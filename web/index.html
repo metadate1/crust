@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self'; style-src 'self'; img-src 'self' data:; media-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+    <meta name="theme-color" content="#071015">
+    <meta name="color-scheme" content="dark">
+    <title>crust — local C1 runtime</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <div class="ambient-grid" aria-hidden="true"></div>
+    <main class="shell" data-runtime-state="idle">
+      <header class="masthead">
+        <div class="identity">
+          <span class="identity-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div>
+            <p class="eyebrow">C1 interoperability runtime / Rust + Wasm</p>
+            <h1>crust<span aria-hidden="true">_</span></h1>
+          </div>
+        </div>
+        <div class="runtime-readout" role="status" aria-live="polite">
+          <span class="signal" aria-hidden="true"></span>
+          <span id="runtimeStatus">Awaiting local media</span>
+        </div>
+      </header>
+
+      <section class="workspace" aria-label="Runtime workspace">
+        <aside class="loader-panel" aria-labelledby="loaderTitle">
+          <div class="panel-index" aria-hidden="true">01 / SOURCE</div>
+          <div class="panel-heading">
+            <div>
+              <p class="kicker">Local-data bay</p>
+              <h2 id="loaderTitle">Mount your own disc</h2>
+            </div>
+            <span class="local-badge">local only</span>
+          </div>
+          <p class="lede">Choose a raw NTSC-U BIN/ISO, or the extracted NSD and NSF files from its S0–S3 directories. Bytes stay in this tab.</p>
+
+          <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-controls="gameFiles" aria-label="Choose or drop local game data">
+            <div class="drop-icon" aria-hidden="true"><span></span></div>
+            <strong>Drop disc or streams</strong>
+            <span>BIN / ISO / NSD / NSF</span>
+          </div>
+
+          <div class="source-actions">
+            <button id="chooseFiles" class="button button-secondary" type="button">Choose files</button>
+            <button id="chooseFolder" class="button button-secondary" type="button">Choose folder</button>
+            <input id="gameFiles" class="visually-hidden" type="file" multiple accept=".bin,.iso,.nsd,.nsf">
+            <input id="gameFolder" class="visually-hidden" type="file" multiple webkitdirectory>
+          </div>
+
+          <div id="importProgress" class="progress-block" hidden>
+            <div class="progress-copy"><span id="progressLabel">Inspecting media…</span><span id="progressValue">0%</span></div>
+            <div class="progress-track"><span id="progressBar"></span></div>
+          </div>
+
+          <dl class="asset-meter" aria-label="Recognized data">
+            <div><dt>Files</dt><dd id="fileCount">0</dd></div>
+            <div><dt>Pairs</dt><dd><span id="pairCount">0</span><small>/44</small></dd></div>
+            <div><dt>Local bytes</dt><dd id="byteCount">0 B</dd></div>
+          </dl>
+          <p id="assetMessage" class="asset-message">No game files selected.</p>
+
+          <label class="select-label" for="bootLevel"><span>Boot target</span><em>43 playable pairs</em></label>
+          <div class="select-shell">
+            <select id="bootLevel" disabled><option>Select game data first</option></select>
+          </div>
+
+          <div class="launch-row">
+            <button id="launch" class="button button-primary" type="button" disabled>
+              <span>Launch Rust runtime</span><b aria-hidden="true">↗</b>
+            </button>
+            <button id="clearData" class="button button-ghost" type="button" disabled>Clear</button>
+          </div>
+          <p class="privacy-note"><span aria-hidden="true">⌁</span> No network upload path exists. Disc bytes are never saved to browser storage.</p>
+        </aside>
+
+        <section class="stage-panel" aria-labelledby="stageTitle">
+          <div class="stage-toolbar">
+            <div>
+              <p class="panel-index" aria-hidden="true">02 / OUTPUT</p>
+              <h2 id="stageTitle">Runtime monitor</h2>
+            </div>
+            <div class="toolbar-actions" role="group" aria-label="Runtime controls">
+              <button id="pause" class="icon-button" type="button" aria-pressed="false" disabled><span aria-hidden="true">Ⅱ</span><b>Pause</b></button>
+              <button id="mute" class="icon-button" type="button" aria-pressed="false" disabled><span aria-hidden="true">◖</span><b>Mute</b></button>
+              <button id="fullscreen" class="icon-button" type="button" disabled><span aria-hidden="true">⛶</span><b>Full</b></button>
+            </div>
+          </div>
+
+          <div id="screen" class="screen" tabindex="-1">
+            <canvas id="canvas" width="1024" height="768" aria-label="Game display"></canvas>
+            <div id="gameOverlay" class="game-overlay" aria-live="polite" hidden>
+              <p id="gameOverline">CRUST RUNTIME</p>
+              <h3 id="gameTitle">LOCAL STREAM READY</h3>
+              <p id="gameSubtitle">Press Start</p>
+              <ol id="gameMenu" class="game-menu"></ol>
+            </div>
+            <div id="screenStandby" class="screen-standby">
+              <span class="crosshair" aria-hidden="true"></span>
+              <p>Video channel idle</p>
+              <small>Mount local media to energize the stage</small>
+            </div>
+            <div class="scanlines" aria-hidden="true"></div>
+            <div class="screen-corner screen-corner-a" aria-hidden="true"></div>
+            <div class="screen-corner screen-corner-b" aria-hidden="true"></div>
+          </div>
+
+          <div class="telemetry" aria-label="Runtime telemetry">
+            <div><span>SIM</span><strong id="simState">STANDBY</strong></div>
+            <div><span>RATE</span><strong id="frameRate">30.00 Hz</strong></div>
+            <div><span>LID</span><strong id="currentLevel">—</strong></div>
+            <div><span>AUDIO</span><strong id="audioState">LOCKED</strong></div>
+            <div><span>CARD</span><strong id="cardState">15 SLOTS</strong></div>
+          </div>
+
+          <details class="diagnostics">
+            <summary><span>Engineering log</span><b>expand</b></summary>
+            <pre id="runtimeLog" aria-live="polite">&gt; crust loader ready
+&gt; runtime logic compiled from Rust</pre>
+          </details>
+        </section>
+      </section>
+
+      <section id="touchControls" class="touch-controls" aria-label="Touch controller">
+        <div class="touch-shoulders">
+          <button data-pad="4" aria-label="L1">L1</button><button data-pad="1" aria-label="L2">L2</button>
+          <span></span>
+          <button data-pad="2" aria-label="R2">R2</button><button data-pad="8" aria-label="R1">R1</button>
+        </div>
+        <div class="touch-main">
+          <div class="dpad" aria-label="Directional pad">
+            <button data-pad="4096" class="d-up" aria-label="Up">▲</button>
+            <button data-pad="32768" class="d-left" aria-label="Left">◀</button>
+            <button data-pad="8192" class="d-right" aria-label="Right">▶</button>
+            <button data-pad="16384" class="d-down" aria-label="Down">▼</button>
+          </div>
+          <div class="touch-meta">
+            <button data-pad="256" aria-label="Select">SELECT</button>
+            <button data-pad="512" aria-label="L3">L3</button>
+            <button data-pad="1024" aria-label="R3">R3</button>
+            <button data-pad="2048" aria-label="Start">START</button>
+          </div>
+          <div class="face-pad" aria-label="Face buttons">
+            <button data-pad="16" class="face-triangle" aria-label="Triangle">△</button>
+            <button data-pad="128" class="face-square" aria-label="Square">□</button>
+            <button data-pad="32" class="face-circle" aria-label="Circle">○</button>
+            <button data-pad="64" class="face-cross" aria-label="Cross">×</button>
+          </div>
+        </div>
+      </section>
+
+      <footer class="legal-strip">
+        <p><strong>Private interoperability research.</strong> No game data is included, uploaded, or persisted.</p>
+        <p>Distribution remains restricted pending upstream and game-rights review.</p>
+      </footer>
+    </main>
+    <noscript>This Rust/Wasm application requires JavaScript only to bootstrap the WebAssembly module.</noscript>
+    <script src="./bootstrap.js"></script>
+  </body>
+</html>

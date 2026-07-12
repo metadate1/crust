@@ -1,0 +1,79 @@
+[package]
+name = "crust-web"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+crust-audio.workspace = true
+crust-formats.workspace = true
+crust-platform.workspace = true
+crust-renderer.workspace = true
+crust-sim.workspace = true
+js-sys.workspace = true
+wasm-bindgen.workspace = true
+wasm-bindgen-futures.workspace = true
+
+[dependencies.web-sys]
+workspace = true
+features = [
+  "AudioBuffer",
+  "AudioBufferSourceNode",
+  "AudioContext",
+  "AudioDestinationNode",
+  "AudioNode",
+  "AudioParam",
+  "AudioScheduledSourceNode",
+  "Blob",
+  "CanvasRenderingContext2d",
+  "console",
+  "CssStyleDeclaration",
+  "Document",
+  "DataTransfer",
+  "DragEvent",
+  "DomRect",
+  "DomTokenList",
+  "Element",
+  "Event",
+  "File",
+  "FileList",
+  "FileReader",
+  "Gamepad",
+  "GamepadButton",
+  "GamepadEvent",
+  "GainNode",
+  "HtmlButtonElement",
+  "HtmlCanvasElement",
+  "HtmlElement",
+  "HtmlInputElement",
+  "HtmlOptionElement",
+  "HtmlProgressElement",
+  "HtmlSelectElement",
+  "KeyboardEvent",
+  "Location",
+  "MouseEvent",
+  "Navigator",
+  "Node",
+  "NodeList",
+  "OscillatorNode",
+  "OscillatorType",
+  "Performance",
+  "PointerEvent",
+  "Storage",
+  "Text",
+  "VisibilityState",
+  "WebGl2RenderingContext",
+  "WebGlBuffer",
+  "WebGlProgram",
+  "WebGlShader",
+  "WebGlTexture",
+  "WebGlUniformLocation",
+  "Window",
+]
+
+[lints]
+workspace = true

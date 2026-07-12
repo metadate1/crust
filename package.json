@@ -1,0 +1,18 @@
+{
+  "name": "crust-browser-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "./scripts/build-web.sh",
+    "dev": "node ./scripts/serve.mjs",
+    "start": "npm run build && npm run dev",
+    "test": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo test --workspace --all-targets",
+    "lint": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy --workspace --all-targets -- -D warnings",
+    "fmt": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo fmt --all -- --check"
+  }
+}
+

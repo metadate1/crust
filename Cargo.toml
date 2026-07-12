@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/audio",
+  "crates/formats",
+  "crates/platform",
+  "crates/renderer",
+  "crates/sim",
+  "crates/web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+authors = ["crust contributors"]
+repository = "https://github.com/metadate1/crust"
+publish = false
+
+[workspace.dependencies]
+base64 = "=0.22.1"
+crust-audio = { path = "crates/audio" }
+crust-formats = { path = "crates/formats" }
+crust-platform = { path = "crates/platform" }
+crust-renderer = { path = "crates/renderer" }
+crust-sim = { path = "crates/sim" }
+js-sys = "=0.3.103"
+proptest = "=1.11.0"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+wasm-bindgen = "=0.2.126"
+wasm-bindgen-futures = "=0.4.76"
+web-sys = "=0.3.103"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+too_many_lines = "allow"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

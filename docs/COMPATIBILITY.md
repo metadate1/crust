@@ -34,8 +34,14 @@ gameplay path.
   target descriptor flags. Rebind runs captured once and target transition blocks synchronously,
   including nested calls/returns and hosted spawns. Checked aligned code/storage/entry references,
   paging cases one through six, path orientation and the characterized entity-color/solid query
-  slices are active. Execution, checked-error and quarantined-object counts are exposed through the
-  engineering log/debug surface.
+  slices are active. Normal, once, transition, event-service and interrupt code all complete typed
+  audio calls synchronously before the following instruction. Execution, checked-error and
+  quarantined-object counts are exposed through the engineering log/debug surface.
+- Camera `LevelUpdate` effects drive a source-ordered zone lifecycle. Departed active zones receive
+  TERM in postorder, migrated objects survive, released subtrees clear typed VM/link/audio state,
+  old load lists close before new lists open, newly adjacent zones activate, and their objects scan
+  on the following cooperative frame. Display and animation masks latch with retail's one-frame
+  timing.
 - Pair-scoped GOOL item-five descriptors and TGEO/SVTX/CVTX frames feed the live renderer. Current
   3D vertex objects use retail fixed-point transforms, lighting, culling and ordering and share one
   resident load-list-filtered TPAG cache/manifest with the world. Eligible collidable animations
@@ -52,7 +58,9 @@ gameplay path.
 - Cooperative 30 Hz loop, keyboard, standard-gamepad polling, complete touch pad, pause, mute,
   fullscreen, responsive presentation, WebGL2 output, and WebAudio scheduling. Each simulation
   tick installs the complete retail `tapped`/`held` history consumed by GOOL opcode `0x1a`.
-- Live SFX/music volume and mono options applied independently to the generated WebAudio buses.
+- Live SFX/music volume and mono options applied independently. Mounted type-12 ADIO item-zero
+  samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
+  WebAudio; music remains the generated software sequence.
 - Versioned automatic resume storage and a 15-slot virtual-card model using the checksummed
   128-byte payload.
 
@@ -64,17 +72,17 @@ gameplay path.
   flags, player/object colors and the characterized scalar process defaults; runtime children
   inherit the parent transform and receive zone colors. Entity-pointer words deliberately remain
   outside raw registers, and MDAT positioning, box stacking/stall adjustment, save-state spawn
-  hooks, event-service returns, remaining process globals, dynamic object lifetime and many host
-  effects remain absent or partial. The browser currently scans the LDAT spawn-zone neighbor set;
-  later camera zone crossings do not yet spawn newly adjacent zones or terminate departed-zone
-  objects. Intra-object once/transition dispatch is exact; checked paging
-  metadata is synchronous and does not claim retail asynchronous residency. Unsupported execution
+  hooks, remaining process globals and several host effects remain absent or partial. Camera zone
+  crossings now execute the ordered lifecycle, dynamic pager references, TERM/migration teardown
+  and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch is synchronous;
+  checked paging metadata is synchronous and does not claim retail asynchronous I/O timing.
+  Unsupported execution
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
   The legally local 300-frame N. Sanity trace now crosses the former ShadC executable 29/state one
   animation-bound boundary using validated frame bounds instead of the source branch's
   uninitialized C locals. Solid suboperations one and three implement their characterized helper
   paths; the late post-physics animation-stamp refresh, solid suboperations zero/two/four/five,
-  `0x85` suboperations one through seven and lighting selectors 40 through 44 remain typed gaps.
+  transform-vector suboperation six and some lighting selectors remain typed gaps.
 - Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
   file handles, validates and swaps every requested destination pair, and updates the active scene;
   it does not yet reproduce the complete retail page residency/transition handshake.
@@ -86,9 +94,9 @@ gameplay path.
   observed first presented path point, draw count and 679-polygon visibility list. Automatic and
   hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
   SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
-  manifest. Sprite, font, text, fragment and 2D CVTX commands, dynamic zone-object termination,
-  dynamic global display-mask changes and mid-frame paging-driven texture changes are not yet
-  coupled to rendering.
+  manifest. Sprite, font, text, fragment and 2D CVTX commands and mid-frame paging-driven texture
+  changes are not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown
+  and the current display mask.
   Twenty-two starts use fog/ripple/lightning/dark variants whose dynamic vertex/color effects
   remain incomplete. Object shader modes two through four, their far-object rejection and the
   zone-graphics `0x1000` fixed-pitch camera substitution are also incomplete. Rendering snapshots
@@ -97,14 +105,15 @@ gameplay path.
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
   the projection and command list are still regenerated every presented gameplay frame. No
   low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.
-- `crust-audio` implements SPU ADPCM, loop semantics, caching, 24-voice mixing, sequence events and
-  a software synth. The live WebAudio path currently plays an original generated sequence and
-  generated SFX; it does not parse and reproduce the retail VAB/SEP/MIDI program/envelope set.
+- `crust-audio` implements SPU ADPCM, loop semantics, caching, the retail 24-voice allocation and
+  control state machine, sequence events and a software synth. GOOL SFX now resolve type-12 ADIO
+  entries from the mounted local NSF and reach WebAudio with owner cleanup. Retail INST/VAB/SEP/MIDI
+  program/envelope music, spatial panning and reverb DSP remain absent; generated music is still
+  used. The newest SFX path was compile- and model-tested but not manually auditioned in-browser.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
-  used. Late bound refresh, player motion/collision response, event services and progression remain
-  incomplete; Crash,
+  used. Late bound refresh, remaining collision branches and progression remain incomplete; Crash,
   bosses, boxes, checkpoints, enemies, bonus entrances and ending conditions therefore do not yet
   form a playable progression path.
 - The password UI applies a local deterministic progression rule, not the retail password codec.

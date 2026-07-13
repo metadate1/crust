@@ -120,6 +120,7 @@ fn parsed_retail_entry_executes_state_code_and_packed_branch() {
 
     let identity = object.program_identity().unwrap();
     assert_eq!(identity.global_eid(), global_eid);
+    assert_eq!(identity.object_type(), 1);
     assert_eq!(identity.category(), 0x100);
     assert_eq!(object.initial_stack_pointer(), 32);
     assert_eq!(object.state_flags(), 0x1122_3344);

@@ -69,6 +69,20 @@ impl OutputOptions {
             clipped_sample(music[1] * music_gain + sfx[1] * sfx_gain),
         ]
     }
+
+    /// Adds a source-scaled SFX frame after the ordinary option buses.
+    ///
+    /// Retail voices already apply `init_vol` when they are created, so the
+    /// SFX option gain must not be applied to them a second time. Mono folding
+    /// and final finite clipping still match [`Self::mix_frame`].
+    #[must_use]
+    pub fn add_prescaled_sfx_frame(self, mixed: [f32; 2], sfx: [f32; 2]) -> [f32; 2] {
+        let sfx = source_frame(sfx, self.mono);
+        [
+            clipped_sample(finite_sample(mixed[0]) + sfx[0]),
+            clipped_sample(finite_sample(mixed[1]) + sfx[1]),
+        ]
+    }
 }
 
 fn normalized_gain(volume: u8) -> f32 {
@@ -191,6 +205,24 @@ mod tests {
 
         let silent = OutputOptions::new(0, 0, true);
         assert_eq!(silent.mix_frame([1.0; 2], [-1.0; 2]), [0.0; 2]);
+    }
+
+    #[test]
+    fn prescaled_sfx_is_not_attenuated_twice() {
+        let options = OutputOptions::new(64, 255, false);
+        assert_eq!(
+            options.add_prescaled_sfx_frame([0.25, -0.25], [0.5, 0.125]),
+            [0.75, -0.125]
+        );
+    }
+
+    #[test]
+    fn prescaled_sfx_obeys_mono_and_final_clipping() {
+        let options = OutputOptions::new(0, 0, true);
+        assert_eq!(
+            options.add_prescaled_sfx_frame([0.9, 0.9], [0.8, -0.2]),
+            [1.0, 1.0]
+        );
     }
 
     #[test]

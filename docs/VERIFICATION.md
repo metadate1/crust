@@ -168,23 +168,34 @@ playthrough.
 Screenshots and game data remained outside Git. See `COMPATIBILITY.md` for features that were not
 exercised or are not yet connected to the live browser runtime.
 
+The 2026-07-13 lifecycle/audio build was then tested against the same legal BIN after adding
+source-ordered zone transitions, synchronous event/audio host calls and local ADIO SFX. Both
+`local_retail_runtime` goldens passed: N. Sanity's exact zone band/load-list transition and its
+seven initial objects, Crash's executable 5/29 children, native handle reparenting, solid snapshot
+boundary and first-frame checked GOOL executions. The release Wasm was rebuilt and reloaded in the
+visible in-app browser; the loader reached its Rust-ready engineering-log state and the server
+returned HTTP 200 with `Cache-Control: no-store`. The operating-system chooser still required the
+user's click, so this newest retail-SFX build is not claimed as manually auditioned.
+
 ## Final automated results
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 345 asset-free tests passed, zero failed; 24 legally local tests
+- locked native workspace suite: 471 asset-free tests passed, zero failed; 25 legally local tests
   remain ignored by default.
-- all 24 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+- the previously recorded 24-test opt-in sweep passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`:
+  raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
   animation descriptors, object-model formats, hosted N. Sanity execution and object projection,
   three camera goldens, scene formats, 12,600 camera-driven scenes, all 43 fractional boot
   snapshots, 40 standalone snapshots, 39 loading images, 1,427 representative texture references
-  and all four image-backed title states. The entity and scene-format tests also passed using the
-  raw BIN alone.
+  and all four image-backed title states. The new expanded two-test N. Sanity lifecycle/runtime
+  target also passed after the current changes. The entity and scene-format tests passed using the
+  raw BIN alone in the earlier sweep.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 759,696 bytes (SHA-256
-  `3c308fc671636e436020139c72695956e3f1d87b9be21acca0e37e9038c76203`).
+- generated web release: passed; Wasm payload was 936,652 bytes (SHA-256
+  `f443dc150e8b697fc542dbc47d63e0761cfa93aba15a2da3f8cac7af0b5018c9`).
 
 ## Reproducible commands
 

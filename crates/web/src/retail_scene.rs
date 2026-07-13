@@ -277,7 +277,16 @@ impl RetailSceneBuilder {
         nsf_bytes: &[u8],
         location: RetailSceneProgressLocation,
     ) -> Result<RetailScene, RetailSceneError> {
-        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location, &[], None)
+        build_retail_scene_cached(
+            self,
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            &[],
+            None,
+            RETAIL_INITIAL_DISPLAY_FLAGS,
+        )
     }
 
     /// Builds one world frame plus post-GOOL vertex objects against one
@@ -302,7 +311,48 @@ impl RetailSceneBuilder {
         objects: &[RetailRenderObject],
         main_object: Option<RuntimeObjectHandle>,
     ) -> Result<RetailScene, RetailSceneError> {
-        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location, objects, main_object)
+        self.build_at_progress_with_objects_and_display_mask(
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            objects,
+            main_object,
+            RETAIL_INITIAL_DISPLAY_FLAGS,
+        )
+    }
+
+    /// Builds the post-GOOL scene using the exact current-frame display mask.
+    ///
+    /// The caller must pass current global nine after GOOL, never the
+    /// script-owned next global four. This also preserves the source's rare
+    /// same-frame behavior if an opcode writes current directly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed scene, animation, object, paging, or
+    /// texture data referenced by the mounted pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_progress_with_objects_and_display_mask(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+        display_mask: u32,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(
+            self,
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            objects,
+            main_object,
+            display_mask,
+        )
     }
 }
 
@@ -379,6 +429,7 @@ pub fn build_retail_scene_at_progress(
     RetailSceneBuilder::new().build_at_progress(nsd, nsf, nsf_bytes, location)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_retail_scene_cached(
     builder: &mut RetailSceneBuilder,
     nsd: &Nsd,
@@ -387,6 +438,7 @@ fn build_retail_scene_cached(
     location: RetailSceneProgressLocation,
     render_objects: &[RetailRenderObject],
     main_object: Option<RuntimeObjectHandle>,
+    display_mask: u32,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -438,7 +490,11 @@ fn build_retail_scene_cached(
         visibility
             .seek(path_point_index)
             .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
-        visibility.visibility().to_vec()
+        if display_mask & 1 == 0 {
+            Vec::new()
+        } else {
+            visibility.visibility().to_vec()
+        }
     };
     validate_visibility(&visible_polygons, &graph.worlds)?;
 
@@ -469,6 +525,7 @@ fn build_retail_scene_cached(
         raw_camera_matrix,
         camera_matrix,
         projection_distance,
+        display_mask,
     )?;
 
     let mut page_ids = BTreeSet::new();
@@ -819,11 +876,11 @@ fn prepare_vertex_objects(
     raw_camera_matrix: Matrix3,
     adjusted_camera_matrix: Matrix3,
     projection_distance: u32,
+    display_flags: u32,
 ) -> Result<PreparedVertexObjects, RetailSceneError> {
     let mut prepared = PreparedVertexObjects::default();
-    let display_flags = RETAIL_INITIAL_DISPLAY_FLAGS;
     for object in render_objects {
-        if !retail_object_is_displayed(object, display_flags) {
+        if !object.display_eligible {
             continue;
         }
         let Some(program) = object.program else {
@@ -983,32 +1040,6 @@ fn touch_object_model_lru(lru: &mut VecDeque<(Eid, u16)>, key: (Eid, u16)) {
         lru.remove(index);
     }
     lru.push_back(key);
-}
-
-fn retail_object_is_displayed(object: &RetailRenderObject, display_flags: u32) -> bool {
-    // Every object admitted by `RetailRuntime` is a GOOL handle, whose source
-    // `handle.subtype` is always three. `RetailRenderObject::subtype` is the
-    // distinct process/program subtype selected by the ZDAT entity and must
-    // not be used for that handle gate.
-    if object.status_b & 0x100 != 0 || display_flags & 0x4 == 0 {
-        return false;
-    }
-    if (object.status_b & 0x0200_0000 != 0 || object.state_flags & 0x0002_0000 != 0)
-        && display_flags & 0x4000 != 0
-    {
-        return true;
-    }
-    let Some(program) = object.program else {
-        return false;
-    };
-    let category_flag = match program.category() {
-        0x100 => 0x10,
-        0x300 | 0x500 | 0x600 => 0x40,
-        0x400 => 0x800,
-        0x200 => 0x200,
-        _ => return false,
-    };
-    display_flags & category_flag != 0
 }
 
 fn object_colored_shift(
@@ -2219,9 +2250,7 @@ mod tests {
             if draw_count == 0 {
                 let mut invalid_frames = objects.clone();
                 for object in &mut invalid_frames {
-                    if retail_object_is_displayed(object, RETAIL_INITIAL_DISPLAY_FLAGS)
-                        && object.animation_reference.is_some()
-                    {
+                    if object.display_eligible && object.animation_reference.is_some() {
                         object.animation_frame = u32::MAX;
                     }
                 }

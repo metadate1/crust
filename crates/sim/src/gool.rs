@@ -8,11 +8,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crust_formats::binary::{Eid, PageIndex};
 use crust_formats::stream::{
-    GOOL_PC_NONE, GoolProgram, ZoneEntity, ZoneEntityPathPoint, structs::GoolState,
+    GOOL_PC_NONE, GoolProgram, LevelId, ZoneEntity, ZoneEntityPathPoint, structs::GoolState,
 };
 
-use crate::math::{Angle12, Bounds3, integer_sqrt, seek};
-use crate::object_bounds::{FrameBound, FrameBounds, FrameBoundsError};
+use crate::math::{Angle12, Angles, Bounds3, Vec2, Vec3, integer_sqrt, seek};
+use crate::object_arena::SPAWN_TABLE_CAPACITY;
+use crate::object_bounds::{
+    BoundTransform, FrameBound, FrameBounds, FrameBoundsError, retail_yxy_transform,
+};
+use crate::retail_physics::{
+    RetailAngles, RetailPhysicsContext, RetailPhysicsPlan, RetailPhysicsResult, RetailPhysicsState,
+    RetailTranslationMode, apply_free_movement, apply_path_orientation, begin_retail_physics,
+    finalize_retail_physics, path_orientation_requested,
+};
+use crate::retail_solid_motion::{
+    SmoothStopMemory, SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError,
+    SolidMotionState, SolidObjectCandidate, SolidZoneView, solve_retail_solid_motion,
+};
 
 pub const MAX_OBJECTS: usize = 96;
 /// Exact `gool_object.regs[0x1FC]` word span from the retail 32-bit layout.
@@ -20,18 +32,55 @@ pub const REGISTER_COUNT: usize = 0x1fc;
 pub const TABLE_WORD_COUNT: usize = 1024;
 pub const MAX_STACK_WORDS: usize = 256;
 pub const MAX_CALL_DEPTH: usize = 64;
+/// Native send-event instructions carry at most three argument-count bits.
+pub const MAX_EVENT_ARGUMENTS: usize = 7;
 pub const MAX_EFFECTS: usize = 256;
 /// Defensive host bound for one retail `once_p` invocation. Retail runs the
 /// block synchronously until its return link; the bound turns malformed or
 /// recursive input into a typed failure instead of hanging the browser.
 pub const MAX_ONCE_INSTRUCTIONS: usize = 16_384;
+/// Defensive bound for one synchronous event-service or mapped-interrupt
+/// interpreter invocation.
+pub const MAX_EVENT_SERVICE_INSTRUCTIONS: usize = 16_384;
 /// Defensive host bound for one synchronous retail transition-block
 /// invocation. Retail has no native instruction limit; malformed local data
 /// becomes a typed failure here instead of hanging the browser's 30 Hz loop.
 pub const MAX_TRANSITION_INSTRUCTIONS: usize = 16_384;
 pub const RETAIL_PAD_COUNT: usize = 2;
+/// GOOL global written by title/pause scripts and latched at frame end.
+pub const NEXT_DISPLAY_GLOBAL: usize = 4;
+/// Frozen display/camera/animation mask consumed during the current frame.
+pub const CURRENT_DISPLAY_GLOBAL: usize = 9;
+pub const INITIAL_DISPLAY_MASK: u32 = 0xffff;
+pub const CURRENT_LEVEL_GLOBAL: usize = 0;
+pub const CAMERA_ROTATION_GLOBAL: usize = 15;
+pub const GAME_STATE_GLOBAL: usize = 17;
+pub const TITLE_STATE_GLOBAL: usize = 18;
+pub const SAVED_TITLE_STATE_GLOBAL: usize = 19;
+pub const CURRENT_MAP_LEVEL_GLOBAL: usize = 20;
+pub const LIFE_COUNT_GLOBAL: usize = 24;
+pub const INITIAL_LIFE_COUNT_GLOBAL: usize = 31;
+pub const MONO_GLOBAL: usize = 33;
+pub const SFX_VOLUME_GLOBAL: usize = 34;
+pub const MUSIC_VOLUME_GLOBAL: usize = 35;
+pub const CAMERA_TRANSLATION_GLOBAL: usize = 37;
+pub const CAMERA_ROTATION_YXZ_GLOBAL: usize = 40;
+pub const TICKS_CURRENT_FRAME_GLOBAL: usize = 43;
+pub const LEVEL_COUNT_GLOBAL: usize = 46;
+pub const LEVELS_UNLOCKED_GLOBAL: usize = 47;
+pub const DRAW_COUNT_GLOBAL: usize = 79;
 /// Halfword count in the retail `gool_colors` union.
 pub const COLOR_COUNT: usize = 24;
+const COLOR_INTENSITY_START: usize = 21;
+const COLOR_INTENSITY_END: usize = 24;
+const HIT_INVINCIBLE_EVENT: u32 = 0x0a00;
+const EVENT_CLEAR_GUARD_STATUS: u32 = 0x1800;
+const SQUASH_EVENT: u32 = 0x1900;
+const BOULDER_SQUASH_EVENT: u32 = 0x2500;
+const EVENT_MAP_NULL_STATE: u16 = 0x00ff;
+const STATUS_A_EVENT_SQUASHED: u32 = 0x0001_0000;
+const STATUS_B_DPAD_CONTROL: u32 = 0x0000_0080;
+const STATUS_B_MAIN_COLOR_BY_ZONE: u32 = 0x0400_0000;
 /// Fourteen-bit retail code/PC address space.
 pub const MAX_CODE_WORDS: usize = 1 << 14;
 pub const NULL_INPUT_VALUE: u32 = 3;
@@ -65,6 +114,12 @@ const COLLISION_OBJECT_REFERENCE_BITS: u32 = 0x7f;
 const COLLISION_OBJECT_REFERENCE_SHIFT: u32 = 2;
 const COLLISION_OBJECT_REFERENCE_MASK: u32 =
     COLLISION_OBJECT_REFERENCE_BITS << COLLISION_OBJECT_REFERENCE_SHIFT;
+const EVENT_ARGUMENT_REFERENCE_TAG: u32 = 0xc000_0000;
+const EVENT_ARGUMENT_REFERENCE_GENERATION_BITS: u32 = 0x0fff_ffff;
+const EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT: u32 = 2;
+const EVENT_ARGUMENT_REFERENCE_PAYLOAD_MASK: u32 =
+    EVENT_ARGUMENT_REFERENCE_GENERATION_BITS << EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT;
+const MAX_EVENT_ARGUMENT_SCOPES: usize = MAX_CALL_DEPTH;
 const INITIAL_FRAME_FLAGS: u32 = 0xffff;
 const STATE_FRAME_WORDS: usize = 3;
 const INITIAL_FRAME_WORDS: usize = 4;
@@ -271,13 +326,14 @@ impl AnimationReference {
 /// Immutable identity of the global GOOL program that owns an object's
 /// animation item and retail display category.
 ///
-/// Keeping both fields on the VM object prevents hosts from reconstructing
+/// Keeping these fields on the VM object prevents hosts from reconstructing
 /// render metadata through an arena slot or executable number after either
 /// handle has been recycled. Objects authored directly with [`VmObject::new`]
 /// intentionally have no parsed-program identity.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct GoolProgramIdentity {
     global_eid: Eid,
+    object_type: u32,
     category: u32,
 }
 
@@ -285,6 +341,12 @@ impl GoolProgramIdentity {
     #[must_use]
     pub const fn global_eid(self) -> Eid {
         self.global_eid
+    }
+
+    /// Retail GOOL header type used by native update/physics special cases.
+    #[must_use]
+    pub const fn object_type(self) -> u32 {
+        self.object_type
     }
 
     #[must_use]
@@ -448,6 +510,53 @@ impl CollisionObjectReference {
     }
 }
 
+/// Opaque 32-bit replacement for the native `uint32_t *argv` stored at
+/// `fp[-1]` while an event-service routine runs.
+///
+/// The generation identifies one bounded, machine-owned scope and makes a word
+/// stale as soon as that scope is left. Low alignment bits stay clear so the
+/// token retains the native pointer/EID discriminator without exposing a host
+/// address.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EventArgumentsReference {
+    generation: u32,
+}
+
+impl EventArgumentsReference {
+    fn checked(generation: u32) -> Result<Self, VmError> {
+        if generation == 0 || generation > EVENT_ARGUMENT_REFERENCE_GENERATION_BITS {
+            return Err(VmError::EventArgumentReferenceCapacityExceeded);
+        }
+        Ok(Self { generation })
+    }
+
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        EVENT_ARGUMENT_REFERENCE_TAG
+            | (self.generation << EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT)
+    }
+
+    #[must_use]
+    const fn from_word(word: u32) -> Option<Self> {
+        if word & !EVENT_ARGUMENT_REFERENCE_PAYLOAD_MASK != EVENT_ARGUMENT_REFERENCE_TAG {
+            return None;
+        }
+        let generation = (word >> EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT)
+            & EVENT_ARGUMENT_REFERENCE_GENERATION_BITS;
+        if generation == 0 {
+            return None;
+        }
+        Some(Self { generation })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EventArgumentsScope {
+    reference: EventArgumentsReference,
+    arguments: [u32; MAX_EVENT_ARGUMENTS],
+    len: u8,
+}
+
 /// Pointer-free view of the three retail transform vectors.
 ///
 /// Rotation preserves the serialized/runtime `ang` component order (Y, X,
@@ -467,6 +576,135 @@ impl Default for RetailTransform {
             scale: [INITIAL_SCALE; 3],
         }
     }
+}
+
+/// Camera state consumed by GOOL transform-vector suboperations one and
+/// seven. The matrix is the source `ms_cam_rot` Q12 matrix after its 5/8 Y
+/// aspect adjustment and Z-axis flip; retaining it as signed halfwords keeps
+/// the VM independent from renderer-owned matrices and native pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailTransformVectorsCamera {
+    pub translation: [i32; 3],
+    /// Camera angles in the retail serialized/runtime order (`y`, `x`, `z`).
+    pub rotation_yxz: [i32; 3],
+    pub rotation_matrix: [[i16; 3]; 3],
+    pub screen_projection: u32,
+}
+
+impl RetailTransformVectorsCamera {
+    /// Builds the exact `ms_cam_rot` matrix produced by `GfxUpdateMatrices`
+    /// from the camera's unusual serialized/runtime Y-X-Z angle order.
+    #[must_use]
+    pub fn from_retail_pose(
+        translation: [i32; 3],
+        rotation_yxz: [i32; 3],
+        screen_projection: u32,
+    ) -> Self {
+        let z = Angle12::new(rotation_yxz[2].wrapping_neg());
+        let stored_y = Angle12::new(rotation_yxz[0].wrapping_neg());
+        let stored_x = Angle12::new(rotation_yxz[1].wrapping_neg());
+        let z_rotation = [
+            [z.cos_q12(), z.sin_q12().wrapping_neg(), 0],
+            [z.sin_q12(), z.cos_q12(), 0],
+            [0, 0, 0x1000],
+        ];
+        let stored_y_rotation = [
+            [0x1000, 0, 0],
+            [0, stored_y.cos_q12(), stored_y.sin_q12().wrapping_neg()],
+            [0, stored_y.sin_q12(), stored_y.cos_q12()],
+        ];
+        let stored_x_rotation = [
+            [stored_x.cos_q12(), 0, stored_x.sin_q12()],
+            [0, 0x1000, 0],
+            [stored_x.sin_q12().wrapping_neg(), 0, stored_x.cos_q12()],
+        ];
+        let mut rotation_matrix = multiply_q12_matrices(
+            multiply_q12_matrices(z_rotation, stored_y_rotation),
+            stored_x_rotation,
+        );
+        for value in &mut rotation_matrix[1] {
+            *value = ((-5 * i32::from(*value)) >> 3) as i16;
+        }
+        for value in &mut rotation_matrix[2] {
+            *value = value.wrapping_neg();
+        }
+        Self {
+            translation,
+            rotation_yxz,
+            rotation_matrix,
+            screen_projection,
+        }
+    }
+}
+
+fn multiply_q12_matrices(left: [[i16; 3]; 3], right: [[i16; 3]; 3]) -> [[i16; 3]; 3] {
+    let mut output = [[0_i16; 3]; 3];
+    for (row_index, row) in output.iter_mut().enumerate() {
+        for (column_index, value) in row.iter_mut().enumerate() {
+            let dot = (0..3).fold(0_i64, |sum, index| {
+                sum + i64::from(left[row_index][index]) * i64::from(right[index][column_index])
+            });
+            // `mat16` coefficients are signed halfwords. The source software
+            // matrix path retains the low halfword after the Q12 shift.
+            *value = (dot >> 12) as i16;
+        }
+    }
+    output
+}
+
+fn transform_q12_point(point: [i32; 3], matrix: [[i16; 3]; 3]) -> [i32; 3] {
+    [0_usize, 1, 2].map(|row| {
+        let dot = i64::from(matrix[row][0]) * i64::from(point[0])
+            + i64::from(matrix[row][1]) * i64::from(point[1])
+            + i64::from(matrix[row][2]) * i64::from(point[2]);
+        (dot >> 12) as i32
+    })
+}
+
+fn camera_space_point(point: [i32; 3], camera: RetailTransformVectorsCamera) -> [i32; 3] {
+    transform_q12_point(
+        [
+            point[0].wrapping_sub(camera.translation[0]) >> 8,
+            point[1].wrapping_sub(camera.translation[1]) >> 8,
+            point[2].wrapping_sub(camera.translation[2]) >> 8,
+        ],
+        camera.rotation_matrix,
+    )
+}
+
+fn project_gte_axis(value: i32, z: i32, projection: u32) -> i32 {
+    let value = value.clamp(-0x8000, 0x7fff);
+    let projected = if (z as u32).wrapping_mul(2) <= projection {
+        (i128::from(value) * 0x1_ffff) >> 16
+    } else {
+        (i128::from(value) * i128::from(projection) * 0x1_0000 / i128::from(z)) >> 16
+    };
+    projected.clamp(-0x400, 0x3ff) as i32
+}
+
+fn project_retail_point(point: [i32; 3], camera: RetailTransformVectorsCamera) -> [i32; 3] {
+    let transformed = camera_space_point(point, camera);
+    let z = transformed[2].clamp(0, 0xffff);
+    let x = project_gte_axis(transformed[0], z, camera.screen_projection);
+    let y = project_gte_axis(transformed[1], z, camera.screen_projection);
+    [
+        x.wrapping_shl(8),
+        y.wrapping_neg().wrapping_shl(8),
+        z.wrapping_shl(8),
+    ]
+}
+
+fn transform_retail_audio_point(
+    point: [i32; 3],
+    prior_output: [i32; 3],
+    camera: RetailTransformVectorsCamera,
+) -> [i32; 3] {
+    let transformed = camera_space_point(point, camera);
+    [
+        transformed[0].wrapping_shl(8),
+        prior_output[1].wrapping_shl(8).wrapping_neg(),
+        transformed[2].wrapping_shl(8),
+    ]
 }
 
 /// Coordinate space carried by a retail entity's parent entry.
@@ -491,6 +729,8 @@ pub struct RetailSolidZone {
     root: u16,
     max_depth: [u16; 3],
     bytes: Vec<u8>,
+    graphics_flags: u32,
+    water_y: i32,
 }
 
 impl RetailSolidZone {
@@ -515,7 +755,19 @@ impl RetailSolidZone {
             root,
             max_depth,
             bytes,
+            graphics_flags: 0,
+            water_y: i32::MIN,
         })
+    }
+
+    /// Adds the runtime ZDAT header fields consumed by water and zone-boundary
+    /// collision rules. Keeping them beside the owned rectangle avoids ever
+    /// retaining a relocated header pointer.
+    #[must_use]
+    pub const fn with_graphics(mut self, graphics_flags: u32, water_y: i32) -> Self {
+        self.graphics_flags = graphics_flags;
+        self.water_y = water_y;
+        self
     }
 }
 
@@ -526,6 +778,8 @@ pub struct RetailSolidEnvironment {
     object_colors: [u16; COLOR_COUNT],
     player_colors: [u16; COLOR_COUNT],
     neighbors: Vec<RetailSolidZone>,
+    object_zone: Option<usize>,
+    level_quirks: SolidLevelQuirks,
 }
 
 const RETAIL_SOLID_RECT_BYTES: usize = 36;
@@ -770,7 +1024,22 @@ impl RetailSolidEnvironment {
             object_colors,
             player_colors,
             neighbors,
+            object_zone: None,
+            level_quirks: SolidLevelQuirks::default(),
         }
+    }
+
+    /// Records which ordered neighbor is the object's current zone and the
+    /// small set of retail level-dependent collision rules.
+    #[must_use]
+    pub const fn with_runtime_context(
+        mut self,
+        object_zone: Option<usize>,
+        level_quirks: SolidLevelQuirks,
+    ) -> Self {
+        self.object_zone = object_zone;
+        self.level_quirks = level_quirks;
+        self
     }
 }
 
@@ -1298,6 +1567,11 @@ impl ObjectHandle {
     }
 }
 
+fn solid_effect_handle(raw: u32) -> Result<ObjectHandle, VmError> {
+    let index = u16::try_from(raw).map_err(|_| VmError::UnknownObject(ObjectHandle(u16::MAX)))?;
+    ObjectHandle::new(index).ok_or(VmError::UnknownObject(ObjectHandle(index)))
+}
+
 /// Host-visible, deterministic effect emitted by GOOL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmEffect {
@@ -1305,6 +1579,13 @@ pub enum VmEffect {
         sender: ObjectHandle,
         recipient: Option<ObjectHandle>,
         event: u32,
+    },
+    /// Collision/event work whose native source target is synchronous GOOL.
+    /// The pure solid solver retains the exact argument/reason payload here so
+    /// the event-service host can consume it without reconstructing C scratch.
+    Solid {
+        object: ObjectHandle,
+        effect: SolidEffect,
     },
     StateChanged {
         object: ObjectHandle,
@@ -1320,6 +1601,10 @@ pub enum VmEffect {
         command: u32,
         value: u32,
     },
+    MidiTogglePlayback {
+        object: ObjectHandle,
+        value: u32,
+    },
     Paging {
         object: ObjectHandle,
         open: bool,
@@ -1332,6 +1617,18 @@ pub enum VmEffect {
         count: u32,
         allow_reclaim: bool,
         arguments: Vec<u32>,
+    },
+    /// Misc 12/4 requests that the runtime assign `obj_zone` to an object.
+    /// The stream-owning lifecycle supplies either a validated destination EID
+    /// or the hard-restart sentinel; the VM never stores a native zone pointer.
+    SetObjectZoneToTransitionTarget {
+        object: ObjectHandle,
+    },
+    /// Misc 12/2 moves the current object beneath one of the eight native
+    /// logical handles. The runtime applies the tree mutation synchronously.
+    ReparentToRoot {
+        object: ObjectHandle,
+        root: u8,
     },
     AnimationSelected {
         object: ObjectHandle,
@@ -1347,17 +1644,225 @@ pub enum VmEffect {
     LoadState(ObjectHandle),
 }
 
+/// State rebind requested synchronously by [`Machine::send_event`].
+///
+/// The caller must resolve and bind `state` with `arguments` before executing
+/// the recipient again. This is the pointer-free boundary corresponding to
+/// native `GoolObjectChangeState`, whose external entry lookup belongs to the
+/// stream-owning runtime rather than the VM.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventStateChange {
+    pub recipient: ObjectHandle,
+    pub state: u16,
+    pub event: u32,
+    pub arguments: Vec<u32>,
+}
+
+/// Complete synchronous result of one checked event delivery.
+///
+/// Event-service and mapped-interrupt code has already run when this value is
+/// returned. `state_change` is the only remaining host action; it must be
+/// rebound immediately rather than queued as an asynchronous event.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventDispatchOutcome {
+    pub acknowledged: bool,
+    pub state_change: Option<EventStateChange>,
+}
+
+/// Checked source operands and values for retail opcode `0x8c`.
+///
+/// Both source references are retained because the native interpreter passes
+/// pointers returned by GOP translation to the audio subsystem. The copied
+/// values are the pointer-free inputs a host needs after the VM suspends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioVoiceCreateRequest {
+    pub object: ObjectHandle,
+    pub volume_source: StorageReference,
+    pub volume: i32,
+    pub adio_source: StorageReference,
+    pub adio: Eid,
+}
+
+/// Retail voice-id source encoded in bits 12 through 17 of opcode `0x8d`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioVoiceSelector {
+    /// Selector zero controls the template copied into the next voice.
+    Template,
+    /// Selector `0x1f` pops the voice id after operand B is translated.
+    Stack { voice_id: i32 },
+    /// Every other selector reads one word from the process register file.
+    ProcessRegister { register: u8, voice_id: i32 },
+}
+
+impl AudioVoiceSelector {
+    /// Effective `AudioControl` id used by the retail audio subsystem.
+    #[must_use]
+    pub const fn voice_id(self) -> i32 {
+        match self {
+            Self::Template => 0,
+            Self::Stack { voice_id } | Self::ProcessRegister { voice_id, .. } => voice_id,
+        }
+    }
+}
+
+/// High control bits synthesized by the packed `0x8d` instruction.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AudioControlFlags {
+    /// Raw suboperation 15 maps to the native force-key-off bit.
+    pub force_off: bool,
+    /// Packed flag bit zero requests key-off after a ramp or glide.
+    pub stop_after_ramp: bool,
+    /// Packed flag bit one enables an amplitude ramp or pitch glide.
+    pub ramp_or_glide: bool,
+}
+
+/// Exact operation and flags decoded from retail opcode `0x8d`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioControlOperation {
+    /// Original four-bit suboperation. Value 15 remains visible even though
+    /// the C boundary maps it to operation zero plus `force_off`.
+    pub suboperation: u8,
+    pub flags: AudioControlFlags,
+}
+
+impl AudioControlOperation {
+    #[must_use]
+    pub const fn decode(instruction: u32) -> Self {
+        let suboperation = ((instruction >> 20) & 0x0f) as u8;
+        let packed_flags = ((instruction >> 18) & 3) as u8;
+        Self {
+            suboperation,
+            flags: AudioControlFlags {
+                force_off: suboperation == 15,
+                stop_after_ramp: packed_flags & 1 != 0,
+                ramp_or_glide: packed_flags & 2 != 0,
+            },
+        }
+    }
+
+    /// Low operation passed to `AudioControl` after suboperation 15 is
+    /// converted into force-off plus the amplitude operation.
+    #[must_use]
+    pub const fn effective_suboperation(self) -> u8 {
+        if self.suboperation == 15 {
+            0
+        } else {
+            self.suboperation
+        }
+    }
+
+    /// Exact native control word, useful to adapters that retain the original
+    /// audio engine's bit-oriented operation representation.
+    #[must_use]
+    pub const fn native_control_word(self) -> u32 {
+        (if self.flags.force_off { 0x8000_0000 } else { 0 })
+            | (if self.flags.stop_after_ramp {
+                0x4000_0000
+            } else {
+                0
+            })
+            | (if self.flags.ramp_or_glide {
+                0x2000_0000
+            } else {
+                0
+            })
+            | self.effective_suboperation() as u32
+    }
+}
+
+/// Scalar widths read by the native `generic` audio-control union.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioScalarArgument {
+    Signed(i32),
+    Unsigned(u32),
+    SignedByte(i8),
+}
+
+/// Typed copy of the argument behind opcode `0x8d` operand B.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioControlArgument {
+    Scalar(AudioScalarArgument),
+    Vector([i32; 3]),
+    Object(Option<ObjectHandle>),
+    /// Operations 8, 9, 13 and 14 translate B but never dereference it.
+    Unused,
+}
+
+impl AudioControlArgument {
+    const fn compatibility_word(self) -> u32 {
+        match self {
+            Self::Scalar(AudioScalarArgument::Signed(value)) => value as u32,
+            Self::Scalar(AudioScalarArgument::Unsigned(value)) => value,
+            Self::Scalar(AudioScalarArgument::SignedByte(value)) => value as i32 as u32,
+            Self::Vector(vector) => vector[0] as u32,
+            Self::Object(Some(object)) => CollisionObjectReference::new(object).to_word(),
+            Self::Object(None) | Self::Unused => 0,
+        }
+    }
+}
+
+/// Checked source and decoded values for retail opcode `0x8d`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AudioControlRequest {
+    pub object: ObjectHandle,
+    pub voice: AudioVoiceSelector,
+    pub operation: AudioControlOperation,
+    /// Present even for no-argument operations when B translated to a valid
+    /// address, preserving its stack/constant/register translation contract.
+    pub argument_source: Option<StorageReference>,
+    pub argument: AudioControlArgument,
+}
+
+/// Typed synchronous audio work exposed when execution halts with
+/// [`HaltReason::HostEffect`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioHostRequest {
+    CreateVoice(AudioVoiceCreateRequest),
+    Control(AudioControlRequest),
+}
+
+impl AudioHostRequest {
+    #[must_use]
+    pub const fn object(self) -> ObjectHandle {
+        match self {
+            Self::CreateVoice(request) => request.object,
+            Self::Control(request) => request.object,
+        }
+    }
+}
+
+/// Host acknowledgement required before the suspended object may resume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AudioHostResponse {
+    VoiceCreated { voice_id: i32 },
+    ControlApplied,
+}
+
+/// One synchronous host boundary reached by an interpreter runner.
+///
+/// [`Self::Effect`] covers object/tree work already represented by
+/// [`VmEffect`]. [`Self::Audio`] is separate because the native audio calls
+/// must return a value or acknowledgement before the following GOOL
+/// instruction can execute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum VmHostRequest {
+    Effect(VmEffect),
+    Audio(AudioHostRequest),
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VmError {
     TooManyObjects,
     DuplicateObject(ObjectHandle),
     UnknownObject(ObjectHandle),
+    ActiveEventInvocation(ObjectHandle),
     CodeTooLarge,
     GlobalCodeTooLarge,
     InternalTableTooLarge(usize),
     ExternalTableTooLarge(usize),
     InvalidInitialStackPointer(u32),
     InvalidPadPort(usize),
+    InvalidSpawnId(u16),
     EntityPathTooLong(usize),
     EntityPathProgressOutOfBounds {
         progress: i32,
@@ -1367,6 +1872,7 @@ pub enum VmError {
     MalformedSolidOctree {
         offset: usize,
     },
+    RetailSolidMotion(SolidMotionError),
     ProgramCounterOutOfBounds {
         object: ObjectHandle,
         pc: usize,
@@ -1379,8 +1885,36 @@ pub enum VmError {
     InvalidCodeReference(u32),
     InvalidOnceCodeSegment(CodeSegment),
     InvalidStorageReference(u32),
+    InvalidObjectReference(u32),
+    InvalidEventArgumentsReference(u32),
+    EventArgumentsTooLong(usize),
+    EventArgumentReferenceCapacityExceeded,
+    EventArgumentOutOfBounds {
+        reference: u32,
+        index: i8,
+        len: u8,
+    },
+    EventArgumentScopeMismatch(u32),
+    EventServiceBudgetExhausted(ObjectHandle),
+    InterruptBudgetExhausted(ObjectHandle),
+    UnexpectedEventServiceHalt {
+        object: ObjectHandle,
+        reason: HaltReason,
+    },
+    UnexpectedInterruptHalt {
+        object: ObjectHandle,
+        reason: HaltReason,
+    },
     InvalidEntryReference(u32),
     EntryReferenceTableFull,
+    MissingAudioVoiceCreateVolume,
+    MissingAudioVoiceCreateAdio,
+    MissingAudioControlArgument(u8),
+    InvalidAudioEntryReference(u32),
+    InvalidAudioObjectReference(u32),
+    AudioHostRequestPending(ObjectHandle),
+    MissingAudioHostRequest,
+    MismatchedAudioHostResponse,
     UnsupportedReferenceOperand(u16),
     AnimationDataUnbound,
     InvalidStateProgramCounter {
@@ -1433,14 +1967,17 @@ pub enum VmError {
     /// Suboperation three still requires its separate transformed-bound and
     /// color-selection path; suboperation one's ordered queries are hosted.
     UnsupportedSolidObjectBounds(ObjectHandle),
-    /// Transform-vector suboperations whose required camera, animation, or
-    /// matrix host state has not yet been made pointer-free remain explicit.
+    /// Suboperation six still needs a checked host binding for the linked
+    /// object's live vertex-animation frame and model geometry.
     UnsupportedTransformVectors {
         suboperation: u8,
         input_vector: u8,
         output_vector: u8,
         operand: u16,
     },
+    /// Projection/audio transforms cannot fabricate the renderer's current
+    /// camera matrix. Hosts bind one checked, pointer-free frame snapshot.
+    TransformVectorsCameraUnbound,
     /// Opcodes `0x88`/`0x89` are event-service returns, not ordinary state
     /// changes. Keep their packed contract visible until nested event-service
     /// invocation is implemented.
@@ -1461,6 +1998,16 @@ pub enum VmError {
         reason: HaltReason,
     },
     SynchronousStateChangeBudgetExhausted(ObjectHandle),
+    MissingMiscOperand {
+        primary: u8,
+        secondary: i8,
+        operand: u16,
+    },
+    UnsupportedMiscOperation {
+        primary: u8,
+        secondary: i8,
+        operand: u16,
+    },
     UnknownOpcode(u8),
     UnknownControl(u8),
     EffectQueueFull,
@@ -1481,6 +2028,11 @@ pub enum HaltReason {
     AnimationWaiting {
         remaining: u8,
     },
+    /// Native `GOOL_FLAG_STALL` countdown skipped transition, interpreter,
+    /// colors, and physics for this object update.
+    NativeStall {
+        remaining: u32,
+    },
     /// A state-change `once_p` block returned through its suspend link. The
     /// production runtime consumes this internal synchronous boundary before
     /// exposing the rebound state to the following frame.
@@ -1488,6 +2040,17 @@ pub enum HaltReason {
     /// A state transition block returned through the nested frame installed
     /// by `GoolObjectChangeState`.
     TransitionCompleted,
+    /// Internal synchronous boundary produced by a valid `0x88`/`0x89`
+    /// event-service response or a later ordinary return after return mode 0.
+    EventServiceReturned {
+        state: u16,
+        guard: bool,
+    },
+    /// The event routine returned without first executing a successful event
+    /// return opcode, so delivery must use the retained event map.
+    EventServiceInvalidReturn,
+    /// A high-bit event-map entry returned from its shared-code interrupt.
+    InterruptCompleted,
     BudgetExhausted,
 }
 
@@ -1515,6 +2078,15 @@ enum ReturnBehavior {
     SuspendTransition {
         previous_animation_wait: Option<AnimationWait>,
     },
+    EventService {
+        condition: bool,
+        return_event: bool,
+        guard: bool,
+        previous_animation_wait: Option<AnimationWait>,
+    },
+    Interrupt {
+        previous_animation_wait: Option<AnimationWait>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1534,6 +2106,7 @@ struct AnimationWait {
 pub struct VmObject {
     handle: ObjectHandle,
     program_identity: Option<GoolProgramIdentity>,
+    event_map: Vec<u16>,
     global_code: Vec<u32>,
     code: Vec<u32>,
     code_segment: CodeSegment,
@@ -1548,6 +2121,9 @@ pub struct VmObject {
     entity_spawn_flags: Option<u16>,
     entity_path: Option<RetailEntityPath>,
     solid_environment: Option<RetailSolidEnvironment>,
+    local_bound: Bounds3,
+    solid_zone_index: Option<usize>,
+    solid_smooth_stop: SmoothStopMemory,
     is_main_player: bool,
     page_count: u32,
     resident_pages: Vec<PageIndex>,
@@ -1577,6 +2153,7 @@ impl VmObject {
         Ok(Self {
             handle,
             program_identity: None,
+            event_map: Vec::new(),
             global_code: Vec::new(),
             code,
             code_segment: CodeSegment::External,
@@ -1591,6 +2168,9 @@ impl VmObject {
             entity_spawn_flags: None,
             entity_path: None,
             solid_environment: None,
+            local_bound: Bounds3::default(),
+            solid_zone_index: None,
+            solid_smooth_stop: SmoothStopMemory::default(),
             is_main_player: false,
             page_count: 0,
             resident_pages: Vec::new(),
@@ -1640,8 +2220,10 @@ impl VmObject {
         let mut object = Self::new(handle, program.code().to_vec())?;
         object.program_identity = Some(GoolProgramIdentity {
             global_eid: program.global_eid(),
+            object_type: program.header().object_type,
             category: program.header().category,
         });
+        object.event_map = program.event_map().to_vec();
         object.global_code = program.global_code().to_vec();
         object.initial_stack_pointer = initial_stack_pointer;
         object.internal[..program.internal_words().len()].copy_from_slice(program.internal_words());
@@ -1673,11 +2255,19 @@ impl VmObject {
     /// Parsed global-program identity paired with this VM object.
     ///
     /// Synthetic objects built with [`VmObject::new`] return `None`; objects
-    /// built from a validated [`GoolProgram`] always return both the global
-    /// EID and its retail category together.
+    /// built from a validated [`GoolProgram`] always return the global EID,
+    /// object type, and retail category together.
     #[must_use]
     pub const fn program_identity(&self) -> Option<GoolProgramIdentity> {
         self.program_identity
+    }
+
+    /// Exact owned prefix of global item three before the subtype-map
+    /// boundary. `0x00ff` is the null-state sentinel; high-bit values are
+    /// shared-code interrupt offsets and remain unmodified here.
+    #[must_use]
+    pub fn event_map(&self) -> &[u16] {
+        &self.event_map
     }
 
     #[must_use]
@@ -1744,6 +2334,29 @@ impl VmObject {
         } else {
             self.status_c
         };
+        Ok(status & target_flags != 0)
+    }
+
+    fn event_state_blocked(&self, state: u16, event: u32) -> Result<bool, VmError> {
+        let target_flags = if self.state_flags_by_index.is_empty() {
+            0
+        } else {
+            *self
+                .state_flags_by_index
+                .get(usize::from(state))
+                .ok_or(VmError::InvalidStateDescriptor(state))?
+        };
+        let mut status = self.status_c;
+        if matches!(
+            event,
+            EVENT_CLEAR_GUARD_STATUS | SQUASH_EVENT | BOULDER_SQUASH_EVENT
+        ) {
+            status &= !2;
+        }
+        let invincibility = self.register(process_register::INVINCIBILITY_STATE)?;
+        if self.is_main_player && matches!(invincibility, 2..=4) {
+            status |= 0x1002;
+        }
         Ok(status & target_flags != 0)
     }
 
@@ -1972,6 +2585,129 @@ impl VmObject {
         })
     }
 
+    fn retail_physics_state(&self) -> Result<RetailPhysicsState, VmError> {
+        Ok(RetailPhysicsState {
+            translation: Vec3 {
+                x: self.register(process_register::TRANSLATION_X)? as i32,
+                y: self.register(process_register::TRANSLATION_Y)? as i32,
+                z: self.register(process_register::TRANSLATION_Z)? as i32,
+            },
+            rotation: RetailAngles {
+                y: self.register(process_register::ROTATION_Y)? as i32,
+                x: self.register(process_register::ROTATION_X)? as i32,
+                z: self.register(process_register::ROTATION_Z)? as i32,
+            },
+            velocity: Vec3 {
+                x: self.register(process_register::MISC_A_X)? as i32,
+                y: self.register(process_register::MISC_A_Y)? as i32,
+                z: self.register(process_register::MISC_A_Z)? as i32,
+            },
+            angular_velocity_x: self.register(process_register::MISC_B_Y)? as i32,
+            target_rotation: Vec2 {
+                x: self.register(process_register::MISC_B_X)? as i32,
+                y: self.register(process_register::MISC_B_Z)? as i32,
+            },
+            status_a: self.register(process_register::STATUS_A)?,
+            status_b: self.register(process_register::STATUS_B)?,
+            state_flags: self.register(process_register::STATE_FLAGS)?,
+            speed: self.register(process_register::SPEED)? as i32,
+            invincibility_state: self.register(process_register::INVINCIBILITY_STATE)?,
+            floor_y: self.register(process_register::FLOOR_Y)? as i32,
+            floor_impact_stamp: self.register(process_register::FLOOR_IMPACT_STAMP)?,
+            floor_impact_velocity: self.register(process_register::FLOOR_IMPACT_VELOCITY)? as i32,
+            event: self.register(process_register::EVENT)?,
+            angular_velocity_y: self.register(process_register::ANGULAR_VELOCITY_Y)? as i32,
+        })
+    }
+
+    fn set_retail_physics_state(&mut self, state: RetailPhysicsState) -> Result<(), VmError> {
+        for (register, value) in [
+            (process_register::TRANSLATION_X, state.translation.x),
+            (process_register::TRANSLATION_Y, state.translation.y),
+            (process_register::TRANSLATION_Z, state.translation.z),
+            (process_register::ROTATION_Y, state.rotation.y),
+            (process_register::ROTATION_X, state.rotation.x),
+            (process_register::ROTATION_Z, state.rotation.z),
+            (process_register::MISC_A_X, state.velocity.x),
+            (process_register::MISC_A_Y, state.velocity.y),
+            (process_register::MISC_A_Z, state.velocity.z),
+            (process_register::MISC_B_Y, state.angular_velocity_x),
+            (process_register::MISC_B_X, state.target_rotation.x),
+            (process_register::MISC_B_Z, state.target_rotation.y),
+            (process_register::STATUS_A, state.status_a as i32),
+            (process_register::STATUS_B, state.status_b as i32),
+            (process_register::STATE_FLAGS, state.state_flags as i32),
+            (process_register::SPEED, state.speed),
+            (
+                process_register::INVINCIBILITY_STATE,
+                state.invincibility_state as i32,
+            ),
+            (process_register::FLOOR_Y, state.floor_y),
+            (
+                process_register::FLOOR_IMPACT_STAMP,
+                state.floor_impact_stamp as i32,
+            ),
+            (
+                process_register::FLOOR_IMPACT_VELOCITY,
+                state.floor_impact_velocity,
+            ),
+            (process_register::EVENT, state.event as i32),
+            (
+                process_register::ANGULAR_VELOCITY_Y,
+                state.angular_velocity_y,
+            ),
+        ] {
+            self.set_register(register, value as u32)?;
+        }
+        Ok(())
+    }
+
+    fn orient_retail_physics_on_path(
+        &mut self,
+        state: &mut RetailPhysicsState,
+    ) -> Result<(), VmError> {
+        let Some(path) = self.entity_path.as_ref() else {
+            // The source caller zero-initializes its out vector, ignores the
+            // missing-entity error, and still copies that Y into `floor_y`.
+            apply_path_orientation(state, Vec3::ZERO);
+            return Ok(());
+        };
+        let object_progress = self.register(process_register::PATH_PROGRESS)? as i32;
+        let oriented = orient_retail_path(
+            path,
+            0,
+            PathOrientationInputs {
+                location: [
+                    state.translation.x,
+                    state.translation.y,
+                    state.translation.z,
+                ],
+                status_a: state.status_a,
+                status_b: state.status_b,
+                object_progress,
+                inertia_limit: self.register(process_register::UNKNOWN_154)? as i32,
+                misc_c_y: self.register(process_register::MODE_FLAGS_B)? as i32,
+                rotation_z: state.rotation.z,
+                target_rotation_x: state.target_rotation.x,
+                target_rotation_y: state.target_rotation.y,
+            },
+        )?;
+        state.status_a = oriented.status_a;
+        state.rotation.z = oriented.rotation_z;
+        state.target_rotation.x = oriented.target_rotation_x;
+        state.target_rotation.y = oriented.target_rotation_y;
+        self.set_register(process_register::MODE_FLAGS_B, oriented.misc_c_y as u32)?;
+        apply_path_orientation(
+            state,
+            Vec3 {
+                x: oriented.location[0],
+                y: oriented.location[1],
+                z: oriented.location[2],
+            },
+        );
+        Ok(())
+    }
+
     fn process_vector(&self, index: u8) -> Result<[i32; 3], VmError> {
         let index = usize::from(index);
         if index >= PROCESS_VECTOR_COUNT {
@@ -2057,7 +2793,16 @@ impl VmObject {
     /// Owns the current ZDAT solid-query inputs without retaining relocated
     /// entry or octree pointers from the source runtime.
     pub fn bind_retail_solid_environment(&mut self, environment: RetailSolidEnvironment) {
+        self.solid_zone_index = environment.object_zone;
+        self.solid_smooth_stop = SmoothStopMemory::default();
         self.solid_environment = Some(environment);
+    }
+
+    /// Updates the persistent object-local AABB calculated from the current
+    /// retail animation. Native solid motion consumes this after the
+    /// interpreter, while the frame-bound list keeps the separate world AABB.
+    pub fn set_retail_local_bound(&mut self, bound: Bounds3) {
+        self.local_bound = bound;
     }
 
     /// Records the runtime identity represented by retail's global `crash`
@@ -2316,6 +3061,73 @@ impl VmObject {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn configure_test_event_interrupt(
+        &mut self,
+        event: u32,
+        global_code: Vec<u32>,
+    ) -> Result<(), VmError> {
+        if global_code.len() > MAX_CODE_WORDS {
+            return Err(VmError::GlobalCodeTooLarge);
+        }
+        let event_index = (event >> 8) as usize;
+        self.event_map.resize(event_index + 1, EVENT_MAP_NULL_STATE);
+        self.event_map[event_index] = 0x8000;
+        self.global_code = global_code;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_event_service(
+        &mut self,
+        code: Vec<u32>,
+        event_pc: usize,
+    ) -> Result<(), VmError> {
+        if code.len() > MAX_CODE_WORDS {
+            return Err(VmError::CodeTooLarge);
+        }
+        if event_pc >= code.len() {
+            return Err(VmError::InvalidJump {
+                object: self.handle,
+                target: event_pc as i64,
+            });
+        }
+        self.code = code;
+        self.event_pc = Some(event_pc);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_once(
+        &mut self,
+        global_code: Vec<u32>,
+        once_pc: usize,
+    ) -> Result<(), VmError> {
+        if global_code.len() > MAX_CODE_WORDS {
+            return Err(VmError::GlobalCodeTooLarge);
+        }
+        if once_pc >= global_code.len() {
+            return Err(VmError::InvalidJump {
+                object: self.handle,
+                target: once_pc as i64,
+            });
+        }
+        self.global_code = global_code;
+        self.set_register(
+            process_register::ONCE_POINTER,
+            CodeAddress {
+                segment: CodeSegment::Global,
+                pc: once_pc,
+            }
+            .to_word(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_state(&mut self, state: u16) {
+        self.state = state;
+    }
+
     pub fn restart(&mut self, pc: usize) -> Result<(), VmError> {
         if pc >= self.code.len() {
             return Err(VmError::InvalidJump {
@@ -2338,14 +3150,20 @@ pub struct Machine {
     objects: BTreeMap<ObjectHandle, VmObject>,
     globals: Vec<u32>,
     effects: Vec<VmEffect>,
+    pending_audio_host_request: Option<AudioHostRequest>,
+    spawn_flags: [u32; SPAWN_TABLE_CAPACITY],
     random_seed: u32,
     ticks_per_frame: i32,
     draw_count: u32,
     frames_elapsed: u32,
+    retail_game_state_playing: bool,
+    camera_rotation_xz: i32,
     pads: [RetailPadSnapshot; RETAIL_PAD_COUNT],
     operand_constants: [u32; 2],
     input_constant_index: usize,
     output_constant_index: usize,
+    event_argument_scopes: Vec<EventArgumentsScope>,
+    next_event_argument_generation: u32,
     // Function-static vectors from `GoolOpReactSolidSurfaces`. They are shared
     // across objects exactly like the source globals, but remain ordinary
     // deterministic machine state rather than hidden Rust statics.
@@ -2353,6 +3171,7 @@ pub struct Machine {
     solid_trans4: [i32; 3],
     solid_frame_bounds: FrameBounds<ObjectHandle>,
     camera_translation: [i32; 3],
+    transform_vectors_camera: Option<RetailTransformVectorsCamera>,
     paging_page_capacity: u32,
     entry_pages: BTreeMap<Eid, PageIndex>,
     paging_page_references: BTreeMap<PageIndex, u32>,
@@ -2369,18 +3188,25 @@ impl Machine {
             objects: BTreeMap::new(),
             globals: vec![0; global_words],
             effects: Vec::new(),
+            pending_audio_host_request: None,
+            spawn_flags: [0; SPAWN_TABLE_CAPACITY],
             random_seed: 12_345,
             ticks_per_frame: 34,
             draw_count: 0,
             frames_elapsed: 0,
+            retail_game_state_playing: false,
+            camera_rotation_xz: 0,
             pads: [RetailPadSnapshot::default(); RETAIL_PAD_COUNT],
             operand_constants: [0; 2],
             input_constant_index: 0,
             output_constant_index: 0,
+            event_argument_scopes: Vec::with_capacity(MAX_CALL_DEPTH),
+            next_event_argument_generation: 1,
             solid_trans3: [0; 3],
             solid_trans4: [0; 3],
             solid_frame_bounds: FrameBounds::new(),
             camera_translation: [0; 3],
+            transform_vectors_camera: None,
             paging_page_capacity: 0,
             entry_pages: BTreeMap::new(),
             paging_page_references: BTreeMap::new(),
@@ -2396,19 +3222,120 @@ impl Machine {
         self.random_seed = seed;
     }
 
+    /// Mirrors the retail persistent spawn word table at the interpreter
+    /// boundary. The runtime refreshes these words from its owning arena
+    /// before GOOL runs so misc reads never dereference native globals.
+    pub fn set_spawn_flags(&mut self, id: u16, flags: u32) -> Result<(), VmError> {
+        *self
+            .spawn_flags
+            .get_mut(usize::from(id))
+            .ok_or(VmError::InvalidSpawnId(id))? = flags;
+        Ok(())
+    }
+
+    pub fn spawn_flags(&self, id: u16) -> Result<u32, VmError> {
+        self.spawn_flags
+            .get(usize::from(id))
+            .copied()
+            .ok_or(VmError::InvalidSpawnId(id))
+    }
+
+    /// Reads one checked logical GOOL global word.
+    pub fn global_word(&self, index: usize) -> Result<u32, VmError> {
+        self.globals
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidRegister(index))
+    }
+
+    /// Writes one checked logical GOOL global word.
+    pub fn set_global_word(&mut self, index: usize, value: u32) -> Result<(), VmError> {
+        *self
+            .globals
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = value;
+        Ok(())
+    }
+
+    /// Seeds the pointer-free scalar subset written by `LevelInitGlobals`,
+    /// `LevelResetGlobals`, `LdatInit`, and `GoolInitLid` before any GOOL code
+    /// executes. Pointer-valued globals remain null checked handles.
+    pub fn initialize_retail_level_globals(&mut self, level: LevelId) {
+        let initial_lives = 4_u32 << 8;
+        for (index, value) in [
+            (CURRENT_LEVEL_GLOBAL, level.get() << 8),
+            (NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK),
+            (CURRENT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK),
+            (GAME_STATE_GLOBAL, 0),
+            (TITLE_STATE_GLOBAL, 7),
+            (SAVED_TITLE_STATE_GLOBAL, u32::MAX),
+            (CURRENT_MAP_LEVEL_GLOBAL, 99),
+            (LIFE_COUNT_GLOBAL, initial_lives),
+            (INITIAL_LIFE_COUNT_GLOBAL, initial_lives),
+            (MONO_GLOBAL, 0),
+            (SFX_VOLUME_GLOBAL, 255),
+            (MUSIC_VOLUME_GLOBAL, 255),
+            (LEVEL_COUNT_GLOBAL, 1),
+            (LEVELS_UNLOCKED_GLOBAL, 1),
+        ] {
+            if let Some(global) = self.globals.get_mut(index) {
+                *global = value;
+            }
+        }
+    }
+
     /// Supplies the cooperative host timing consumed by opcode `0x1b`.
     pub fn set_ticks_per_frame(&mut self, ticks_per_frame: i32) {
+        self.set_frame_timing(ticks_per_frame, ticks_per_frame);
+    }
+
+    /// Supplies the source browser's unrounded global tick delta and rounded
+    /// physics/GOOL scaling value for one cooperative frame.
+    pub fn set_frame_timing(&mut self, ticks_current_frame: i32, ticks_per_frame: i32) {
         self.ticks_per_frame = ticks_per_frame;
+        if let Some(global) = self.globals.get_mut(TICKS_CURRENT_FRAME_GLOBAL) {
+            *global = ticks_current_frame as u32;
+        }
     }
 
     /// Supplies the presentation counter consumed by opcode `0x1e`.
     pub fn set_draw_count(&mut self, draw_count: u32) {
         self.draw_count = draw_count;
+        if let Some(global) = self.globals.get_mut(DRAW_COUNT_GLOBAL) {
+            *global = draw_count;
+        }
     }
 
     /// Supplies the retail simulation-frame stamp used by animation waits.
     pub fn set_frames_elapsed(&mut self, frames_elapsed: u32) {
         self.frames_elapsed = frames_elapsed;
+    }
+
+    /// Supplies the camera/game-state globals read by native object physics.
+    /// They are frozen for the complete retail preorder traversal, just like
+    /// the pad snapshot and cooperative tick duration.
+    pub fn set_retail_physics_frame_context(
+        &mut self,
+        game_state_playing: bool,
+        camera_rotation_xz: i32,
+    ) {
+        self.set_retail_frame_context(
+            if game_state_playing { 0x100 } else { 0 },
+            camera_rotation_xz,
+        );
+    }
+
+    /// Supplies the exact retail game-state word and camera-relative heading
+    /// frozen for one source-ordered object traversal.
+    pub fn set_retail_frame_context(&mut self, game_state: i32, camera_rotation_xz: i32) {
+        self.retail_game_state_playing = game_state == 0x100;
+        self.camera_rotation_xz = i32::from(Angle12::new(camera_rotation_xz).raw());
+        if let Some(global) = self.globals.get_mut(CAMERA_ROTATION_GLOBAL) {
+            *global = self.camera_rotation_xz as u32;
+        }
+        if let Some(global) = self.globals.get_mut(GAME_STATE_GLOBAL) {
+            *global = game_state as u32;
+        }
     }
 
     #[must_use]
@@ -2448,6 +3375,32 @@ impl Machine {
     /// Supplies the current retail camera translation used by shadow sizing.
     pub fn set_camera_translation(&mut self, translation: [i32; 3]) {
         self.camera_translation = translation;
+        for (offset, value) in translation.into_iter().enumerate() {
+            if let Some(global) = self
+                .globals
+                .get_mut(CAMERA_TRANSLATION_GLOBAL.saturating_add(offset))
+            {
+                *global = value as u32;
+            }
+        }
+        if let Some(camera) = &mut self.transform_vectors_camera {
+            camera.translation = translation;
+        }
+    }
+
+    /// Supplies the complete frozen camera snapshot used by transform-vector
+    /// projection and audio-space operations during this cooperative frame.
+    pub fn set_transform_vectors_camera(&mut self, camera: RetailTransformVectorsCamera) {
+        self.set_camera_translation(camera.translation);
+        for (offset, value) in camera.rotation_yxz.into_iter().enumerate() {
+            if let Some(global) = self
+                .globals
+                .get_mut(CAMERA_ROTATION_YXZ_GLOBAL.saturating_add(offset))
+            {
+                *global = value as u32;
+            }
+        }
+        self.transform_vectors_camera = Some(camera);
     }
 
     /// Replaces one complete retail pad history snapshot.
@@ -2472,6 +3425,336 @@ impl Machine {
             .get(port)
             .copied()
             .ok_or(VmError::InvalidPadPort(port))
+    }
+
+    fn restore_retail_intensity_from_zone(&mut self, handle: ObjectHandle) -> Result<(), VmError> {
+        let intensity = {
+            let object = self.object(handle)?;
+            let environment = object
+                .solid_environment
+                .as_ref()
+                .ok_or(VmError::MissingSolidEnvironment(handle))?;
+            let source = if object.is_main_player {
+                &environment.player_colors
+            } else {
+                &environment.object_colors
+            };
+            [
+                source[COLOR_INTENSITY_START],
+                source[COLOR_INTENSITY_START + 1],
+                source[COLOR_INTENSITY_START + 2],
+            ]
+        };
+        let object = self.object_mut(handle)?;
+        object.set_register(process_register::INVINCIBILITY_STATE, 0)?;
+        object.colors[COLOR_INTENSITY_START..COLOR_INTENSITY_END].copy_from_slice(&intensity);
+        Ok(())
+    }
+
+    /// Executes source `GoolObjectColors` for one live object.
+    ///
+    /// This preserves the intentional switch fallthrough for invincibility
+    /// states two through five. The category-`0x300` collider interrupt stays
+    /// represented by the VM's checked event effect until synchronous event
+    /// services are hosted by the runtime.
+    pub fn run_retail_object_colors(&mut self, handle: ObjectHandle) -> Result<(), VmError> {
+        let (
+            invincibility_state,
+            invincibility_stamp,
+            status_a,
+            status_b,
+            is_main_player,
+            collider,
+        ) = {
+            let object = self.object(handle)?;
+            (
+                object.register(process_register::INVINCIBILITY_STATE)?,
+                object.register(process_register::INVINCIBILITY_STAMP)?,
+                object.register(process_register::STATUS_A)?,
+                object.register(process_register::STATUS_B)?,
+                object.is_main_player,
+                object.links[6],
+            )
+        };
+        // Both source operands are unsigned words. Assignment to its signed
+        // local retains the low 32 bits on the characterized two's-complement
+        // target, so a future stamp does not spuriously expire the state.
+        let elapsed_since = self.frames_elapsed.wrapping_sub(invincibility_stamp) as i32;
+
+        match invincibility_state {
+            2..=5 => {
+                let expired = match invincibility_state {
+                    3 => elapsed_since > 451,
+                    4 => elapsed_since > 60,
+                    5 => elapsed_since > 602,
+                    _ => false,
+                };
+                if expired {
+                    self.restore_retail_intensity_from_zone(handle)?;
+                }
+
+                // Case four performs this branch after its timeout reset and
+                // before falling through to the shared cyclic intensity.
+                if invincibility_state == 4
+                    && let Some(collider) = collider
+                    && self
+                        .object(collider)?
+                        .program_identity
+                        .is_some_and(|identity| identity.category() == 0x300)
+                {
+                    self.emit(VmEffect::Event {
+                        sender: handle,
+                        recipient: Some(collider),
+                        event: HIT_INVINCIBLE_EVENT,
+                    })?;
+                }
+
+                let modulus = (self.draw_count % 4) << 8;
+                let value = (if modulus < 0x100 {
+                    modulus + 0x7f
+                } else {
+                    0x47f - modulus
+                }) as u16;
+                self.object_mut(handle)?.colors[COLOR_INTENSITY_START..COLOR_INTENSITY_END]
+                    .fill(value);
+            }
+            6 => {
+                if elapsed_since > 15 {
+                    let object = self.object_mut(handle)?;
+                    object.set_register(process_register::INVINCIBILITY_STATE, 0)?;
+                    object.set_register(
+                        process_register::STATUS_B,
+                        status_b | STATUS_B_DPAD_CONTROL,
+                    )?;
+                }
+            }
+            7 => {
+                if elapsed_since > 15 || status_a & 1 != 0 {
+                    let object = self.object_mut(handle)?;
+                    object.set_register(process_register::INVINCIBILITY_STATE, 0)?;
+                    object.set_register(
+                        process_register::STATUS_B,
+                        status_b | STATUS_B_DPAD_CONTROL,
+                    )?;
+                }
+            }
+            _ => {
+                if is_main_player && status_b & STATUS_B_MAIN_COLOR_BY_ZONE != 0 {
+                    self.restore_retail_intensity_from_zone(handle)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Executes the native post-interpreter color and physics phases for one
+    /// live GOOL object, in source order. Static ZDAT floor response is
+    /// resolved here because it needs the object's owned collision
+    /// environment; dynamic object/wall service effects remain explicit
+    /// follow-on branches.
+    pub fn run_retail_object_physics(
+        &mut self,
+        handle: ObjectHandle,
+    ) -> Result<RetailPhysicsResult, VmError> {
+        self.run_retail_object_colors(handle)?;
+        let object_type = self
+            .object(handle)?
+            .program_identity
+            .map_or(0, GoolProgramIdentity::object_type);
+        let context = RetailPhysicsContext {
+            ticks_per_frame: self.ticks_per_frame.max(0) as u32,
+            game_state_playing: self.retail_game_state_playing,
+            camera_rotation_xz: self.camera_rotation_xz,
+            pad_held: self.pad_snapshot(0)?.held,
+            frame_stamp: self.frames_elapsed,
+            object_type,
+        };
+        let mut state = self.object(handle)?.retail_physics_state()?;
+        let plan = begin_retail_physics(&mut state, context);
+        if plan.clear_collider {
+            self.object_mut(handle)?.set_link(6, None)?;
+        }
+        match plan.translation_mode {
+            RetailTranslationMode::None => {}
+            RetailTranslationMode::Free => {
+                let _changed = apply_free_movement(&mut state, plan);
+            }
+            RetailTranslationMode::StoppedBySolid => {
+                self.resolve_retail_static_solid_motion(handle, &mut state, plan)?;
+            }
+        }
+        if path_orientation_requested(&state) {
+            self.object_mut(handle)?
+                .orient_retail_physics_on_path(&mut state)?;
+        }
+        let result = finalize_retail_physics(&mut state, context);
+        self.object_mut(handle)?.set_retail_physics_state(state)?;
+        Ok(result)
+    }
+
+    fn resolve_retail_static_solid_motion(
+        &mut self,
+        handle: ObjectHandle,
+        state: &mut RetailPhysicsState,
+        plan: RetailPhysicsPlan,
+    ) -> Result<(), VmError> {
+        let (
+            environment,
+            local_bound,
+            object_zone,
+            smooth_stop,
+            collider,
+            status_c,
+            animation_stamp,
+            hotspot_size,
+        ) = {
+            let object = self.object(handle)?;
+            (
+                object
+                    .solid_environment
+                    .clone()
+                    .ok_or(VmError::MissingSolidEnvironment(handle))?,
+                object.local_bound,
+                object.solid_zone_index,
+                object.solid_smooth_stop,
+                object.links[6].map(|collider| u32::from(collider.get())),
+                object.register(process_register::STATUS_C)?,
+                object.register(process_register::ANIMATION_STAMP)? as i32,
+                object.register(process_register::HOTSPOT_SIZE)? as i32,
+            )
+        };
+
+        let mut zones = Vec::with_capacity(environment.neighbors.len());
+        for zone in &environment.neighbors {
+            zones.push(
+                SolidZoneView::new(
+                    zone.origin,
+                    zone.dimensions,
+                    zone.root,
+                    zone.max_depth,
+                    &zone.bytes,
+                )
+                .map_err(VmError::RetailSolidMotion)?
+                .with_graphics(zone.graphics_flags, zone.water_y),
+            );
+        }
+
+        // The source reads the frame-bound list in traversal order. Each
+        // snapshot owns only its world AABB; all gates and metadata are live
+        // object fields at the exact moment this mover reaches physics.
+        let mut candidates = Vec::with_capacity(self.solid_frame_bounds.len());
+        for snapshot in &self.solid_frame_bounds {
+            let candidate = self.object(snapshot.object)?;
+            let identity = candidate.program_identity;
+            candidates.push(SolidObjectCandidate {
+                id: u32::from(snapshot.object.get()),
+                translation: Vec3 {
+                    x: candidate.register(process_register::TRANSLATION_X)? as i32,
+                    y: candidate.register(process_register::TRANSLATION_Y)? as i32,
+                    z: candidate.register(process_register::TRANSLATION_Z)? as i32,
+                },
+                bounds: snapshot.bound,
+                status_b: candidate.register(process_register::STATUS_B)?,
+                status_c: candidate.register(process_register::STATUS_C)?,
+                state_flags: candidate.register(process_register::STATE_FLAGS)?,
+                category: identity.map_or(0, GoolProgramIdentity::category),
+                object_type: identity.map_or(0, GoolProgramIdentity::object_type),
+                hotspot_size: candidate.register(process_register::HOTSPOT_SIZE)? as i32,
+            });
+        }
+
+        let solid_state = SolidMotionState {
+            translation: state.translation,
+            velocity: state.velocity,
+            local_bound,
+            status_a: state.status_a,
+            status_b: state.status_b,
+            status_c,
+            state_flags: state.state_flags,
+            invincibility_state: state.invincibility_state as i32,
+            animation_stamp,
+            floor_impact_stamp: state.floor_impact_stamp as i32,
+            floor_impact_velocity: state.floor_impact_velocity,
+            event: state.event,
+            hotspot_size,
+            collider,
+        };
+        let outcome = solve_retail_solid_motion(
+            &zones,
+            &candidates,
+            solid_state,
+            plan.displacement,
+            SolidMotionContext {
+                frame_stamp: self.frames_elapsed as i32,
+                object_zone,
+                current_world_graphics_flags: environment.graphics_flags,
+                quirks: environment.level_quirks,
+            },
+            smooth_stop,
+        )
+        .map_err(VmError::RetailSolidMotion)?;
+
+        state.translation = outcome.state.translation;
+        state.velocity = outcome.state.velocity;
+        state.status_a = outcome.state.status_a;
+        state.floor_impact_stamp = outcome.state.floor_impact_stamp as u32;
+        state.floor_impact_velocity = outcome.state.floor_impact_velocity;
+        state.event = outcome.state.event;
+
+        {
+            let object = self.object_mut(handle)?;
+            object.solid_zone_index = outcome.object_zone;
+            object.solid_smooth_stop = outcome.smooth_stop;
+            object.links[6] = outcome
+                .state
+                .collider
+                .and_then(|candidate| u16::try_from(candidate).ok())
+                .and_then(ObjectHandle::new);
+        }
+        self.apply_retail_solid_effects(handle, &outcome.effects)?;
+        Ok(())
+    }
+
+    fn apply_retail_solid_effects(
+        &mut self,
+        moving: ObjectHandle,
+        effects: &[SolidEffect],
+    ) -> Result<(), VmError> {
+        for effect in effects.iter().copied() {
+            match effect {
+                SolidEffect::SetCandidateCollider { candidate } => {
+                    let candidate = solid_effect_handle(candidate)?;
+                    self.object_mut(candidate)?.set_link(6, Some(moving))?;
+                }
+                SolidEffect::SetCandidateStatus {
+                    candidate,
+                    status_bits,
+                } => {
+                    let candidate = solid_effect_handle(candidate)?;
+                    let status = self
+                        .object(candidate)?
+                        .register(process_register::STATUS_A)?;
+                    self.object_mut(candidate)?
+                        .set_register(process_register::STATUS_A, status | status_bits)?;
+                }
+                SolidEffect::ObjectCollision { .. } | SolidEffect::SendEvent { .. } => {
+                    // `GoolCollide` and `GoolSendEvent` are synchronous in the
+                    // source. Retain their complete typed payload until the
+                    // nested event-service runner consumes it in this frame.
+                    self.emit(VmEffect::Solid {
+                        object: moving,
+                        effect,
+                    })?;
+                }
+                SolidEffect::NodeContact { .. }
+                | SolidEffect::ZoneChanged { .. }
+                | SolidEffect::MissingZone => {
+                    // The pure solver has already committed the corresponding
+                    // state, zone, or preserve-previous-zone result.
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn insert_object(&mut self, object: VmObject) -> Result<(), VmError> {
@@ -2558,6 +3841,629 @@ impl Machine {
         self.objects
             .get_mut(&handle)
             .ok_or(VmError::UnknownObject(handle))
+    }
+
+    /// Removes one checked VM object and nulls every inbound process link.
+    /// Active synchronous event/interrupt frames cannot be removed midway;
+    /// this keeps their stack-scoped argument tokens and return addresses from
+    /// becoming detached from an owning object.
+    pub fn remove_object(&mut self, handle: ObjectHandle) -> Result<VmObject, VmError> {
+        let object = self.object(handle)?;
+        if object.call_stack.iter().any(|frame| {
+            matches!(
+                frame.behavior,
+                ReturnBehavior::EventService { .. } | ReturnBehavior::Interrupt { .. }
+            )
+        }) {
+            return Err(VmError::ActiveEventInvocation(handle));
+        }
+        let removed = self
+            .objects
+            .remove(&handle)
+            .ok_or(VmError::UnknownObject(handle))?;
+        for object in self.objects.values_mut() {
+            for link in &mut object.links {
+                if *link == Some(handle) {
+                    *link = None;
+                }
+            }
+        }
+        Ok(removed)
+    }
+
+    /// Enters one synchronous event-argument scope. `None` is the native null
+    /// `argv` pointer, while `Some(&[])` deliberately creates a non-null owned
+    /// reference with zero readable elements.
+    pub fn enter_event_arguments_scope(
+        &mut self,
+        arguments: Option<&[u32]>,
+    ) -> Result<Option<EventArgumentsReference>, VmError> {
+        let Some(arguments) = arguments else {
+            return Ok(None);
+        };
+        if arguments.len() > MAX_EVENT_ARGUMENTS {
+            return Err(VmError::EventArgumentsTooLong(arguments.len()));
+        }
+        if self.event_argument_scopes.len() == MAX_EVENT_ARGUMENT_SCOPES {
+            return Err(VmError::EventArgumentReferenceCapacityExceeded);
+        }
+        let reference = EventArgumentsReference::checked(self.next_event_argument_generation)?;
+        self.next_event_argument_generation = self
+            .next_event_argument_generation
+            .checked_add(1)
+            .ok_or(VmError::EventArgumentReferenceCapacityExceeded)?;
+        let mut owned = [0; MAX_EVENT_ARGUMENTS];
+        owned[..arguments.len()].copy_from_slice(arguments);
+        self.event_argument_scopes.push(EventArgumentsScope {
+            reference,
+            arguments: owned,
+            len: arguments.len() as u8,
+        });
+        Ok(Some(reference))
+    }
+
+    /// Leaves the most recently entered event-argument scope. Requiring LIFO
+    /// release mirrors the synchronous interpreter stack and prevents a token
+    /// from outliving the frame whose `fp[-1]` contains it.
+    pub fn leave_event_arguments_scope(
+        &mut self,
+        reference: Option<EventArgumentsReference>,
+    ) -> Result<(), VmError> {
+        let Some(reference) = reference else {
+            return Ok(());
+        };
+        if self
+            .event_argument_scopes
+            .last()
+            .is_none_or(|scope| scope.reference != reference)
+        {
+            return Err(VmError::EventArgumentScopeMismatch(reference.to_word()));
+        }
+        self.event_argument_scopes.pop();
+        Ok(())
+    }
+
+    fn event_argument(
+        &self,
+        reference: EventArgumentsReference,
+        index: i8,
+    ) -> Result<u32, VmError> {
+        let scope = self
+            .event_argument_scopes
+            .iter()
+            .find(|scope| scope.reference == reference)
+            .ok_or(VmError::InvalidEventArgumentsReference(reference.to_word()))?;
+        let index = usize::try_from(index).map_err(|_| VmError::EventArgumentOutOfBounds {
+            reference: reference.to_word(),
+            index,
+            len: scope.len,
+        })?;
+        scope
+            .arguments
+            .get(index)
+            .copied()
+            .filter(|_| index < usize::from(scope.len))
+            .ok_or(VmError::EventArgumentOutOfBounds {
+                reference: reference.to_word(),
+                index: index as i8,
+                len: scope.len,
+            })
+    }
+
+    fn begin_synchronous_event_frame(
+        &mut self,
+        handle: ObjectHandle,
+        target: CodeAddress,
+        arguments: &[u32],
+        behavior: ReturnBehavior,
+    ) -> Result<usize, VmError> {
+        let object = self.object(handle)?;
+        let code_len = match target.segment {
+            CodeSegment::External => object.code.len(),
+            CodeSegment::Global => object.global_code.len(),
+        };
+        if target.pc >= code_len {
+            return Err(VmError::InvalidJump {
+                object: handle,
+                target: target.pc as i64,
+            });
+        }
+        if object.call_stack.len() == MAX_CALL_DEPTH {
+            return Err(VmError::CallStackOverflow(handle));
+        }
+        let required = arguments
+            .len()
+            .checked_add(3)
+            .ok_or(VmError::StackOverflow(handle))?;
+        if object.stack.len() + required > MAX_STACK_WORDS {
+            return Err(VmError::StackOverflow(handle));
+        }
+
+        let stack_origin = object.initial_stack_pointer as usize;
+        let argument_base = object.stack.len();
+        let frame_base = stack_origin
+            .checked_add(argument_base)
+            .and_then(|base| base.checked_add(arguments.len()))
+            .ok_or(VmError::StackOverflow(handle))?;
+        if frame_base + 3 > REGISTER_COUNT {
+            return Err(VmError::StackOverflow(handle));
+        }
+        let return_address = object.code_address();
+        let return_halted = object.halted;
+        let previous_frame_base = object.frame_base;
+        let prior_rsp_bytes = stack_origin
+            .checked_add(argument_base)
+            .and_then(|word| word.checked_mul(4))
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let prior_rfp_bytes = previous_frame_base
+            .checked_mul(4)
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let frame_depth = object.call_stack.len();
+
+        for argument in arguments {
+            self.push(handle, *argument)?;
+        }
+        {
+            let object = self.object_mut(handle)?;
+            object.frame_base = frame_base;
+            object.call_stack.push(CallFrame {
+                return_address,
+                return_halted,
+                argument_base,
+                previous_frame_base,
+                behavior,
+            });
+        }
+        self.push(handle, INITIAL_FRAME_FLAGS)?;
+        self.push(handle, return_address.to_word())?;
+        self.push(
+            handle,
+            (u32::from(prior_rfp_bytes) << 16) | u32::from(prior_rsp_bytes),
+        )?;
+        let object = self.object_mut(handle)?;
+        object.code_segment = target.segment;
+        object.pc = target.pc;
+        object.halted = false;
+        Ok(frame_depth)
+    }
+
+    fn unwind_synchronous_event_frame(
+        &mut self,
+        handle: ObjectHandle,
+        frame_depth: usize,
+    ) -> Result<(), VmError> {
+        let Some(frame) = self.object(handle)?.call_stack.get(frame_depth).copied() else {
+            return Ok(());
+        };
+        let (ReturnBehavior::EventService {
+            previous_animation_wait,
+            ..
+        }
+        | ReturnBehavior::Interrupt {
+            previous_animation_wait,
+        }) = frame.behavior
+        else {
+            return Err(VmError::UnexpectedEventServiceHalt {
+                object: handle,
+                reason: HaltReason::Halted,
+            });
+        };
+        let object = self.object_mut(handle)?;
+        object.call_stack.truncate(frame_depth);
+        object.stack.truncate(frame.argument_base);
+        object.frame_base = frame.previous_frame_base;
+        object.code_segment = frame.return_address.segment;
+        object.pc = frame.return_address.pc;
+        object.halted = frame.return_halted;
+        object.animation_wait = previous_animation_wait;
+        Ok(())
+    }
+
+    fn run_synchronous_event_code_mode<F>(
+        &mut self,
+        handle: ObjectHandle,
+        host: &mut F,
+        service_audio: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        if let Some(request) = self.pending_audio_host_request {
+            if !service_audio {
+                return Ok(Execution {
+                    reason: HaltReason::HostEffect,
+                    steps: 0,
+                });
+            }
+            host(self, VmHostRequest::Audio(request))?;
+            if self.pending_audio_host_request.is_some() {
+                return Ok(Execution {
+                    reason: HaltReason::HostEffect,
+                    steps: 0,
+                });
+            }
+        }
+        let mut condition = false;
+        for steps in 0..MAX_EVENT_SERVICE_INSTRUCTIONS {
+            match self.step(handle, &mut condition)? {
+                None | Some(HaltReason::AnimationChanged { .. }) => {}
+                Some(HaltReason::HostEffect)
+                    if self.pending_audio_host_request.is_some() && service_audio =>
+                {
+                    let request = self
+                        .pending_audio_host_request
+                        .expect("matched pending audio request");
+                    host(self, VmHostRequest::Audio(request))?;
+                    if self.pending_audio_host_request.is_some() {
+                        return Ok(Execution {
+                            reason: HaltReason::HostEffect,
+                            steps: steps + 1,
+                        });
+                    }
+                }
+                Some(HaltReason::HostEffect)
+                    if matches!(
+                        self.effects.last(),
+                        Some(VmEffect::SetObjectZoneToTransitionTarget { .. })
+                    ) => {}
+                Some(reason) => {
+                    return Ok(Execution {
+                        reason,
+                        steps: steps + 1,
+                    });
+                }
+            }
+        }
+        Ok(Execution {
+            reason: HaltReason::BudgetExhausted,
+            steps: MAX_EVENT_SERVICE_INSTRUCTIONS,
+        })
+    }
+
+    fn set_event_acknowledgement(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        acknowledged: bool,
+    ) -> Result<(), VmError> {
+        if let Some(sender) = sender {
+            self.object_mut(sender)?
+                .set_register(process_register::MISC_VALUE, u32::from(acknowledged))?;
+        }
+        Ok(())
+    }
+
+    fn invoke_event_service<F>(
+        &mut self,
+        recipient: ObjectHandle,
+        event: u32,
+        arguments: Option<&[u32]>,
+        event_pc: usize,
+        host: &mut F,
+        service_audio: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        let reference = self.enter_event_arguments_scope(arguments)?;
+        let argv_word = reference.map_or(0, EventArgumentsReference::to_word);
+        let previous_animation_wait = self.object(recipient)?.animation_wait;
+        let behavior = ReturnBehavior::EventService {
+            condition: false,
+            return_event: false,
+            guard: false,
+            previous_animation_wait,
+        };
+        let frame_depth = match self.begin_synchronous_event_frame(
+            recipient,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: event_pc,
+            },
+            &[event, argv_word],
+            behavior,
+        ) {
+            Ok(depth) => depth,
+            Err(error) => {
+                self.leave_event_arguments_scope(reference)?;
+                return Err(error);
+            }
+        };
+
+        let execution = self.run_synchronous_event_code_mode(recipient, host, service_audio);
+        let preserve_for_rebind = matches!(
+            execution,
+            Ok(Execution {
+                reason: HaltReason::StateChanged(_),
+                ..
+            })
+        );
+        if !preserve_for_rebind
+            && (execution.is_err()
+                || !matches!(
+                    execution,
+                    Ok(Execution {
+                        reason: HaltReason::EventServiceReturned { .. }
+                            | HaltReason::EventServiceInvalidReturn,
+                        ..
+                    })
+                ))
+        {
+            self.unwind_synchronous_event_frame(recipient, frame_depth)?;
+        }
+        self.leave_event_arguments_scope(reference)?;
+
+        let execution = execution?;
+        match execution.reason {
+            HaltReason::EventServiceReturned { .. }
+            | HaltReason::EventServiceInvalidReturn
+            | HaltReason::StateChanged(_) => Ok(execution),
+            HaltReason::BudgetExhausted => Err(VmError::EventServiceBudgetExhausted(recipient)),
+            reason => Err(VmError::UnexpectedEventServiceHalt {
+                object: recipient,
+                reason,
+            }),
+        }
+    }
+
+    fn invoke_event_interrupt<F>(
+        &mut self,
+        recipient: ObjectHandle,
+        offset: usize,
+        arguments: &[u32],
+        host: &mut F,
+        service_audio: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        let previous_animation_wait = self.object(recipient)?.animation_wait;
+        let frame_depth = self.begin_synchronous_event_frame(
+            recipient,
+            CodeAddress {
+                segment: CodeSegment::Global,
+                pc: offset,
+            },
+            arguments,
+            ReturnBehavior::Interrupt {
+                previous_animation_wait,
+            },
+        )?;
+        let execution = self.run_synchronous_event_code_mode(recipient, host, service_audio);
+        let preserve_for_rebind = matches!(
+            execution,
+            Ok(Execution {
+                reason: HaltReason::StateChanged(_),
+                ..
+            })
+        );
+        if !preserve_for_rebind
+            && (execution.is_err()
+                || !matches!(
+                    execution,
+                    Ok(Execution {
+                        reason: HaltReason::InterruptCompleted,
+                        ..
+                    })
+                ))
+        {
+            self.unwind_synchronous_event_frame(recipient, frame_depth)?;
+        }
+        let execution = execution?;
+        match execution.reason {
+            HaltReason::InterruptCompleted | HaltReason::StateChanged(_) => Ok(execution),
+            HaltReason::BudgetExhausted => Err(VmError::InterruptBudgetExhausted(recipient)),
+            reason => Err(VmError::UnexpectedInterruptHalt {
+                object: recipient,
+                reason,
+            }),
+        }
+    }
+
+    fn request_event_state_change(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        recipient: ObjectHandle,
+        event: u32,
+        state: u16,
+        arguments: &[u32],
+        acknowledged: bool,
+    ) -> Result<EventDispatchOutcome, VmError> {
+        if self.object(recipient)?.event_state_blocked(state, event)? {
+            self.set_event_acknowledgement(sender, false)?;
+            return Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            });
+        }
+        {
+            let object = self.object_mut(recipient)?;
+            object.set_register(process_register::EVENT, event)?;
+            if matches!(event, EVENT_CLEAR_GUARD_STATUS | SQUASH_EVENT) {
+                let status = object.register(process_register::STATUS_A)?;
+                object
+                    .set_register(process_register::STATUS_A, status | STATUS_A_EVENT_SQUASHED)?;
+            }
+            object.state = state;
+        }
+        Ok(EventDispatchOutcome {
+            acknowledged,
+            state_change: Some(EventStateChange {
+                recipient,
+                state,
+                event,
+                arguments: arguments.to_vec(),
+            }),
+        })
+    }
+
+    /// Delivers one event synchronously through the recipient's current ESR,
+    /// exact event-map fallback, and high-bit shared-code interrupt path.
+    ///
+    /// `None` preserves a native null `argv`; `Some(&[])` is a distinct owned,
+    /// non-null empty argument list. At most [`MAX_EVENT_ARGUMENTS`] words are
+    /// accepted. A returned [`EventStateChange`] must be rebound immediately
+    /// by the stream-owning runtime before either object executes again.
+    pub fn send_event(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        recipient: Option<ObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+    ) -> Result<EventDispatchOutcome, VmError> {
+        let mut host = |_machine: &mut Self, _request: VmHostRequest| -> Result<(), VmError> {
+            unreachable!("legacy event delivery suspends before typed audio")
+        };
+        self.send_event_mode(sender, recipient, event, arguments, &mut host, false)
+    }
+
+    /// Audio-aware event delivery used by the stream-owning runtime.
+    ///
+    /// Event-service and high-bit interrupt code remain inside the same
+    /// bounded synchronous frame while [`VmHostRequest::Audio`] is completed.
+    /// The legacy [`Self::send_event`] behavior remains unchanged for callers
+    /// that explicitly own the typed `HostEffect` handshake.
+    pub fn send_event_with_host_requests<F>(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        recipient: Option<ObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        mut host: F,
+    ) -> Result<EventDispatchOutcome, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        self.send_event_mode(sender, recipient, event, arguments, &mut host, true)
+    }
+
+    fn send_event_mode<F>(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        recipient: Option<ObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        host: &mut F,
+        service_audio: bool,
+    ) -> Result<EventDispatchOutcome, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        let argument_count = arguments.map_or(0, <[u32]>::len);
+        if argument_count > MAX_EVENT_ARGUMENTS {
+            return Err(VmError::EventArgumentsTooLong(argument_count));
+        }
+        if let Some(sender) = sender {
+            self.object(sender)?;
+        }
+        let Some(recipient) = recipient else {
+            self.set_event_acknowledgement(sender, false)?;
+            return Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            });
+        };
+        self.object(recipient)?;
+        self.set_event_acknowledgement(sender, true)?;
+        self.object_mut(recipient)?.set_link(7, sender)?;
+        let argument_words = arguments.unwrap_or(&[]);
+
+        if let Some(event_pc) = self.object(recipient)?.event_pc {
+            let execution = self.invoke_event_service(
+                recipient,
+                event,
+                arguments,
+                event_pc,
+                host,
+                service_audio,
+            )?;
+            match execution.reason {
+                HaltReason::EventServiceReturned { state, guard } => {
+                    self.set_event_acknowledgement(sender, guard)?;
+                    if state == EVENT_MAP_NULL_STATE {
+                        return Ok(EventDispatchOutcome {
+                            acknowledged: guard,
+                            state_change: None,
+                        });
+                    }
+                    return self.request_event_state_change(
+                        sender,
+                        recipient,
+                        event,
+                        state,
+                        argument_words,
+                        guard,
+                    );
+                }
+                HaltReason::StateChanged(state) => {
+                    return Ok(EventDispatchOutcome {
+                        acknowledged: true,
+                        state_change: Some(EventStateChange {
+                            recipient,
+                            state,
+                            event,
+                            arguments: Vec::new(),
+                        }),
+                    });
+                }
+                HaltReason::EventServiceInvalidReturn => {}
+                _ => unreachable!("invoke_event_service validates its halt reason"),
+            }
+        }
+
+        let event_index = (event >> 8) as usize;
+        let state = self
+            .object(recipient)?
+            .event_map
+            .get(event_index)
+            .copied()
+            .unwrap_or(EVENT_MAP_NULL_STATE);
+        let acknowledged = state != EVENT_MAP_NULL_STATE;
+        self.set_event_acknowledgement(sender, acknowledged)?;
+        if !acknowledged {
+            return Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            });
+        }
+
+        if state & 0x8000 != 0 {
+            self.object_mut(recipient)?
+                .set_register(process_register::EVENT, event)?;
+            let execution = self.invoke_event_interrupt(
+                recipient,
+                usize::from(state & 0x7fff),
+                argument_words,
+                host,
+                service_audio,
+            )?;
+            return match execution.reason {
+                HaltReason::InterruptCompleted => Ok(EventDispatchOutcome {
+                    acknowledged: true,
+                    state_change: None,
+                }),
+                HaltReason::StateChanged(state) => Ok(EventDispatchOutcome {
+                    acknowledged: true,
+                    state_change: Some(EventStateChange {
+                        recipient,
+                        state,
+                        event,
+                        arguments: Vec::new(),
+                    }),
+                }),
+                _ => unreachable!("invoke_event_interrupt validates its halt reason"),
+            };
+        }
+
+        self.request_event_state_change(
+            sender,
+            recipient,
+            event,
+            state,
+            argument_words,
+            acknowledged,
+        )
     }
 
     /// Rebinds an object after [`HaltReason::StateChanged`].
@@ -2676,6 +4582,38 @@ impl Machine {
         }
     }
 
+    /// Audio-aware counterpart of [`Self::run_pending_once_with_host_effects`].
+    /// The callback must complete each [`VmHostRequest::Audio`] before the
+    /// once block can advance past that opcode.
+    pub fn run_pending_once_with_host_requests<F>(
+        &mut self,
+        handle: ObjectHandle,
+        host: F,
+    ) -> Result<Option<Execution>, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        if !self.begin_pending_once(handle)? {
+            return Ok(None);
+        }
+        let execution = self.run_with_host_requests_mode(
+            handle,
+            MAX_ONCE_INSTRUCTIONS,
+            host,
+            false,
+            false,
+            true,
+        )?;
+        match execution.reason {
+            HaltReason::OnceCompleted => Ok(Some(execution)),
+            HaltReason::BudgetExhausted => Err(VmError::OnceBudgetExhausted(handle)),
+            reason => Err(VmError::UnexpectedOnceHalt {
+                object: handle,
+                reason,
+            }),
+        }
+    }
+
     /// Pushes and enters the target state's external transition block exactly
     /// as `GoolObjectChangeState` does after installing the initial wait word
     /// and recording `state_stamp`.
@@ -2780,9 +4718,75 @@ impl Machine {
         }
     }
 
+    /// Audio-aware counterpart of [`Self::run_transition_with_host_effects`].
+    /// The transition remains one bounded synchronous invocation even when it
+    /// contains multiple voice-create or voice-control calls.
+    pub fn run_transition_with_host_requests<F>(
+        &mut self,
+        handle: ObjectHandle,
+        host: F,
+    ) -> Result<Option<Execution>, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        if !self.begin_transition_block(handle)? {
+            return Ok(None);
+        }
+        let execution = self.run_with_host_requests_mode(
+            handle,
+            MAX_TRANSITION_INSTRUCTIONS,
+            host,
+            false,
+            false,
+            true,
+        )?;
+        match execution.reason {
+            HaltReason::TransitionCompleted | HaltReason::StateChanged(_) => Ok(Some(execution)),
+            HaltReason::BudgetExhausted => Err(VmError::TransitionBudgetExhausted(handle)),
+            reason => Err(VmError::UnexpectedTransitionHalt {
+                object: handle,
+                reason,
+            }),
+        }
+    }
+
     #[must_use]
     pub fn effects(&self) -> &[VmEffect] {
         &self.effects
+    }
+
+    /// Returns the synchronous audio request that caused
+    /// [`HaltReason::HostEffect`]. The request remains pending until a
+    /// matching [`AudioHostResponse`] is supplied.
+    #[must_use]
+    pub const fn pending_audio_host_request(&self) -> Option<AudioHostRequest> {
+        self.pending_audio_host_request
+    }
+
+    /// Completes the pending retail audio call. Voice creation writes its
+    /// signed result bits to `gool_process.voice_id` before interpretation can
+    /// resume; control calls require an explicit acknowledgement so template
+    /// changes cannot be reordered past a following create instruction.
+    pub fn complete_audio_host_request(
+        &mut self,
+        response: AudioHostResponse,
+    ) -> Result<(), VmError> {
+        let request = self
+            .pending_audio_host_request
+            .ok_or(VmError::MissingAudioHostRequest)?;
+        match (request, response) {
+            (
+                AudioHostRequest::CreateVoice(request),
+                AudioHostResponse::VoiceCreated { voice_id },
+            ) => {
+                self.object_mut(request.object)?
+                    .set_register(process_register::VOICE_ID, voice_id as u32)?;
+            }
+            (AudioHostRequest::Control(_), AudioHostResponse::ControlApplied) => {}
+            _ => return Err(VmError::MismatchedAudioHostResponse),
+        }
+        self.pending_audio_host_request = None;
+        Ok(())
     }
 
     #[must_use]
@@ -2791,6 +4795,12 @@ impl Machine {
     }
 
     pub fn run(&mut self, handle: ObjectHandle, budget: usize) -> Result<Execution, VmError> {
+        if self.pending_audio_host_request.is_some() {
+            return Ok(Execution {
+                reason: HaltReason::HostEffect,
+                steps: 0,
+            });
+        }
         if let Some(execution) = self.animation_gate(handle)? {
             return Ok(execution);
         }
@@ -2809,8 +4819,10 @@ impl Machine {
         })
     }
 
-    /// Runs one interpreter invocation while applying spawn effects before the
-    /// following instruction, matching retail's synchronous host call.
+    /// Runs one interpreter invocation while applying spawn/event effects
+    /// before the following instruction, matching their synchronous retail
+    /// host calls. Typed audio work is returned as [`HaltReason::HostEffect`]
+    /// and must be completed through [`Self::complete_audio_host_request`].
     ///
     /// The callback may update the machine (for example by installing a child
     /// object or link) and external host state. Returning an error aborts the
@@ -2827,6 +4839,25 @@ impl Machine {
         self.run_with_host_effects_mode(handle, budget, host, true, true)
     }
 
+    /// Runs one interpreter invocation while synchronously servicing both
+    /// ordinary VM effects and typed audio calls.
+    ///
+    /// An [`VmHostRequest::Audio`] callback must complete the request through
+    /// [`Self::complete_audio_host_request`]. If it deliberately leaves the
+    /// request pending, execution returns [`HaltReason::HostEffect`] without
+    /// advancing to the following instruction.
+    pub fn run_with_host_requests<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
+        host: F,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        self.run_with_host_requests_mode(handle, budget, host, true, true, true)
+    }
+
     fn run_with_host_effects_mode<F>(
         &mut self,
         handle: ObjectHandle,
@@ -2838,6 +4869,48 @@ impl Machine {
     where
         F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
     {
+        self.run_with_host_requests_mode(
+            handle,
+            budget,
+            |machine, request| match request {
+                VmHostRequest::Effect(effect) => host(machine, &effect),
+                VmHostRequest::Audio(_) => {
+                    unreachable!("legacy host-effect runner suspends before typed audio")
+                }
+            },
+            suspend_on_animation,
+            apply_animation_gate,
+            false,
+        )
+    }
+
+    fn run_with_host_requests_mode<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
+        mut host: F,
+        suspend_on_animation: bool,
+        apply_animation_gate: bool,
+        service_audio: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        if let Some(request) = self.pending_audio_host_request {
+            if !service_audio {
+                return Ok(Execution {
+                    reason: HaltReason::HostEffect,
+                    steps: 0,
+                });
+            }
+            host(self, VmHostRequest::Audio(request))?;
+            if self.pending_audio_host_request.is_some() {
+                return Ok(Execution {
+                    reason: HaltReason::HostEffect,
+                    steps: 0,
+                });
+            }
+        }
         if apply_animation_gate && let Some(execution) = self.animation_gate(handle)? {
             return Ok(execution);
         }
@@ -2845,15 +4918,37 @@ impl Machine {
         for steps in 0..budget {
             if let Some(reason) = self.step(handle, &mut condition)? {
                 if reason == HaltReason::HostEffect {
+                    if let Some(request) = self.pending_audio_host_request {
+                        if !service_audio {
+                            return Ok(Execution {
+                                reason,
+                                steps: steps + 1,
+                            });
+                        }
+                        host(self, VmHostRequest::Audio(request))?;
+                        if self.pending_audio_host_request.is_some() {
+                            return Ok(Execution {
+                                reason,
+                                steps: steps + 1,
+                            });
+                        }
+                        continue;
+                    }
                     let effect = self
                         .effects
                         .last()
                         .cloned()
                         .ok_or(VmError::MissingHostEffect)?;
-                    if !matches!(effect, VmEffect::SpawnChildren { .. }) {
+                    if !matches!(
+                        effect,
+                        VmEffect::SpawnChildren { .. }
+                            | VmEffect::Event { .. }
+                            | VmEffect::SetObjectZoneToTransitionTarget { .. }
+                            | VmEffect::ReparentToRoot { .. }
+                    ) {
                         return Err(VmError::MissingHostEffect);
                     }
-                    host(self, &effect)?;
+                    host(self, VmHostRequest::Effect(effect))?;
                     continue;
                 }
                 if !suspend_on_animation && matches!(reason, HaltReason::AnimationChanged { .. }) {
@@ -2894,6 +4989,9 @@ impl Machine {
         handle: ObjectHandle,
         condition: &mut bool,
     ) -> Result<Option<HaltReason>, VmError> {
+        if self.pending_audio_host_request.is_some() {
+            return Ok(Some(HaltReason::HostEffect));
+        }
         let word = {
             let object = self.object_mut(handle)?;
             if object.halted {
@@ -2960,7 +5058,10 @@ impl Machine {
             }
             0x0e => self.binary_push(handle, a, b, |left, right| left ^ right)?,
             0x0f => {
-                self.binary_push(handle, a, b, |left, right| u32::from(left & right == left))?;
+                // `binary_push` names B `left` and A `right` to preserve the
+                // arithmetic opcodes' retail ordering. TST is specifically
+                // `(A & B) == A`, so the subset is the right-hand argument.
+                self.binary_push(handle, a, b, |left, right| u32::from(left & right == right))?;
             }
             0x10 => {
                 let upper = self.read_operand(handle, a)?;
@@ -3081,15 +5182,8 @@ impl Machine {
                 self.push(handle, velocity.wrapping_add(delta) as u32)?;
             }
             0x1c => {
-                let command = self.read_operand(handle, a)? as u8;
-                match command {
-                    0 => self.emit(VmEffect::SaveState(handle))?,
-                    1 => self.emit(VmEffect::LoadState(handle))?,
-                    9 => {
-                        let level = self.read_operand(handle, b)? as i32;
-                        self.emit(VmEffect::Transition(level))?;
-                    }
-                    _ => return Err(VmError::UnknownControl(command)),
+                if self.misc_operation(handle, word, b)? {
+                    return Ok(Some(HaltReason::HostEffect));
                 }
             }
             0x1d => {
@@ -3136,9 +5230,16 @@ impl Machine {
                 self.push(handle, i32::from(current.difference_to(target)) as u32)?;
             }
             0x22 => {
-                let target = self.read_operand(handle, a)? as i32;
+                // GOP 0xbf0 is the authored two-pop form: speed is on top of
+                // target, and B is translated only after both are consumed.
+                let (speed, target) = if a == Operand::StackDouble {
+                    (self.pop(handle)? as i32, self.pop(handle)? as i32)
+                } else {
+                    (0x100, self.read_operand(handle, a)? as i32)
+                };
                 let current = self.read_operand(handle, b)? as i32;
-                self.push(handle, seek(current, target, 0x100) as u32)?;
+                let speed = speed.checked_abs().ok_or(VmError::ArithmeticOverflow)?;
+                self.push(handle, seek(current, target, speed) as u32)?;
             }
             0x23 => {
                 let link = ((word >> 12) & 7) as usize;
@@ -3286,20 +5387,115 @@ impl Machine {
             }
             0x85 => {
                 // Retail translates B once before dispatching the packed
-                // transform selector. For stack operands that pop must occur
-                // even when the object has no entity path.
-                let input = self.read_optional_input(handle, b)?;
+                // transform selector. Retaining its checked address matters:
+                // subop one treats the operand as a three-word vector, while
+                // stack operands must pop even in subops that ignore B.
+                let input = self.input_reference(handle, b)?;
                 let suboperation = ((word >> 18) & 7) as u8;
                 let input_vector = ((word >> 12) & 7) as u8;
                 let output_vector = ((word >> 15) & 7) as u8;
                 match suboperation {
                     0 => {
-                        if let Some(progress) = input {
+                        if let Some(input) = input {
+                            let progress = self.read_storage_reference(input)?;
                             self.object_mut(handle)?
                                 .orient_process_vector_on_path(progress as i32, input_vector)?;
                         }
                     }
-                    _ => {
+                    1 => {
+                        let input = input.ok_or(VmError::InvalidOperand(instruction.operand_b))?;
+                        let camera = self
+                            .transform_vectors_camera
+                            .ok_or(VmError::TransformVectorsCameraUnbound)?;
+                        let perspective = self.object(handle)?.process_vector(input_vector)?;
+                        let projected = project_retail_point(perspective, camera);
+                        self.object_mut(handle)?
+                            .set_process_vector(output_vector, projected)?;
+
+                        // The in/out pointer may alias the output vector, so
+                        // read it only after GoolProject has stored `ortho`.
+                        let inout_x = self.read_storage_reference(input)? as i32;
+                        let z = self.object(handle)?.process_vector(output_vector)?[2] >> 8;
+                        if inout_x != 0 && z != 0 {
+                            let inout = self.read_storage_span3(input)?.map(|value| value as i32);
+                            let scaled = inout.map(|value| value.wrapping_mul(280) / z);
+                            self.write_storage_span3(input, scaled.map(|value| value as u32))?;
+                        }
+                    }
+                    2 => {
+                        let input = input.ok_or(VmError::InvalidOperand(instruction.operand_b))?;
+                        let speed = self.read_storage_reference(input)? as i32;
+                        let (mut velocity, target_rotation_x, status_b) = {
+                            let object = self.object(handle)?;
+                            (
+                                object.process_vector(input_vector)?,
+                                object.register(process_register::MISC_B_X)? as i32,
+                                object.register(process_register::STATUS_B)?,
+                            )
+                        };
+                        let angle = Angle12::new(target_rotation_x);
+                        velocity[0] = (i32::from(angle.sin_q12()) / 16).wrapping_mul(speed) >> 8;
+                        if status_b & 0x0020_0200 != 0 {
+                            velocity[1] =
+                                (i32::from(angle.cos_q12()) / 16).wrapping_mul(speed) >> 8;
+                        } else {
+                            velocity[2] =
+                                (i32::from(angle.cos_q12()) / 16).wrapping_mul(speed) >> 8;
+                        }
+                        let object = self.object_mut(handle)?;
+                        object.set_process_vector(input_vector, velocity)?;
+                        object.set_register(process_register::SPEED, speed as u32)?;
+                    }
+                    // Source has no case three; translating B is its only
+                    // observable behavior.
+                    3 => {}
+                    4 | 5 => {
+                        let input = input.ok_or(VmError::InvalidOperand(instruction.operand_b))?;
+                        let input_z = self.read_storage_reference(input)? as i32;
+                        let input_y = self.pop(handle)? as i32;
+                        let input_x = self.pop(handle)? as i32;
+                        let (translation, rotation, scale) = {
+                            let object = self.object(handle)?;
+                            (
+                                object.process_vector(input_vector)?,
+                                object.process_vector(if suboperation == 4 { 1 } else { 4 })?,
+                                if suboperation == 4 {
+                                    object.process_vector(2)?
+                                } else {
+                                    [INITIAL_SCALE; 3]
+                                },
+                            )
+                        };
+                        let transformed = retail_yxy_transform(
+                            Vec3 {
+                                x: input_x,
+                                y: input_y,
+                                z: input_z,
+                            },
+                            BoundTransform {
+                                translation: Vec3 {
+                                    x: translation[0],
+                                    y: translation[1],
+                                    z: translation[2],
+                                },
+                                rotation: Angles {
+                                    y: Angle12::new(rotation[0]),
+                                    x: Angle12::new(rotation[1]),
+                                    z: Angle12::new(rotation[2]),
+                                },
+                                scale: Vec3 {
+                                    x: scale[0],
+                                    y: scale[1],
+                                    z: scale[2],
+                                },
+                            },
+                        );
+                        self.object_mut(handle)?.set_process_vector(
+                            output_vector,
+                            [transformed.x, transformed.y, transformed.z],
+                        )?;
+                    }
+                    6 => {
                         return Err(VmError::UnsupportedTransformVectors {
                             suboperation,
                             input_vector,
@@ -3307,6 +5503,23 @@ impl Machine {
                             operand: instruction.operand_b,
                         });
                     }
+                    7 => {
+                        let camera = self
+                            .transform_vectors_camera
+                            .ok_or(VmError::TransformVectorsCameraUnbound)?;
+                        let (vector, prior_output) = {
+                            let object = self.object(handle)?;
+                            (
+                                object.process_vector(input_vector)?,
+                                object.process_vector(output_vector)?,
+                            )
+                        };
+                        let transformed =
+                            transform_retail_audio_point(vector, prior_output, camera);
+                        self.object_mut(handle)?
+                            .set_process_vector(output_vector, transformed)?;
+                    }
+                    _ => unreachable!(),
                 }
             }
             0x86 => {
@@ -3316,17 +5529,20 @@ impl Machine {
             }
             0x87 | 0x90 => {
                 let link_index = ((word >> 21) & 7) as usize;
-                let recipient =
-                    self.object(handle)?.links[link_index].ok_or(VmError::MissingLink {
-                        object: handle,
-                        link: link_index as u8,
-                    })?;
+                let recipient = self.object(handle)?.links[link_index];
                 let event = self.read_operand(handle, b)?;
-                self.emit(VmEffect::Event {
-                    sender: handle,
-                    recipient: Some(recipient),
-                    event,
-                })?;
+                if let Some(recipient) = recipient {
+                    self.emit(VmEffect::Event {
+                        sender: handle,
+                        recipient: Some(recipient),
+                        event,
+                    })?;
+                    return Ok(Some(HaltReason::HostEffect));
+                }
+                // Native GoolOpSendEvent accepts a null link, clears the
+                // sender acknowledgement flag, and continues.
+                self.object_mut(handle)?
+                    .set_register(process_register::MISC_VALUE, 0)?;
             }
             0x8f => {
                 let event = self.read_operand(handle, b)?;
@@ -3335,14 +5551,10 @@ impl Machine {
                     recipient: None,
                     event,
                 })?;
+                return Ok(Some(HaltReason::HostEffect));
             }
             0x88 | 0x89 => {
-                return Err(VmError::UnsupportedEventServiceReturn {
-                    opcode: instruction.opcode,
-                    condition_type: ((word >> 20) & 3) as u8,
-                    return_type: ((word >> 22) & 3) as u8,
-                    register: ((word >> 14) & 0x3f) as u8,
-                });
+                return self.event_service_return(handle, word, instruction.opcode);
             }
             0x8a | 0x91 => {
                 if self.spawn_children(handle, word, instruction.opcode == 0x91)? {
@@ -3353,22 +5565,58 @@ impl Machine {
                 self.paging_operation(handle, a, b)?;
             }
             0x8c => {
-                let voice = self.read_operand(handle, a)?;
-                let sound = self.read_operand(handle, b)?;
+                // Native code dereferences A before translating B, then
+                // synchronously stores AudioVoiceCreate's signed result in
+                // process.voice_id. Retain both checked source addresses and
+                // stop before the following GOOL instruction.
+                let volume_source = self
+                    .input_reference(handle, a)?
+                    .ok_or(VmError::MissingAudioVoiceCreateVolume)?;
+                let volume = self.read_storage_reference(volume_source)? as i32;
+                let adio_source = self
+                    .input_reference(handle, b)?
+                    .ok_or(VmError::MissingAudioVoiceCreateAdio)?;
+                let adio = self.resolve_audio_entry_argument(adio_source)?;
+                let request = AudioVoiceCreateRequest {
+                    object: handle,
+                    volume_source,
+                    volume,
+                    adio_source,
+                    adio,
+                };
+                // Keep the legacy observation queue populated while the
+                // typed synchronous request becomes the authoritative path.
                 self.emit(VmEffect::AudioStart {
                     object: handle,
-                    voice,
-                    sound,
+                    voice: volume as u32,
+                    sound: adio.raw(),
                 })?;
+                self.begin_audio_host_request(AudioHostRequest::CreateVoice(request))?;
+                return Ok(Some(HaltReason::HostEffect));
             }
             0x8d => {
-                let command = self.read_operand(handle, a)?;
-                let value = self.read_operand(handle, b)?;
+                // B is a generic-union pointer and is translated before the
+                // packed voice selector. In particular, B=stack must pop
+                // before selector 0x1f performs its independent voice-id pop.
+                let argument_source = self.input_reference(handle, b)?;
+                let operation = AudioControlOperation::decode(word);
+                let voice_selector = ((word >> 12) & 0x3f) as u8;
+                let voice = self.decode_audio_voice_selector(handle, voice_selector)?;
+                let argument = self.decode_audio_control_argument(operation, argument_source)?;
+                let request = AudioControlRequest {
+                    object: handle,
+                    voice,
+                    operation,
+                    argument_source,
+                    argument,
+                };
                 self.emit(VmEffect::AudioControl {
                     object: handle,
-                    command,
-                    value,
+                    command: operation.native_control_word(),
+                    value: argument.compatibility_word(),
                 })?;
+                self.begin_audio_host_request(AudioHostRequest::Control(request))?;
+                return Ok(Some(HaltReason::HostEffect));
             }
             0x8e => {
                 let suboperation = ((word >> 18) & 7) as u8;
@@ -3701,6 +5949,109 @@ impl Machine {
         Ok(condition ^ negate)
     }
 
+    fn begin_audio_host_request(&mut self, request: AudioHostRequest) -> Result<(), VmError> {
+        if let Some(pending) = self.pending_audio_host_request {
+            return Err(VmError::AudioHostRequestPending(pending.object()));
+        }
+        self.pending_audio_host_request = Some(request);
+        Ok(())
+    }
+
+    fn resolve_audio_entry_argument(&self, reference: StorageReference) -> Result<Eid, VmError> {
+        let raw = self.read_storage_reference(reference)?;
+        let eid = Eid::from_raw(raw);
+        if eid.is_named() {
+            return Ok(eid);
+        }
+        let entry =
+            EntryReference::from_word(raw).ok_or(VmError::InvalidAudioEntryReference(raw))?;
+        self.paging_entry_references
+            .get(entry.slot as usize)
+            .map(|(eid, _)| *eid)
+            .ok_or(VmError::InvalidAudioEntryReference(raw))
+    }
+
+    fn decode_audio_voice_selector(
+        &mut self,
+        handle: ObjectHandle,
+        selector: u8,
+    ) -> Result<AudioVoiceSelector, VmError> {
+        match selector {
+            0 => Ok(AudioVoiceSelector::Template),
+            0x1f => Ok(AudioVoiceSelector::Stack {
+                voice_id: self.pop(handle)? as i32,
+            }),
+            register => Ok(AudioVoiceSelector::ProcessRegister {
+                register,
+                voice_id: self.read_process_register_reference(handle, usize::from(register))?
+                    as i32,
+            }),
+        }
+    }
+
+    fn decode_audio_object_argument(
+        &self,
+        reference: StorageReference,
+    ) -> Result<Option<ObjectHandle>, VmError> {
+        if reference.region == StorageRegion::Register && reference.index < 8 {
+            let target = self.object(reference.object)?.links[usize::from(reference.index)];
+            if let Some(target) = target {
+                self.object(target)?;
+            }
+            return Ok(target);
+        }
+
+        let raw = self.read_storage_reference(reference)?;
+        if raw == 0 {
+            return Ok(None);
+        }
+        let object = CollisionObjectReference::from_word(raw)
+            .map(CollisionObjectReference::object)
+            .ok_or(VmError::InvalidAudioObjectReference(raw))?;
+        self.object(object)?;
+        Ok(Some(object))
+    }
+
+    fn decode_audio_control_argument(
+        &self,
+        operation: AudioControlOperation,
+        source: Option<StorageReference>,
+    ) -> Result<AudioControlArgument, VmError> {
+        let required_source =
+            || source.ok_or(VmError::MissingAudioControlArgument(operation.suboperation));
+        match operation.effective_suboperation() {
+            0 | 1 | 6 => {
+                let value = self.read_storage_reference(required_source()?)? as i32;
+                Ok(AudioControlArgument::Scalar(AudioScalarArgument::Signed(
+                    value,
+                )))
+            }
+            2 | 3 => {
+                let vector = self
+                    .read_storage_span3(required_source()?)?
+                    .map(|word| word as i32);
+                Ok(AudioControlArgument::Vector(vector))
+            }
+            4 | 12 => {
+                let value = self.read_storage_reference(required_source()?)? as u8 as i8;
+                Ok(AudioControlArgument::Scalar(
+                    AudioScalarArgument::SignedByte(value),
+                ))
+            }
+            5 => Ok(AudioControlArgument::Object(
+                self.decode_audio_object_argument(required_source()?)?,
+            )),
+            7 | 10 | 11 => {
+                let value = self.read_storage_reference(required_source()?)?;
+                Ok(AudioControlArgument::Scalar(AudioScalarArgument::Unsigned(
+                    value,
+                )))
+            }
+            8 | 9 | 13 | 14 => Ok(AudioControlArgument::Unused),
+            _ => unreachable!("effective audio suboperation is four bits and never fifteen"),
+        }
+    }
+
     fn paging_operation(
         &mut self,
         handle: ObjectHandle,
@@ -3827,6 +6178,154 @@ impl Machine {
         self.paging_page_capacity.saturating_sub(referenced)
     }
 
+    fn peek_process_register_reference(
+        &self,
+        handle: ObjectHandle,
+        register: usize,
+    ) -> Result<u32, VmError> {
+        let object = self.object(handle)?;
+        match register {
+            // `gool_process.regs` aliases the eight leading link pointers.
+            // A checked Rust handle may validly use slot zero, so expose link
+            // presence as canonical nonzero truth instead of leaking the raw
+            // slot number into GOOL arithmetic.
+            0..=7 => Ok(u32::from(object.links[register].is_some())),
+            0x1f => object
+                .stack
+                .last()
+                .copied()
+                .ok_or(VmError::StackUnderflow(handle)),
+            _ => object.register(register),
+        }
+    }
+
+    fn read_process_register_reference(
+        &mut self,
+        handle: ObjectHandle,
+        register: usize,
+    ) -> Result<u32, VmError> {
+        if register == 0x1f {
+            self.pop(handle)
+        } else {
+            self.peek_process_register_reference(handle, register)
+        }
+    }
+
+    fn event_service_return(
+        &mut self,
+        handle: ObjectHandle,
+        instruction: u32,
+        opcode: u8,
+    ) -> Result<Option<HaltReason>, VmError> {
+        let condition_type = ((instruction >> 20) & 3) as u8;
+        let return_type = ((instruction >> 22) & 3) as u8;
+        let register = ((instruction >> 14) & 0x3f) as usize;
+        let previous_condition = match self.object(handle)?.call_stack.last() {
+            Some(CallFrame {
+                behavior: ReturnBehavior::EventService { condition, .. },
+                ..
+            }) => *condition,
+            _ => {
+                return Err(VmError::UnsupportedEventServiceReturn {
+                    opcode,
+                    condition_type,
+                    return_type,
+                    register: register as u8,
+                });
+            }
+        };
+
+        let pops_condition = matches!(condition_type, 1 | 2) && register == 0x1f;
+        let tested = match condition_type {
+            0 => true,
+            1 | 2 => {
+                let value = self.peek_process_register_reference(handle, register)?;
+                if condition_type == 1 {
+                    value != 0
+                } else {
+                    value == 0
+                }
+            }
+            3 => previous_condition,
+            _ => unreachable!(),
+        };
+        let branch_argument_count = if !tested && return_type == 0 {
+            ((instruction >> 10) & 0x0f) as usize
+        } else {
+            0
+        };
+        let required = branch_argument_count + usize::from(pops_condition);
+        let object = self.object(handle)?;
+        let stack_origin = object.initial_stack_pointer as usize;
+        let frame_floor = object
+            .frame_base
+            .checked_sub(stack_origin)
+            .and_then(|frame| frame.checked_add(3))
+            .ok_or(VmError::StackUnderflow(handle))?;
+        let available = object
+            .stack
+            .len()
+            .checked_sub(frame_floor)
+            .ok_or(VmError::StackUnderflow(handle))?;
+        if available < required {
+            return Err(VmError::StackUnderflow(handle));
+        }
+        if matches!(condition_type, 1 | 2) {
+            let value = self.read_process_register_reference(handle, register)?;
+            debug_assert_eq!(
+                tested,
+                if condition_type == 1 {
+                    value != 0
+                } else {
+                    value == 0
+                }
+            );
+        }
+        {
+            let frame = self
+                .object_mut(handle)?
+                .call_stack
+                .last_mut()
+                .expect("validated event-service frame remains present");
+            let ReturnBehavior::EventService {
+                condition,
+                return_event,
+                guard,
+                ..
+            } = &mut frame.behavior
+            else {
+                unreachable!("validated event-service frame remains on top");
+            };
+            *condition = tested;
+            if tested {
+                *return_event = true;
+                *guard = opcode == 0x89;
+            }
+        }
+
+        if tested && matches!(return_type, 1 | 2) {
+            let state = if return_type == 1 {
+                (instruction & 0x3fff) as u16
+            } else {
+                EVENT_MAP_NULL_STATE
+            };
+            let reason = self
+                .return_from_call(handle)?
+                .expect("event-service return always crosses a frame boundary");
+            let HaltReason::EventServiceReturned { guard, .. } = reason else {
+                unreachable!("validated event-service frame returns an event response");
+            };
+            return Ok(Some(HaltReason::EventServiceReturned { state, guard }));
+        }
+        if !tested && return_type == 0 {
+            let offset = i64::from(sign_extend(instruction & 0x03ff, 10));
+            self.jump_relative(handle, offset)?;
+            let stack = &mut self.object_mut(handle)?.stack;
+            stack.truncate(stack.len() - branch_argument_count);
+        }
+        Ok(None)
+    }
+
     fn control_flow(
         &mut self,
         handle: ObjectHandle,
@@ -3839,15 +6338,7 @@ impl Machine {
         let tested = match condition_type {
             0 => true,
             1 | 2 => {
-                let value = if pops_condition {
-                    self.object(handle)?
-                        .stack
-                        .last()
-                        .copied()
-                        .ok_or(VmError::StackUnderflow(handle))?
-                } else {
-                    self.object(handle)?.register(register)?
-                };
+                let value = self.peek_process_register_reference(handle, register)?;
                 if condition_type == 1 {
                     value != 0
                 } else {
@@ -3870,12 +6361,21 @@ impl Machine {
             return Err(VmError::StackUnderflow(handle));
         }
 
+        if matches!(condition_type, 1 | 2) {
+            let value = self.read_process_register_reference(handle, register)?;
+            debug_assert_eq!(
+                tested,
+                if condition_type == 1 {
+                    value != 0
+                } else {
+                    value == 0
+                }
+            );
+        }
+
         if tested && operation == 0 {
             let offset = i64::from(sign_extend(instruction & 0x03ff, 10));
             self.jump_relative(handle, offset)?;
-        }
-        if pops_condition {
-            self.pop(handle)?;
         }
         if !tested || operation == 3 {
             return Ok(None);
@@ -3928,8 +6428,11 @@ impl Machine {
     where
         F: FnOnce(i32, i32) -> bool,
     {
-        let right = self.read_operand(handle, a)? as i32;
-        let left = self.read_operand(handle, b)? as i32;
+        // `G_TRANS_GOPS` translates A before B, then opcodes 0x09..0x0c
+        // evaluate the signed predicate as A op B. Keep the read order exact
+        // because either operand can pop the retail stack.
+        let left = self.read_operand(handle, a)? as i32;
+        let right = self.read_operand(handle, b)? as i32;
         self.push(handle, u32::from(operation(left, right)))
     }
 
@@ -3943,6 +6446,175 @@ impl Machine {
         self.output_constant_index ^= 1;
         self.operand_constants[self.output_constant_index] = value;
         self.output_constant_index
+    }
+
+    fn misc_operation(
+        &mut self,
+        handle: ObjectHandle,
+        instruction: u32,
+        operand: Operand,
+    ) -> Result<bool, VmError> {
+        // Native `GoolOpMisc` translates GOP B before inspecting either
+        // packed selector. This matters for stack GOPs and the shared
+        // immediate-constant cursor even when the selected operation is not
+        // implemented yet.
+        let input = self.input_reference(handle, operand)?;
+        let primary = ((instruction >> 20) & 0x0f) as u8;
+        let secondary = sign_extend((instruction >> 15) & 0x1f, 5) as i8;
+        match primary {
+            0 => {
+                // Event-service `fp[-1]` is itself a pointer-valued word. A
+                // null GOP means no destination/push; a non-null GOP holding
+                // zero is the distinct native null-argv case and pushes zero.
+                let Some(input) = input else {
+                    return Ok(false);
+                };
+                let argv_word = self.read_storage_reference(input)?;
+                if argv_word == 0 {
+                    self.push(handle, 0)?;
+                    return Ok(false);
+                }
+                let reference = EventArgumentsReference::from_word(argv_word)
+                    .ok_or(VmError::InvalidEventArgumentsReference(argv_word))?;
+                let argument = self.event_argument(reference, secondary)?;
+                self.push(handle, argument)?;
+                Ok(false)
+            }
+            3 | 4 => {
+                let input = input.ok_or(VmError::MissingMiscOperand {
+                    primary,
+                    secondary,
+                    operand: instruction as u16 & 0x0fff,
+                })?;
+                let link_index = ((instruction >> 12) & 7) as u8;
+                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
+                    VmError::MissingLink {
+                        object: handle,
+                        link: link_index,
+                    },
+                )?;
+                let register = (self.read_storage_reference(input)? >> 8) as usize;
+                if primary == 3 {
+                    let value = self.object(target)?.register(register)?;
+                    self.push(handle, value)?;
+                } else {
+                    // Translation of GOP B happens before this pop, matching
+                    // the native two-stack-word set-register form.
+                    let value = self.pop(handle)?;
+                    self.object_mut(target)?.set_register(register, value)?;
+                }
+                Ok(false)
+            }
+            11 => {
+                if !(1..=3).contains(&secondary) {
+                    return Ok(false);
+                }
+                let Some(input) = input else {
+                    self.push(handle, 0)?;
+                    return Ok(false);
+                };
+                let raw_id = self.read_storage_reference(input)? >> 8;
+                let id = u16::try_from(raw_id).map_err(|_| VmError::InvalidSpawnId(u16::MAX))?;
+                let flags = self.spawn_flags(id)?;
+                let value = match secondary {
+                    1 => u32::from(flags & 2 == 0),
+                    2 => flags & 4,
+                    3 => flags & 8,
+                    _ => unreachable!(),
+                };
+                self.push(handle, value)?;
+                Ok(false)
+            }
+            12 => match secondary {
+                // These are the three native suboperations that correspond to
+                // the VM's existing host effects. The remaining misc cases
+                // stay explicit until their object/audio/global bindings are
+                // available.
+                0 => {
+                    self.emit(VmEffect::SaveState(handle))?;
+                    Ok(false)
+                }
+                1 => {
+                    self.emit(VmEffect::LoadState(handle))?;
+                    Ok(false)
+                }
+                2 => {
+                    let input = input.ok_or(VmError::MissingMiscOperand {
+                        primary,
+                        secondary,
+                        operand: instruction as u16 & 0x0fff,
+                    })?;
+                    let raw_root = self.read_storage_reference(input)? >> 8;
+                    let root = u8::try_from(raw_root).map_err(|_| {
+                        VmError::InvalidRegister(usize::try_from(raw_root).unwrap_or(usize::MAX))
+                    })?;
+                    self.emit(VmEffect::ReparentToRoot {
+                        object: handle,
+                        root,
+                    })?;
+                    Ok(true)
+                }
+                4 => {
+                    let input = input.ok_or(VmError::MissingMiscOperand {
+                        primary,
+                        secondary,
+                        operand: instruction as u16 & 0x0fff,
+                    })?;
+                    let object = self.decode_misc_object_argument(input)?;
+                    self.emit(VmEffect::SetObjectZoneToTransitionTarget { object })?;
+                    Ok(true)
+                }
+                6 => {
+                    let input = input.ok_or(VmError::MissingMiscOperand {
+                        primary,
+                        secondary,
+                        operand: instruction as u16 & 0x0fff,
+                    })?;
+                    let value = self.read_storage_reference(input)?;
+                    self.emit(VmEffect::MidiTogglePlayback {
+                        object: handle,
+                        value,
+                    })?;
+                    Ok(false)
+                }
+                9 => {
+                    let input = input.ok_or(VmError::MissingMiscOperand {
+                        primary,
+                        secondary,
+                        operand: instruction as u16 & 0x0fff,
+                    })?;
+                    let level = (self.read_storage_reference(input)? >> 8) as i32;
+                    self.emit(VmEffect::Transition(level))?;
+                    Ok(false)
+                }
+                _ => Err(VmError::UnsupportedMiscOperation {
+                    primary,
+                    secondary,
+                    operand: instruction as u16 & 0x0fff,
+                }),
+            },
+            _ => Err(VmError::UnsupportedMiscOperation {
+                primary,
+                secondary,
+                operand: instruction as u16 & 0x0fff,
+            }),
+        }
+    }
+
+    fn decode_misc_object_argument(
+        &self,
+        reference: StorageReference,
+    ) -> Result<ObjectHandle, VmError> {
+        if reference.region == StorageRegion::Register && reference.index < 8 {
+            return self.object(reference.object)?.links[usize::from(reference.index)]
+                .ok_or(VmError::InvalidObjectReference(0));
+        }
+        let raw = self.read_storage_reference(reference)?;
+        let object = CollisionObjectReference::from_word(raw)
+            .map(CollisionObjectReference::object)
+            .ok_or(VmError::InvalidObjectReference(raw))?;
+        self.object(object)?;
+        Ok(object)
     }
 
     fn input_reference(
@@ -4160,6 +6832,22 @@ impl Machine {
             self.write_storage_reference(reference, value)?;
         }
         Ok(())
+    }
+
+    fn read_storage_span3(&self, reference: StorageReference) -> Result<[u32; 3], VmError> {
+        let base = usize::from(reference.index);
+        let references = [0_usize, 1, 2].map(|offset| {
+            let index = base
+                .checked_add(offset)
+                .ok_or(VmError::InvalidStorageReference(reference.to_word()))?;
+            StorageReference::checked(reference.object, reference.region, index)
+        });
+        let references = [references[0]?, references[1]?, references[2]?];
+        Ok([
+            self.read_storage_reference(references[0])?,
+            self.read_storage_reference(references[1])?,
+            self.read_storage_reference(references[2])?,
+        ])
     }
 
     fn intern_entry_reference(
@@ -4406,6 +7094,28 @@ impl Machine {
                 self.object_mut(handle)?.animation_wait = previous_animation_wait;
                 Ok(Some(HaltReason::TransitionCompleted))
             }
+            ReturnBehavior::EventService {
+                return_event,
+                guard,
+                previous_animation_wait,
+                ..
+            } => {
+                self.object_mut(handle)?.animation_wait = previous_animation_wait;
+                if return_event {
+                    Ok(Some(HaltReason::EventServiceReturned {
+                        state: EVENT_MAP_NULL_STATE,
+                        guard,
+                    }))
+                } else {
+                    Ok(Some(HaltReason::EventServiceInvalidReturn))
+                }
+            }
+            ReturnBehavior::Interrupt {
+                previous_animation_wait,
+            } => {
+                self.object_mut(handle)?.animation_wait = previous_animation_wait;
+                Ok(Some(HaltReason::InterruptCompleted))
+            }
         }
     }
 
@@ -4472,6 +7182,7 @@ mod tests {
 
     const REG0: u16 = 0x0e00;
     const REG1: u16 = 0x0e01;
+    const REG2: u16 = 0x0e02;
     const STACK: u16 = 0x0e1f;
 
     fn handle(index: u16) -> ObjectHandle {
@@ -4491,6 +7202,37 @@ mod tests {
             | ((register & 0x3f) << 14)
             | ((argument_count & 0xf) << 10)
             | (target & 0x03ff)
+    }
+
+    fn misc(primary: u32, secondary: i32, operand: u16) -> u32 {
+        (0x1c_u32 << 24)
+            | ((primary & 0x0f) << 20)
+            | (((secondary as u32) & 0x1f) << 15)
+            | u32::from(operand & 0x0fff)
+    }
+
+    fn audio_control(suboperation: u8, flags: u8, voice_selector: u8, operand: u16) -> u32 {
+        (0x8d_u32 << 24)
+            | (u32::from(suboperation & 0x0f) << 20)
+            | (u32::from(flags & 3) << 18)
+            | (u32::from(voice_selector & 0x3f) << 12)
+            | u32::from(operand & 0x0fff)
+    }
+
+    fn event_return(
+        opcode: u8,
+        return_type: u32,
+        condition_type: u32,
+        register: u32,
+        argument_count: u32,
+        target: u32,
+    ) -> u32 {
+        (u32::from(opcode) << 24)
+            | ((return_type & 3) << 22)
+            | ((condition_type & 3) << 20)
+            | ((register & 0x3f) << 14)
+            | ((argument_count & 0x0f) << 10)
+            | (target & 0x3fff)
     }
 
     #[test]
@@ -4629,6 +7371,192 @@ mod tests {
     }
 
     #[test]
+    fn event_argument_references_are_aligned_generation_checked_scopes() {
+        let mut machine = Machine::new(0);
+        assert_eq!(machine.enter_event_arguments_scope(None), Ok(None));
+
+        let empty = machine
+            .enter_event_arguments_scope(Some(&[]))
+            .unwrap()
+            .unwrap();
+        assert_ne!(empty.to_word(), 0, "owned empty argv is not a null pointer");
+        assert_eq!(empty.to_word() & 3, 0);
+        for low_bits in 1..=3 {
+            assert_eq!(
+                EventArgumentsReference::from_word(empty.to_word() | low_bits),
+                None
+            );
+        }
+
+        let nested = machine
+            .enter_event_arguments_scope(Some(&[10, 20]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(machine.event_argument(nested, 0), Ok(10));
+        assert_eq!(machine.event_argument(nested, 1), Ok(20));
+        assert_eq!(
+            machine.event_argument(nested, 2),
+            Err(VmError::EventArgumentOutOfBounds {
+                reference: nested.to_word(),
+                index: 2,
+                len: 2,
+            })
+        );
+        assert_eq!(
+            machine.leave_event_arguments_scope(Some(empty)),
+            Err(VmError::EventArgumentScopeMismatch(empty.to_word()))
+        );
+        machine.leave_event_arguments_scope(Some(nested)).unwrap();
+        machine.leave_event_arguments_scope(Some(empty)).unwrap();
+        assert_eq!(
+            machine.event_argument(nested, 0),
+            Err(VmError::InvalidEventArgumentsReference(nested.to_word()))
+        );
+        assert_eq!(
+            machine.enter_event_arguments_scope(Some(&[0; MAX_EVENT_ARGUMENTS + 1])),
+            Err(VmError::EventArgumentsTooLong(MAX_EVENT_ARGUMENTS + 1))
+        );
+    }
+
+    #[test]
+    fn packed_misc_earg_reads_real_fp_minus_one_and_checks_signed_indices() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        let reference = machine
+            .enter_event_arguments_scope(Some(&[0x1122_3344, 0x5566_7788]))
+            .unwrap()
+            .unwrap();
+        // Legal N. Sanity Crash/WillC word: misc primary zero, argv[0],
+        // frame-relative GOP B `fp[-1]`.
+        let mut object = VmObject::new(h, vec![0x1c00_5b7f]).unwrap();
+        object
+            .initialize_arguments(&[0x1500, reference.to_word()])
+            .unwrap();
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 1,
+            }
+        );
+        assert_eq!(
+            machine.object(h).unwrap().stack().last(),
+            Some(&0x1122_3344)
+        );
+
+        let negative = handle(1);
+        let mut object = VmObject::new(negative, vec![misc(0, -1, REG1)]).unwrap();
+        object.set_register(1, reference.to_word()).unwrap();
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(negative, 1),
+            Err(VmError::EventArgumentOutOfBounds {
+                reference: reference.to_word(),
+                index: -1,
+                len: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn packed_misc_earg_preserves_null_gop_and_null_argv_distinction() {
+        let null_gop = handle(0);
+        let null_argv = handle(1);
+        let empty_argv = handle(2);
+        let mut machine = Machine::new(0);
+
+        machine
+            .insert_object(VmObject::new(null_gop, vec![misc(0, 0, 0x0be0)]).unwrap())
+            .unwrap();
+        assert_eq!(machine.run(null_gop, 1).unwrap().steps, 1);
+        assert!(machine.object(null_gop).unwrap().stack().is_empty());
+
+        let mut object = VmObject::new(null_argv, vec![misc(0, 0, REG1)]).unwrap();
+        object.set_register(1, 0).unwrap();
+        machine.insert_object(object).unwrap();
+        assert_eq!(machine.run(null_argv, 1).unwrap().steps, 1);
+        assert_eq!(machine.object(null_argv).unwrap().stack(), &[0]);
+
+        let empty = machine
+            .enter_event_arguments_scope(Some(&[]))
+            .unwrap()
+            .unwrap();
+        let mut object = VmObject::new(empty_argv, vec![misc(0, 0, REG1)]).unwrap();
+        object.set_register(1, empty.to_word()).unwrap();
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(empty_argv, 1),
+            Err(VmError::EventArgumentOutOfBounds {
+                reference: empty.to_word(),
+                index: 0,
+                len: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn stale_event_argument_generation_cannot_read_reused_stack_slot() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        let stale = machine
+            .enter_event_arguments_scope(Some(&[1]))
+            .unwrap()
+            .unwrap();
+        machine.leave_event_arguments_scope(Some(stale)).unwrap();
+        let current = machine
+            .enter_event_arguments_scope(Some(&[2]))
+            .unwrap()
+            .unwrap();
+        assert_ne!(stale.to_word(), current.to_word());
+
+        let mut object = VmObject::new(h, vec![misc(0, 0, REG1)]).unwrap();
+        object.set_register(1, stale.to_word()).unwrap();
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::InvalidEventArgumentsReference(stale.to_word()))
+        );
+    }
+
+    #[test]
+    fn process_register_references_alias_links_and_pop_only_selector_31() {
+        let h = handle(0);
+        let other = handle(1);
+        let mut object = VmObject::new(h, vec![control_flow(1, 1, 0, 0, 7)]).unwrap();
+        object.set_register(0, 0).unwrap();
+        object.set_register(8, 0xfeed_beef).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .insert_object(VmObject::new(other, vec![0]).unwrap())
+            .unwrap();
+
+        assert_eq!(machine.read_process_register_reference(h, 0), Ok(1));
+        assert_eq!(machine.read_process_register_reference(h, 6), Ok(0));
+        machine
+            .object_mut(h)
+            .unwrap()
+            .set_link(6, Some(other))
+            .unwrap();
+        assert_eq!(machine.read_process_register_reference(h, 6), Ok(1));
+        assert_eq!(
+            machine.read_process_register_reference(h, 8),
+            Ok(0xfeed_beef)
+        );
+        machine.push(h, 0x1234).unwrap();
+        assert_eq!(machine.read_process_register_reference(h, 0x1f), Ok(0x1234));
+        assert!(machine.object(h).unwrap().stack().is_empty());
+
+        // The encoded state-link condition names register zero. Native sees
+        // the non-null self link even though scalar storage word zero is zero.
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::StateChanged(7)
+        );
+    }
+
+    #[test]
     fn animation_references_preserve_unaligned_byte_offsets() {
         // Opcode 0x27 forms a `uint8_t *` into animation item five. Unlike
         // code, storage and entry pointers, that source address has no
@@ -4698,6 +7626,79 @@ mod tests {
     }
 
     #[test]
+    fn signed_comparisons_evaluate_operand_a_against_operand_b() {
+        let h = handle(0);
+        let code = (0x09..=0x0c)
+            .map(|opcode| Instruction::encode(opcode, REG0, REG1))
+            .collect();
+        let mut object = VmObject::new(h, code).unwrap();
+        object.set_register(0, (-2_i32) as u32).unwrap();
+        object.set_register(1, 1).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 4).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn state_34_animation_bound_keeps_looping_below_the_limit() {
+        let h = handle(0);
+        // Exact Wil9C pc 16 word: signed `0x1a00 >= pop(animation_frame)`.
+        let object = VmObject::new(h, vec![0x0a81_ae1f]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, 0x100).unwrap();
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[1]);
+    }
+
+    #[test]
+    fn state_34_status_mask_tests_operand_a_as_the_subset() {
+        let h = handle(0);
+        // Exact Wil9C pc 106 word: `(0x20 & status_a) == 0x20`.
+        let mut object = VmObject::new(h, vec![0x0fa0_2e1a]).unwrap();
+        object
+            .set_register(process_register::STATUS_A, 0x0006_0821)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[1]);
+    }
+
+    #[test]
+    fn shadow_seek_stack_double_pops_speed_then_target() {
+        let h = handle(0);
+        // Exact ShadC state-1 pc 51 word: seek R74 toward the stacked target
+        // using the absolute value of the stacked speed.
+        let mut object = VmObject::new(h, vec![0x22bf_0e4a]).unwrap();
+        object.set_register(74, 100).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, 300).unwrap();
+        machine.push(h, (-50_i32) as u32).unwrap();
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[150]);
+    }
+
+    #[test]
+    fn signed_comparisons_translate_stack_operands_a_then_b() {
+        let h = handle(0);
+        let object = VmObject::new(h, vec![Instruction::encode(0x0b, STACK, STACK)]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, 3).unwrap();
+        machine.push(h, 7).unwrap();
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[0]);
+    }
+
+    #[test]
     fn retail_scalar_opcodes_use_deterministic_frame_context() {
         let h = handle(0);
         let code = vec![
@@ -4727,6 +7728,42 @@ mod tests {
         assert_eq!(
             machine.object(h).unwrap().stack(),
             &[56, 67, 0x100, 0x200, 134, 0x1000, 2]
+        );
+    }
+
+    #[test]
+    fn retail_frame_context_keeps_scalar_globals_and_camera_pose_synchronized() {
+        let mut machine = Machine::new(256);
+        machine.initialize_retail_level_globals(LevelId::N_SANITY_BEACH);
+        machine.set_frame_timing(33, 34);
+        machine.set_draw_count(19);
+        machine.set_retail_frame_context(0x500, 0x1234);
+        machine.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+            [-256, 512, 768],
+            [0x111, -0x222, 0x333],
+            500,
+        ));
+
+        assert_eq!(machine.ticks_per_frame, 34);
+        assert_eq!(
+            machine.global_word(CURRENT_LEVEL_GLOBAL),
+            Ok(LevelId::N_SANITY_BEACH.get() << 8)
+        );
+        assert_eq!(machine.global_word(TICKS_CURRENT_FRAME_GLOBAL), Ok(33));
+        assert_eq!(machine.global_word(DRAW_COUNT_GLOBAL), Ok(19));
+        assert_eq!(machine.global_word(GAME_STATE_GLOBAL), Ok(0x500));
+        assert_eq!(machine.global_word(CAMERA_ROTATION_GLOBAL), Ok(0x234));
+        assert_eq!(
+            [0_usize, 1, 2].map(|axis| machine
+                .global_word(CAMERA_TRANSLATION_GLOBAL + axis)
+                .unwrap()),
+            [(-256_i32) as u32, 512, 768]
+        );
+        assert_eq!(
+            [0_usize, 1, 2].map(|axis| machine
+                .global_word(CAMERA_ROTATION_YXZ_GLOBAL + axis)
+                .unwrap()),
+            [0x111, (-0x222_i32) as u32, 0x333]
         );
     }
 
@@ -6394,38 +9431,748 @@ mod tests {
     }
 
     #[test]
+    fn audio_voice_create_translates_a_then_b_and_writes_the_synchronous_result() {
+        let h = handle(0);
+        let adio = Eid::from_name("audio").unwrap();
+        let object = VmObject::new(h, vec![Instruction::encode(0x8c, STACK, STACK)]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, adio.raw()).unwrap();
+        machine.push(h, (-0x1234_i32) as u32).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 1,
+            }
+        );
+        assert!(machine.object(h).unwrap().stack().is_empty());
+        let request = AudioVoiceCreateRequest {
+            object: h,
+            volume_source: StorageReference::checked(
+                h,
+                StorageRegion::Register,
+                SYNTHETIC_STACK_POINTER + 1,
+            )
+            .unwrap(),
+            volume: -0x1234,
+            adio_source: StorageReference::checked(
+                h,
+                StorageRegion::Register,
+                SYNTHETIC_STACK_POINTER,
+            )
+            .unwrap(),
+            adio,
+        };
+        assert_eq!(
+            machine.pending_audio_host_request(),
+            Some(AudioHostRequest::CreateVoice(request))
+        );
+        assert_eq!(
+            machine.run(h, 1).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 0,
+            },
+            "an unresolved native audio call cannot execute the next word"
+        );
+        assert_eq!(
+            machine.complete_audio_host_request(AudioHostResponse::ControlApplied),
+            Err(VmError::MismatchedAudioHostResponse)
+        );
+        assert_eq!(
+            machine.pending_audio_host_request(),
+            Some(AudioHostRequest::CreateVoice(request))
+        );
+
+        machine
+            .complete_audio_host_request(AudioHostResponse::VoiceCreated { voice_id: -17 })
+            .unwrap();
+        assert_eq!(machine.pending_audio_host_request(), None);
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::VOICE_ID),
+            Ok((-17_i32) as u32)
+        );
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::AudioStart {
+                object: h,
+                voice: (-0x1234_i32) as u32,
+                sound: adio.raw(),
+            }]
+        );
+    }
+
+    #[test]
+    fn typed_audio_request_escapes_the_legacy_effect_runner_without_advancing() {
+        let h = handle(0);
+        let adio = Eid::from_name("audio").unwrap();
+        let mut object = VmObject::new(h, vec![Instruction::encode(0x8c, REG1, REG2)]).unwrap();
+        object.set_register(1, 0x3fff).unwrap();
+        object.set_register(2, adio.raw()).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine
+                .run_with_host_effects(h, 1, |_machine, _effect| {
+                    panic!("typed audio requests do not use the legacy effect callback")
+                })
+                .unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 1,
+            }
+        );
+        assert!(matches!(
+            machine.pending_audio_host_request(),
+            Some(AudioHostRequest::CreateVoice(_))
+        ));
+        assert_eq!(
+            machine.run(h, 1).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn audio_control_decodes_every_operation_and_generic_argument_width() {
+        let target = handle(1);
+        for suboperation in 0_u8..16 {
+            let h = handle(0);
+            let operand = if suboperation == 5 { 0x0e03 } else { 0 };
+            let mut object =
+                VmObject::new(h, vec![audio_control(suboperation, 0, 0, operand)]).unwrap();
+            object.set_internal(0, 0xffff_ff80).unwrap();
+            object.set_internal(1, 2).unwrap();
+            object.set_internal(2, 3).unwrap();
+            object.set_link(3, Some(target)).unwrap();
+            let mut machine = Machine::new(0);
+            machine.insert_object(object).unwrap();
+            machine
+                .insert_object(VmObject::new(target, Vec::new()).unwrap())
+                .unwrap();
+
+            assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::HostEffect);
+            let Some(AudioHostRequest::Control(request)) = machine.pending_audio_host_request()
+            else {
+                panic!("0x8d must expose a typed control request");
+            };
+            assert_eq!(request.operation.suboperation, suboperation);
+            assert_eq!(
+                request.operation.effective_suboperation(),
+                suboperation % 15
+            );
+            assert_eq!(request.voice, AudioVoiceSelector::Template);
+            let expected = match request.operation.effective_suboperation() {
+                0 | 1 | 6 => AudioControlArgument::Scalar(AudioScalarArgument::Signed(-128)),
+                2 | 3 => AudioControlArgument::Vector([-128, 2, 3]),
+                4 | 12 => AudioControlArgument::Scalar(AudioScalarArgument::SignedByte(-128)),
+                5 => AudioControlArgument::Object(Some(target)),
+                7 | 10 | 11 => {
+                    AudioControlArgument::Scalar(AudioScalarArgument::Unsigned(0xffff_ff80))
+                }
+                8 | 9 | 13 | 14 => AudioControlArgument::Unused,
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                request.argument, expected,
+                "raw suboperation {suboperation}"
+            );
+            machine
+                .complete_audio_host_request(AudioHostResponse::ControlApplied)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn audio_control_decodes_all_flag_bits_and_force_off_mapping() {
+        for suboperation in 0_u8..16 {
+            for packed_flags in 0_u8..4 {
+                let operation = AudioControlOperation::decode(audio_control(
+                    suboperation,
+                    packed_flags,
+                    0x3f,
+                    0x0fff,
+                ));
+                assert_eq!(operation.suboperation, suboperation);
+                assert_eq!(operation.flags.force_off, suboperation == 15);
+                assert_eq!(operation.flags.stop_after_ramp, packed_flags & 1 != 0);
+                assert_eq!(operation.flags.ramp_or_glide, packed_flags & 2 != 0);
+                assert_eq!(operation.effective_suboperation(), suboperation % 15);
+                let expected = (if suboperation == 15 { 0x8000_0000 } else { 0 })
+                    | (if packed_flags & 1 != 0 {
+                        0x4000_0000
+                    } else {
+                        0
+                    })
+                    | (if packed_flags & 2 != 0 {
+                        0x2000_0000
+                    } else {
+                        0
+                    })
+                    | u32::from(suboperation % 15);
+                assert_eq!(operation.native_control_word(), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn audio_control_translates_b_before_popping_the_stack_voice_selector() {
+        let h = handle(0);
+        let object = VmObject::new(h, vec![audio_control(15, 3, 0x1f, STACK)]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, (-7_i32) as u32).unwrap();
+        machine.push(h, (-123_i32) as u32).unwrap();
+
+        assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::HostEffect);
+        assert!(machine.object(h).unwrap().stack().is_empty());
+        let Some(AudioHostRequest::Control(request)) = machine.pending_audio_host_request() else {
+            panic!("0x8d must expose a typed control request");
+        };
+        assert_eq!(request.voice, AudioVoiceSelector::Stack { voice_id: -7 });
+        assert_eq!(request.voice.voice_id(), -7);
+        assert_eq!(
+            request.argument,
+            AudioControlArgument::Scalar(AudioScalarArgument::Signed(-123))
+        );
+        assert_eq!(
+            request.argument_source,
+            Some(
+                StorageReference::checked(h, StorageRegion::Register, SYNTHETIC_STACK_POINTER + 1,)
+                    .unwrap()
+            )
+        );
+        assert_eq!(request.operation.native_control_word(), 0xe000_0000);
+    }
+
+    #[test]
+    fn audio_control_distinguishes_template_and_process_register_voice_selectors() {
+        let h = handle(0);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                audio_control(8, 0, 0, 0x0be0),
+                audio_control(9, 0, process_register::VOICE_ID as u8, 0x0be0),
+            ],
+        )
+        .unwrap();
+        object
+            .set_register(process_register::VOICE_ID, (-21_i32) as u32)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::HostEffect);
+        let Some(AudioHostRequest::Control(template)) = machine.pending_audio_host_request() else {
+            panic!("expected template request");
+        };
+        assert_eq!(template.voice, AudioVoiceSelector::Template);
+        assert_eq!(template.argument_source, None);
+        assert_eq!(template.argument, AudioControlArgument::Unused);
+        machine
+            .complete_audio_host_request(AudioHostResponse::ControlApplied)
+            .unwrap();
+
+        assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::HostEffect);
+        let Some(AudioHostRequest::Control(process)) = machine.pending_audio_host_request() else {
+            panic!("expected process-register request");
+        };
+        assert_eq!(
+            process.voice,
+            AudioVoiceSelector::ProcessRegister {
+                register: process_register::VOICE_ID as u8,
+                voice_id: -21,
+            }
+        );
+    }
+
+    #[test]
     fn events_audio_and_misc_transitions_are_effects() {
         let a = handle(0);
         let b = handle(1);
+        let adio = Eid::from_name("audio").unwrap();
         let code = vec![
             Instruction::encode(0x87, 3 << 9, REG0),
-            Instruction::encode(0x8c, REG1, REG0),
-            Instruction::encode(0x1c, REG1, REG0),
+            Instruction::encode(0x8c, REG1, REG2),
+            misc(12, 9, REG0),
         ];
         let mut object = VmObject::new(a, code).unwrap();
         object.set_link(3, Some(b)).unwrap();
         object.set_register(0, 0x900).unwrap();
         object.set_register(1, 9).unwrap();
+        object.set_register(2, adio.raw()).unwrap();
         let mut machine = Machine::new(1);
         machine.insert_object(object).unwrap();
         machine
             .insert_object(VmObject::new(b, vec![Instruction::encode(0x82, 0, 0)]).unwrap())
             .unwrap();
         assert_eq!(
-            machine.run(a, 3).unwrap().reason,
+            machine.run(a, 3).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 1,
+            }
+        );
+        assert_eq!(
+            machine.run(a, 2).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 1,
+            }
+        );
+        machine
+            .complete_audio_host_request(AudioHostResponse::VoiceCreated { voice_id: 41 })
+            .unwrap();
+        assert_eq!(
+            machine.run(a, 1).unwrap().reason,
             HaltReason::BudgetExhausted
         );
         assert!(machine.effects().contains(&VmEffect::Event {
             sender: a,
             recipient: Some(b),
-            event: 0x900
+            event: 0x900,
         }));
         assert!(machine.effects().contains(&VmEffect::AudioStart {
             object: a,
             voice: 9,
-            sound: 0x900
+            sound: adio.raw(),
         }));
-        assert!(machine.effects().contains(&VmEffect::Transition(0x900)));
+        assert!(machine.effects().contains(&VmEffect::Transition(9)));
+        assert_eq!(
+            machine
+                .object(a)
+                .unwrap()
+                .register(process_register::VOICE_ID),
+            Ok(41)
+        );
+    }
+
+    #[test]
+    fn native_misc_twelve_relocates_save_and_load_effects() {
+        let h = handle(0);
+        let object = VmObject::new(h, vec![misc(12, 0, 0x0be0), misc(12, 1, 0x0be0)]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(machine.run(h, 2).unwrap().steps, 2);
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::SaveState(h), VmEffect::LoadState(h)]
+        );
+
+        let unsupported = handle(1);
+        machine
+            .insert_object(VmObject::new(unsupported, vec![misc(12, 5, REG0)]).unwrap())
+            .unwrap();
+        assert_eq!(
+            machine.run(unsupported, 1),
+            Err(VmError::UnsupportedMiscOperation {
+                primary: 12,
+                secondary: 5,
+                operand: REG0,
+            })
+        );
+    }
+
+    #[test]
+    fn native_misc_link_register_load_and_store_use_checked_links() {
+        let source = handle(0);
+        let target = handle(1);
+        let mut source_object = VmObject::new(
+            source,
+            vec![misc(4, 0, REG0) | (3 << 12), misc(3, 0, REG0) | (3 << 12)],
+        )
+        .unwrap();
+        source_object.set_link(3, Some(target)).unwrap();
+        source_object.set_register(0, 5 << 8).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(source_object).unwrap();
+        machine
+            .insert_object(VmObject::new(target, Vec::new()).unwrap())
+            .unwrap();
+        machine.push(source, 0x1234_5678).unwrap();
+
+        assert_eq!(
+            machine.run(source, 2).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 2,
+            }
+        );
+        assert_eq!(machine.object(target).unwrap().register(5), Ok(0x1234_5678));
+        assert_eq!(machine.object(source).unwrap().stack(), &[0x1234_5678]);
+    }
+
+    #[test]
+    fn native_misc_spawn_reads_preserve_retail_bit_values() {
+        let object = handle(0);
+        let mut vm_object = VmObject::new(
+            object,
+            vec![misc(11, 1, REG0), misc(11, 2, REG0), misc(11, 3, REG0)],
+        )
+        .unwrap();
+        vm_object.set_register(0, 17 << 8).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(vm_object).unwrap();
+        machine.set_spawn_flags(17, 0b1100).unwrap();
+
+        assert_eq!(machine.run(object, 3).unwrap().steps, 3);
+        assert_eq!(machine.object(object).unwrap().stack(), &[1, 4, 8]);
+    }
+
+    #[test]
+    fn native_misc_midi_toggle_retains_the_translated_value() {
+        let object = handle(0);
+        let mut vm_object = VmObject::new(object, vec![misc(12, 6, REG0)]).unwrap();
+        vm_object.set_register(0, 0x1234).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(vm_object).unwrap();
+
+        assert_eq!(machine.run(object, 1).unwrap().steps, 1);
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::MidiTogglePlayback {
+                object,
+                value: 0x1234,
+            }]
+        );
+    }
+
+    #[test]
+    fn native_misc_add_to_handle_is_a_synchronous_checked_effect() {
+        let object = handle(0);
+        let mut vm_object = VmObject::new(object, vec![misc(12, 2, REG0)]).unwrap();
+        vm_object.set_register(0, 4 << 8).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(vm_object).unwrap();
+
+        assert_eq!(
+            machine.run(object, 1).unwrap(),
+            Execution {
+                reason: HaltReason::HostEffect,
+                steps: 1,
+            }
+        );
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::ReparentToRoot { object, root: 4 }]
+        );
+    }
+
+    #[test]
+    fn synchronous_event_service_returns_state_and_preserves_guard_bit() {
+        let sender = handle(0);
+        let recipient = handle(1);
+        let mut object = VmObject::new(recipient, vec![event_return(0x88, 1, 0, 0, 0, 5)]).unwrap();
+        object.event_pc = Some(0);
+        object.state_flags_by_index = vec![0; 6];
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(sender, vec![0]).unwrap())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(Some(sender), Some(recipient), 0x1500, Some(&[11, 22])),
+            Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: Some(EventStateChange {
+                    recipient,
+                    state: 5,
+                    event: 0x1500,
+                    arguments: vec![11, 22],
+                }),
+            })
+        );
+        let recipient = machine.object(recipient).unwrap();
+        assert_eq!(recipient.links[7], Some(sender));
+        assert_eq!(recipient.register(process_register::EVENT), Ok(0x1500));
+        assert_eq!(recipient.state(), 5);
+        assert!(recipient.stack().is_empty());
+        assert!(recipient.call_stack.is_empty());
+        assert_eq!(
+            machine
+                .object(sender)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0),
+            "opcode 0x88 returns a false sender guard"
+        );
+    }
+
+    #[test]
+    fn checked_send_event_rejects_oversized_arguments_before_mutation() {
+        let sender = handle(0);
+        let recipient = handle(1);
+        let mut sender_object = VmObject::new(sender, vec![0]).unwrap();
+        sender_object
+            .set_register(process_register::MISC_VALUE, 0x55)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(sender_object).unwrap();
+        machine
+            .insert_object(VmObject::new(recipient, vec![0]).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            machine.send_event(
+                Some(sender),
+                Some(recipient),
+                0,
+                Some(&[0; MAX_EVENT_ARGUMENTS + 1]),
+            ),
+            Err(VmError::EventArgumentsTooLong(MAX_EVENT_ARGUMENTS + 1))
+        );
+        assert_eq!(
+            machine
+                .object(sender)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0x55)
+        );
+        assert_eq!(machine.object(recipient).unwrap().links[7], None);
+
+        assert_eq!(
+            machine.send_event(Some(sender), None, 0, None),
+            Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            })
+        );
+        assert_eq!(
+            machine
+                .object(sender)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn event_service_earg_and_guarded_null_return_are_one_synchronous_scope() {
+        let sender = handle(0);
+        let recipient = handle(1);
+        let mut object = VmObject::new(
+            recipient,
+            vec![0x1c00_5b7f, event_return(0x89, 2, 1, 0x1f, 0, 0)],
+        )
+        .unwrap();
+        object.event_pc = Some(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(sender, vec![0]).unwrap())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(Some(sender), Some(recipient), 0x1500, Some(&[7])),
+            Ok(EventDispatchOutcome {
+                acknowledged: true,
+                state_change: None,
+            })
+        );
+        let recipient = machine.object(recipient).unwrap();
+        assert!(recipient.stack().is_empty());
+        assert!(recipient.call_stack.is_empty());
+        assert!(machine.event_argument_scopes.is_empty());
+        assert_eq!(
+            machine
+                .object(sender)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(1)
+        );
+    }
+
+    #[test]
+    fn event_return_mode_zero_defers_guarded_null_response_to_frame_return() {
+        let recipient = handle(0);
+        let mut object = VmObject::new(
+            recipient,
+            vec![
+                event_return(0x89, 0, 0, 0, 0, 0),
+                control_flow(2, 0, 0, 0, 0),
+            ],
+        )
+        .unwrap();
+        object.event_pc = Some(0);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(None, Some(recipient), 0, Some(&[])),
+            Ok(EventDispatchOutcome {
+                acknowledged: true,
+                state_change: None,
+            })
+        );
+        assert!(machine.object(recipient).unwrap().stack().is_empty());
+    }
+
+    #[test]
+    fn false_event_return_mode_zero_branches_from_the_post_fetch_pc() {
+        let recipient = handle(0);
+        let mut object = VmObject::new(
+            recipient,
+            vec![
+                event_return(0x89, 0, 1, 6, 0, 1),
+                Instruction::encode(0xff, 0, 0),
+                event_return(0x89, 2, 0, 0, 0, 0),
+            ],
+        )
+        .unwrap();
+        object.event_pc = Some(0);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(None, Some(recipient), 0, None),
+            Ok(EventDispatchOutcome {
+                acknowledged: true,
+                state_change: None,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_event_service_return_falls_back_to_exact_event_map_state() {
+        let sender = handle(0);
+        let recipient = handle(1);
+        let mut object = VmObject::new(recipient, vec![control_flow(2, 0, 0, 0, 0)]).unwrap();
+        object.event_pc = Some(0);
+        object.event_map = vec![EVENT_MAP_NULL_STATE; 4];
+        object.event_map[3] = 2;
+        object.state_flags_by_index = vec![0; 3];
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(sender, vec![0]).unwrap())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(Some(sender), Some(recipient), 0x0300, None),
+            Ok(EventDispatchOutcome {
+                acknowledged: true,
+                state_change: Some(EventStateChange {
+                    recipient,
+                    state: 2,
+                    event: 0x0300,
+                    arguments: Vec::new(),
+                }),
+            })
+        );
+        assert_eq!(machine.object(recipient).unwrap().state(), 2);
+    }
+
+    #[test]
+    fn event_map_distinguishes_null_state_from_every_high_bit_interrupt() {
+        let null_recipient = handle(0);
+        let interrupt_recipient = handle(1);
+        let invalid_interrupt = handle(2);
+
+        let mut null = VmObject::new(null_recipient, vec![0]).unwrap();
+        null.event_map = vec![EVENT_MAP_NULL_STATE];
+        let mut interrupt = VmObject::new(interrupt_recipient, vec![0]).unwrap();
+        interrupt.event_map = vec![0x8000];
+        interrupt.global_code = vec![control_flow(2, 0, 0, 0, 0)];
+        let mut invalid = VmObject::new(invalid_interrupt, vec![0]).unwrap();
+        invalid.event_map = vec![0xffff];
+        invalid.global_code = vec![control_flow(2, 0, 0, 0, 0)];
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(null).unwrap();
+        machine.insert_object(interrupt).unwrap();
+        machine.insert_object(invalid).unwrap();
+        assert_eq!(
+            machine.send_event(None, Some(null_recipient), 0, Some(&[])),
+            Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            })
+        );
+        assert_eq!(
+            machine.send_event(None, Some(interrupt_recipient), 1, Some(&[0x1234])),
+            Ok(EventDispatchOutcome {
+                acknowledged: true,
+                state_change: None,
+            })
+        );
+        let interrupt = machine.object(interrupt_recipient).unwrap();
+        assert_eq!(interrupt.register(process_register::EVENT), Ok(1));
+        assert!(interrupt.stack().is_empty());
+        assert_eq!(
+            machine.send_event(None, Some(invalid_interrupt), 0, None),
+            Err(VmError::InvalidJump {
+                object: invalid_interrupt,
+                target: 0x7fff,
+            })
+        );
+    }
+
+    #[test]
+    fn event_state_guards_apply_squash_exception_and_status_update() {
+        let sender = handle(0);
+        let recipient = handle(1);
+        let mut object = VmObject::new(recipient, vec![0]).unwrap();
+        object.event_map = vec![EVENT_MAP_NULL_STATE; 26];
+        object.event_map[3] = 1;
+        object.event_map[0x19] = 1;
+        object.state_flags_by_index = vec![0, 2];
+        object.set_register(process_register::STATUS_C, 2).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(sender, vec![0]).unwrap())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(Some(sender), Some(recipient), 0x0300, None),
+            Ok(EventDispatchOutcome {
+                acknowledged: false,
+                state_change: None,
+            })
+        );
+        let outcome = machine
+            .send_event(Some(sender), Some(recipient), SQUASH_EVENT, None)
+            .unwrap();
+        assert_eq!(
+            outcome.state_change.as_ref().map(|change| change.state),
+            Some(1)
+        );
+        let recipient = machine.object(recipient).unwrap();
+        assert_eq!(
+            recipient.register(process_register::EVENT),
+            Ok(SQUASH_EVENT)
+        );
+        assert_ne!(
+            recipient.register(process_register::STATUS_A).unwrap() & STATUS_A_EVENT_SQUASHED,
+            0
+        );
+    }
+
+    #[test]
+    fn event_service_budget_failure_unwinds_frame_and_argument_scope() {
+        let recipient = handle(0);
+        let mut object = VmObject::new(recipient, vec![control_flow(0, 0, 0, 0, 0x3ff)]).unwrap();
+        object.event_pc = Some(0);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.send_event(None, Some(recipient), 0, Some(&[1])),
+            Err(VmError::EventServiceBudgetExhausted(recipient))
+        );
+        let recipient = machine.object(recipient).unwrap();
+        assert!(recipient.stack().is_empty());
+        assert!(recipient.call_stack.is_empty());
+        assert!(machine.event_argument_scopes.is_empty());
     }
 
     #[test]
@@ -6924,6 +10671,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn checked_remove_object_clears_every_inbound_process_link() {
+        let target = handle(0);
+        let first = handle(1);
+        let second = handle(2);
+        let mut first_object = VmObject::new(first, vec![0]).unwrap();
+        first_object.set_link(6, Some(target)).unwrap();
+        first_object.set_link(7, Some(target)).unwrap();
+        let mut second_object = VmObject::new(second, vec![0]).unwrap();
+        second_object.set_link(1, Some(target)).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.insert_object(first_object).unwrap();
+        machine.insert_object(second_object).unwrap();
+
+        assert_eq!(machine.remove_object(target).unwrap().handle(), target);
+        assert_eq!(machine.object(target), Err(VmError::UnknownObject(target)));
+        assert_eq!(machine.object(first).unwrap().links[6], None);
+        assert_eq!(machine.object(first).unwrap().links[7], None);
+        assert_eq!(machine.object(second).unwrap().links[1], None);
+        assert_eq!(
+            machine.remove_object(target),
+            Err(VmError::UnknownObject(target))
+        );
+    }
+
+    #[test]
+    fn checked_remove_rejects_an_active_synchronous_event_frame() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+        object.global_code = vec![control_flow(2, 0, 0, 0, 0)];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let depth = machine
+            .begin_synchronous_event_frame(
+                h,
+                CodeAddress {
+                    segment: CodeSegment::Global,
+                    pc: 0,
+                },
+                &[],
+                ReturnBehavior::Interrupt {
+                    previous_animation_wait: None,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            machine.remove_object(h),
+            Err(VmError::ActiveEventInvocation(h))
+        );
+        machine.unwind_synchronous_event_frame(h, depth).unwrap();
+        assert_eq!(machine.remove_object(h).unwrap().handle(), h);
+    }
+
     fn entity_with_path(points: Vec<ZoneEntityPathPoint>) -> ZoneEntity {
         ZoneEntity {
             serialized_parent: crust_formats::binary::EntryRef::from_raw(0),
@@ -6935,6 +10739,151 @@ mod tests {
             subtype: 0,
             path_points: points,
         }
+    }
+
+    fn transform_vectors_instruction(
+        suboperation: u8,
+        input_vector: u8,
+        output_vector: u8,
+        operand: u16,
+    ) -> u32 {
+        let packed = u16::from(input_vector)
+            | (u16::from(output_vector) << 3)
+            | (u16::from(suboperation) << 6);
+        Instruction::encode(0x85, packed, operand)
+    }
+
+    #[test]
+    fn transform_vectors_projects_and_scales_the_translated_operand_vector() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(1, 0, 1, 20)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object
+            .set_process_vector(0, [25_600, 12_800, -256_000])
+            .unwrap();
+        object.internal[20..23].copy_from_slice(&[1_000, 2_000, 3_000]);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let camera = RetailTransformVectorsCamera::from_retail_pose([0; 3], [0; 3], 500);
+        assert_eq!(
+            camera.rotation_matrix,
+            [[0x1000, 0, 0], [0, -0x0a00, 0], [0, 0, -0x1000]]
+        );
+        machine.set_transform_vectors_camera(camera);
+
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(1), Ok([12_800, 4_096, 256_000]));
+        assert_eq!(&object.internal[20..23], &[280, 560, 840]);
+    }
+
+    #[test]
+    fn transform_vectors_aims_velocity_in_target_rotation_plane() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(2, 3, 0, 0x804)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.set_process_vector(3, [99, 77, 55]).unwrap();
+        object
+            .set_register(process_register::MISC_B_X, 0x400)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(3), Ok([1_024, 77, 0]));
+        assert_eq!(object.register(process_register::SPEED), Ok(1_024));
+
+        let h = handle(1);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(2, 3, 0, 0x804)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.set_process_vector(3, [99, 77, 55]).unwrap();
+        object
+            .set_register(process_register::STATUS_B, 0x0020_0200)
+            .unwrap();
+        machine.insert_object(object).unwrap();
+        machine.run(h, 1).unwrap();
+        assert_eq!(
+            machine.object(h).unwrap().process_vector(3),
+            Ok([0, 1_024, 55])
+        );
+    }
+
+    #[test]
+    fn transform_vectors_subop_four_applies_translation_rotation_and_scale() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(4, 0, 5, 0x0a03)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object
+            .set_retail_transform(RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0, 0x400, 0],
+                scale: [0x2000, 0x1000, 0x1000],
+            })
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        let base_stack_len = machine.object(h).unwrap().stack().len();
+        machine.push(h, 16).unwrap();
+        machine.push(h, 32).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(5), Ok([148, 232, 268]));
+        assert_eq!(object.stack().len(), base_stack_len);
+    }
+
+    #[test]
+    fn transform_vectors_subop_five_matches_n_sanity_stack_contract() {
+        let h = handle(0);
+        // Legal N. Sanity executes subop 5 with input vec 5, output vec 0,
+        // and B=0x800 (the immediate Q8 value zero).
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(5, 5, 0, 0x800)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.set_process_vector(4, [0; 3]).unwrap();
+        object.set_process_vector(5, [1_000, 2_000, 3_000]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        let base_stack_len = machine.object(h).unwrap().stack().len();
+        machine.push(h, 160).unwrap();
+        machine.push(h, (-320_i32) as u32).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(0), Ok([1_160, 1_680, 3_000]));
+        assert_eq!(object.stack().len(), base_stack_len);
+    }
+
+    #[test]
+    fn transform_vectors_audio_transform_consumes_b_and_preserves_source_y_quirk() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(7, 0, 1, STACK)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.set_process_vector(0, [256, 512, -768]).unwrap();
+        object.set_process_vector(1, [10, 7, 30]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+            [0; 3], [0; 3], 500,
+        ));
+        machine.run(h, 0).unwrap();
+        let base_stack_len = machine.object(h).unwrap().stack().len();
+        machine.push(h, 0xdead_beef).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(1), Ok([256, -1_792, 768]));
+        assert_eq!(object.stack().len(), base_stack_len);
     }
 
     #[test]
@@ -7089,6 +11038,274 @@ mod tests {
         );
         assert_eq!(retail_sqrt(10_000), Ok(99));
         assert_eq!(retail_atan2(-1_024, 25_600), -0x1a);
+    }
+
+    fn retail_color_environment(
+        object_intensity: [u16; 3],
+        player_intensity: [u16; 3],
+    ) -> RetailSolidEnvironment {
+        let mut object_colors = [0_u16; COLOR_COUNT];
+        let mut player_colors = [0_u16; COLOR_COUNT];
+        object_colors[COLOR_INTENSITY_START..COLOR_INTENSITY_END]
+            .copy_from_slice(&object_intensity);
+        player_colors[COLOR_INTENSITY_START..COLOR_INTENSITY_END]
+            .copy_from_slice(&player_intensity);
+        RetailSolidEnvironment::new(0, object_colors, player_colors, Vec::new())
+    }
+
+    #[test]
+    fn native_colors_cycle_only_the_three_intensity_halfwords() {
+        for (draw_count, expected) in [(0, 0x07f), (1, 0x37f), (2, 0x27f), (3, 0x17f)] {
+            let h = handle(0);
+            let mut object = VmObject::new(h, Vec::new()).unwrap();
+            let mut original = [0_u16; COLOR_COUNT];
+            for (index, color) in original.iter_mut().enumerate() {
+                *color = u16::try_from(index * 17).unwrap();
+            }
+            object.set_retail_colors(original);
+            object
+                .set_register(process_register::INVINCIBILITY_STATE, 2)
+                .unwrap();
+            let mut machine = Machine::new(0);
+            machine.insert_object(object).unwrap();
+            machine.set_draw_count(draw_count);
+
+            machine.run_retail_object_colors(h).unwrap();
+
+            let colors = machine.object(h).unwrap().retail_colors();
+            assert_eq!(
+                &colors[..COLOR_INTENSITY_START],
+                &original[..COLOR_INTENSITY_START]
+            );
+            assert_eq!(
+                &colors[COLOR_INTENSITY_START..COLOR_INTENSITY_END],
+                &[expected; 3]
+            );
+        }
+    }
+
+    #[test]
+    fn native_color_expiry_thresholds_are_strict_and_keep_fallthrough_flash() {
+        for (invincibility_state, threshold) in [(3, 451), (4, 60), (5, 602)] {
+            let h = handle(0);
+            let mut object = VmObject::new(h, Vec::new()).unwrap();
+            object.bind_retail_solid_environment(retail_color_environment(
+                [0x111, 0x222, 0x333],
+                [0x444, 0x555, 0x666],
+            ));
+            object
+                .set_register(process_register::INVINCIBILITY_STATE, invincibility_state)
+                .unwrap();
+            object
+                .set_register(process_register::INVINCIBILITY_STAMP, 100)
+                .unwrap();
+            let mut machine = Machine::new(0);
+            machine.insert_object(object).unwrap();
+            machine.set_draw_count(2);
+            machine.set_frames_elapsed(100 + threshold);
+
+            machine.run_retail_object_colors(h).unwrap();
+            assert_eq!(
+                machine
+                    .object(h)
+                    .unwrap()
+                    .register(process_register::INVINCIBILITY_STATE),
+                Ok(invincibility_state)
+            );
+
+            machine.set_frames_elapsed(101 + threshold);
+            machine.run_retail_object_colors(h).unwrap();
+            let object = machine.object(h).unwrap();
+            assert_eq!(
+                object.register(process_register::INVINCIBILITY_STATE),
+                Ok(0)
+            );
+            assert_eq!(
+                &object.retail_colors()[COLOR_INTENSITY_START..COLOR_INTENSITY_END],
+                &[0x27f; 3],
+                "zone reset is intentionally overwritten by case-two fallthrough"
+            );
+        }
+    }
+
+    #[test]
+    fn state_four_emits_checked_category_three_hundred_collider_event() {
+        let sender = handle(0);
+        let collider = handle(1);
+        let mut sender_object = VmObject::new(sender, Vec::new()).unwrap();
+        sender_object.bind_retail_solid_environment(retail_color_environment([1, 2, 3], [4, 5, 6]));
+        sender_object
+            .set_register(process_register::INVINCIBILITY_STATE, 4)
+            .unwrap();
+        sender_object.set_link(6, Some(collider)).unwrap();
+        let mut collider_object = VmObject::new(collider, Vec::new()).unwrap();
+        collider_object.program_identity = Some(GoolProgramIdentity {
+            global_eid: Eid::from_raw(0x7500_2055),
+            object_type: 0,
+            category: 0x300,
+        });
+        let mut machine = Machine::new(0);
+        machine.insert_object(sender_object).unwrap();
+        machine.insert_object(collider_object).unwrap();
+        machine.set_frames_elapsed(61);
+
+        machine.run_retail_object_colors(sender).unwrap();
+
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::Event {
+                sender,
+                recipient: Some(collider),
+                event: HIT_INVINCIBLE_EVENT,
+            }]
+        );
+        assert_eq!(
+            machine
+                .object(sender)
+                .unwrap()
+                .register(process_register::INVINCIBILITY_STATE),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn recovery_states_restore_dpad_on_strict_timeout_or_floor_contact() {
+        let timed = handle(0);
+        let grounded = handle(1);
+        let future = handle(2);
+        let mut timed_object = VmObject::new(timed, Vec::new()).unwrap();
+        timed_object
+            .set_register(process_register::INVINCIBILITY_STATE, 6)
+            .unwrap();
+        let mut grounded_object = VmObject::new(grounded, Vec::new()).unwrap();
+        grounded_object
+            .set_register(process_register::INVINCIBILITY_STATE, 7)
+            .unwrap();
+        grounded_object
+            .set_register(process_register::STATUS_A, 1)
+            .unwrap();
+        let mut future_object = VmObject::new(future, Vec::new()).unwrap();
+        future_object
+            .set_register(process_register::INVINCIBILITY_STATE, 6)
+            .unwrap();
+        future_object
+            .set_register(process_register::INVINCIBILITY_STAMP, 17)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(timed_object).unwrap();
+        machine.insert_object(grounded_object).unwrap();
+        machine.insert_object(future_object).unwrap();
+        machine.set_frames_elapsed(16);
+
+        for object in [timed, grounded, future] {
+            machine.run_retail_object_colors(object).unwrap();
+        }
+
+        for object in [timed, grounded] {
+            let object = machine.object(object).unwrap();
+            assert_eq!(
+                object.register(process_register::INVINCIBILITY_STATE),
+                Ok(0)
+            );
+            assert_ne!(
+                object.register(process_register::STATUS_B).unwrap() & STATUS_B_DPAD_CONTROL,
+                0
+            );
+        }
+        assert_eq!(
+            machine
+                .object(future)
+                .unwrap()
+                .register(process_register::INVINCIBILITY_STATE),
+            Ok(6),
+            "wrapped unsigned subtraction becomes signed -1, not an expiry"
+        );
+    }
+
+    #[test]
+    fn main_player_default_branch_restores_player_zone_intensity() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, Vec::new()).unwrap();
+        object.set_main_player_identity(true);
+        object.set_retail_colors([0x777; COLOR_COUNT]);
+        object.bind_retail_solid_environment(retail_color_environment(
+            [0x111, 0x222, 0x333],
+            [0x444, 0x555, 0x666],
+        ));
+        object
+            .set_register(process_register::INVINCIBILITY_STATE, 1)
+            .unwrap();
+        object
+            .set_register(process_register::STATUS_B, STATUS_B_MAIN_COLOR_BY_ZONE)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run_retail_object_colors(h).unwrap();
+
+        let object = machine.object(h).unwrap();
+        assert_eq!(
+            &object.retail_colors()[COLOR_INTENSITY_START..COLOR_INTENSITY_END],
+            &[0x444, 0x555, 0x666]
+        );
+        assert_eq!(
+            object.register(process_register::INVINCIBILITY_STATE),
+            Ok(0)
+        );
+        assert!(
+            object.retail_colors()[..COLOR_INTENSITY_START]
+                .iter()
+                .all(|color| *color == 0x777)
+        );
+    }
+
+    #[test]
+    fn native_color_recovery_enables_controller_before_same_frame_physics() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, Vec::new()).unwrap();
+        object
+            .set_register(process_register::INVINCIBILITY_STATE, 6)
+            .unwrap();
+        object
+            .set_register(process_register::STATUS_A, 0x2000)
+            .unwrap();
+        object
+            .set_register(process_register::STATUS_B, 0x40)
+            .unwrap();
+        object
+            .set_register(process_register::STATE_FLAGS, 0x4)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.set_frames_elapsed(16);
+        machine.set_retail_physics_frame_context(true, 0);
+        machine
+            .set_pad_snapshot(
+                0,
+                RetailPadSnapshot {
+                    held: 4 << 12,
+                    ..RetailPadSnapshot::default()
+                },
+            )
+            .unwrap();
+
+        machine.run_retail_object_physics(h).unwrap();
+
+        let expected_speed = (0x001a_0aaa_i32 * 34) / 1024;
+        let expected_translation = (expected_speed * 34) / 1024;
+        let object = machine.object(h).unwrap();
+        assert_eq!(
+            object.register(process_register::SPEED),
+            Ok(expected_speed as u32)
+        );
+        assert_eq!(
+            object.register(process_register::TRANSLATION_Z),
+            Ok(expected_translation as u32)
+        );
+        assert_ne!(
+            object.register(process_register::STATUS_B).unwrap() & STATUS_B_DPAD_CONTROL,
+            0
+        );
     }
 
     proptest! {

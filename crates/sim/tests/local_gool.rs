@@ -6,8 +6,8 @@ use crust_formats::binary::Eid;
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
     GoolAnimationDescriptor, LevelId, NsdKind, StreamKind, StreamName, load_gool_program,
-    load_object_model_frame, parse_gool_animation_descriptor, parse_nsd, parse_nsf,
-    structs::GoolState,
+    load_gool_state_program, load_object_model_frame, parse_gool_animation_descriptor, parse_nsd,
+    parse_nsf, structs::GoolState,
 };
 use crust_sim::gool::{
     AnimationReference, CodeAddress, CodeSegment, Execution, HaltReason, Machine, ObjectHandle,
@@ -101,6 +101,19 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
     let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
     let crash_eid = metadata.ldat().unwrap().executable_map[0];
     let program = load_gool_program(&metadata, &nsf, &nsf_bytes, crash_eid, 0).unwrap();
+    assert_eq!(program.event_map().len(), 45);
+    assert_eq!(program.event_map()[2], 0x84ed);
+    assert_eq!(program.event_map()[3], 23);
+    assert_eq!(program.event_map()[5], 0x84fa);
+    assert_eq!(program.event_map()[6], 0x8500);
+
+    let state_one = load_gool_state_program(&metadata, &nsf, &nsf_bytes, crash_eid, 1).unwrap();
+    assert_eq!(state_one.event_pc(), Some(420));
+    assert_eq!(state_one.code()[431], 0x8897_c000);
+    let state_seven = load_gool_state_program(&metadata, &nsf, &nsf_bytes, crash_eid, 7).unwrap();
+    assert_eq!(state_seven.event_pc(), Some(731));
+    assert_eq!(state_seven.code()[731], 0x0481_5b7e);
+    assert_eq!(state_seven.code()[732], 0x8957_c001);
     assert_eq!(program.page_count(), metadata.header.page_count);
     assert_eq!(
         program.resident_pages(),
@@ -123,6 +136,7 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
 
     let handle = ObjectHandle::new(0).unwrap();
     let mut object = VmObject::from_gool_program(handle, &program).unwrap();
+    assert_eq!(object.event_map(), program.event_map());
     object.restart(70).unwrap();
     let mut machine = Machine::new(0);
     machine.insert_object(object).unwrap();

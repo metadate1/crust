@@ -219,6 +219,27 @@ impl Mixer {
         }
     }
 
+    /// Updates one active voice's channel volumes without restarting its
+    /// sample cursor.
+    pub fn set_voice_volume(&mut self, voice_index: usize, left: u16, right: u16) -> bool {
+        let Some(voice) = self.voices.get_mut(voice_index) else {
+            return false;
+        };
+        voice.left = f64::from(left.min(16_383)) / VOLUME_BASE;
+        voice.right = f64::from(right.min(16_383)) / VOLUME_BASE;
+        true
+    }
+
+    /// Updates one active voice's SPU pitch without restarting its sample
+    /// cursor.
+    pub fn set_voice_pitch(&mut self, voice_index: usize, pitch: u16) -> bool {
+        let Some(voice) = self.voices.get_mut(voice_index) else {
+            return false;
+        };
+        voice.pitch = pitch;
+        true
+    }
+
     #[must_use]
     pub fn is_active(&self, voice_index: usize) -> bool {
         self.voices

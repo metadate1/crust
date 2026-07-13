@@ -24,8 +24,11 @@ pub mod object_bounds;
 pub mod paging;
 pub mod player;
 pub mod retail_frame;
+pub mod retail_physics;
 pub mod retail_runtime;
+pub mod retail_solid_motion;
 pub mod scheduler;
+pub mod zone_lifecycle;
 
 pub use math::{Angle12, Bounds3, Vec2, Vec3};
 pub use scheduler::{FrameDecision, FrameScheduler, SIMULATION_HZ};

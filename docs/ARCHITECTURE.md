@@ -15,11 +15,10 @@ is written explicitly where it is part of the observed contract.
 ## Dependency direction
 
 ```text
-crust-formats ──┬── crust-sim ───────┐
-                └── crust-audio ─────┤
-crust-renderer ──────────────────────┤
-crust-platform ──────────────────────┤
-                                     └── crust-web
+crust-formats ───── crust-sim ── crust-audio ──┐
+crust-renderer ────────────────────────────────┤
+crust-platform ────────────────────────────────┤
+                                               └── crust-web
 ```
 
 The browser crate owns only browser concerns. Format validation, simulation, render-command
@@ -41,8 +40,8 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
    Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
    transform, zoom, held pad and prior frame stamp. The current union assumes that GOOL does not
-   replace page residency midway through the tick; complete paging, progression and retail audio
-   remain later host boundaries.
+   applies ordered zone/pager transitions before the following spawn scan. Progression, persistent
+   save handshakes and retail MIDI music remain later host boundaries.
 6. User game bytes are released on reload and are never serialized. Only checksummed 128-byte
    progression/options records enter `localStorage`.
 
@@ -86,8 +85,8 @@ pair-scoped cache returns the same allocation. A distinct allocation is conserva
 even if its bytes happen to match, avoiding per-frame pixel-vector clones and byte scans. Automatic
 `CamUpdate` and live main-object `CamFollow` path/zone changes select the canvas scene; pause freezes
 the last successfully installed snapshot. Three-dimensional vertex object models and their current
-animation transforms are reflected in that snapshot; zone-object lifetime changes, dynamic global
-display masks and mid-frame paging-driven texture changes are not yet complete.
+animation transforms are reflected in that snapshot. Ordered zone teardown and dynamic display
+masks affect post-GOOL snapshots; mid-frame paging-driven texture replacement remains incomplete.
 
 ## Simulation and GOOL
 
@@ -128,28 +127,30 @@ second post-physics animation-stamp recomputation remains outside this slice.
 `RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
 VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs
 from NSD/NSF entries, executes the mutation-aware spawn tree, and synchronously binds runtime
-children (including bounded `0x91` reclaim selection). A state-change halt is resolved through
-`NsfProgramHost`; rebind, once and transition code complete at that same host boundary, while the
-new state's ordinary code resumes on a later object execution. The browser creates this runtime
+children (including bounded `0x91` reclaim selection). A state-change halt is resolved through the
+stream host; rebind, once and transition code complete at that same host boundary, and normal code
+continues in the same native update. Event services, interrupts and audio calls use the same typed
+synchronous request boundary. The browser creates this runtime
 when a pair is mounted and runs it at 30 Hz in
 gameplay, bonus, boss and ending flow states. The host initializes the characterized ZDAT
 zone/path transform, rotation/mode flags, scale, colors and scalar process defaults without placing
 native entity pointers in the register file; children inherit typed parent state. Any checked
 execution failure quarantines that exact generational object identity, preventing a pre-incremented
 program counter from resuming past an unsupported operation while healthy siblings continue.
-MDAT/box special cases, `0x85` suboperations one through seven, solid suboperations
-zero/two/four/five, event-service returns, most host effects, the late post-physics bound refresh,
-complete zone lifetime/collision response and non-vertex object rendering remain outside this
-bridge.
+MDAT/box special cases, transform-vector suboperation six, remaining solid branches, some host
+effects, the late post-physics bound refresh, full progression and non-vertex object rendering
+remain outside this bridge.
 
 ## Audio
 
-The audio library is deterministic signed stereo at 44.1 kHz. Sixteen-byte SPU ADPCM blocks decode to 28
-samples with saturated predictor history and loop-marker semantics. A bounded sample cache feeds
-24 logical voices; voice zero is reserved for music. Sequence events drive a 64-voice software
-synth. The browser output is unlocked only after a user gesture; mute does not stop simulation, and
-SFX/music volume plus mono are applied as independent output policy. Its current sequence and
-effects remain original generated signals rather than retail banks.
+The audio library is deterministic signed stereo at 44.1 kHz. Sixteen-byte SPU ADPCM blocks decode
+to 28 samples with saturated predictor history and loop-marker semantics. A bounded sample cache
+feeds the retail 24-slot voice allocator, including template controls, stealing, delay/rekey,
+ramp/glide and owner-wide teardown. The browser program host lazily resolves local type-12 ADIO item
+zero, returns the exact synchronous voice result to GOOL, ticks voices at 30 Hz and merges their PCM
+into WebAudio. The output unlocks only after a user gesture; mute does not stop simulation, and
+SFX/music volume plus mono are independent. Retail INST/VAB/SEP/MIDI music, spatial panning and
+reverb remain future work; the sequence synth currently supplies generated music.
 
 ## Persistence
 

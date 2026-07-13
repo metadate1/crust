@@ -157,6 +157,23 @@ impl Pager {
         self.entries.get(&entry).copied()
     }
 
+    /// Sum of all explicit page references, including references contributed
+    /// by opened entries. This is a diagnostics value; reference mutation
+    /// remains checked per page.
+    #[must_use]
+    pub fn total_page_references(&self) -> u64 {
+        self.pages
+            .values()
+            .map(|page| u64::from(page.references))
+            .sum()
+    }
+
+    /// Sum of all named-entry references currently owned by the pager.
+    #[must_use]
+    pub fn total_entry_references(&self) -> u64 {
+        self.entries.values().copied().map(u64::from).sum()
+    }
+
     pub fn set_page_inaccessible(&mut self, page: PageIndex) -> Result<(), PagingError> {
         let record = self
             .pages
@@ -340,6 +357,8 @@ mod tests {
         assert_eq!(pager.page(PageIndex::new(0)).unwrap().references, 1);
         assert_eq!(pager.page(PageIndex::new(1)).unwrap().references, 1);
         assert_eq!(pager.entry_references(entry(0, 0)), Some(1));
+        assert_eq!(pager.total_entry_references(), 1);
+        assert_eq!(pager.total_page_references(), 2);
 
         pager
             .apply_load_list(LoadList::new([entry(0, 1), entry(1, 0)], []))
@@ -347,6 +366,8 @@ mod tests {
         assert_eq!(pager.entry_references(entry(0, 0)), Some(0));
         assert_eq!(pager.entry_references(entry(0, 1)), Some(1));
         assert_eq!(pager.entry_references(entry(1, 0)), Some(1));
+        assert_eq!(pager.total_entry_references(), 2);
+        assert_eq!(pager.total_page_references(), 2);
     }
 
     #[test]

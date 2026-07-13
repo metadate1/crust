@@ -438,11 +438,13 @@ impl ObjectArena {
 
     /// Creates a child requested by GOOL opcode `0x8a` or `0x91`.
     ///
-    /// Runtime children do not consume or clear an entity spawn-table ID. If
-    /// the ordinary pool is full, `allow_reclaim` mirrors opcode `0x91` by
-    /// terminating the first safe preorder object whose state has retail flag
-    /// `0x80000`. The live parent and its ancestors are excluded so a checked
-    /// handle can never be invalidated halfway through creation.
+    /// Runtime children do not mark an entity spawn-table ID when created.
+    /// Their retail PID word is zero, however, so teardown clears the active
+    /// bit of spawn slot zero exactly like `GoolObjectKill`. If the ordinary
+    /// pool is full, `allow_reclaim` mirrors opcode `0x91` by terminating the
+    /// first safe preorder object whose state has retail flag `0x80000`. The
+    /// live parent and its ancestors are excluded so a checked handle can
+    /// never be invalidated halfway through creation.
     pub fn create_child(
         &mut self,
         parent: ObjectHandle,
@@ -529,6 +531,15 @@ impl ObjectArena {
         Ok(())
     }
 
+    /// Changes the current zone attached to one live object.
+    ///
+    /// The object's allocation, tree position, and persistent entity spawn
+    /// flags are not changed. A stale generation is rejected before mutation.
+    pub fn set_zone(&mut self, handle: ObjectHandle, zone: Eid) -> Result<(), TreeError> {
+        self.object_mut(handle)?.zone = zone;
+        Ok(())
+    }
+
     /// Runs the current-zone neighbor scan without reordering any input.
     ///
     /// Only displayed neighbors (`display_flags & 2`) and group-three entities
@@ -585,6 +596,19 @@ impl ObjectArena {
         Ok(())
     }
 
+    /// Moves a live object to the head of one of the eight logical roots.
+    ///
+    /// Descendants remain attached to the object. The operation first
+    /// validates the live generation and then uses the same checked detach and
+    /// head insertion as object-to-object reparenting.
+    pub fn reparent_to_root(
+        &mut self,
+        child: ObjectHandle,
+        root: RootHandle,
+    ) -> Result<(), TreeError> {
+        self.add_child(TreeParent::Root(root), child)
+    }
+
     /// Iterates all descendants of a root or object in retail preorder.
     pub fn preorder(&self, parent: TreeParent) -> Result<Preorder<'_>, TreeError> {
         let next = self.first_child_of(parent)?;
@@ -596,19 +620,46 @@ impl ObjectArena {
         })
     }
 
-    /// Despawns an object and all descendants, clearing entity active bits.
-    pub fn despawn_subtree(&mut self, root: ObjectHandle) -> Result<(), TreeError> {
-        self.object(root)?;
-        let mut preorder = [None; TOTAL_SLOT_COUNT];
-        let mut len = 0_usize;
-        self.collect_subtree(root, &mut preorder, &mut len)?;
+    /// Takes a deterministic, checked postorder snapshot of the whole forest.
+    ///
+    /// Roots are visited in retail index order `0..8`; siblings retain their
+    /// current head-to-tail order. Every descendant therefore appears before
+    /// its parent, which lets callers terminate selected zone objects without
+    /// borrowing the arena during traversal. Invalid, cyclic, duplicated, or
+    /// unreachable tree links are reported instead of producing a partial
+    /// snapshot.
+    pub fn postorder_snapshot(&self) -> Result<Vec<ObjectHandle>, TreeError> {
+        let mut output = Vec::with_capacity(self.object_count);
+        let mut visited = [false; TOTAL_SLOT_COUNT];
+        for root_index in 0..ROOT_HANDLE_COUNT as u8 {
+            let root = RootHandle(root_index);
+            self.collect_children_postorder(TreeParent::Root(root), &mut visited, &mut output)?;
+        }
+        if output.len() != self.object_count {
+            return Err(TreeError::BrokenTreeLink);
+        }
+        Ok(output)
+    }
+
+    /// Despawns an object and all descendants in retail release order.
+    ///
+    /// The returned stale handles are ordered children-before-parent, with
+    /// every sibling list visited from head to tail. This matches the release
+    /// order of recursive `GoolObjectKill` and lets the runtime remove paired
+    /// VM/audio state deterministically after the arena generations advance.
+    /// Entity objects clear their own active spawn bit; runtime children clear
+    /// slot zero, matching their zero-initialized retail PID word.
+    pub fn despawn_subtree(&mut self, root: ObjectHandle) -> Result<Vec<ObjectHandle>, TreeError> {
+        let parent = self.object(root)?.parent;
+        let mut postorder = Vec::new();
+        let mut visited = [false; TOTAL_SLOT_COUNT];
+        self.collect_object_postorder(root, parent, &mut visited, &mut postorder)?;
         self.detach(root)?;
 
-        // Reverse preorder guarantees every child is released before its parent.
-        for handle in preorder[..len].iter().rev().copied().flatten() {
+        for handle in postorder.iter().copied() {
             self.release(handle)?;
         }
-        Ok(())
+        Ok(postorder)
     }
 
     fn allocate(
@@ -758,32 +809,52 @@ impl ObjectArena {
         Ok(())
     }
 
-    fn collect_subtree(
+    fn collect_children_postorder(
         &self,
-        root: ObjectHandle,
-        output: &mut [Option<ObjectHandle>; TOTAL_SLOT_COUNT],
-        len: &mut usize,
+        parent: TreeParent,
+        visited: &mut [bool; TOTAL_SLOT_COUNT],
+        output: &mut Vec<ObjectHandle>,
     ) -> Result<(), TreeError> {
-        if *len == output.len() {
-            return Err(TreeError::WouldCreateCycle);
-        }
-        output[*len] = Some(root);
-        *len += 1;
-        let mut child = self.object(root)?.first_child;
+        let mut child = self.first_child_of(parent)?;
         while let Some(current) = child {
             let sibling = self.object(current)?.next_sibling;
-            self.collect_subtree(current, output, len)?;
+            self.collect_object_postorder(current, parent, visited, output)?;
             child = sibling;
         }
+        Ok(())
+    }
+
+    fn collect_object_postorder(
+        &self,
+        current: ObjectHandle,
+        parent: TreeParent,
+        visited: &mut [bool; TOTAL_SLOT_COUNT],
+        output: &mut Vec<ObjectHandle>,
+    ) -> Result<(), TreeError> {
+        let was_visited = visited
+            .get_mut(usize::from(current.slot))
+            .ok_or(TreeError::InvalidObject(current))?;
+        if *was_visited {
+            return Err(TreeError::WouldCreateCycle);
+        }
+        let object = self.object(current)?;
+        if object.parent != parent {
+            return Err(TreeError::BrokenTreeLink);
+        }
+        *was_visited = true;
+        self.collect_children_postorder(TreeParent::Object(current), visited, output)?;
+        output.push(current);
         Ok(())
     }
 
     fn release(&mut self, handle: ObjectHandle) -> Result<(), TreeError> {
         let slot_index = usize::from(handle.slot);
         let object = self.object(handle)?.clone();
-        if let ObjectOrigin::Entity(descriptor) = object.origin {
-            self.spawn_table.clear_active(descriptor.id);
-        }
+        let spawn_id = match object.origin {
+            ObjectOrigin::Entity(descriptor) => descriptor.id,
+            ObjectOrigin::Runtime { .. } => 0,
+        };
+        self.spawn_table.clear_active(spawn_id);
         let slot = &mut self.slots[slot_index];
         slot.object = None;
         slot.generation = slot.generation.wrapping_add(1).max(1);
@@ -1029,6 +1100,204 @@ mod tests {
             Err(TreeError::WouldCreateCycle)
         );
         assert_eq!(arena, before);
+    }
+
+    #[test]
+    fn moving_a_live_object_to_another_zone_is_checked_and_preserves_spawn_state() {
+        let mut arena = ObjectArena::new();
+        let object = arena.spawn_entity(ZONE_A, entity(42, 3, 1, 0)).unwrap();
+
+        arena.set_zone(object, ZONE_B).unwrap();
+        assert_eq!(arena.get(object).unwrap().zone(), ZONE_B);
+        assert_eq!(arena.spawn_table().flags(42), Some(SPAWN_ACTIVE_BIT));
+
+        arena.despawn_subtree(object).unwrap();
+        assert_eq!(arena.spawn_table().flags(42), Some(0));
+        assert_eq!(
+            arena.set_zone(object, ZONE_A),
+            Err(TreeError::InvalidObject(object))
+        );
+    }
+
+    #[test]
+    fn category_reparenting_moves_root_three_objects_to_root_four_at_head() {
+        let mut arena = ObjectArena::new();
+        let first = arena.spawn_entity(ZONE_A, entity(43, 3, 1, 0)).unwrap();
+        let second = arena.spawn_entity(ZONE_A, entity(44, 3, 1, 0)).unwrap();
+        let third = arena.spawn_entity(ZONE_A, entity(45, 3, 1, 0)).unwrap();
+
+        arena.reparent_to_root(second, ENEMY_OBJECT_ROOT).unwrap();
+        arena.reparent_to_root(first, ENEMY_OBJECT_ROOT).unwrap();
+
+        assert_eq!(
+            object_ids(
+                &arena,
+                arena.preorder(TreeParent::Root(ZONE_OBJECT_ROOT)).unwrap()
+            ),
+            [45]
+        );
+        assert_eq!(
+            object_ids(
+                &arena,
+                arena.preorder(TreeParent::Root(ENEMY_OBJECT_ROOT)).unwrap()
+            ),
+            [43, 44],
+            "each category move inserts at the destination root's head"
+        );
+        assert_eq!(
+            arena.get(first).unwrap().parent(),
+            TreeParent::Root(ENEMY_OBJECT_ROOT)
+        );
+        assert_eq!(
+            arena.get(second).unwrap().parent(),
+            TreeParent::Root(ENEMY_OBJECT_ROOT)
+        );
+        assert_eq!(arena.get(third).unwrap().next_sibling(), None);
+    }
+
+    #[test]
+    fn whole_forest_postorder_is_children_first_and_root_ordered() {
+        let mut arena = ObjectArena::new();
+        let root_zero_parent = arena.spawn_entity(ZONE_A, entity(46, 3, 1, 0)).unwrap();
+        let root_zero_child = arena.spawn_entity(ZONE_A, entity(47, 3, 1, 0)).unwrap();
+        let root_zero_grandchild = arena.spawn_entity(ZONE_A, entity(48, 3, 1, 0)).unwrap();
+        let root_zero_head = arena.spawn_entity(ZONE_A, entity(49, 3, 1, 0)).unwrap();
+        let root_two = arena.spawn_entity(ZONE_A, entity(50, 3, 1, 0)).unwrap();
+        let root_seven_parent = arena.spawn_entity(ZONE_A, entity(51, 3, 1, 0)).unwrap();
+        let root_seven_child = arena.spawn_entity(ZONE_A, entity(52, 3, 1, 0)).unwrap();
+
+        arena
+            .add_child(TreeParent::Object(root_zero_parent), root_zero_child)
+            .unwrap();
+        arena
+            .add_child(TreeParent::Object(root_zero_child), root_zero_grandchild)
+            .unwrap();
+        arena
+            .reparent_to_root(root_zero_parent, RootHandle::new(0).unwrap())
+            .unwrap();
+        arena
+            .reparent_to_root(root_zero_head, RootHandle::new(0).unwrap())
+            .unwrap();
+        arena
+            .reparent_to_root(root_two, RootHandle::new(2).unwrap())
+            .unwrap();
+        arena
+            .add_child(TreeParent::Object(root_seven_parent), root_seven_child)
+            .unwrap();
+        arena
+            .reparent_to_root(root_seven_parent, RootHandle::new(7).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            arena.postorder_snapshot().unwrap(),
+            [
+                root_zero_head,
+                root_zero_grandchild,
+                root_zero_child,
+                root_zero_parent,
+                root_two,
+                root_seven_child,
+                root_seven_parent,
+            ]
+        );
+    }
+
+    #[test]
+    fn stale_lifecycle_handles_and_cycle_requests_do_not_mutate_live_objects() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(53, 3, 1, 0)).unwrap();
+        let child = arena.spawn_entity(ZONE_A, entity(54, 3, 1, 0)).unwrap();
+        arena.add_child(TreeParent::Object(parent), child).unwrap();
+
+        let before_cycle = arena.clone();
+        assert_eq!(
+            arena.add_child(TreeParent::Object(child), parent),
+            Err(TreeError::WouldCreateCycle)
+        );
+        assert_eq!(arena, before_cycle);
+
+        let snapshot = arena.postorder_snapshot().unwrap();
+        assert_eq!(snapshot, [child, parent]);
+        arena.despawn_subtree(parent).unwrap();
+        let replacement = arena.spawn_entity(ZONE_B, entity(55, 3, 1, 0)).unwrap();
+        assert_eq!(replacement.slot(), parent.slot());
+        assert_ne!(replacement.generation(), parent.generation());
+
+        assert_eq!(
+            arena.reparent_to_root(parent, ENEMY_OBJECT_ROOT),
+            Err(TreeError::InvalidObject(parent))
+        );
+        assert_eq!(
+            arena.despawn_subtree(snapshot[0]),
+            Err(TreeError::InvalidObject(child))
+        );
+        assert_eq!(arena.get(replacement).unwrap().zone(), ZONE_B);
+        assert_eq!(arena.len(), 1);
+    }
+
+    #[test]
+    fn subtree_despawn_returns_and_reuses_exact_head_to_tail_postorder() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(56, 3, 1, 0)).unwrap();
+        let first_child = arena.spawn_entity(ZONE_A, entity(57, 3, 1, 0)).unwrap();
+        let second_child = arena.spawn_entity(ZONE_A, entity(58, 3, 1, 0)).unwrap();
+        let grandchild = arena.spawn_entity(ZONE_A, entity(59, 3, 1, 0)).unwrap();
+        arena
+            .add_child(TreeParent::Object(parent), second_child)
+            .unwrap();
+        arena
+            .add_child(TreeParent::Object(parent), first_child)
+            .unwrap();
+        arena
+            .add_child(TreeParent::Object(first_child), grandchild)
+            .unwrap();
+
+        let removed = arena.despawn_subtree(parent).unwrap();
+        assert_eq!(removed, [grandchild, first_child, second_child, parent]);
+        assert!(removed.iter().all(|handle| arena.get(*handle).is_none()));
+        for id in 56..=59 {
+            assert_eq!(arena.spawn_table().flags(id), Some(0));
+        }
+
+        let replacements = (60..=63)
+            .map(|id| arena.spawn_entity(ZONE_B, entity(id, 3, 1, 0)).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            replacements
+                .iter()
+                .map(|handle| handle.slot())
+                .collect::<Vec<_>>(),
+            [
+                parent.slot(),
+                second_child.slot(),
+                first_child.slot(),
+                grandchild.slot(),
+            ],
+            "head insertion into the free list makes the parent reusable first"
+        );
+        assert!(
+            replacements
+                .iter()
+                .zip([parent, second_child, first_child, grandchild])
+                .all(|(replacement, stale)| replacement.generation() != stale.generation())
+        );
+    }
+
+    #[test]
+    fn runtime_child_teardown_clears_only_spawn_slot_zero_active_bit() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(64, 3, 1, 0)).unwrap();
+        arena.spawn_table_mut().set_flags(0, 0x8000_000f).unwrap();
+        let child = arena.create_child(parent, ZONE_A, 5, 2, false).unwrap();
+        assert_eq!(arena.spawn_table().flags(0), Some(0x8000_000f));
+
+        assert_eq!(arena.despawn_subtree(child).unwrap(), [child]);
+        assert_eq!(arena.spawn_table().flags(0), Some(0x8000_000e));
+        assert_eq!(
+            arena.spawn_table().flags(64),
+            Some(SPAWN_ACTIVE_BIT),
+            "runtime teardown must not clear its live parent's entity bit"
+        );
     }
 
     #[test]

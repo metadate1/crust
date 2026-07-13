@@ -110,6 +110,17 @@ pub struct RetailCameraInput {
     pub tapped: u32,
 }
 
+/// External world-map globals consumed by retail camera modes seven and eight.
+///
+/// `island_cam_state` is written by title/GOOL logic outside `CamUpdate`, while
+/// `island_cam_rot_x` supplies mode seven's target orbit angle. Keeping these
+/// words at an explicit boundary avoids inventing values in the camera runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailIslandCameraInput {
+    pub island_cam_state: i32,
+    pub island_cam_rot_x: i32,
+}
+
 /// Frame-local object and global words consumed by retail `CamFollow`.
 ///
 /// Translations and zooms retain the engine's signed 24.8 representation.
@@ -158,6 +169,16 @@ pub struct RetailCameraLocation {
     pub progress: PathProgress,
 }
 
+/// Camera transform sampled from one retail ZDAT path position.
+///
+/// Translation uses the engine's signed 24.8 world units. Rotation preserves
+/// the serialized/runtime `y`, `x`, `z` order consumed by `GfxUpdateMatrices`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailCameraPose {
+    pub translation: [i32; 3],
+    pub rotation_yxz: [i32; 3],
+}
+
 /// Behavior selected by one source-compatible camera update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetailCameraOutcome {
@@ -178,11 +199,38 @@ pub enum RetailCameraOutcome {
         moved: bool,
         crossed_path: bool,
     },
+    /// Modes seven/eight need world-map globals owned outside `CamUpdate`.
+    ///
+    /// The legacy [`RetailCameraRuntime::update`] entry point returns this safe
+    /// no-op until a host calls [`RetailCameraRuntime::update_with_island`] or
+    /// [`RetailCameraRuntime::update_island`] with those typed values.
+    IslandBoundary { mode: u16 },
+    /// A source-compatible world-map orbit or directed path step.
+    IslandAdvanced {
+        mode: u16,
+        state_before: i32,
+        state_after: i32,
+        /// Path links traversed while selecting the final location. Mode seven
+        /// may traverse several locally but still emits one final `LevelUpdate`.
+        path_crossings: u32,
+        moved: bool,
+    },
 }
 
 /// A side-effect handshake requested by the retail camera state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetailCameraEffect {
+    /// One exact `LevelUpdate` call produced by camera traversal.
+    ///
+    /// Automatic skip can cross several paths/zones in a single frame. The
+    /// ordered trace is therefore required; comparing only a step's aggregate
+    /// `before`/`after` locations would skip intermediate termination and
+    /// paging work.
+    LevelUpdate {
+        before: RetailCameraLocation,
+        after: RetailCameraLocation,
+        flags: u8,
+    },
     /// Retail saves after entering a zone whose graphics flag `0x1000` is clear.
     SaveStateHandshake { location: RetailCameraLocation },
 }
@@ -213,6 +261,10 @@ pub enum RetailCameraError {
         path: RetailPathId,
         mode: u16,
     },
+    IslandModeRequired {
+        path: RetailPathId,
+        mode: u16,
+    },
     InvalidAverageNodeDistance {
         path: RetailPathId,
         distance: i16,
@@ -222,6 +274,9 @@ pub enum RetailCameraError {
         operation: &'static str,
     },
     AutoSkipCycle {
+        path: RetailPathId,
+    },
+    IslandOrbitCycle {
         path: RetailPathId,
     },
 }
@@ -245,6 +300,11 @@ impl fmt::Display for RetailCameraError {
                 "camera path {}:{} uses mode {mode}; retail follow requires mode 5 or 6",
                 path.zone, path.index
             ),
+            Self::IslandModeRequired { path, mode } => write!(
+                formatter,
+                "camera path {}:{} uses mode {mode}; retail island camera requires mode 7 or 8",
+                path.zone, path.index
+            ),
             Self::InvalidAverageNodeDistance { path, distance } => write!(
                 formatter,
                 "camera path {}:{} has invalid average-node distance {distance}",
@@ -260,6 +320,11 @@ impl fmt::Display for RetailCameraError {
                 "automatic-camera skip cycles through path {}:{}",
                 path.zone, path.index
             ),
+            Self::IslandOrbitCycle { path } => write!(
+                formatter,
+                "world-map camera orbit cycles without returning through path {}:{}",
+                path.zone, path.index
+            ),
         }
     }
 }
@@ -271,9 +336,11 @@ impl std::error::Error for RetailCameraError {
             Self::InvalidPathPointCount { .. }
             | Self::UnsupportedMode { .. }
             | Self::FollowModeRequired { .. }
+            | Self::IslandModeRequired { .. }
             | Self::InvalidAverageNodeDistance { .. }
             | Self::FollowArithmetic { .. }
-            | Self::AutoSkipCycle { .. } => None,
+            | Self::AutoSkipCycle { .. }
+            | Self::IslandOrbitCycle { .. } => None,
         }
     }
 }
@@ -331,10 +398,215 @@ impl RetailCameraRuntime {
         self.game_state
     }
 
+    /// Returns the no-op result used when current display bit two disables
+    /// `CamUpdate` for this frame.
+    #[must_use]
+    pub fn stationary_step(&self) -> RetailCameraStep {
+        RetailCameraStep {
+            before: self.location,
+            after: self.location,
+            outcome: RetailCameraOutcome::Stationary,
+            game_state: self.game_state,
+            effects: Vec::new(),
+        }
+    }
+
     /// Persistent retail follow-camera offset, zoom, and smoothing globals.
     #[must_use]
     pub const fn follow_state(&self) -> RetailCameraFollowState {
         self.follow
+    }
+
+    /// Camera-relative XZ heading consumed by native GOOL player physics.
+    ///
+    /// `LevelUpdate` samples the current path with the negated signed-8.8
+    /// progress, then `GfxUpdateMatrices` publishes `cam_rot_after.x` unless
+    /// the active zone's fixed-bounce camera flag forces zero. Path sampling
+    /// itself uses the progress magnitude, so this method can operate on the
+    /// runtime's canonical location without manufacturing a render matrix.
+    pub fn rotation_xz(&self, graph: &RetailZoneGraph) -> Result<Angle12, RetailCameraError> {
+        let zone = graph.zone(self.location.path.zone).ok_or_else(|| {
+            RetailCameraError::Graph(FormatError::global(format!(
+                "camera zone {} is absent",
+                self.location.path.zone
+            )))
+        })?;
+        if zone.graphics_flags & 0x1000 != 0 {
+            return Ok(Angle12::new(0));
+        }
+        let path = graph.path(self.location.path).ok_or_else(|| {
+            RetailCameraError::Graph(FormatError::global(format!(
+                "camera path {}:{} is absent",
+                self.location.path.zone, self.location.path.index
+            )))
+        })?;
+        let magnitude = self.location.progress.raw().unsigned_abs();
+        let point_index =
+            usize::try_from(magnitude >> 8).map_err(|_| RetailCameraError::FollowArithmetic {
+                path: self.location.path,
+                operation: "XZ rotation point lookup",
+            })?;
+        let point = path.points.get(point_index).ok_or({
+            RetailCameraError::InvalidPathPointCount {
+                path: self.location.path,
+                point_count: path.points.len(),
+            }
+        })?;
+        let fraction =
+            i32::try_from(magnitude & 0xff).map_err(|_| RetailCameraError::FollowArithmetic {
+                path: self.location.path,
+                operation: "XZ rotation fraction",
+            })?;
+        let mut next_rotation_x = point.rotation_x;
+
+        if fraction != 0 && point_index == path.points.len() - 1 {
+            if let Some((link_index, link)) = path
+                .neighbors
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, link)| link.relation & 2 != 0)
+            {
+                let (next_id, _) = graph.resolve_neighbor(self.location.path, link_index)?;
+                let next_path = graph.path(next_id).ok_or_else(|| {
+                    RetailCameraError::Graph(FormatError::global(format!(
+                        "camera path {}:{} is absent",
+                        next_id.zone, next_id.index
+                    )))
+                })?;
+                // Retail refuses to interpolate into a mode-one camera.
+                if next_path.camera_mode != 1 {
+                    let next_index = if link.goal & 2 != 0 {
+                        next_path.points.len() - 1
+                    } else {
+                        0
+                    };
+                    next_rotation_x = next_path.points[next_index].rotation_x;
+                }
+            }
+        } else if let Some(next) = path.points.get(point_index.saturating_add(1)) {
+            next_rotation_x = next.rotation_x;
+        }
+
+        let rotation = i32::from(point.rotation_x).wrapping_add(
+            (i32::from(next_rotation_x)
+                .wrapping_sub(i32::from(point.rotation_x))
+                .wrapping_mul(fraction))
+                >> 8,
+        );
+        Ok(Angle12::new(rotation))
+    }
+
+    /// Samples the exact source `ZonePathProgressToLoc` camera transform.
+    ///
+    /// A fractional final point may interpolate into the first eligible
+    /// following path. Mode-one automatic cameras deliberately refuse that
+    /// cross-path interpolation, matching the retail boundary.
+    pub fn pose(&self, graph: &RetailZoneGraph) -> Result<RetailCameraPose, RetailCameraError> {
+        let zone = graph.zone(self.location.path.zone).ok_or_else(|| {
+            RetailCameraError::Graph(FormatError::global(format!(
+                "camera zone {} is absent",
+                self.location.path.zone
+            )))
+        })?;
+        let path = graph.path(self.location.path).ok_or_else(|| {
+            RetailCameraError::Graph(FormatError::global(format!(
+                "camera path {}:{} is absent",
+                self.location.path.zone, self.location.path.index
+            )))
+        })?;
+        let point_index = usize::from(self.location.progress.point_index());
+        let point = path.points.get(point_index).ok_or({
+            RetailCameraError::InvalidPathPointCount {
+                path: self.location.path,
+                point_count: path.points.len(),
+            }
+        })?;
+        let fraction = i32::from(self.location.progress.fraction());
+        let mut next_zone = zone;
+        let mut next_point = *path
+            .points
+            .get(point_index.saturating_add(1))
+            .unwrap_or(point);
+
+        if fraction != 0
+            && point_index == path.points.len() - 1
+            && let Some((neighbor_index, link)) = path
+                .neighbors
+                .iter()
+                .copied()
+                .enumerate()
+                .find(|(_, link)| link.relation & 2 != 0)
+        {
+            let (next_path_id, _) = graph.resolve_neighbor(self.location.path, neighbor_index)?;
+            let following = graph.path(next_path_id).ok_or_else(|| {
+                RetailCameraError::Graph(FormatError::global(format!(
+                    "camera path {}:{} is absent",
+                    next_path_id.zone, next_path_id.index
+                )))
+            })?;
+            if following.camera_mode != 1 {
+                next_zone = graph.zone(next_path_id.zone).ok_or_else(|| {
+                    RetailCameraError::Graph(FormatError::global(format!(
+                        "camera zone {} is absent",
+                        next_path_id.zone
+                    )))
+                })?;
+                let next_index = if link.goal & 2 != 0 {
+                    following.points.len() - 1
+                } else {
+                    0
+                };
+                next_point = following.points[next_index];
+            }
+        }
+
+        let world_translation = |origin: [i32; 3], coordinates: [i16; 3]| {
+            [
+                origin[0]
+                    .wrapping_add(i32::from(coordinates[0]))
+                    .wrapping_shl(8),
+                origin[1]
+                    .wrapping_add(i32::from(coordinates[1]))
+                    .wrapping_shl(8),
+                origin[2]
+                    .wrapping_add(i32::from(coordinates[2]))
+                    .wrapping_shl(8),
+            ]
+        };
+        let current_translation = world_translation(zone.origin, [point.x, point.y, point.z]);
+        let next_translation =
+            world_translation(next_zone.origin, [next_point.x, next_point.y, next_point.z]);
+        let interpolate = |current: i32, next: i32| {
+            current.wrapping_add(next.wrapping_sub(current).wrapping_mul(fraction) >> 8)
+        };
+        let current_rotation = [
+            i32::from(point.rotation_y),
+            i32::from(point.rotation_x),
+            i32::from(point.rotation_z),
+        ];
+        let next_rotation = [
+            i32::from(next_point.rotation_y),
+            i32::from(next_point.rotation_x),
+            i32::from(next_point.rotation_z),
+        ];
+        let rotation_y = current_rotation[0].wrapping_add(
+            i32::from(
+                Angle12::new(current_rotation[0]).difference_to(Angle12::new(next_rotation[0])),
+            )
+            .wrapping_mul(fraction)
+                >> 8,
+        );
+
+        Ok(RetailCameraPose {
+            translation: [0_usize, 1, 2]
+                .map(|axis| interpolate(current_translation[axis], next_translation[axis])),
+            rotation_yxz: [
+                rotation_y,
+                interpolate(current_rotation[1], next_rotation[1]),
+                interpolate(current_rotation[2], next_rotation[2]),
+            ],
+        })
     }
 
     /// Executes the retail mode-five/six `CamFollow` path selection slice.
@@ -359,11 +631,26 @@ impl RetailCameraRuntime {
         }
     }
 
-    /// Executes the mode 0/1/3/5/6 portion of retail `CamUpdate`.
+    /// Executes retail `CamUpdate` with no world-map globals bound.
+    ///
+    /// Modes seven and eight return an [`RetailCameraOutcome::IslandBoundary`]
+    /// no-op through this compatibility entry point. Hosts with the title/GOOL
+    /// globals should call [`Self::update_with_island`] instead.
     pub fn update(
         &mut self,
         graph: &RetailZoneGraph,
         input: RetailCameraInput,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        self.update_with_island(graph, input, None)
+    }
+
+    /// Executes retail `CamUpdate`, including modes seven/eight when their
+    /// external world-map globals are supplied.
+    pub fn update_with_island(
+        &mut self,
+        graph: &RetailZoneGraph,
+        input: RetailCameraInput,
+        island: Option<RetailIslandCameraInput>,
     ) -> Result<RetailCameraStep, RetailCameraError> {
         let before = self.location;
         let initial_path = graph.path(before.path).ok_or_else(|| {
@@ -386,11 +673,300 @@ impl RetailCameraRuntime {
                 ))
             }
             1 | 3 => self.update_automatic(graph, input, before),
+            mode @ (7 | 8) => match island {
+                Some(island) => self.update_island(graph, island),
+                None => Ok(self.step(
+                    before,
+                    RetailCameraOutcome::IslandBoundary { mode },
+                    Vec::new(),
+                )),
+            },
             mode => Err(RetailCameraError::UnsupportedMode {
                 path: before.path,
                 mode,
             }),
         }
+    }
+
+    /// Executes the source world-map modes with explicit title/GOOL globals.
+    ///
+    /// Like [`Self::update_follow`], errors are transactional: graph failures
+    /// and malformed cycles leave the persistent camera byte-for-byte unchanged.
+    pub fn update_island(
+        &mut self,
+        graph: &RetailZoneGraph,
+        input: RetailIslandCameraInput,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        let before_runtime = *self;
+        let mut next = before_runtime;
+        match next.update_island_inner(graph, input) {
+            Ok(step) => {
+                *self = next;
+                Ok(step)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn update_island_inner(
+        &mut self,
+        graph: &RetailZoneGraph,
+        input: RetailIslandCameraInput,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        let before = self.location;
+        let mode = graph
+            .path(before.path)
+            .ok_or_else(|| {
+                RetailCameraError::Graph(FormatError::global(format!(
+                    "camera path {}:{} is absent",
+                    before.path.zone, before.path.index
+                )))
+            })?
+            .camera_mode;
+        match mode {
+            7 => self.update_island_orbit(graph, input, before),
+            8 => self.update_island_directed(graph, input, before),
+            mode => Err(RetailCameraError::IslandModeRequired {
+                path: before.path,
+                mode,
+            }),
+        }
+    }
+
+    fn update_island_orbit(
+        &mut self,
+        graph: &RetailZoneGraph,
+        input: RetailIslandCameraInput,
+        before: RetailCameraLocation,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        let state_before = input.island_cam_state;
+        let mut state_after = state_before;
+        let mut next_state = state_before;
+        let angle = if state_before == 0 {
+            0
+        } else if state_before == -1 {
+            next_state = 1;
+            -(i32::from(Angle12::new(input.island_cam_rot_x).raw()))
+        } else if matches!(state_before, 5 | 6) {
+            0x22
+        } else {
+            let camera_rotation_x = self.pose(graph)?.rotation_yxz[1];
+            let difference = i32::from(
+                Angle12::new(camera_rotation_x).difference_to(Angle12::new(input.island_cam_rot_x)),
+            );
+            if difference.unsigned_abs() < 0x17 {
+                0
+            } else {
+                difference.signum()
+            }
+        };
+
+        let mut cursor = before;
+        let mut selected = None;
+        let mut path_crossings = 0_u32;
+        let mut visited = BTreeSet::new();
+        visited.insert((cursor.path, cursor.progress.point_index()));
+        loop {
+            if angle == 0 {
+                break;
+            }
+            selected = Some(cursor);
+            let path = graph.path(cursor.path).ok_or_else(|| {
+                RetailCameraError::Graph(FormatError::global(format!(
+                    "camera path {}:{} is absent",
+                    cursor.path.zone, cursor.path.index
+                )))
+            })?;
+            if state_before == -1 {
+                let point = path
+                    .points
+                    .get(usize::from(cursor.progress.point_index()))
+                    .ok_or(RetailCameraError::InvalidPathPointCount {
+                        path: cursor.path,
+                        point_count: path.points.len(),
+                    })?;
+                let difference = Angle12::new(i32::from(point.rotation_y))
+                    .difference_to(Angle12::new(angle.abs()));
+                if difference.unsigned_abs() < 0x17 {
+                    break;
+                }
+            }
+
+            let raw_step = if next_state & 4 != 0 { 0x400 } else { 0x100 };
+            let next_progress = cursor.progress.raw().wrapping_add(raw_step);
+            let path_length = i32::from(retail_point_count(graph, cursor.path)?.get()) << 8;
+            if next_progress >= path_length {
+                let map_neighbors = path
+                    .neighbors
+                    .iter()
+                    .map(|neighbor| MapNeighbor {
+                        goal: neighbor.goal,
+                    })
+                    .collect::<Vec<_>>();
+                let Some(neighbor_index) = select_island_neighbor(&map_neighbors, next_state)
+                else {
+                    break;
+                };
+                let (next_path, link) = graph.resolve_neighbor(cursor.path, neighbor_index)?;
+                let next_count = retail_point_count(graph, next_path)?;
+                let next_raw = if link.goal & 1 != 0 {
+                    0
+                } else {
+                    (i32::from(next_count.get()) - 1) << 8
+                };
+                cursor = RetailCameraLocation {
+                    path: next_path,
+                    progress: PathProgress::clamped(next_raw, next_count),
+                };
+                path_crossings = path_crossings.saturating_add(1);
+                if next_state & 4 != 0 || angle > 0 {
+                    selected = Some(cursor);
+                    break;
+                }
+            } else if next_state & 4 != 0 || angle > 0 {
+                selected = Some(location_at_raw(graph, cursor.path, next_progress)?);
+                break;
+            } else {
+                cursor = location_at_raw(graph, cursor.path, next_progress)?;
+            }
+
+            if cursor.path == before.path
+                && cursor.progress.point_index() == before.progress.point_index()
+            {
+                break;
+            }
+            if !visited.insert((cursor.path, cursor.progress.point_index())) {
+                return Err(RetailCameraError::IslandOrbitCycle { path: cursor.path });
+            }
+        }
+
+        if state_before == -1 {
+            state_after = next_state;
+        }
+        let after = selected.unwrap_or(before);
+        let moved = after != before;
+        self.location = after;
+        let effects = moved
+            .then_some(RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags: 0,
+            })
+            .into_iter()
+            .collect();
+        Ok(self.step(
+            before,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 7,
+                state_before,
+                state_after,
+                path_crossings,
+                moved,
+            },
+            effects,
+        ))
+    }
+
+    fn update_island_directed(
+        &mut self,
+        graph: &RetailZoneGraph,
+        input: RetailIslandCameraInput,
+        before: RetailCameraLocation,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        let state_before = input.island_cam_state;
+        let path = graph.path(before.path).ok_or_else(|| {
+            RetailCameraError::Graph(FormatError::global(format!(
+                "camera path {}:{} is absent",
+                before.path.zone, before.path.index
+            )))
+        })?;
+        let desired_relation = ((state_before & 3) ^ 3) as u8;
+        let neighbor_index = path
+            .neighbors
+            .iter()
+            .position(|neighbor| neighbor.relation & 3 == desired_relation);
+        let point_count = retail_point_count(graph, before.path)?;
+        let point_index = i32::from(before.progress.point_index());
+        let mut after = before;
+        let mut called_level_update = false;
+        let mut path_crossings = 0_u32;
+
+        if state_before & 1 != 0 {
+            if point_index + 1 < i32::from(point_count.get()) {
+                after = location_at_raw(
+                    graph,
+                    before.path,
+                    before.progress.raw().wrapping_add(PATH_POINT_STEP),
+                )?;
+                called_level_update = true;
+            } else if let Some(neighbor_index) = neighbor_index {
+                let (next_path, link) = graph.resolve_neighbor(before.path, neighbor_index)?;
+                let next_count = retail_point_count(graph, next_path)?;
+                let next_progress = if link.goal & 1 != 0 {
+                    0
+                } else {
+                    (i32::from(next_count.get()) - 1) << 8
+                };
+                after = RetailCameraLocation {
+                    path: next_path,
+                    progress: PathProgress::clamped(next_progress, next_count),
+                };
+                called_level_update = true;
+                path_crossings = 1;
+            }
+        } else if point_index > 0 {
+            after = location_at_raw(
+                graph,
+                before.path,
+                before.progress.raw().wrapping_sub(PATH_POINT_STEP),
+            )?;
+            called_level_update = true;
+        } else if let Some(neighbor_index) = neighbor_index {
+            let (next_path, link) = graph.resolve_neighbor(before.path, neighbor_index)?;
+            let next_count = retail_point_count(graph, next_path)?;
+            let next_progress = if link.goal & 1 != 0 {
+                0
+            } else {
+                (i32::from(next_count.get()) - 1) << 8
+            };
+            after = RetailCameraLocation {
+                path: next_path,
+                progress: PathProgress::clamped(next_progress, next_count),
+            };
+            called_level_update = true;
+            path_crossings = 1;
+        }
+
+        self.location = after;
+        let final_mode = graph
+            .path(after.path)
+            .ok_or_else(|| {
+                RetailCameraError::Graph(FormatError::global(format!(
+                    "camera path {}:{} is absent",
+                    after.path.zone, after.path.index
+                )))
+            })?
+            .camera_mode;
+        let state_after = if final_mode == 8 { state_before } else { 1 };
+        let effects = called_level_update
+            .then_some(RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags: 0,
+            })
+            .into_iter()
+            .collect();
+        Ok(self.step(
+            before,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 8,
+                state_before,
+                state_after,
+                path_crossings,
+                moved: after != before,
+            },
+            effects,
+        ))
     }
 
     fn update_follow_inner(
@@ -594,6 +1170,15 @@ impl RetailCameraRuntime {
         }
         let crossed_path = self.location.path != before.path;
         let moved = self.location != before;
+        let effects = if crossed_path {
+            vec![RetailCameraEffect::LevelUpdate {
+                before,
+                after: self.location,
+                flags: 0,
+            }]
+        } else {
+            Vec::new()
+        };
         Ok(self.step(
             before,
             RetailCameraOutcome::FollowEvaluated {
@@ -602,7 +1187,7 @@ impl RetailCameraRuntime {
                 moved,
                 crossed_path,
             },
-            Vec::new(),
+            effects,
         ))
     }
 
@@ -658,6 +1243,7 @@ impl RetailCameraRuntime {
                 ));
             }
 
+            let crossing_before = location;
             let (target_path, link) = graph.resolve_neighbor(location.path, 0)?;
             let target_count = retail_point_count(graph, target_path)?;
             let target_progress = if link.goal & 1 != 0 {
@@ -671,6 +1257,11 @@ impl RetailCameraRuntime {
                 progress: target_progress,
             };
             path_crossings = path_crossings.saturating_add(1);
+            effects.push(RetailCameraEffect::LevelUpdate {
+                before: crossing_before,
+                after: location,
+                flags: 0,
+            });
 
             let target_flags = graph
                 .zone(target_path.zone)
@@ -1388,11 +1979,12 @@ pub struct MapNeighbor {
 /// Retail preference: the last exact/direction-compatible match, then the first
 /// goal without orbit bit 4, then no route.
 #[must_use]
-pub fn select_island_neighbor(neighbors: &[MapNeighbor], state: u8) -> Option<usize> {
+pub fn select_island_neighbor(neighbors: &[MapNeighbor], state: i32) -> Option<usize> {
     let mut selected = None;
     for (index, neighbor) in neighbors.iter().copied().enumerate() {
-        if neighbor.goal == state
-            || (selected.is_none() && (neighbors.len() == 1 || (neighbor.goal & 3) == (state & 3)))
+        if i32::from(neighbor.goal) == state
+            || (selected.is_none()
+                && (neighbors.len() == 1 || i32::from(neighbor.goal & 3) == (state & 3)))
         {
             selected = Some(index);
         }
@@ -1441,6 +2033,27 @@ mod tests {
             direction: [0; 3],
             points: vec![point; point_count],
         }
+    }
+
+    fn island_path(
+        camera_mode: u16,
+        point_count: usize,
+        neighbors: &[(u8, u8, u8, u8)],
+    ) -> ZonePath {
+        let mut path = retail_path(camera_mode, point_count, None);
+        path.neighbors = neighbors
+            .iter()
+            .copied()
+            .map(
+                |(relation, neighbor_zone_index, path_index, goal)| ZoneNeighborPath {
+                    relation,
+                    neighbor_zone_index,
+                    path_index,
+                    goal,
+                },
+            )
+            .collect();
+        path
     }
 
     fn follow_path(
@@ -1529,6 +2142,225 @@ mod tests {
             select_island_neighbor(&[MapNeighbor { goal: 4 }, MapNeighbor { goal: 4 }], 2),
             None
         );
+        assert_eq!(
+            select_island_neighbor(&[MapNeighbor { goal: 1 }, MapNeighbor { goal: 1 }], 0x101),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn retail_world_map_mode_without_external_globals_stops_at_typed_boundary() {
+        for mode in [7, 8] {
+            let graph = single_zone_graph(0, vec![island_path(mode, 2, &[])]);
+            let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+            let before = camera;
+            let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+
+            assert_eq!(camera, before);
+            assert_eq!(step.outcome, RetailCameraOutcome::IslandBoundary { mode });
+            assert!(step.effects.is_empty());
+        }
+    }
+
+    #[test]
+    fn retail_mode_seven_traverses_local_orbit_but_emits_one_final_level_update() {
+        let graph = single_zone_graph(
+            0,
+            vec![
+                island_path(7, 1, &[(0, 0, 1, 1)]),
+                island_path(7, 1, &[(0, 0, 2, 1)]),
+                island_path(7, 1, &[(0, 0, 0, 1)]),
+            ],
+        );
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let before = camera.location();
+        let step = camera
+            .update_island(
+                &graph,
+                RetailIslandCameraInput {
+                    island_cam_state: 1,
+                    island_cam_rot_x: 0xf00,
+                },
+            )
+            .unwrap();
+        let after = RetailCameraLocation {
+            path: RetailPathId {
+                zone: TEST_ZONE,
+                index: 2,
+            },
+            progress: PathProgress::ZERO,
+        };
+
+        assert_eq!(step.after, after);
+        assert_eq!(
+            step.outcome,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 7,
+                state_before: 1,
+                state_after: 1,
+                path_crossings: 3,
+                moved: true,
+            }
+        );
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn retail_mode_eight_advances_one_point_with_ordered_level_update() {
+        let graph = single_zone_graph(0, vec![island_path(8, 3, &[])]);
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let before = camera.location();
+        let step = camera
+            .update_island(
+                &graph,
+                RetailIslandCameraInput {
+                    island_cam_state: 1,
+                    island_cam_rot_x: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(step.after.progress.raw(), PATH_POINT_STEP);
+        assert_eq!(
+            step.outcome,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 8,
+                state_before: 1,
+                state_after: 1,
+                path_crossings: 0,
+                moved: true,
+            }
+        );
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before,
+                after: step.after,
+                flags: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn retail_mode_eight_crosses_selected_neighbor_and_resets_state_off_mode_eight() {
+        let graph = single_zone_graph(
+            0,
+            vec![island_path(8, 1, &[(0, 0, 1, 1)]), island_path(5, 2, &[])],
+        );
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let before = camera.location();
+        let step = camera
+            .update_island(
+                &graph,
+                RetailIslandCameraInput {
+                    island_cam_state: 3,
+                    island_cam_rot_x: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(step.after.path.index, 1);
+        assert_eq!(step.after.progress, PathProgress::ZERO);
+        assert_eq!(
+            step.outcome,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 8,
+                state_before: 3,
+                state_after: 1,
+                path_crossings: 1,
+                moved: true,
+            }
+        );
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before,
+                after: step.after,
+                flags: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn retail_mode_eight_stays_at_endpoint_without_selected_neighbor() {
+        let graph = single_zone_graph(0, vec![island_path(8, 2, &[])]);
+        let mut camera = RetailCameraRuntime::at_path(
+            &graph,
+            graph.spawn_path(),
+            PATH_POINT_STEP,
+            GAME_STATE_CUTSCENE,
+        )
+        .unwrap();
+        let before = camera;
+        let step = camera
+            .update_island(
+                &graph,
+                RetailIslandCameraInput {
+                    island_cam_state: 1,
+                    island_cam_rot_x: 0,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(camera, before);
+        assert_eq!(step.before, step.after);
+        assert!(step.effects.is_empty());
+        assert_eq!(
+            step.outcome,
+            RetailCameraOutcome::IslandAdvanced {
+                mode: 8,
+                state_before: 1,
+                state_after: 1,
+                path_crossings: 0,
+                moved: false,
+            }
+        );
+    }
+
+    #[test]
+    fn retail_island_orbit_cycle_error_is_transactional() {
+        let graph = single_zone_graph(
+            0,
+            vec![
+                island_path(7, 2, &[(0, 0, 1, 1)]),
+                island_path(7, 1, &[(0, 0, 1, 1)]),
+            ],
+        );
+        let mut camera = RetailCameraRuntime::at_path(
+            &graph,
+            graph.spawn_path(),
+            PATH_POINT_STEP,
+            GAME_STATE_CUTSCENE,
+        )
+        .unwrap();
+        let before = camera;
+        let error = camera
+            .update_island(
+                &graph,
+                RetailIslandCameraInput {
+                    island_cam_state: 1,
+                    island_cam_rot_x: 0xf00,
+                },
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            RetailCameraError::IslandOrbitCycle {
+                path: RetailPathId {
+                    zone: TEST_ZONE,
+                    index: 1,
+                },
+            }
+        );
+        assert_eq!(camera, before);
     }
 
     #[test]
@@ -1576,6 +2408,76 @@ mod tests {
     }
 
     #[test]
+    fn retail_camera_rotation_xz_interpolates_path_rotation_x() {
+        let mut path = retail_path(0, 2, None);
+        path.points[0].rotation_x = 0x100;
+        path.points[1].rotation_x = 0x500;
+        let graph = single_zone_graph(0, vec![path]);
+        let camera =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0x80, GAME_STATE_PLAYING)
+                .unwrap();
+
+        assert_eq!(camera.rotation_xz(&graph).unwrap(), Angle12::new(0x300));
+    }
+
+    #[test]
+    fn retail_camera_pose_matches_source_path_interpolation() {
+        let mut path = retail_path(0, 2, None);
+        path.points[0] = ZonePathPoint {
+            x: 10,
+            y: -20,
+            z: 30,
+            rotation_y: 0x0f00,
+            rotation_x: 0x100,
+            rotation_z: -0x100,
+        };
+        path.points[1] = ZonePathPoint {
+            x: 30,
+            y: 20,
+            z: 50,
+            rotation_y: 0x0100,
+            rotation_x: 0x500,
+            rotation_z: 0x100,
+        };
+        let graph = RetailZoneGraph::new(
+            RetailPathId {
+                zone: TEST_ZONE,
+                index: 0,
+            },
+            [RetailZoneNode::new(
+                TEST_ZONE,
+                [100, 200, 300],
+                0,
+                0,
+                vec![TEST_ZONE],
+                vec![path],
+            )],
+        )
+        .unwrap();
+        let camera =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0x80, GAME_STATE_PLAYING)
+                .unwrap();
+
+        assert_eq!(
+            camera.pose(&graph).unwrap(),
+            RetailCameraPose {
+                translation: [120 << 8, 200 << 8, 340 << 8],
+                rotation_yxz: [0x1000, 0x300, 0],
+            }
+        );
+    }
+
+    #[test]
+    fn retail_bounce_camera_forces_zero_physics_heading() {
+        let mut path = retail_path(0, 1, None);
+        path.points[0].rotation_x = 0x700;
+        let graph = single_zone_graph(0x1000, vec![path]);
+        let camera = RetailCameraRuntime::new(&graph).unwrap();
+
+        assert_eq!(camera.rotation_xz(&graph).unwrap(), Angle12::new(0));
+    }
+
+    #[test]
     fn retail_modes_one_and_three_advance_one_whole_point_per_tick() {
         for mode in [1, 3] {
             let graph = single_zone_graph(0, vec![retail_path(mode, 3, None)]);
@@ -1617,9 +2519,16 @@ mod tests {
         );
         assert_eq!(
             crossing.effects,
-            [RetailCameraEffect::SaveStateHandshake {
-                location: crossing.after,
-            }]
+            [
+                RetailCameraEffect::LevelUpdate {
+                    before: crossing.before,
+                    after: crossing.after,
+                    flags: 0,
+                },
+                RetailCameraEffect::SaveStateHandshake {
+                    location: crossing.after,
+                },
+            ]
         );
         assert_eq!(crossing.game_state, GAME_STATE_CUTSCENE);
 
@@ -1819,6 +2728,14 @@ mod tests {
                 crossed_path: true,
             }
         );
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before: step.before,
+                after: step.after,
+                flags: 0,
+            }]
+        );
     }
 
     #[test]
@@ -1888,7 +2805,32 @@ mod tests {
                 path_crossings: 2,
             }
         );
-        assert_eq!(step.effects.len(), 2);
+        let middle = RetailCameraLocation {
+            path: RetailPathId {
+                zone: step.before.path.zone,
+                index: 1,
+            },
+            progress: PathProgress::ZERO,
+        };
+        assert_eq!(
+            step.effects,
+            [
+                RetailCameraEffect::LevelUpdate {
+                    before: step.before,
+                    after: middle,
+                    flags: 0,
+                },
+                RetailCameraEffect::SaveStateHandshake { location: middle },
+                RetailCameraEffect::LevelUpdate {
+                    before: middle,
+                    after: step.after,
+                    flags: 0,
+                },
+                RetailCameraEffect::SaveStateHandshake {
+                    location: step.after,
+                },
+            ]
+        );
         assert_eq!(step.game_state, GAME_STATE_CUTSCENE);
     }
 
@@ -1942,7 +2884,14 @@ mod tests {
         let mut camera = RetailCameraRuntime::new(&graph).unwrap();
         let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
         assert_eq!(step.after.path.zone, target_zone);
-        assert!(step.effects.is_empty());
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before: step.before,
+                after: step.after,
+                flags: 0,
+            }]
+        );
     }
 
     #[test]

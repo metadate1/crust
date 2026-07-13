@@ -375,7 +375,8 @@ fn current_zone_entities_and_hosted_children_share_one_runtime_frame() {
     assert_eq!(child_vm.register(process_register::PATH_LENGTH), Ok(0));
     assert_eq!(
         child_vm.register(process_register::STATUS_A),
-        Ok(0x0002_0020)
+        Ok(0x0002_0000),
+        "the same-frame native update clears GOOL_FLAG_FIRST_FRAME"
     );
     assert_eq!(
         child_vm.register(process_register::VOICE_ID),

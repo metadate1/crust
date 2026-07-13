@@ -60,8 +60,9 @@ An external `git archive` copy produced these results:
   arena and VM handles, traverses the mutation-aware spawn tree, and applies synchronous runtime
   child creation inside the same 30 Hz frame. Immutable post-GOOL snapshots now feed pair-scoped
   3D vertex-object rendering, while pre-execution animation bounds feed the implemented solid-query
-  helpers. Effects remain data rather than unchecked host pointers; complete collision response,
-  non-vertex rendering, audio and progression are not implied.
+  helpers. Camera crossings apply checked zone teardown/paging/activation, and typed ADIO requests
+  feed the retail SFX voice engine. Effects remain data rather than unchecked host pointers;
+  complete collision response, non-vertex rendering, retail music and progression are not implied.
 
 ## Deliberate corrections
 

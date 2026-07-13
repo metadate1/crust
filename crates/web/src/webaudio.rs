@@ -1,5 +1,6 @@
 use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE, Sample};
 use crust_audio::output::OutputOptions;
+use crust_audio::retail::RetailAudioEngine;
 use crust_audio::sequencer::{EventKind, Sequence, SequenceEvent, Sequencer};
 use wasm_bindgen::JsValue;
 use web_sys::{AudioContext, GainNode};
@@ -72,7 +73,7 @@ impl WebAudio {
         self.mixer.play(voice, sample, 13_000, 13_000, 4_096, 0, 1);
     }
 
-    pub fn schedule(&mut self) -> Result<(), JsValue> {
+    pub fn schedule(&mut self, retail_audio: &mut RetailAudioEngine) -> Result<(), JsValue> {
         let now = self.context.current_time();
         if self.next_time < now {
             self.next_time = now + 0.035;
@@ -82,14 +83,26 @@ impl WebAudio {
             self.sequencer.render(&mut music);
             let mut sfx = vec![0_i16; CHUNK_FRAMES * 2];
             self.mixer.mix(&mut sfx);
+            let mut retail_sfx = vec![0_i16; CHUNK_FRAMES * 2];
+            retail_audio.mix(&mut retail_sfx);
             let mut left = vec![0.0_f32; CHUNK_FRAMES];
             let mut right = vec![0.0_f32; CHUNK_FRAMES];
             for frame in 0..CHUNK_FRAMES {
-                let mixed = self.output.mix_frame(
+                let option_mixed = self.output.mix_frame(
                     [music[frame * 2], music[frame * 2 + 1]],
                     [
                         f32::from(sfx[frame * 2]) / 32_768.0,
                         f32::from(sfx[frame * 2 + 1]) / 32_768.0,
+                    ],
+                );
+                // RetailAudioEngine applies the source `init_vol` when a
+                // voice is created. Add that already-scaled bus after the
+                // synthetic SFX option gain so it is not attenuated twice.
+                let mixed = self.output.add_prescaled_sfx_frame(
+                    option_mixed,
+                    [
+                        f32::from(retail_sfx[frame * 2]) / 32_768.0,
+                        f32::from(retail_sfx[frame * 2 + 1]) / 32_768.0,
                     ],
                 );
                 left[frame] = mixed[0];

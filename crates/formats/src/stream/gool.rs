@@ -34,6 +34,7 @@ pub struct GoolProgram {
     state_index: u16,
     state: GoolState,
     states: Vec<GoolState>,
+    event_map: Vec<u16>,
     global_code: Vec<u32>,
     code: Vec<u32>,
     internal_words: Vec<u32>,
@@ -79,6 +80,16 @@ impl GoolProgram {
     #[must_use]
     pub fn states(&self) -> &[GoolState] {
         &self.states
+    }
+
+    /// Raw event-to-state/interrupt halfwords from the prefix of global item
+    /// three. Values below `0x8000` name states (with `0x00ff` as retail's
+    /// null-state sentinel); values with bit 15 set name shared-code
+    /// interrupt offsets. The returned slice ends exactly at the header's
+    /// `subtype_map_index` boundary.
+    #[must_use]
+    pub fn event_map(&self) -> &[u16] {
+        &self.event_map
     }
 
     #[must_use]
@@ -154,36 +165,23 @@ pub fn load_gool_program(
     let global = unique_entry(metadata, nsf, global_eid, "global GOOL")?;
     let header = parse_global_header(global, nsf_bytes)?;
     let internal_words = parse_words(global, GLOBAL_DATA_ITEM, nsf_bytes, "GOOL internal data")?;
-    let map_bytes = item_bytes(global, GLOBAL_MAP_ITEM, nsf_bytes, "GOOL state maps")?;
-    let state_map = parse_halfwords(
-        map_bytes,
-        global.items[GLOBAL_MAP_ITEM].byte_range().start,
-        "GOOL state maps",
-    )?;
-    let subtype_base = usize::try_from(header.subtype_map_index).map_err(|_| {
-        FormatError::at(
-            global.items[GLOBAL_HEADER_ITEM].byte_range().start + 16,
-            "GOOL subtype-map index does not fit the host",
-        )
-    })?;
-    if subtype_base > state_map.len() {
-        return Err(FormatError::at(
-            global.items[GLOBAL_HEADER_ITEM].byte_range().start + 16,
-            "GOOL subtype-map index is outside the map item",
-        ));
-    }
-    let subtype_index = subtype_base
-        .checked_add(usize::from(subtype))
-        .ok_or_else(|| FormatError::global("GOOL subtype-map lookup overflows"))?;
-    let state_index = state_map.get(subtype_index).copied().ok_or_else(|| {
-        FormatError::at(
-            global.items[GLOBAL_MAP_ITEM].byte_range().start,
-            format!("GOOL subtype {subtype} is outside the subtype map"),
-        )
-    })?;
+    let maps = parse_state_maps(global, nsf_bytes, header)?;
+    let subtype_index = usize::from(subtype);
+    let state_index = maps
+        .subtype_map
+        .get(subtype_index)
+        .copied()
+        .ok_or_else(|| {
+            FormatError::at(
+                global.items[GLOBAL_MAP_ITEM].byte_range().start,
+                format!("GOOL subtype {subtype} is outside the subtype map"),
+            )
+        })?;
     if state_index == 0x00ff {
         return Err(FormatError::at(
-            global.items[GLOBAL_MAP_ITEM].byte_range().start + subtype_index * 2,
+            global.items[GLOBAL_MAP_ITEM].byte_range().start
+                + maps.event_map.len() * 2
+                + subtype_index * 2,
             format!("GOOL subtype {subtype} maps to the invalid-state sentinel"),
         ));
     }
@@ -196,6 +194,7 @@ pub fn load_gool_program(
         global,
         header,
         internal_words,
+        maps.event_map,
         state_index,
     )
 }
@@ -215,6 +214,7 @@ pub fn load_gool_state_program(
     let global = unique_entry(metadata, nsf, global_eid, "global GOOL")?;
     let header = parse_global_header(global, nsf_bytes)?;
     let internal_words = parse_words(global, GLOBAL_DATA_ITEM, nsf_bytes, "GOOL internal data")?;
+    let event_map = parse_state_maps(global, nsf_bytes, header)?.event_map;
     load_resolved_state_program(
         metadata,
         nsf,
@@ -223,8 +223,45 @@ pub fn load_gool_state_program(
         global,
         header,
         internal_words,
+        event_map,
         state_index,
     )
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct GoolStateMaps {
+    event_map: Vec<u16>,
+    subtype_map: Vec<u16>,
+}
+
+fn parse_state_maps(
+    global: &Entry,
+    nsf_bytes: &[u8],
+    header: GoolHeader,
+) -> Result<GoolStateMaps, FormatError> {
+    let map_bytes = item_bytes(global, GLOBAL_MAP_ITEM, nsf_bytes, "GOOL state maps")?;
+    let map_absolute = global.items[GLOBAL_MAP_ITEM].byte_range().start;
+    let mut maps = parse_halfwords(map_bytes, map_absolute, "GOOL state maps")?;
+    let subtype_base = usize::try_from(header.subtype_map_index).map_err(|_| {
+        FormatError::at(
+            global.items[GLOBAL_HEADER_ITEM].byte_range().start + 16,
+            "GOOL subtype-map index does not fit the host",
+        )
+    })?;
+    if subtype_base > maps.len() {
+        return Err(FormatError::at(
+            global.items[GLOBAL_HEADER_ITEM].byte_range().start + 16,
+            format!(
+                "GOOL subtype-map index {subtype_base} is outside the {}-halfword map item",
+                maps.len()
+            ),
+        ));
+    }
+    let subtype_map = maps.split_off(subtype_base);
+    Ok(GoolStateMaps {
+        event_map: maps,
+        subtype_map,
+    })
 }
 
 fn parse_global_header(global: &Entry, nsf_bytes: &[u8]) -> Result<GoolHeader, FormatError> {
@@ -247,6 +284,7 @@ fn load_resolved_state_program(
     global: &Entry,
     header: GoolHeader,
     internal_words: Vec<u32>,
+    event_map: Vec<u16>,
     state_index: u16,
 ) -> Result<GoolProgram, FormatError> {
     let global_code = parse_words(global, GLOBAL_CODE_ITEM, nsf_bytes, "GOOL shared code")?;
@@ -349,6 +387,7 @@ fn load_resolved_state_program(
         state_index,
         state,
         states,
+        event_map,
         global_code,
         code,
         internal_words,
@@ -526,22 +565,22 @@ mod tests {
         bytes
     }
 
-    fn program_nsf(state_code_pc: u16, subtype_state: u16) -> (Vec<u8>, Eid) {
+    fn program_nsf_with_map_bytes(
+        state_code_pc: u16,
+        subtype_map_index: u32,
+        maps: Vec<u8>,
+    ) -> (Vec<u8>, Eid) {
         let global_eid = Eid::from_name(GLOBAL_EID_NAME).unwrap();
         let external_eid = Eid::from_name(EXTERNAL_EID_NAME).unwrap();
 
         let mut header = Vec::new();
-        for word in [1, 0x100, 0, 32, 1, 0] {
+        for word in [1, 0x100, 0, 32, subtype_map_index, 0] {
             push_u32(&mut header, word);
         }
         let mut shared_code = Vec::new();
         push_u32(&mut shared_code, 0x8200_0000);
         let mut internal = Vec::new();
         push_u32(&mut internal, external_eid.raw());
-        let mut maps = Vec::new();
-        for value in [0xffff, 0x00ff, 0x00ff, subtype_state] {
-            push_u16(&mut maps, value);
-        }
         let mut states = Vec::new();
         push_u32(&mut states, 0x1122_3344);
         push_u32(&mut states, 0x5566_7788);
@@ -549,7 +588,10 @@ mod tests {
         push_u16(&mut states, GOOL_PC_NONE);
         push_u16(&mut states, 1);
         push_u16(&mut states, state_code_pc);
-        let animation_data = vec![0xde, 0xad, 0xbe, 0xef];
+        let mut animation_data = vec![0xde, 0xad, 0xbe, 0xef];
+        while !(maps.len() + animation_data.len()).is_multiple_of(4) {
+            animation_data.push(0);
+        }
         let global = entry(
             global_eid,
             &[header, shared_code, internal, maps, states, animation_data],
@@ -579,6 +621,14 @@ mod tests {
         (bytes, global_eid)
     }
 
+    fn program_nsf(state_code_pc: u16, subtype_state: u16) -> (Vec<u8>, Eid) {
+        let mut maps = Vec::new();
+        for value in [0xffff, 0x00ff, 0x00ff, subtype_state] {
+            push_u16(&mut maps, value);
+        }
+        program_nsf_with_map_bytes(state_code_pc, 1, maps)
+    }
+
     #[test]
     fn resolves_subtype_state_and_external_code_without_pointer_relocation() {
         let metadata = one_page_nsd();
@@ -595,6 +645,7 @@ mod tests {
         assert_eq!(program.state_index(), 0);
         assert_eq!(program.state().flags, 0x1122_3344);
         assert_eq!(program.states(), &[program.state()]);
+        assert_eq!(program.event_map(), &[0xffff]);
         assert_eq!(program.global_code(), &[0x8200_0000]);
         assert_eq!(program.code(), &[0, 0x8200_0000]);
         assert_eq!(program.internal_words(), &[program.external_eid().raw()]);
@@ -623,6 +674,64 @@ mod tests {
         assert!(error.message().contains("code PC 2"));
     }
 
+    #[test]
+    fn event_map_uses_the_exact_half_open_subtype_boundary() {
+        let metadata = one_page_nsd();
+
+        let mut maps = Vec::new();
+        for value in [0, 0x8001, 0x00ff, 0] {
+            push_u16(&mut maps, value);
+        }
+        let (bytes, global_eid) = program_nsf_with_map_bytes(0, 0, maps);
+        let nsf = parse_nsf(&bytes, &metadata).unwrap();
+        let program = load_gool_program(&metadata, &nsf, &bytes, global_eid, 3).unwrap();
+        assert!(program.event_map().is_empty());
+
+        let mut maps = Vec::new();
+        for value in [0, 0x8001, 0x00ff, 7] {
+            push_u16(&mut maps, value);
+        }
+        let expected = [0, 0x8001, 0x00ff, 7];
+        let (bytes, global_eid) = program_nsf_with_map_bytes(0, 4, maps);
+        let nsf = parse_nsf(&bytes, &metadata).unwrap();
+        let program = load_gool_state_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap();
+        assert_eq!(program.event_map(), expected);
+        assert!(load_gool_program(&metadata, &nsf, &bytes, global_eid, 0).is_err());
+    }
+
+    #[test]
+    fn rejects_state_map_boundaries_past_the_item_for_all_load_paths() {
+        let metadata = one_page_nsd();
+        let mut maps = Vec::new();
+        for value in [0xffff, 0x00ff, 0x00ff, 0] {
+            push_u16(&mut maps, value);
+        }
+        let (bytes, global_eid) = program_nsf_with_map_bytes(0, 5, maps);
+        let nsf = parse_nsf(&bytes, &metadata).unwrap();
+
+        for error in [
+            load_gool_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap_err(),
+            load_gool_state_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap_err(),
+        ] {
+            assert!(error.message().contains("subtype-map index 5"));
+            assert!(error.message().contains("4-halfword map item"));
+        }
+    }
+
+    #[test]
+    fn rejects_odd_state_map_items_for_all_load_paths() {
+        let metadata = one_page_nsd();
+        let (bytes, global_eid) = program_nsf_with_map_bytes(0, 1, vec![0xff, 0xff, 0x00]);
+        let nsf = parse_nsf(&bytes, &metadata).unwrap();
+
+        for error in [
+            load_gool_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap_err(),
+            load_gool_state_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap_err(),
+        ] {
+            assert!(error.message().contains("not a multiple of two bytes"));
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(64))]
 
@@ -637,6 +746,7 @@ mod tests {
             bytes[index] = value;
             if let Ok(nsf) = parse_nsf(&bytes, &metadata) {
                 let _ = load_gool_program(&metadata, &nsf, &bytes, global_eid, subtype);
+                let _ = load_gool_state_program(&metadata, &nsf, &bytes, global_eid, subtype);
             }
         }
     }

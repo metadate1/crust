@@ -11,28 +11,31 @@ use std::collections::{BTreeMap, BTreeSet};
 use crust_formats::{
     binary::{Eid, FormatError},
     stream::{
-        GoolAnimationDescriptor, Nsd, Nsf, ObjectVertexKind, ZoneEntity, ZoneHeader, ZoneRect,
-        load_gool_program, load_gool_state_program, parse_gool_animation_descriptor,
+        GoolAnimationDescriptor, LevelId, Nsd, Nsf, ObjectVertexKind, ZoneEntity, ZoneHeader,
+        ZoneRect, load_gool_program, load_gool_state_program, parse_gool_animation_descriptor,
         parse_object_frame,
     },
 };
 
 use crate::{
     gool::{
-        AnimationReference, COLOR_COUNT, Execution, GoolProgramIdentity, HaltReason, MAX_OBJECTS,
-        Machine, ObjectHandle as VmObjectHandle, RetailPadSnapshot, RetailSolidEnvironment,
-        RetailSolidZone, RetailTransform, VmEffect, VmError, VmObject, VmStateProgram,
-        process_register,
+        AnimationReference, AudioHostRequest, AudioHostResponse, COLOR_COUNT,
+        CURRENT_DISPLAY_GLOBAL, EventDispatchOutcome, EventStateChange, Execution,
+        GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
+        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, RetailPadSnapshot,
+        RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
+        VmEffect, VmError, VmHostRequest, VmObject, VmStateProgram, process_register,
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
-        EntitySpawnDescriptor, NeighborZone, ObjectArena, ObjectHandle as ArenaObjectHandle,
-        ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError, SpawnError, SpawnedObject, TreeError,
-        TreeParent,
+        ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, NeighborZone, ObjectArena,
+        ObjectHandle as ArenaObjectHandle, ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError,
+        SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent,
     },
     object_bounds::{
         AnimationBoundSource, BoundTransform, calculate_local_bound, calculate_world_bound,
     },
+    retail_solid_motion::{HOG_LAND_OFFSET, STANDARD_LAND_OFFSET, SolidLevelQuirks},
 };
 
 /// A malformed transition graph must not monopolize the browser's
@@ -40,6 +43,88 @@ use crate::{
 /// preserves that ordering while reporting cycles as a typed VM failure.
 const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
 const COLLIDABLE_STATUS_B: u32 = 0x10;
+const FIRST_FRAME_STATUS_A: u32 = 0x20;
+const STALL_STATUS_B: u32 = 0x1000_0000;
+const FORCE_UPDATE_STATUS_B: u32 = 0x0200_0000;
+const MENU_TEXT_STATE_FLAG: u32 = 0x0002_0000;
+const INVISIBLE_STATUS_B: u32 = 0x100;
+const DISPLAY_OBJECTS: u32 = 0x4;
+const ANIMATE_OBJECTS: u32 = 0x8;
+const FORCE_DISPLAY_MENUS: u32 = 0x4000;
+const FORCE_ANIMATE_MENUS: u32 = 0x8000;
+const TERMINATE_EVENT: u32 = 0x1a00;
+const ZONE_TERMINATION_STATUS_B_IMMUNE: u32 = 0x0100_0000;
+const ZONE_TERMINATION_STATE_IMMUNE: u32 = 0x0004_0000;
+
+fn solid_level_quirks(level: LevelId) -> SolidLevelQuirks {
+    let level = level.get();
+    SolidLevelQuirks {
+        land_offset: if matches!(level, 0x11 | 0x1e) {
+            HOG_LAND_OFFSET
+        } else {
+            STANDARD_LAND_OFFSET
+        },
+        type_four_pits_drown: matches!(level, 0x03 | 0x07),
+        drown_when_below_zone: level == 0x17,
+        lethal_river_water: matches!(level, 0x0f | 0x18),
+    }
+}
+
+const fn retail_animation_mask_enabled(
+    display_mask: u32,
+    status_b: u32,
+    state_flags: u32,
+    category: Option<u32>,
+) -> bool {
+    if display_mask & ANIMATE_OBJECTS == 0 {
+        return false;
+    }
+    if (status_b & FORCE_UPDATE_STATUS_B != 0 || state_flags & MENU_TEXT_STATE_FLAG != 0)
+        && display_mask & FORCE_ANIMATE_MENUS != 0
+    {
+        return true;
+    }
+    let Some(category) = category else {
+        // Synthetic test/host objects have no retail category contract.
+        return true;
+    };
+    let category_mask = match category {
+        0x100 => 0x20,
+        0x300 | 0x500 | 0x600 => 0x80,
+        0x400 => 0x400,
+        0x200 => 0x100,
+        _ => 0,
+    };
+    display_mask & category_mask != 0
+}
+
+const fn retail_display_mask_enabled(
+    display_mask: u32,
+    status_b: u32,
+    state_flags: u32,
+    category: Option<u32>,
+    has_animation: bool,
+) -> bool {
+    if !has_animation || status_b & INVISIBLE_STATUS_B != 0 || display_mask & DISPLAY_OBJECTS == 0 {
+        return false;
+    }
+    if (status_b & FORCE_UPDATE_STATUS_B != 0 || state_flags & MENU_TEXT_STATE_FLAG != 0)
+        && display_mask & FORCE_DISPLAY_MENUS != 0
+    {
+        return true;
+    }
+    let Some(category) = category else {
+        return true;
+    };
+    let category_mask = match category {
+        0x100 => 0x10,
+        0x300 | 0x500 | 0x600 => 0x40,
+        0x400 => 0x800,
+        0x200 => 0x200,
+        _ => 0,
+    };
+    display_mask & category_mask != 0
+}
 
 /// One live object identity at the arena/VM boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -84,6 +169,8 @@ pub struct RetailRenderObject {
     pub state_flags: u32,
     pub size: i32,
     pub colors: [u16; COLOR_COUNT],
+    /// Exact per-object display decision captured after this object's update.
+    pub display_eligible: bool,
 }
 
 /// Checked failures while taking an immutable render-object snapshot.
@@ -194,6 +281,20 @@ pub trait ProgramHost {
         _binding: AnimationBoundBinding,
     ) -> Result<Option<AnimationBoundSource>, Self::Error> {
         Ok(None)
+    }
+
+    /// Completes an exact synchronous retail audio opcode before the next
+    /// GOOL instruction executes. Asset-only hosts use the native failure
+    /// value for voice creation while still acknowledging control calls; a
+    /// browser host can override this boundary with the retail audio engine.
+    fn handle_audio_request(
+        &mut self,
+        request: AudioHostRequest,
+    ) -> Result<AudioHostResponse, Self::Error> {
+        Ok(match request {
+            AudioHostRequest::CreateVoice(_) => AudioHostResponse::VoiceCreated { voice_id: -2 },
+            AudioHostRequest::Control(_) => AudioHostResponse::ControlApplied,
+        })
     }
 }
 
@@ -347,7 +448,8 @@ impl ProgramHost for NsfProgramHost<'_> {
         )
         .map_err(NsfProgramError::Format)?;
         let mut neighbors = Vec::with_capacity(header.neighbors.len());
-        for neighbor in &header.neighbors {
+        let mut object_zone = None;
+        for (neighbor_index, neighbor) in header.neighbors.iter().enumerate() {
             let entry = self
                 .nsf
                 .resolve_entry(self.metadata, *neighbor)
@@ -358,6 +460,20 @@ impl ProgramHost for NsfProgramHost<'_> {
                     entry.entry_type
                 ))));
             }
+            if *neighbor == zone {
+                object_zone = Some(neighbor_index);
+            }
+            let neighbor_header_item = entry.item(0).ok_or_else(|| {
+                NsfProgramError::Format(FormatError::global(format!(
+                    "solid-query neighbor {neighbor} has no ZDAT header item"
+                )))
+            })?;
+            let neighbor_header = ZoneHeader::parse(
+                neighbor_header_item
+                    .bytes(self.nsf_bytes)
+                    .map_err(NsfProgramError::Format)?,
+            )
+            .map_err(NsfProgramError::Format)?;
             let rect_item = entry.item(1).ok_or_else(|| {
                 NsfProgramError::Format(FormatError::global(format!(
                     "solid-query neighbor {neighbor} has no ZDAT rectangle item"
@@ -375,15 +491,22 @@ impl ProgramHost for NsfProgramHost<'_> {
                     rect.octree_max_depth,
                     bytes.to_vec(),
                 )
-                .map_err(NsfProgramError::Vm)?,
+                .map_err(NsfProgramError::Vm)?
+                .with_graphics(
+                    neighbor_header.graphics.flags,
+                    neighbor_header.graphics.water_y,
+                ),
             );
         }
-        Ok(Some(RetailSolidEnvironment::new(
-            header.graphics.flags,
-            header.graphics.object_colors.words,
-            header.graphics.player_colors.words,
-            neighbors,
-        )))
+        Ok(Some(
+            RetailSolidEnvironment::new(
+                header.graphics.flags,
+                header.graphics.object_colors.words,
+                header.graphics.player_colors.words,
+                neighbors,
+            )
+            .with_runtime_context(object_zone, solid_level_quirks(self.metadata.level())),
+        ))
     }
 
     fn animation_bound_source(
@@ -521,6 +644,69 @@ pub struct SpawnedRuntimeFrame<E> {
     pub frame: RuntimeFrame<E>,
 }
 
+/// Native zone-termination mode selected by the level lifecycle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ZoneTerminationMode {
+    /// Ordinary camera/zone departure. An object that migrates to another zone
+    /// while handling the terminate event survives.
+    Departure { target: Eid },
+    /// `LevelRestart`'s native `obj_zone == (entry *)-1` sentinel. Migration
+    /// no longer prevents teardown, but the ordinary eligibility gates and
+    /// non-title Crash immunity still apply.
+    HardRestart,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransitionZoneContext {
+    Target(Eid),
+    HardRestartSentinel,
+}
+
+/// Cleanup work whose owner lives outside [`RetailRuntime`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeCleanupAction {
+    /// Equivalent to native `AudioVoiceFree(object)` for a stale object pair.
+    ///
+    /// The simulation crate intentionally has no WebAudio/voice allocator.
+    /// The platform audio owner must consume these actions before it reuses an
+    /// object-associated voice. Actions retain exact child-before-parent
+    /// teardown order.
+    FreeObjectAudio(RuntimeObjectHandle),
+}
+
+/// Deterministic result of terminating all eligible objects from one zone.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ZoneTerminationEventFailure<E> {
+    pub object: RuntimeObjectHandle,
+    pub error: RuntimeError<E>,
+}
+
+/// Deterministic result of terminating all eligible objects from one zone.
+#[derive(Debug, Eq, PartialEq)]
+pub struct ZoneTerminationReport<E> {
+    /// Removed identities in native recursive release order.
+    pub terminated: Vec<RuntimeObjectHandle>,
+    /// Objects whose terminate handler changed their zone during an ordinary
+    /// departure. Hard restart never records migration survivors.
+    pub migrated: Vec<RuntimeObjectHandle>,
+    /// Platform-owned cleanup work in the same order as `terminated`.
+    pub cleanup_actions: Vec<RuntimeCleanupAction>,
+    /// Checked TERM-handler failures. Native teardown ignores these failures
+    /// and still kills an object whose zone did not change.
+    pub event_failures: Vec<ZoneTerminationEventFailure<E>>,
+}
+
+impl<E> ZoneTerminationReport<E> {
+    fn new() -> Self {
+        Self {
+            terminated: Vec::new(),
+            migrated: Vec::new(),
+            cleanup_actions: Vec::new(),
+            event_failures: Vec::new(),
+        }
+    }
+}
+
 /// Checked failures at the arena/VM/asset boundary.
 #[derive(Debug, Eq, PartialEq)]
 pub enum RuntimeError<E> {
@@ -542,6 +728,7 @@ pub enum RuntimeError<E> {
         expected: VmObjectHandle,
         actual: VmObjectHandle,
     },
+    MissingTransitionZoneTarget,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -633,20 +820,47 @@ pub struct RetailRuntime {
     handles: HandleMap,
     pending_states: BTreeMap<VmObjectHandle, u16>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
+    displayed_objects: BTreeMap<RuntimeObjectHandle, bool>,
+    level: Option<LevelId>,
+    transition_zone_context: Option<TransitionZoneContext>,
     frame_index: u64,
+    draw_count: u32,
 }
 
 impl RetailRuntime {
     #[must_use]
     pub fn new(global_words: usize) -> Self {
+        let mut machine = Machine::new(global_words);
+        // Authored tests may deliberately construct a zero-global VM. Retail
+        // stream hosts allocate the complete globals span and receive the two
+        // exact LdatInit display words.
+        if global_words > CURRENT_DISPLAY_GLOBAL {
+            let next = machine.set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
+            let current = machine.set_global_word(CURRENT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
+            debug_assert!(next.is_ok() && current.is_ok());
+        }
         Self {
             arena: ObjectArena::new(),
-            machine: Machine::new(global_words),
+            machine,
             handles: HandleMap::default(),
             pending_states: BTreeMap::new(),
             faulted_objects: BTreeSet::new(),
+            displayed_objects: BTreeMap::new(),
+            level: None,
+            transition_zone_context: None,
             frame_index: 0,
+            draw_count: 0,
         }
+    }
+
+    /// Creates a production retail runtime with the level/read-only GOOL
+    /// globals initialized before the first entity program can execute.
+    #[must_use]
+    pub fn new_for_level(global_words: usize, level: LevelId) -> Self {
+        let mut runtime = Self::new(global_words);
+        runtime.level = Some(level);
+        runtime.machine.initialize_retail_level_globals(level);
+        runtime
     }
 
     #[must_use]
@@ -657,6 +871,52 @@ impl RetailRuntime {
     #[must_use]
     pub const fn machine(&self) -> &Machine {
         &self.machine
+    }
+
+    /// Level identity used by lifecycle-only contracts such as Crash's title
+    /// teardown exception. Authored runtimes made with [`Self::new`] retain
+    /// `None`, which is treated as non-title.
+    #[must_use]
+    pub const fn level(&self) -> Option<LevelId> {
+        self.level
+    }
+
+    /// GOOL display/animation word currently consumed by object/render logic.
+    ///
+    /// Authored zero-global runtimes retain the historical all-enabled
+    /// fallback; stream-backed runtimes always contain the exact global.
+    #[must_use]
+    pub fn current_display_mask(&self) -> u32 {
+        self.machine
+            .global_word(CURRENT_DISPLAY_GLOBAL)
+            .unwrap_or(INITIAL_DISPLAY_MASK)
+    }
+
+    /// Counter used by world textures and GOOL during the current frame.
+    #[must_use]
+    pub const fn draw_count(&self) -> u32 {
+        self.draw_count
+    }
+
+    /// Completes the source `GLUpdate` display/draw-count boundary.
+    ///
+    /// Normal [`Self::run_frame`] calls finish this automatically. A paused
+    /// host that deliberately skips GOOL can call it with `paused = true` to
+    /// keep title/pause-authored mask writes synchronized without incrementing
+    /// the draw counter.
+    pub fn finish_display_frame(&mut self, paused: bool) -> Result<u32, VmError> {
+        let display_mask = if self.machine.global_word(CURRENT_DISPLAY_GLOBAL).is_ok() {
+            let next = self.machine.global_word(NEXT_DISPLAY_GLOBAL)?;
+            self.machine.set_global_word(CURRENT_DISPLAY_GLOBAL, next)?;
+            next
+        } else {
+            INITIAL_DISPLAY_MASK
+        };
+        if !paused && display_mask & 0x1000 != 0 {
+            self.draw_count = self.draw_count.wrapping_add(1);
+        }
+        self.machine.set_draw_count(self.draw_count);
+        Ok(display_mask)
     }
 
     #[must_use]
@@ -681,6 +941,39 @@ impl RetailRuntime {
         self.machine.set_pad_snapshot(port, snapshot)
     }
 
+    /// Freezes the camera-relative heading and retail gameplay-input gate for
+    /// the next source-ordered object traversal.
+    pub fn set_physics_frame_context(
+        &mut self,
+        game_state_playing: bool,
+        camera_rotation_xz: Angle12,
+    ) {
+        self.machine.set_retail_physics_frame_context(
+            game_state_playing,
+            i32::from(camera_rotation_xz.raw()),
+        );
+    }
+
+    /// Freezes the complete retail game-state word and camera-relative
+    /// heading for the next source-ordered object traversal.
+    pub fn set_frame_context(&mut self, game_state: i32, camera_rotation_xz: Angle12) {
+        self.machine
+            .set_retail_frame_context(game_state, i32::from(camera_rotation_xz.raw()));
+    }
+
+    /// Freezes the camera pose and projection used by GOOL transform-vector
+    /// projection/audio operations for the next cooperative frame.
+    pub fn set_transform_vectors_camera(&mut self, camera: RetailTransformVectorsCamera) {
+        self.machine.set_transform_vectors_camera(camera);
+    }
+
+    /// Freezes the browser frame's unrounded and source-rounded millisecond
+    /// tick deltas before the next cooperative object traversal.
+    pub fn set_frame_timing(&mut self, ticks_current_frame: i32, ticks_per_frame: i32) {
+        self.machine
+            .set_frame_timing(ticks_current_frame, ticks_per_frame);
+    }
+
     #[must_use]
     pub fn object_for_arena(&self, arena: ArenaObjectHandle) -> Option<RuntimeObjectHandle> {
         self.handles.for_arena(arena)
@@ -689,6 +982,72 @@ impl RetailRuntime {
     #[must_use]
     pub fn object_for_vm(&self, vm: VmObjectHandle) -> Option<RuntimeObjectHandle> {
         self.handles.for_vm(vm)
+    }
+
+    /// Delivers one event through the checked VM and resolves any returned
+    /// state program before control is returned to the caller.
+    ///
+    /// This is the stream-owning half of [`Machine::send_event`]. It validates
+    /// both arena/VM handle directions, binds the target state through
+    /// [`ProgramHost`], preserves the event argument payload, and runs an armed
+    /// state `once` block synchronously. Spawn effects from that once block are
+    /// also materialized before this method returns.
+    pub fn dispatch_event<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        let mut spawned_children = Vec::new();
+        let Self {
+            arena,
+            machine,
+            handles,
+            pending_states,
+            transition_zone_context,
+            ..
+        } = self;
+        Self::dispatch_event_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            *transition_zone_context,
+            host,
+            sender,
+            recipient,
+            event,
+            arguments,
+            &mut spawned_children,
+        )
+    }
+
+    /// Sends the native terminate event to every eligible live object from
+    /// `zone`, then tears down objects that did not migrate away.
+    ///
+    /// The forest is snapshotted in retail postorder before delivery begins.
+    /// Any recursive subtree release uses [`ObjectArena::despawn_subtree`]'s
+    /// returned order to remove VM state and produce platform audio actions.
+    pub fn terminate_zone_objects<H: ProgramHost>(
+        &mut self,
+        zone: Eid,
+        mode: ZoneTerminationMode,
+        host: &mut H,
+    ) -> Result<ZoneTerminationReport<H::Error>, RuntimeError<H::Error>> {
+        let context = match mode {
+            ZoneTerminationMode::Departure { target } => TransitionZoneContext::Target(target),
+            ZoneTerminationMode::HardRestart => TransitionZoneContext::HardRestartSentinel,
+        };
+        let previous_context = self.transition_zone_context.replace(context);
+        let result = self.terminate_zone_objects_with(zone, mode, |runtime, object| {
+            runtime
+                .dispatch_event(host, None, Some(object), TERMINATE_EVENT, None)
+                .map(|_| ())
+        });
+        self.transition_zone_context = previous_context;
+        result
     }
 
     /// Whether an object has failed during a program/VM invocation and is no
@@ -755,6 +1114,12 @@ impl RetailRuntime {
                     return Err(RenderObjectsError::StaleObjectPair(object));
                 }
                 let origin = spawned.origin();
+                let display_eligible = self
+                    .displayed_objects
+                    .get(&object)
+                    .copied()
+                    .map_or_else(|| self.retail_display_enabled(object), Ok)
+                    .map_err(RenderObjectsError::Vm)?;
                 objects.push(RetailRenderObject {
                     object,
                     zone: spawned.zone(),
@@ -780,6 +1145,7 @@ impl RetailRuntime {
                         .register(process_register::SIZE)
                         .map_err(RenderObjectsError::Vm)? as i32,
                     colors: *vm_object.retail_colors(),
+                    display_eligible,
                 });
             }
         }
@@ -892,14 +1258,27 @@ impl RetailRuntime {
         host: &mut H,
         instruction_budget_per_object: usize,
     ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>> {
+        for index in 0..SPAWN_TABLE_CAPACITY {
+            let id = u16::try_from(index)
+                .map_err(|_| RuntimeError::Spawn(SpawnError::InvalidSpawnId(u16::MAX)))?;
+            let flags = self
+                .arena
+                .spawn_table()
+                .flags(id)
+                .ok_or(RuntimeError::Spawn(SpawnError::InvalidSpawnId(id)))?;
+            self.machine
+                .set_spawn_flags(id, flags)
+                .map_err(RuntimeError::Vm)?;
+        }
         self.machine.clear_frame_bounds();
         let _discarded_effects = self.machine.take_effects();
         let frame_stamp = wrapping_frame_stamp(self.frame_index);
         self.machine.set_frames_elapsed(frame_stamp);
-        self.machine.set_draw_count(frame_stamp);
+        self.machine.set_draw_count(self.draw_count);
         let handles = &self.handles;
         self.faulted_objects
             .retain(|object| handles.is_live_pair(*object));
+        self.displayed_objects.clear();
         let mut work = FrameWork {
             executions: Vec::with_capacity(self.handles.vm_by_arena.len()),
             spawned_children: Vec::new(),
@@ -927,6 +1306,7 @@ impl RetailRuntime {
 
         let frame_index = self.frame_index;
         self.frame_index = self.frame_index.wrapping_add(1);
+        self.finish_display_frame(false).map_err(RuntimeError::Vm)?;
         Ok(RuntimeFrame {
             frame_index,
             executions: work.executions,
@@ -944,15 +1324,24 @@ impl RetailRuntime {
     ) -> Result<(), RuntimeError<H::Error>> {
         if let Some(object) = self.handles.for_arena(arena_handle)
             && !self.faulted_objects.contains(&object)
+            && self.retail_animation_enabled(object)?
         {
             let result = if self.handles.is_live_pair(object) {
-                self.register_animation_bound(object, host).and_then(|()| {
-                    self.run_object(
-                        object,
-                        host,
-                        instruction_budget_per_object,
-                        &mut work.spawned_children,
-                    )
+                self.begin_native_object_update(object).and_then(|stalled| {
+                    if let Some(execution) = stalled {
+                        Ok(execution)
+                    } else {
+                        self.register_animation_bound(object, host).and_then(|()| {
+                            let execution = self.run_object(
+                                object,
+                                host,
+                                instruction_budget_per_object,
+                                &mut work.spawned_children,
+                            )?;
+                            self.finish_native_object_update(object)?;
+                            Ok(execution)
+                        })
+                    }
                 })
             } else {
                 Err(RuntimeError::UnknownArenaObject(arena_handle))
@@ -974,6 +1363,14 @@ impl RetailRuntime {
             }
             work.executions.push(RuntimeExecution { object, result });
         }
+        if let Some(object) = self.handles.for_arena(arena_handle)
+            && self.handles.is_live_pair(object)
+        {
+            let displayed = self
+                .retail_display_enabled(object)
+                .map_err(RuntimeError::Vm)?;
+            self.displayed_objects.insert(object, displayed);
+        }
 
         let mut child = self
             .arena
@@ -988,6 +1385,101 @@ impl RetailRuntime {
             child = sibling;
         }
         Ok(())
+    }
+
+    fn retail_animation_enabled<E>(
+        &self,
+        object: RuntimeObjectHandle,
+    ) -> Result<bool, RuntimeError<E>> {
+        let Ok(display_mask) = self.machine.global_word(CURRENT_DISPLAY_GLOBAL) else {
+            return Ok(true);
+        };
+        let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+        let status_b = vm_object
+            .register(process_register::STATUS_B)
+            .map_err(RuntimeError::Vm)?;
+        Ok(retail_animation_mask_enabled(
+            display_mask,
+            status_b,
+            vm_object.state_flags(),
+            vm_object
+                .program_identity()
+                .map(GoolProgramIdentity::category),
+        ))
+    }
+
+    fn retail_display_enabled(&self, object: RuntimeObjectHandle) -> Result<bool, VmError> {
+        let display_mask = self
+            .machine
+            .global_word(CURRENT_DISPLAY_GLOBAL)
+            .unwrap_or(INITIAL_DISPLAY_MASK);
+        let vm_object = self.machine.object(object.vm)?;
+        let status_b = vm_object.register(process_register::STATUS_B)?;
+        Ok(retail_display_mask_enabled(
+            display_mask,
+            status_b,
+            vm_object.state_flags(),
+            vm_object
+                .program_identity()
+                .map(GoolProgramIdentity::category),
+            vm_object.animation_reference()?.is_some(),
+        ))
+    }
+
+    fn begin_native_object_update<E>(
+        &mut self,
+        object: RuntimeObjectHandle,
+    ) -> Result<Option<Execution>, RuntimeError<E>> {
+        let frame_stamp = self.machine.frames_elapsed();
+        let vm_object = self
+            .machine
+            .object_mut(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        let status_b = vm_object
+            .register(process_register::STATUS_B)
+            .map_err(RuntimeError::Vm)?;
+        let counter = vm_object
+            .register(process_register::ANIMATION_COUNTER)
+            .map_err(RuntimeError::Vm)?;
+        if status_b & STALL_STATUS_B != 0 && counter != 0 {
+            let remaining = counter - 1;
+            vm_object
+                .set_register(process_register::ANIMATION_COUNTER, remaining)
+                .map_err(RuntimeError::Vm)?;
+            if remaining == 0 {
+                vm_object
+                    .set_register(process_register::STATUS_B, status_b & !STALL_STATUS_B)
+                    .map_err(RuntimeError::Vm)?;
+            }
+            return Ok(Some(Execution {
+                reason: HaltReason::NativeStall { remaining },
+                steps: 0,
+            }));
+        }
+        vm_object
+            .set_register(process_register::ANIMATION_STAMP, frame_stamp)
+            .map_err(RuntimeError::Vm)?;
+        Ok(None)
+    }
+
+    fn finish_native_object_update<E>(
+        &mut self,
+        object: RuntimeObjectHandle,
+    ) -> Result<(), RuntimeError<E>> {
+        let _physics = self
+            .machine
+            .run_retail_object_physics(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        let vm_object = self
+            .machine
+            .object_mut(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        let status_a = vm_object
+            .register(process_register::STATUS_A)
+            .map_err(RuntimeError::Vm)?;
+        vm_object
+            .set_register(process_register::STATUS_A, status_a & !FIRST_FRAME_STATUS_A)
+            .map_err(RuntimeError::Vm)
     }
 
     fn register_animation_bound<H: ProgramHost>(
@@ -1053,6 +1545,10 @@ impl RetailRuntime {
         let local_bound = calculate_local_bound(source, scale, object.arena.is_dedicated_main());
         let world_bound = calculate_world_bound(local_bound, source, bound_transform);
         self.machine
+            .object_mut(object.vm)
+            .map_err(RuntimeError::Vm)?
+            .set_retail_local_bound(local_bound);
+        self.machine
             .register_frame_bound(object.vm, world_bound)
             .map_err(RuntimeError::Vm)
     }
@@ -1113,22 +1609,99 @@ impl RetailRuntime {
         budget: usize,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<Execution, RuntimeError<H::Error>> {
+        let rebound_at_frame_start = self.pending_states.contains_key(&object.vm);
         self.rebind_pending_state(object, host, spawned_children)?;
+        if !rebound_at_frame_start {
+            self.run_frame_transition(object, host, spawned_children)?;
+        }
+        let mut remaining = budget;
+        let mut total_steps = 0_usize;
+        loop {
+            let mut callback_error = None;
+            let execution = {
+                let Self {
+                    arena,
+                    machine,
+                    handles,
+                    pending_states,
+                    transition_zone_context,
+                    ..
+                } = self;
+                machine.run_with_host_requests(object.vm, remaining, |machine, request| {
+                    let result = Self::apply_host_request(
+                        arena,
+                        handles,
+                        machine,
+                        pending_states,
+                        *transition_zone_context,
+                        host,
+                        request,
+                        spawned_children,
+                    );
+                    if let Err(error) = result {
+                        callback_error = Some(error);
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    Ok(())
+                })
+            };
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            let execution = execution.map_err(RuntimeError::Vm)?;
+            total_steps = total_steps.saturating_add(execution.steps);
+            let HaltReason::StateChanged(state) = execution.reason else {
+                return Ok(Execution {
+                    reason: execution.reason,
+                    steps: total_steps,
+                });
+            };
+
+            // Normal GoolObjectUpdate code carries SUSPEND_ON_ANIM but not
+            // SUSPEND_ON_RETLNK. A successful state link therefore binds the
+            // target (including its transition block), pops its zero wait tag
+            // through the next animation gate, and continues interpreting in
+            // this same native update.
+            self.pending_states.insert(object.vm, state);
+            self.rebind_pending_state(object, host, spawned_children)?;
+            if total_steps >= budget {
+                return Ok(Execution {
+                    reason: HaltReason::StateChanged(state),
+                    steps: total_steps,
+                });
+            }
+            remaining = budget - total_steps;
+        }
+    }
+
+    /// Runs the current state's transition block at the start of every native
+    /// object update. `GoolObjectUpdate` does this before consulting the
+    /// animation wait tag; it is not limited to the instant a state is bound.
+    fn run_frame_transition<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
         let mut callback_error = None;
         let execution = {
             let Self {
                 arena,
                 machine,
                 handles,
+                pending_states,
+                transition_zone_context,
                 ..
             } = self;
-            machine.run_with_host_effects(object.vm, budget, |machine, effect| {
-                let result = Self::apply_host_effect(
+            machine.run_transition_with_host_requests(object.vm, |machine, request| {
+                let result = Self::apply_host_request(
                     arena,
                     handles,
                     machine,
+                    pending_states,
+                    *transition_zone_context,
                     host,
-                    effect,
+                    request,
                     spawned_children,
                 );
                 if let Err(error) = result {
@@ -1141,12 +1714,15 @@ impl RetailRuntime {
         if let Some(error) = callback_error {
             return Err(error);
         }
-        let execution = execution.map_err(RuntimeError::Vm)?;
-        if let HaltReason::StateChanged(state) = execution.reason {
+        if let Some(Execution {
+            reason: HaltReason::StateChanged(state),
+            ..
+        }) = execution.map_err(RuntimeError::Vm)?
+        {
             self.pending_states.insert(object.vm, state);
             self.rebind_pending_state(object, host, spawned_children)?;
         }
-        Ok(execution)
+        Ok(())
     }
 
     fn rebind_pending_state<H: ProgramHost>(
@@ -1187,15 +1763,19 @@ impl RetailRuntime {
                     arena,
                     machine,
                     handles,
+                    pending_states,
+                    transition_zone_context,
                     ..
                 } = self;
-                machine.run_pending_once_with_host_effects(object.vm, |machine, effect| {
-                    let result = Self::apply_host_effect(
+                machine.run_pending_once_with_host_requests(object.vm, |machine, request| {
+                    let result = Self::apply_host_request(
                         arena,
                         handles,
                         machine,
+                        pending_states,
+                        *transition_zone_context,
                         host,
-                        effect,
+                        request,
                         spawned_children,
                     );
                     if let Err(error) = result {
@@ -1216,15 +1796,19 @@ impl RetailRuntime {
                     arena,
                     machine,
                     handles,
+                    pending_states,
+                    transition_zone_context,
                     ..
                 } = self;
-                machine.run_transition_with_host_effects(object.vm, |machine, effect| {
-                    let result = Self::apply_host_effect(
+                machine.run_transition_with_host_requests(object.vm, |machine, request| {
+                    let result = Self::apply_host_request(
                         arena,
                         handles,
                         machine,
+                        pending_states,
+                        *transition_zone_context,
                         host,
-                        effect,
+                        request,
                         spawned_children,
                     );
                     if let Err(error) = result {
@@ -1253,14 +1837,495 @@ impl RetailRuntime {
         ))
     }
 
+    fn validate_runtime_object<E>(
+        arena: &ObjectArena,
+        handles: &HandleMap,
+        machine: &Machine,
+        object: RuntimeObjectHandle,
+    ) -> Result<(), RuntimeError<E>> {
+        if arena.get(object.arena).is_none() || handles.for_arena(object.arena) != Some(object) {
+            return Err(RuntimeError::UnknownArenaObject(object.arena));
+        }
+        if handles.for_vm(object.vm) != Some(object) {
+            return Err(RuntimeError::UnknownVmObject(object.vm));
+        }
+        machine.object(object.vm).map_err(RuntimeError::Vm)?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_event_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        transition_zone_context: Option<TransitionZoneContext>,
+        host: &mut H,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        if let Some(sender) = sender {
+            Self::validate_runtime_object(arena, handles, machine, sender)?;
+        }
+        if let Some(recipient) = recipient {
+            Self::validate_runtime_object(arena, handles, machine, recipient)?;
+        }
+
+        let effect_start = machine.effects().len();
+        let mut callback_error = None;
+        let outcome = machine.send_event_with_host_requests(
+            sender.map(RuntimeObjectHandle::vm),
+            recipient.map(RuntimeObjectHandle::vm),
+            event,
+            arguments,
+            |machine, request| {
+                let result = Self::apply_host_request(
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    transition_zone_context,
+                    host,
+                    request,
+                    spawned_children,
+                );
+                if let Err(error) = result {
+                    callback_error = Some(error);
+                    return Err(VmError::MissingHostEffect);
+                }
+                Ok(())
+            },
+        );
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        let outcome = outcome.map_err(RuntimeError::Vm)?;
+        let synchronous_effects = machine.effects()[effect_start..]
+            .iter()
+            .filter(|effect| matches!(effect, VmEffect::SetObjectZoneToTransitionTarget { .. }))
+            .cloned()
+            .collect::<Vec<_>>();
+        for effect in &synchronous_effects {
+            Self::apply_host_effect(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                transition_zone_context,
+                host,
+                effect,
+                spawned_children,
+            )?;
+        }
+        if let Some(change) = &outcome.state_change {
+            Self::rebind_event_state_change_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                transition_zone_context,
+                host,
+                change,
+                spawned_children,
+            )?;
+        }
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rebind_event_state_change_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        transition_zone_context: Option<TransitionZoneContext>,
+        host: &mut H,
+        change: &EventStateChange,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let object = handles
+            .for_vm(change.recipient)
+            .ok_or(RuntimeError::UnknownVmObject(change.recipient))?;
+        Self::validate_runtime_object(arena, handles, machine, object)?;
+        let spawned = arena
+            .get(object.arena)
+            .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+        let program = host
+            .bind_state_program(StateProgramBinding {
+                object,
+                zone: spawned.zone(),
+                executable: spawned.origin().executable(),
+                state: change.state,
+            })
+            .map_err(RuntimeError::Program)?;
+        machine
+            .rebind_state_program(object.vm, &program, &change.arguments)
+            .map_err(RuntimeError::Vm)?;
+        pending_states.remove(&object.vm);
+        arena
+            .set_state_flags(
+                object.arena,
+                machine
+                    .object(object.vm)
+                    .map_err(RuntimeError::Vm)?
+                    .state_flags(),
+            )
+            .map_err(RuntimeError::Tree)?;
+
+        // Native GoolObjectChangeState runs an armed once block during event
+        // delivery even though the recipient is not the current frame object.
+        // It does not run the new transition block in this context.
+        let mut callback_error = None;
+        let once = machine.run_pending_once_with_host_requests(object.vm, |machine, request| {
+            let result = Self::apply_host_request(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                transition_zone_context,
+                host,
+                request,
+                spawned_children,
+            );
+            if let Err(error) = result {
+                callback_error = Some(error);
+                return Err(VmError::MissingHostEffect);
+            }
+            Ok(())
+        });
+        if let Some(error) = callback_error {
+            return Err(error);
+        }
+        once.map_err(RuntimeError::Vm)?;
+        arena
+            .set_state_flags(
+                object.arena,
+                machine
+                    .object(object.vm)
+                    .map_err(RuntimeError::Vm)?
+                    .state_flags(),
+            )
+            .map_err(RuntimeError::Tree)
+    }
+
+    fn terminate_zone_objects_with<E, F>(
+        &mut self,
+        zone: Eid,
+        mode: ZoneTerminationMode,
+        mut dispatch_terminate: F,
+    ) -> Result<ZoneTerminationReport<E>, RuntimeError<E>>
+    where
+        F: FnMut(&mut Self, RuntimeObjectHandle) -> Result<(), RuntimeError<E>>,
+    {
+        let snapshot = self
+            .arena
+            .postorder_snapshot()
+            .map_err(RuntimeError::Tree)?;
+        let mut report = ZoneTerminationReport::new();
+
+        for arena_handle in snapshot {
+            let Some(spawned) = self.arena.get(arena_handle) else {
+                // A prior recursive parent release cannot invalidate a later
+                // postorder item. A synchronous handler may, however, have
+                // removed an object through a future host extension, so treat
+                // that as already handled rather than dereferencing stale data.
+                continue;
+            };
+            if spawned.zone() != zone {
+                continue;
+            }
+            let original_zone = spawned.zone();
+            let is_crash = arena_handle.is_dedicated_main()
+                && spawned.origin().executable() == 0
+                && spawned.origin().subtype() == 0;
+            let object = self
+                .handles
+                .for_arena(arena_handle)
+                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+            Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, object)?;
+            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+            let status_b = vm_object
+                .register(process_register::STATUS_B)
+                .map_err(RuntimeError::Vm)?;
+            if status_b & ZONE_TERMINATION_STATUS_B_IMMUNE != 0
+                || vm_object.state_flags() & ZONE_TERMINATION_STATE_IMMUNE != 0
+            {
+                continue;
+            }
+
+            let event_failure = dispatch_terminate(self, object).err();
+            Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, object)?;
+            let current_zone = self
+                .arena
+                .get(arena_handle)
+                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?
+                .zone();
+            if matches!(mode, ZoneTerminationMode::Departure { .. })
+                && current_zone != original_zone
+            {
+                if event_failure.is_some() {
+                    self.pending_states.remove(&object.vm);
+                    self.faulted_objects.insert(object);
+                }
+                report.migrated.push(object);
+                if let Some(error) = event_failure {
+                    report
+                        .event_failures
+                        .push(ZoneTerminationEventFailure { object, error });
+                }
+                continue;
+            }
+            if let Some(error) = event_failure {
+                report
+                    .event_failures
+                    .push(ZoneTerminationEventFailure { object, error });
+            }
+            if is_crash && self.level != Some(LevelId::TITLE) {
+                continue;
+            }
+
+            self.remove_runtime_subtree(arena_handle, &mut report)?;
+        }
+
+        if !report.terminated.is_empty() {
+            // Frame bounds are immutable traversal snapshots and currently do
+            // not expose targeted retention. Clearing the complete bounded
+            // list prevents a removed VM handle from surviving until the next
+            // normal frame rebuild.
+            self.machine.clear_frame_bounds();
+            Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
+        }
+        Ok(report)
+    }
+
+    fn remove_runtime_subtree<E>(
+        &mut self,
+        root: ArenaObjectHandle,
+        report: &mut ZoneTerminationReport<E>,
+    ) -> Result<(), RuntimeError<E>> {
+        let removed = self
+            .arena
+            .despawn_subtree(root)
+            .map_err(RuntimeError::Tree)?;
+        for arena_handle in removed {
+            let object = self
+                .handles
+                .for_arena(arena_handle)
+                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+            self.machine
+                .remove_object(object.vm)
+                .map_err(RuntimeError::Vm)?;
+            self.pending_states.remove(&object.vm);
+            self.faulted_objects.remove(&object);
+            self.displayed_objects.remove(&object);
+            self.handles.release(object);
+            report.terminated.push(object);
+            report
+                .cleanup_actions
+                .push(RuntimeCleanupAction::FreeObjectAudio(object));
+        }
+        Ok(())
+    }
+
+    fn refresh_tree_links<E>(
+        arena: &ObjectArena,
+        handles: &HandleMap,
+        machine: &mut Machine,
+    ) -> Result<(), RuntimeError<E>> {
+        let player = arena
+            .main_object()
+            .and_then(|arena| handles.for_arena(arena))
+            .map(RuntimeObjectHandle::vm);
+        let objects = handles
+            .vm_by_arena
+            .iter()
+            .map(|(arena, vm)| RuntimeObjectHandle {
+                arena: *arena,
+                vm: *vm,
+            })
+            .collect::<Vec<_>>();
+        for object in objects {
+            Self::validate_runtime_object(arena, handles, machine, object)?;
+            let spawned = arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+            let parent = match spawned.parent() {
+                TreeParent::Root(_) => None,
+                TreeParent::Object(parent) => Some(
+                    handles
+                        .for_arena(parent)
+                        .ok_or(RuntimeError::UnknownArenaObject(parent))?
+                        .vm,
+                ),
+            };
+            let sibling = spawned
+                .next_sibling()
+                .map(|sibling| {
+                    handles
+                        .for_arena(sibling)
+                        .ok_or(RuntimeError::UnknownArenaObject(sibling))
+                        .map(RuntimeObjectHandle::vm)
+                })
+                .transpose()?;
+            let child = spawned
+                .first_child()
+                .map(|child| {
+                    handles
+                        .for_arena(child)
+                        .ok_or(RuntimeError::UnknownArenaObject(child))
+                        .map(RuntimeObjectHandle::vm)
+                })
+                .transpose()?;
+            let vm_object = machine.object_mut(object.vm).map_err(RuntimeError::Vm)?;
+            vm_object
+                .set_link(0, Some(object.vm))
+                .map_err(RuntimeError::Vm)?;
+            vm_object.set_link(1, parent).map_err(RuntimeError::Vm)?;
+            vm_object.set_link(2, sibling).map_err(RuntimeError::Vm)?;
+            vm_object.set_link(3, child).map_err(RuntimeError::Vm)?;
+            vm_object.set_link(5, player).map_err(RuntimeError::Vm)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_host_request<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        transition_zone_context: Option<TransitionZoneContext>,
+        host: &mut H,
+        request: VmHostRequest,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        match request {
+            VmHostRequest::Audio(request) => {
+                let response = host
+                    .handle_audio_request(request)
+                    .map_err(RuntimeError::Program)?;
+                machine
+                    .complete_audio_host_request(response)
+                    .map_err(RuntimeError::Vm)
+            }
+            VmHostRequest::Effect(effect) => Self::apply_host_effect(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                transition_zone_context,
+                host,
+                &effect,
+                spawned_children,
+            ),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn apply_host_effect<H: ProgramHost>(
         arena: &mut ObjectArena,
         handles: &mut HandleMap,
         machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        transition_zone_context: Option<TransitionZoneContext>,
         host: &mut H,
         effect: &VmEffect,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
+        if let VmEffect::ReparentToRoot { object, root } = effect {
+            let object = handles
+                .for_vm(*object)
+                .ok_or(RuntimeError::UnknownVmObject(*object))?;
+            Self::validate_runtime_object(arena, handles, machine, object)?;
+            let root =
+                RootHandle::new(*root).ok_or(RuntimeError::InvalidRootIndex(usize::from(*root)))?;
+            arena
+                .reparent_to_root(object.arena, root)
+                .map_err(RuntimeError::Tree)?;
+            return Self::refresh_tree_links(arena, handles, machine);
+        }
+
+        if let VmEffect::SetObjectZoneToTransitionTarget { object } = effect {
+            let object = handles
+                .for_vm(*object)
+                .ok_or(RuntimeError::UnknownVmObject(*object))?;
+            Self::validate_runtime_object(arena, handles, machine, object)?;
+            return match transition_zone_context {
+                Some(TransitionZoneContext::Target(target)) => arena
+                    .set_zone(object.arena, target)
+                    .map_err(RuntimeError::Tree),
+                // Native writes the `(entry *)-1` sentinel to the object. The
+                // arena admits only validated EIDs, and hard restart kills the
+                // object immediately regardless, so no persistent zone value
+                // is needed here.
+                Some(TransitionZoneContext::HardRestartSentinel) => Ok(()),
+                None => Err(RuntimeError::MissingTransitionZoneTarget),
+            };
+        }
+
+        if let VmEffect::Event {
+            sender,
+            recipient,
+            event,
+        } = effect
+        {
+            let sender = handles
+                .for_vm(*sender)
+                .ok_or(RuntimeError::UnknownVmObject(*sender))?;
+            if let Some(recipient) = recipient {
+                let recipient = handles
+                    .for_vm(*recipient)
+                    .ok_or(RuntimeError::UnknownVmObject(*recipient))?;
+                Self::dispatch_event_parts(
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    transition_zone_context,
+                    host,
+                    Some(sender),
+                    Some(recipient),
+                    *event,
+                    None,
+                    spawned_children,
+                )?;
+            } else {
+                // Opcode 0x8f uses a null effect recipient as its checked
+                // all-root postorder broadcast token. The VM effect does not
+                // yet retain nonzero collision modes or argv, so this path is
+                // exact for the common mode-zero/no-argument form.
+                let recipients = arena
+                    .postorder_snapshot()
+                    .map_err(RuntimeError::Tree)?
+                    .into_iter()
+                    .map(|arena| {
+                        handles
+                            .for_arena(arena)
+                            .ok_or(RuntimeError::UnknownArenaObject(arena))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                for recipient in recipients {
+                    Self::dispatch_event_parts(
+                        arena,
+                        handles,
+                        machine,
+                        pending_states,
+                        transition_zone_context,
+                        host,
+                        Some(sender),
+                        Some(recipient),
+                        *event,
+                        None,
+                        spawned_children,
+                    )?;
+                }
+            }
+            return Ok(());
+        }
+
         let VmEffect::SpawnChildren {
             parent,
             executable,
@@ -1416,6 +2481,18 @@ impl RetailRuntime {
             &mut vm_object,
         )?;
         Self::install_vm_object(&mut self.machine, vm_object)?;
+        let is_entity_enemy = matches!(binding.origin, ProgramOrigin::Entity(_))
+            && self
+                .machine
+                .object(binding.object.vm)
+                .map_err(RuntimeError::Vm)?
+                .program_identity()
+                .is_some_and(|identity| identity.category() == 0x300);
+        if is_entity_enemy {
+            self.arena
+                .reparent_to_root(binding.object.arena, ENEMY_OBJECT_ROOT)
+                .map_err(RuntimeError::Tree)?;
+        }
         self.arena
             .set_state_flags(
                 binding.object.arena,
@@ -1564,15 +2641,228 @@ fn wrapping_frame_stamp(frame_index: u64) -> u32 {
 mod tests {
     use crust_formats::{
         binary::EntryRef,
-        stream::{ENTRY_MAGIC, LevelId, NSF_PAGE_SIZE, ZoneEntityPathPoint, parse_nsd, parse_nsf},
+        stream::{
+            ENTRY_MAGIC, GOOL_PC_NONE, LevelId, NSF_PAGE_SIZE, ZoneEntityPathPoint, parse_nsd,
+            parse_nsf, structs::GoolState,
+        },
     };
 
     use super::*;
+    use crate::gool::Instruction;
     use crate::object_bounds::MAX_FRAME_BOUNDS;
 
     const ZONE: Eid = Eid::from_raw(0x1234_5679);
+    const ZONE_B: Eid = Eid::from_raw(0x2234_5679);
     const RETURN: u32 = 0x8289_4000;
     const MODERN_NSD_HEADER_SIZE: usize = 0x520;
+
+    const fn misc(primary: u32, secondary: i32, operand: u16) -> u32 {
+        (0x1c_u32 << 24)
+            | ((primary & 0x0f) << 20)
+            | (((secondary as u32) & 0x1f) << 15)
+            | (operand as u32 & 0x0fff)
+    }
+
+    #[test]
+    fn retail_runtime_initializes_both_display_globals_when_present() {
+        let runtime = RetailRuntime::new(CURRENT_DISPLAY_GLOBAL + 1);
+        assert_eq!(
+            runtime.machine().global_word(NEXT_DISPLAY_GLOBAL),
+            Ok(INITIAL_DISPLAY_MASK)
+        );
+        assert_eq!(
+            runtime.machine().global_word(CURRENT_DISPLAY_GLOBAL),
+            Ok(INITIAL_DISPLAY_MASK)
+        );
+
+        let authored = RetailRuntime::new(0);
+        assert!(
+            authored
+                .machine()
+                .global_word(CURRENT_DISPLAY_GLOBAL)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn display_mask_latches_after_traversal_with_one_frame_latency() {
+        let entities = [entity(10, 3, 1)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(CURRENT_DISPLAY_GLOBAL + 1);
+        let _object = *runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost)[0]
+            .result
+            .as_ref()
+            .unwrap();
+
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, 0)
+            .unwrap();
+        assert_eq!(runtime.current_display_mask(), INITIAL_DISPLAY_MASK);
+        let first = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert_eq!(runtime.current_display_mask(), 0);
+        assert_eq!(first.executions.len(), 1);
+
+        let suppressed = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert!(suppressed.executions.is_empty());
+
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, ANIMATE_OBJECTS | 0x20)
+            .unwrap();
+        let still_suppressed = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert!(still_suppressed.executions.is_empty());
+        assert_eq!(runtime.current_display_mask(), ANIMATE_OBJECTS | 0x20);
+        let animated = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert_eq!(animated.executions.len(), 1);
+    }
+
+    #[test]
+    fn retail_animation_masks_match_every_category_and_force_path() {
+        assert!(!retail_animation_mask_enabled(
+            0xffff & !ANIMATE_OBJECTS,
+            0,
+            0,
+            Some(0x100)
+        ));
+        for (category, bit) in [
+            (0x100, 0x20),
+            (0x200, 0x100),
+            (0x300, 0x80),
+            (0x400, 0x400),
+            (0x500, 0x80),
+            (0x600, 0x80),
+        ] {
+            assert!(retail_animation_mask_enabled(
+                ANIMATE_OBJECTS | bit,
+                0,
+                0,
+                Some(category)
+            ));
+            assert!(!retail_animation_mask_enabled(
+                ANIMATE_OBJECTS,
+                0,
+                0,
+                Some(category)
+            ));
+        }
+        assert!(!retail_animation_mask_enabled(
+            ANIMATE_OBJECTS | 0x20,
+            0,
+            0,
+            Some(0x700)
+        ));
+        assert!(retail_animation_mask_enabled(
+            ANIMATE_OBJECTS | FORCE_ANIMATE_MENUS,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x700)
+        ));
+        assert!(retail_animation_mask_enabled(
+            ANIMATE_OBJECTS | 0x20,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x100)
+        ));
+        assert!(retail_animation_mask_enabled(
+            ANIMATE_OBJECTS | 0x20,
+            0,
+            MENU_TEXT_STATE_FLAG,
+            Some(0x100)
+        ));
+        assert!(!retail_animation_mask_enabled(
+            ANIMATE_OBJECTS,
+            0,
+            MENU_TEXT_STATE_FLAG,
+            Some(0x100)
+        ));
+    }
+
+    #[test]
+    fn retail_display_masks_match_post_update_visibility_and_categories() {
+        assert!(!retail_display_mask_enabled(
+            0xffff,
+            0,
+            0,
+            Some(0x100),
+            false
+        ));
+        assert!(!retail_display_mask_enabled(
+            0xffff,
+            INVISIBLE_STATUS_B,
+            0,
+            Some(0x100),
+            true
+        ));
+        for (category, bit) in [
+            (0x100, 0x10),
+            (0x200, 0x200),
+            (0x300, 0x40),
+            (0x400, 0x800),
+            (0x500, 0x40),
+            (0x600, 0x40),
+        ] {
+            assert!(retail_display_mask_enabled(
+                DISPLAY_OBJECTS | bit,
+                0,
+                0,
+                Some(category),
+                true
+            ));
+            assert!(!retail_display_mask_enabled(
+                DISPLAY_OBJECTS,
+                0,
+                0,
+                Some(category),
+                true
+            ));
+        }
+        assert!(retail_display_mask_enabled(
+            DISPLAY_OBJECTS | FORCE_DISPLAY_MENUS,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x700),
+            true
+        ));
+        assert!(retail_display_mask_enabled(
+            DISPLAY_OBJECTS | 0x10,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x100),
+            true
+        ));
+    }
+
+    #[test]
+    fn newly_latched_count_draws_bit_controls_the_following_counter() {
+        let mut runtime = RetailRuntime::new(crate::gool::DRAW_COUNT_GLOBAL + 1);
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK & !0x1000)
+            .unwrap();
+        runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert_eq!(runtime.draw_count(), 0);
+
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK)
+            .unwrap();
+        runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert_eq!(runtime.draw_count(), 1);
+        assert_eq!(
+            runtime
+                .machine()
+                .global_word(crate::gool::DRAW_COUNT_GLOBAL),
+            Ok(1)
+        );
+
+        runtime.finish_display_frame(true).unwrap();
+        assert_eq!(runtime.draw_count(), 1, "paused GLUpdate never increments");
+    }
 
     struct SnapshotHost;
 
@@ -1589,6 +2879,63 @@ mod tests {
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
         }
+    }
+
+    struct AudioRecordingHost {
+        state_program: Option<VmStateProgram>,
+        requests: Vec<AudioHostRequest>,
+        next_voice_id: i32,
+    }
+
+    impl AudioRecordingHost {
+        fn new(state_program: Option<VmStateProgram>) -> Self {
+            Self {
+                state_program,
+                requests: Vec::new(),
+                next_voice_id: 40,
+            }
+        }
+    }
+
+    impl ProgramHost for AudioRecordingHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            self.state_program.clone().ok_or(())
+        }
+
+        fn handle_audio_request(
+            &mut self,
+            request: AudioHostRequest,
+        ) -> Result<AudioHostResponse, Self::Error> {
+            self.requests.push(request);
+            Ok(match request {
+                AudioHostRequest::CreateVoice(_) => {
+                    let voice_id = self.next_voice_id;
+                    self.next_voice_id = self.next_voice_id.wrapping_add(1);
+                    AudioHostResponse::VoiceCreated { voice_id }
+                }
+                AudioHostRequest::Control(_) => AudioHostResponse::ControlApplied,
+            })
+        }
+    }
+
+    const fn audio_create() -> u32 {
+        Instruction::encode(0x8c, 0x0e01, 0x0e02)
+    }
+
+    fn prepare_audio_registers(runtime: &mut RetailRuntime, object: RuntimeObjectHandle) {
+        let vm = runtime.machine.object_mut(object.vm).unwrap();
+        vm.set_register(1, 0x3fff).unwrap();
+        vm.set_register(2, Eid::from_raw(0x1234_5679).raw())
+            .unwrap();
     }
 
     struct BoundHost {
@@ -1639,6 +2986,431 @@ mod tests {
             subtype,
             path_points: vec![ZoneEntityPathPoint { x: 0, y: 0, z: 0 }],
         }
+    }
+
+    fn spawn_test_object(
+        runtime: &mut RetailRuntime,
+        zone: Eid,
+        id: u16,
+        executable: u8,
+        subtype: u8,
+    ) -> RuntimeObjectHandle {
+        let entities = [entity(id, executable, subtype)];
+        let neighbors = [NeighborZone {
+            eid: zone,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        *runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost)[0]
+            .result
+            .as_ref()
+            .unwrap()
+    }
+
+    fn attach_test_child(
+        runtime: &mut RetailRuntime,
+        parent: RuntimeObjectHandle,
+        zone: Eid,
+        executable: u8,
+    ) -> RuntimeObjectHandle {
+        let arena = runtime
+            .arena
+            .create_child(parent.arena, zone, executable, 0, false)
+            .unwrap();
+        let object = runtime.handles.reserve::<()>(arena).unwrap();
+        let mut vm_object = VmObject::new(object.vm, vec![RETURN]).unwrap();
+        vm_object.set_link(1, Some(parent.vm)).unwrap();
+        vm_object.set_link(4, Some(parent.vm)).unwrap();
+        runtime.machine.upsert_object(vm_object).unwrap();
+        object
+    }
+
+    fn arm_zone_migration_terminate_handler(
+        runtime: &mut RetailRuntime,
+        object: RuntimeObjectHandle,
+    ) {
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .configure_test_event_interrupt(TERMINATE_EVENT, vec![misc(12, 4, 0x0e00), 0x8280_0000])
+            .unwrap();
+    }
+
+    #[test]
+    fn audio_host_request_completes_before_normal_code_advances() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 60, 2, 0);
+        let mut vm = VmObject::new(
+            object.vm,
+            vec![
+                audio_create(),
+                Instruction::encode(0x11, 0x0805, 0x0e00),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        vm.set_link(0, Some(object.vm)).unwrap();
+        vm.set_register(1, 0x3fff).unwrap();
+        vm.set_register(2, ZONE.raw()).unwrap();
+        runtime.machine.upsert_object(vm).unwrap();
+        let mut host = AudioRecordingHost::new(None);
+
+        runtime.run_frame(&mut host, 3).unwrap();
+
+        assert_eq!(host.requests.len(), 1);
+        assert_eq!(runtime.machine.pending_audio_host_request(), None);
+        let vm = runtime.machine.object(object.vm).unwrap();
+        assert_eq!(vm.register(process_register::VOICE_ID), Ok(40));
+        assert_eq!(vm.register(0), Ok(0x500));
+    }
+
+    #[test]
+    fn once_and_transition_audio_share_one_synchronous_state_rebind() {
+        let state = VmStateProgram::new(
+            7,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: 2,
+            },
+            vec![audio_create(), 0x8280_0000, RETURN],
+            Vec::new(),
+        )
+        .unwrap();
+        let mut host = AudioRecordingHost::new(Some(state));
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 61, 2, 0);
+        prepare_audio_registers(&mut runtime, object);
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .configure_test_once(vec![audio_create(), 0x8280_0000], 0)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .configure_test_state(7);
+        runtime.pending_states.insert(object.vm, 7);
+
+        let frame = runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(host.requests.len(), 2, "{frame:?}");
+        assert_eq!(runtime.machine.pending_audio_host_request(), None);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .register(process_register::VOICE_ID),
+            Ok(41)
+        );
+    }
+
+    #[test]
+    fn event_service_and_interrupt_audio_complete_inside_delivery() {
+        const EVENT: u32 = 0x1500;
+        for event_service in [false, true] {
+            let mut runtime = RetailRuntime::new(0);
+            let object = spawn_test_object(
+                &mut runtime,
+                ZONE,
+                if event_service { 62 } else { 63 },
+                2,
+                0,
+            );
+            prepare_audio_registers(&mut runtime, object);
+            let vm = runtime.machine.object_mut(object.vm).unwrap();
+            if event_service {
+                vm.configure_test_event_service(vec![audio_create(), 0x8880_0000], 0)
+                    .unwrap();
+            } else {
+                vm.configure_test_event_interrupt(EVENT, vec![audio_create(), 0x8280_0000])
+                    .unwrap();
+            }
+            let mut host = AudioRecordingHost::new(None);
+
+            runtime
+                .dispatch_event(&mut host, None, Some(object), EVENT, None)
+                .unwrap();
+
+            assert_eq!(host.requests.len(), 1);
+            assert_eq!(runtime.machine.pending_audio_host_request(), None);
+            assert_eq!(
+                runtime
+                    .machine
+                    .object(object.vm)
+                    .unwrap()
+                    .register(process_register::VOICE_ID),
+                Ok(40)
+            );
+        }
+    }
+
+    fn install_test_event_sender(
+        runtime: &mut RetailRuntime,
+        sender: RuntimeObjectHandle,
+        recipient: Option<RuntimeObjectHandle>,
+        opcode: u8,
+        event: u32,
+    ) {
+        let link = usize::from(recipient.is_some());
+        let operand_a = u16::try_from(link << 9).unwrap();
+        let mut object = VmObject::new(
+            sender.vm,
+            vec![Instruction::encode(opcode, operand_a, 0x0e00), RETURN],
+        )
+        .unwrap();
+        object.set_link(0, Some(sender.vm)).unwrap();
+        if let Some(recipient) = recipient {
+            object.set_link(link, Some(recipient.vm)).unwrap();
+        }
+        object.set_register(0, event).unwrap();
+        runtime.machine.upsert_object(object).unwrap();
+    }
+
+    #[test]
+    fn event_opcodes_dispatch_synchronously_through_the_runtime_host() {
+        const EVENT: u32 = 0x1500;
+
+        for opcode in [0x87, 0x90] {
+            let mut runtime = RetailRuntime::new(0);
+            let recipient = spawn_test_object(&mut runtime, ZONE, u16::from(opcode), 2, 0);
+            let sender = spawn_test_object(&mut runtime, ZONE, u16::from(opcode) + 1, 2, 0);
+            runtime
+                .machine
+                .object_mut(recipient.vm)
+                .unwrap()
+                .configure_test_event_interrupt(EVENT, vec![0x8280_0000])
+                .unwrap();
+            install_test_event_sender(&mut runtime, sender, Some(recipient), opcode, EVENT);
+
+            runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+            assert_eq!(
+                runtime
+                    .machine
+                    .object(recipient.vm)
+                    .unwrap()
+                    .register(process_register::EVENT),
+                Ok(EVENT),
+                "opcode {opcode:#x} did not synchronously reach its recipient"
+            );
+            assert!(!runtime.faulted_objects.contains(&sender));
+        }
+
+        let mut runtime = RetailRuntime::new(0);
+        let first = spawn_test_object(&mut runtime, ZONE, 200, 2, 0);
+        let second = spawn_test_object(&mut runtime, ZONE, 201, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 202, 2, 0);
+        for recipient in [first, second] {
+            runtime
+                .machine
+                .object_mut(recipient.vm)
+                .unwrap()
+                .configure_test_event_interrupt(EVENT, vec![0x8280_0000])
+                .unwrap();
+        }
+        install_test_event_sender(&mut runtime, sender, None, 0x8f, EVENT);
+
+        runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        for recipient in [first, second] {
+            assert_eq!(
+                runtime
+                    .machine
+                    .object(recipient.vm)
+                    .unwrap()
+                    .register(process_register::EVENT),
+                Ok(EVENT)
+            );
+        }
+        assert!(!runtime.faulted_objects.contains(&sender));
+    }
+
+    #[test]
+    fn terminate_event_migration_survives_departure_but_not_hard_restart() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let object = spawn_test_object(&mut runtime, ZONE, 40, 2, 0);
+        arm_zone_migration_terminate_handler(&mut runtime, object);
+
+        let report = runtime
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert!(report.terminated.is_empty(), "{report:?}");
+        assert_eq!(report.migrated, [object]);
+        assert!(report.event_failures.is_empty());
+        assert_eq!(runtime.arena.get(object.arena).unwrap().zone(), ZONE_B);
+        assert_eq!(runtime.object_for_vm(object.vm), Some(object));
+
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let object = spawn_test_object(&mut runtime, ZONE, 41, 2, 0);
+        arm_zone_migration_terminate_handler(&mut runtime, object);
+        let report = runtime
+            .terminate_zone_objects(ZONE, ZoneTerminationMode::HardRestart, &mut SnapshotHost)
+            .unwrap();
+        assert_eq!(report.terminated, [object]);
+        assert!(report.migrated.is_empty());
+        assert!(runtime.object_for_vm(object.vm).is_none());
+    }
+
+    #[test]
+    fn malformed_terminate_handler_is_reported_but_unchanged_object_is_killed() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 42, 2, 0);
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .configure_test_event_interrupt(TERMINATE_EVENT, vec![0xff00_0000])
+            .unwrap();
+
+        let report = runtime
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert_eq!(report.terminated, [object]);
+        assert!(matches!(
+            report.event_failures.as_slice(),
+            [ZoneTerminationEventFailure {
+                object: failed,
+                error: RuntimeError::Vm(VmError::UnknownOpcode(0xff)),
+            }] if *failed == object
+        ));
+        assert!(runtime.arena.get(object.arena).is_none());
+        assert_eq!(
+            runtime.machine.object(object.vm),
+            Err(VmError::UnknownObject(object.vm))
+        );
+    }
+
+    #[test]
+    fn zone_termination_reads_live_vm_immunity_flags() {
+        let mut runtime = RetailRuntime::new(0);
+        let eligible = spawn_test_object(&mut runtime, ZONE, 43, 2, 0);
+        let status_immune = spawn_test_object(&mut runtime, ZONE, 44, 2, 0);
+        let state_immune = spawn_test_object(&mut runtime, ZONE, 45, 2, 0);
+        runtime
+            .machine
+            .object_mut(status_immune.vm)
+            .unwrap()
+            .set_register(process_register::STATUS_B, ZONE_TERMINATION_STATUS_B_IMMUNE)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(state_immune.vm)
+            .unwrap()
+            .set_register(process_register::STATE_FLAGS, ZONE_TERMINATION_STATE_IMMUNE)
+            .unwrap();
+        assert_eq!(
+            runtime.arena.get(state_immune.arena).unwrap().state_flags(),
+            0
+        );
+
+        let report = runtime
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert_eq!(report.terminated, [eligible]);
+        assert_eq!(runtime.object_for_vm(status_immune.vm), Some(status_immune));
+        assert_eq!(runtime.object_for_vm(state_immune.vm), Some(state_immune));
+    }
+
+    #[test]
+    fn recursive_termination_cleans_every_runtime_registry_in_release_order() {
+        let mut runtime = RetailRuntime::new(0);
+        let parent = spawn_test_object(&mut runtime, ZONE, 46, 2, 0);
+        let child = attach_test_child(&mut runtime, parent, ZONE, 3);
+        let grandchild = attach_test_child(&mut runtime, child, ZONE, 4);
+        for object in [child, grandchild] {
+            runtime
+                .machine
+                .object_mut(object.vm)
+                .unwrap()
+                .set_register(process_register::STATE_FLAGS, ZONE_TERMINATION_STATE_IMMUNE)
+                .unwrap();
+        }
+        for (index, object) in [parent, child, grandchild].into_iter().enumerate() {
+            runtime.pending_states.insert(object.vm, index as u16);
+            runtime.faulted_objects.insert(object);
+            runtime.displayed_objects.insert(object, true);
+            runtime
+                .machine
+                .register_frame_bound(object.vm, Bounds3::default())
+                .unwrap();
+        }
+
+        let report = runtime
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert_eq!(report.terminated, [grandchild, child, parent]);
+        assert_eq!(
+            report.cleanup_actions,
+            [
+                RuntimeCleanupAction::FreeObjectAudio(grandchild),
+                RuntimeCleanupAction::FreeObjectAudio(child),
+                RuntimeCleanupAction::FreeObjectAudio(parent),
+            ]
+        );
+        assert!(runtime.arena.is_empty());
+        assert!(runtime.pending_states.is_empty());
+        assert!(runtime.faulted_objects.is_empty());
+        assert!(runtime.displayed_objects.is_empty());
+        assert!(runtime.machine.frame_bounds().is_empty());
+        for object in [parent, child, grandchild] {
+            assert!(runtime.object_for_arena(object.arena).is_none());
+            assert!(runtime.object_for_vm(object.vm).is_none());
+            assert_eq!(
+                runtime.machine.object(object.vm),
+                Err(VmError::UnknownObject(object.vm))
+            );
+        }
+    }
+
+    #[test]
+    fn crash_is_immune_outside_title_and_released_on_title() {
+        let mut gameplay = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let crash = spawn_test_object(&mut gameplay, ZONE, 47, 0, 0);
+        let report = gameplay
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert!(report.terminated.is_empty());
+        assert_eq!(gameplay.object_for_vm(crash.vm), Some(crash));
+
+        let mut title = RetailRuntime::new_for_level(0, LevelId::TITLE);
+        let crash = spawn_test_object(&mut title, ZONE, 48, 0, 0);
+        let report = title
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert_eq!(report.terminated, [crash]);
+        assert!(title.object_for_vm(crash.vm).is_none());
     }
 
     fn configure_render_state(runtime: &mut RetailRuntime, object: RuntimeObjectHandle, seed: u8) {

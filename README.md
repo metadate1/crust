@@ -35,21 +35,25 @@ zone-relative path position, rotation/mode flags, scale, process defaults, playe
 matrix and typed parent/player links; runtime children inherit their parent's transform.
 State changes rebind at the synchronous host boundary: a captured once block runs before the state
 stamp, then the target transition block runs after it, including nested calls and hosted spawns;
-newly bound state code resumes on the next object execution. Initial/call frames share the bounded
+normal updates continue into newly bound state code in that same native update. Initial/call frames
+share the bounded
 process word array at `init_sp`, state links apply target-state guards, and checked failures
 quarantine only the affected object. Checked aligned code/storage/entry tags, paging operations,
-five-word pad history, entity-path orientation, color seeking and the source-defined solid-surface
-paths exercised by the legal trace are implemented without native pointers or C undefined
+five-word pad history, camera-relative movement, gravity, rotation, entity-path orientation, color
+seeking and the source-defined static/object solid paths exercised by the legal trace are
+implemented without native pointers or C undefined
 behavior. The WebGL stage transactionally replaces the camera/path scene while reusing shared
 immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
 TGEO plus 3D SVTX/CVTX frames; post-GOOL object snapshots drive fixed-point projection, lighting,
 culling, ordering and the same resident TPAG cache as the world. Eligible animation frames also
 register an ordered, bounded collision snapshot before execution, allowing the checked solid query
 to cross the former N. Sanity animation-bound boundary without emulating undefined C locals. This
-is not yet a playable retail world: sprite/font/text/fragment and 2D-CVTX presentation, complete
-player physics/collision/progression, zone-object termination, dynamic display/paging state, event
-services and save handshakes remain incomplete, and retail VAB/SEP/MIDI audio is not connected.
-The current browser audio remains synthesized. See
+now produces an interactive data-backed N. Sanity scene with Crash, retail entrance timing, floor
+response, camera following and pad-driven movement. It is not yet a complete retail playthrough:
+sprite/font/text/fragment and 2D-CVTX presentation, full progression, several GOOL host operations
+and save-state handshakes remain incomplete. Source-ordered zone lifetime/paging, synchronous event
+and audio calls, display-mask latching and local ADIO SFX are now connected. Retail MIDI/INST music
+is not yet connected, so the browser still uses its software-generated sequence for music. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -78,7 +82,8 @@ entry/state graphs can be validated and bound natively. Zone entities and their 
 flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
-camera-selected world, but it is not yet a complete playable retail level.
+camera-selected world; Crash accepts retail pad input and collides with the decoded zone, but later
+progression and save/checkpoint behavior are not yet complete enough to certify a full level.
 
 ## Controls
 
@@ -118,11 +123,13 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
   scene metadata and tagged-reference validation.
 - `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
   binding/word machine, hosted retail entity runtime with state rebinding, bounded object arena,
-  level/title flow, collision, camera, paging, demos, and retail card payload/state handshakes.
+  source-ordered movement/solid physics, level/title flow, collision, camera, paging, demos, and
+  retail card payload/state handshakes.
 - `crust-renderer` — PSX texture/TPAG/UV decoding and cache, world and object fixed-point
   projection/lighting/culling, ordering, clipping, blend passes, title composition and
   WebGL2-ready commands.
-- `crust-audio` — SPU ADPCM, sample cache/mixer, sequence events and a 44.1 kHz software synth.
+- `crust-audio` — SPU ADPCM, retail 24-voice SFX control/cache/mixer, sequence events and a
+  44.1 kHz software synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
 - `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the
   cooperative application loop.

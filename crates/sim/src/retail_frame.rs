@@ -241,11 +241,24 @@ impl RetailFrameState {
 
     /// Advances one cooperative 30 Hz gameplay tick and returns its event trace.
     pub fn tick(&mut self) -> FrameTrace {
+        self.tick_with_draw_count_enabled(true)
+    }
+
+    /// Advances one tick while applying the newly latched display-mask draw gate.
+    ///
+    /// Native primitive generation uses the pre-increment counter. `GLUpdate`
+    /// then latches the next display word and advances the counter only when
+    /// bit `0x1000` is enabled and the game is not paused.
+    pub fn tick_with_draw_count_enabled(&mut self, enabled: bool) -> FrameTrace {
         let tick = self.tick.wrapping_add(1);
         let progress_before = self.progress;
         let progress_after = progress_before.advance(PATH_POINT_STEP, self.point_count);
         let draw_count_before = self.draw_count;
-        let draw_count_after = draw_count_before.wrapping_add(1);
+        let draw_count_after = if enabled {
+            draw_count_before.wrapping_add(1)
+        } else {
+            draw_count_before
+        };
         let draw_skip_before = self.draw_skip;
         let render_frame = matches!(draw_skip_before, 0 | 1);
         let draw_skip_after = draw_skip_before.saturating_sub(1);
@@ -358,6 +371,35 @@ mod tests {
             }
         );
         assert_eq!(trace.draw_count(), 1);
+    }
+
+    #[test]
+    fn draw_count_gate_holds_the_counter_without_changing_frame_order() {
+        let mut state = RetailFrameState::ready(NonZeroU16::new(3).unwrap(), 0);
+        let held = state.tick_with_draw_count_enabled(false);
+        assert_eq!(held.draw_count(), 0);
+        assert!(held.events().contains(&FrameEvent::DrawCountIncremented {
+            before: 0,
+            after: 0,
+        }));
+        assert_eq!(
+            held.presented(),
+            PresentedFrame::Gameplay {
+                progress: PathProgress::clamped(0x100, NonZeroU16::new(3).unwrap()),
+                draw_count: 0,
+            }
+        );
+
+        let advanced = state.tick_with_draw_count_enabled(true);
+        assert_eq!(advanced.draw_count(), 1);
+        assert!(
+            advanced
+                .events()
+                .contains(&FrameEvent::DrawCountIncremented {
+                    before: 0,
+                    after: 1,
+                })
+        );
     }
 
     #[test]

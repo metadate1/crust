@@ -1,17 +1,12 @@
-//! Safe, pointer-free construction of a retail world spawn snapshot.
-//!
-//! This module deliberately models the LDAT progress-zero scene. The retail
-//! runtime runs entity spawning and `CamUpdate` before its first presentation,
-//! so exact first-frame camera behavior remains simulation work rather than a
-//! hidden approximation in the renderer.
+//! Safe, pointer-free construction of a retail world path snapshot.
 
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crust_formats::binary::Eid;
 use crust_formats::stream::{
-    Entry, Nsd, Nsf, PolygonId, SlstItem, WorldGeometry, ZoneHeader, ZonePath, ZoneRect,
-    parse_world_geometry,
+    Entry, Nsd, Nsf, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader, ZonePath,
+    ZoneRect, parse_world_geometry,
 };
 use crust_renderer::cache::{TextureCache, TextureHandle};
 use crust_renderer::command::{
@@ -46,7 +41,7 @@ pub struct RetailSceneTexture {
     pub pixels: DecodedTexture,
 }
 
-/// Read-only diagnostics for the current progress-zero world snapshot.
+/// Read-only diagnostics for the current world snapshot.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RetailSceneStats {
     pub worlds: usize,
@@ -63,6 +58,9 @@ pub struct RetailScene {
     pub commands: Vec<RetailSceneCommand>,
     pub textures: Vec<RetailSceneTexture>,
     pub stats: RetailSceneStats,
+    pub path_point_count: u16,
+    pub path_point_index: u16,
+    pub draw_count: u32,
 }
 
 /// Controlled failure while following the retail LDAT scene graph.
@@ -93,6 +91,23 @@ pub fn build_retail_scene(
     nsf: &Nsf,
     nsf_bytes: &[u8],
 ) -> Result<RetailScene, RetailSceneError> {
+    build_retail_scene_at_path_point(nsd, nsf, nsf_bytes, 0, 0)
+}
+
+/// Builds one exact integer camera-path state with the corresponding mutable
+/// SLST visibility and texture-animation counter.
+///
+/// # Errors
+///
+/// Returns the same structural errors as [`build_retail_scene`]. Like retail
+/// path progress, a point beyond the path is clamped to its final point.
+pub fn build_retail_scene_at_path_point(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    path_point_index: usize,
+    draw_count: u32,
+) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
         .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
@@ -116,6 +131,11 @@ pub fn build_retail_scene(
         "ZDAT spawn path",
     )?)
     .map_err(|error| scene_error(format!("ZDAT spawn path: {error}")))?;
+    let path_point_index = path_point_index.min(path.points.len() - 1);
+    let path_point_count = u16::try_from(path.points.len())
+        .map_err(|_| scene_error("spawn path point count does not fit u16"))?;
+    let path_point_index_u16 = u16::try_from(path_point_index)
+        .map_err(|_| scene_error("spawn path point index does not fit u16"))?;
 
     // LevelUpdate deliberately does not open the SLST when the zone has no
     // worlds. Title, Hog Wild and Whole Hog use this as an external-transition
@@ -125,6 +145,9 @@ pub fn build_retail_scene(
             commands: Vec::new(),
             textures: Vec::new(),
             stats: RetailSceneStats::default(),
+            path_point_count,
+            path_point_index: path_point_index_u16,
+            draw_count,
         });
     }
 
@@ -146,25 +169,20 @@ pub fn build_retail_scene(
             slst_entry.items.len()
         )));
     }
-    // LevelUpdate starts from the nearer raw endpoint. At progress zero this
-    // is item zero except for one-point paths, where retail selects item one.
-    let raw_item_index = usize::from(path.points.len() == 1);
-    let raw_visibility = SlstItem::parse(entry_item(
-        slst_entry,
-        nsf_bytes,
-        raw_item_index,
-        "spawn SLST endpoint",
-    )?)
-    .map_err(|error| scene_error(format!("spawn SLST endpoint: {error}")))?;
-    let SlstItem::Raw {
-        polygons: visible_polygons,
-        ..
-    } = raw_visibility
-    else {
-        return Err(scene_error(
-            "spawn SLST endpoint is a delta, not a raw list",
-        ));
-    };
+    let slst_items = slst_entry
+        .items
+        .iter()
+        .enumerate()
+        .map(|(item_index, _)| {
+            SlstItem::parse(entry_item(
+                slst_entry,
+                nsf_bytes,
+                item_index,
+                "spawn SLST item",
+            )?)
+            .map_err(|error| scene_error(format!("spawn SLST item {item_index}: {error}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut worlds = Vec::with_capacity(zone_header.worlds.len());
     for (world_index, world) in zone_header.worlds.iter().enumerate() {
@@ -177,22 +195,29 @@ pub fn build_retail_scene(
         .map_err(|error| scene_error(format!("spawn WGEO {world_index}: {error}")))?;
         worlds.push(geometry);
     }
+    let world_polygon_counts = worlds
+        .iter()
+        .map(|world| world.polygons.len())
+        .collect::<Vec<_>>();
+    let visibility = SlstCursor::new(&slst_items, &world_polygon_counts, path_point_index)
+        .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
+    let visible_polygons = visibility.visibility().to_vec();
     validate_visibility(&visible_polygons, &worlds)?;
 
-    let first_point = path
+    let camera_point = path
         .points
-        .first()
+        .get(path_point_index)
         .copied()
-        .ok_or_else(|| scene_error("spawn path contains no camera point"))?;
+        .ok_or_else(|| scene_error("requested camera point is outside the spawn path"))?;
     let camera_translation = Vec3i {
-        x: zone_rect.origin[0].saturating_add(i32::from(first_point.x)),
-        y: zone_rect.origin[1].saturating_add(i32::from(first_point.y)),
-        z: zone_rect.origin[2].saturating_add(i32::from(first_point.z)),
+        x: path_coordinate(zone_rect.origin[0], camera_point.x)?,
+        y: path_coordinate(zone_rect.origin[1], camera_point.y)?,
+        z: path_coordinate(zone_rect.origin[2], camera_point.z)?,
     };
     let camera_matrix = world_camera_matrix(
-        first_point.rotation_y,
-        first_point.rotation_x,
-        first_point.rotation_z,
+        camera_point.rotation_y,
+        camera_point.rotation_x,
+        camera_point.rotation_z,
     );
     let projection_distance = projection_distance(ldat.field_of_view)?;
 
@@ -201,7 +226,7 @@ pub fn build_retail_scene(
         let geometry = &worlds[usize::from(polygon_id.world_index)];
         let polygon = geometry.polygons[usize::from(polygon_id.polygon_index)];
         if let Some(texture) = geometry
-            .texture_for_polygon(polygon, 0)
+            .texture_for_polygon(polygon, draw_count)
             .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?
         {
             let reference = RetailTextureReference::new(
@@ -292,7 +317,7 @@ pub fn build_retail_scene(
         }
 
         let texture = geometry
-            .texture_for_polygon(polygon, 0)
+            .texture_for_polygon(polygon, draw_count)
             .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?;
         let primitive = if let Some(texture) = texture {
             let reference = RetailTextureReference::new(
@@ -374,6 +399,9 @@ pub fn build_retail_scene(
         },
         commands,
         textures,
+        path_point_count,
+        path_point_index: path_point_index_u16,
+        draw_count,
     })
 }
 
@@ -422,6 +450,12 @@ fn validate_visibility(
         }
     }
     Ok(())
+}
+
+fn path_coordinate(origin: i32, point: i16) -> Result<i32, RetailSceneError> {
+    origin
+        .checked_add(i32::from(point))
+        .ok_or_else(|| scene_error("camera path coordinate overflows signed world space"))
 }
 
 fn projection_distance(field_of_view: u32) -> Result<u32, RetailSceneError> {
@@ -532,6 +566,13 @@ mod tests {
     }
 
     #[test]
+    fn world_camera_coordinates_add_signed_path_points_before_source_24_8_expansion() {
+        assert_eq!(path_coordinate(1_000, -2).unwrap(), 998);
+        assert_eq!(path_coordinate(-1_000, 2).unwrap(), -998);
+        assert!(path_coordinate(i32::MAX, 1).is_err());
+    }
+
+    #[test]
     #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
     fn builds_n_sanity_spawn_snapshot_from_local_retail_streams() {
         let root = PathBuf::from(
@@ -562,6 +603,15 @@ mod tests {
         );
         assert!(!scene.commands.is_empty());
         assert_eq!(scene.stats.unique_textures, scene.textures.len());
+
+        let first_presented =
+            build_retail_scene_at_path_point(&nsd, &nsf, &nsf_bytes, 2, 1).unwrap();
+        assert_eq!(first_presented.stats.worlds, 4);
+        assert_eq!(first_presented.stats.visible_polygons, 679);
+        assert_eq!(
+            first_presented.stats.submitted_polygons,
+            first_presented.commands.len()
+        );
     }
 
     #[test]
@@ -599,6 +649,10 @@ mod tests {
                 skipped_textured_polygons: 0,
             }
         );
+        let first_presented =
+            build_retail_scene_at_path_point(&nsd, &nsf, &nsf_bytes, 2, 1).unwrap();
+        assert_eq!(first_presented.stats.worlds, 4);
+        assert_eq!(first_presented.stats.visible_polygons, 679);
     }
 
     #[test]

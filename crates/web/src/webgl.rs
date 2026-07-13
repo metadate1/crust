@@ -12,7 +12,6 @@ use crate::retail_scene::{RetailScene, RetailSceneCommand};
 
 const LOADING_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX);
 const TITLE_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX - 1);
-const LOADING_IMAGE_FRAMES: u8 = 30;
 const LOADING_IMAGE_DEPTH: u16 = 2_047;
 const TITLE_IMAGE_DEPTH: u16 = 0;
 const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
@@ -26,6 +25,7 @@ const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
 pub struct VisualState {
     pub show_title_image: bool,
     pub show_retail_scene: bool,
+    pub show_loading_image: bool,
 }
 
 #[derive(Debug)]
@@ -33,7 +33,6 @@ pub struct GlStage {
     backend: RendererBackend,
     ordering: OrderingTable,
     loading_image_dimensions: Option<[i32; 2]>,
-    loading_image_frames: u8,
     title_image_dimensions: Option<[i32; 2]>,
     retail_scene_commands: Vec<RetailSceneCommand>,
     last_error: u32,
@@ -46,15 +45,14 @@ impl GlStage {
             backend,
             ordering: OrderingTable::default(),
             loading_image_dimensions: None,
-            loading_image_frames: 0,
             title_image_dimensions: None,
             retail_scene_commands: Vec::new(),
             last_error: 0,
         })
     }
 
-    /// Upload a decoded retail loading image and display it for the next 30
-    /// successful presentation frames.
+    /// Uploads a decoded retail loading image. Simulation-controlled
+    /// [`VisualState`] decides whether it is presented on a given frame.
     pub fn install_loading_image(&mut self, image: &DecodedTexture) -> Result<(), JsValue> {
         let dimensions = [
             i32::try_from(image.width())
@@ -66,7 +64,6 @@ impl GlStage {
             .upload_texture(LOADING_IMAGE_HANDLE, image)
             .map_err(|error| backend_error(&error))?;
         self.loading_image_dimensions = Some(dimensions);
-        self.loading_image_frames = LOADING_IMAGE_FRAMES;
         Ok(())
     }
 
@@ -127,7 +124,7 @@ impl GlStage {
             self.submit_image(TITLE_IMAGE_HANDLE, TITLE_IMAGE_DEPTH, width, height)?;
         }
 
-        if self.loading_image_frames != 0
+        if state.show_loading_image
             && let Some([width, height]) = self.loading_image_dimensions
         {
             self.submit_image(LOADING_IMAGE_HANDLE, LOADING_IMAGE_DEPTH, width, height)?;
@@ -150,9 +147,6 @@ impl GlStage {
             .or_else(|| diagnostics.gl_errors.first())
             .copied()
             .unwrap_or(0);
-        if self.loading_image_frames != 0 {
-            self.loading_image_frames -= 1;
-        }
         Ok(())
     }
 

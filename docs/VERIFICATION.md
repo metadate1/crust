@@ -1,8 +1,8 @@
 # Verification record
 
 This file records observed checks for the initial private rewrite delivery on 2026-07-12 and the
-stream, title, GOOL and spawn-scene vertical slices on 2026-07-13. It does not turn subsystem tests
-into a claim of retail gameplay parity.
+stream, title, GOOL, entity, SLST and first-presentation vertical slices on 2026-07-13. It does not
+turn subsystem tests into a claim of retail gameplay parity.
 
 ## Reference characterization
 
@@ -21,9 +21,22 @@ stream bytes. Every filename and declared extent was matched against the extract
 Read-only scene characterization covered 1,223 ZDAT entries, 1,735 paths, 520 WGEO entries and
 1,726 SLST entries containing 138,038 items. All 43 playable LDAT spawn zones/paths resolved. The
 static scene builder produced world commands for 40 starts; Title, Hog Wild and Whole Hog use
-zero-world dummy starts with external SLST placeholders. N. Sanity Beach deterministically produced
-4 worlds, 681/681 submitted visible polygons and 52 unique decoded textures from both the extracted
-pair and directly from the raw BIN.
+zero-world dummy starts with external SLST placeholders. Exhaustive mutable-SLST characterization
+covered 1,726 resolved paths, 136,312 visibility states, 134,586 adjacent transitions, 269,172
+forward/backward inverse round trips and 89,666,970 validated polygon references, with fingerprint
+`0x1400935c08cfe148`.
+
+All 4,292 retail ZDAT entities and 16,363 signed entity path points parsed; every entity was in
+group three. The data contained 52 main-object candidates, 624 valid executable/subtype bindings
+and seven bindings that the retail program loader also rejects, with fingerprint
+`0x71524c62fcbf6ddb`. N. Sanity Beach's progress-zero baseline remained 4 worlds and 681 visible
+polygons. The observed first-presented state at path point two/draw count one produced 679 visible
+polygons from both the extracted pair and directly from the raw BIN.
+
+The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
+verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
+optional-pointer word `0x16be0e1f`, and the first two child-spawn yields with argument cleanup,
+without treating any serialized word as a native pointer.
 
 ## Browser checks actually performed
 
@@ -72,9 +85,10 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
   simulation stopped as `BLOCKED`, retained `0x19`, and displayed the missing local filename rather
   than advancing or presenting the destination against stale assets.
 
-The later scene-enabled build was reloaded at `http://127.0.0.1:4174/` in the visible Codex in-app
+The later first-presentation build was reloaded at `http://127.0.0.1:4174/` in the visible Codex in-app
 browser. Its DOM contained the complete loader, two local file inputs and one canvas; there was no
-framework error overlay and the captured warning/error console was empty. Browser automation in
+framework error overlay and the captured warning/error console was empty. The served canvas backing
+size was 1024×768 and the HTTP response used `Cache-Control: no-store`. Browser automation in
 this environment could not populate the operating-system file chooser, so this specific build's
 raw-BIN import and WebGL scene presentation are not claimed as browser-exercised. The same raw BIN
 was exercised directly by the opt-in Rust disc-to-scene test described above. A user can select it
@@ -87,15 +101,17 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 198 passed, zero failed, 12 legally local tests ignored by
-  default.
-- all 12 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
-  all-pair parsing, GOOL graph/binding, scene formats, 40 standalone spawn snapshots, 39 loading
-  images, 1,427 representative texture references and all four image-backed title states.
+- locked native workspace suite: 223 asset-free tests passed, zero failed; 14 legally local tests
+  remain ignored by default.
+- all 14 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+  all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
+  scene formats, 40 standalone snapshots, 39 loading images, 1,427 representative texture
+  references and all four image-backed title states. The entity and scene-format tests also passed
+  using the raw BIN alone.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 469,993 bytes (SHA-256
-  `100f7641fdbc666244778926dd27ab6aaa75a69cd2d26207ce7bcf800d867740`).
+- generated web release: passed; Wasm payload was 485,081 bytes (SHA-256
+  `51930742ab573f51774d6e0eb77abd6d547666bf9f97da38bc043b112c048333`).
 
 ## Reproducible commands
 

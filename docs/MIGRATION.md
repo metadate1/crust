@@ -35,10 +35,19 @@ An external `git archive` copy produced these results:
 - Image-backed title states resolve `5MapP`, `7MapP`, `8MapP`, and `aMapP` MDAT graphs; each IMAG
   column contains 16×16 indexed tiles and selects a CLUT item through the MDAT IPAL table.
 - GOOL programs are retained as owned code/state/EID tables. Serialized PCs are validated within
-  the 14-bit code space and never converted to host pointers.
+  the 14-bit code space and never converted to host pointers. External/global code addresses and
+  return frames are explicit values; global calls remove their validated argument span on return.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.
+- ZDAT entities retain the exact 20-byte header and six-byte signed path points. The 304 entity
+  spawn flags, 96 ordinary objects, dedicated main slot and eight roots are fixed-size Rust state;
+  generations reject stale object references after despawn.
+- SLST visibility is reconstructed from the nearest raw endpoint with the retail midpoint tie-break.
+  Every adjacent delta is bounds-checked in both directions, and a failed seek rolls back both the
+  point index and ordered visibility list.
+- Direct-loading presentation uses the observed two-step draw skip: tick one executes but is
+  discarded, while tick two presents gameplay with path progress `0x200` and draw count one.
 
 ## Deliberate corrections
 
@@ -47,6 +56,6 @@ access, division by zero, oversized shift counts, unbounded collision result agg
 texture/CLUT ranges, malformed audio banks/sequences, and PBAK frame overruns. These were undefined
 or insufficiently bounded in C and are not compatibility behavior.
 
-No C runtime, C compatibility layer, copied header, or vendored C synthesizer remains in the final
-application. Upstream attribution is retained because its observable behavior and format research
-informed this work.
+No C runtime, C compatibility layer, copied header, or vendored C synthesizer remains in the
+current application build. Upstream attribution is retained because its observable behavior and
+format research informed this work.

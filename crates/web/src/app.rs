@@ -7,6 +7,7 @@
     clippy::too_many_lines
 )]
 
+use core::num::NonZeroU16;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -27,6 +28,7 @@ use crust_sim::flow::{
     TitleScreen,
 };
 use crust_sim::player::{PadState as SimPadState, PlayerMode};
+use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use js_sys::{Object, Reflect};
 use wasm_bindgen::JsCast as _;
@@ -41,7 +43,7 @@ use web_sys::{
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
-use crate::retail_scene::build_retail_scene;
+use crate::retail_scene::build_retail_scene_at_path_point;
 use crate::storage::StorageState;
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
@@ -260,6 +262,8 @@ struct Runtime {
     scheduler: FrameScheduler,
     pad: PlatformPadState,
     stage: GlStage,
+    retail_frame: RetailFrameState,
+    show_loading_image: bool,
     level_assets: ValidatedPair,
     audio: Option<WebAudio>,
     storage: Option<StorageState>,
@@ -332,7 +336,7 @@ impl Runtime {
             }
         };
         let mut stage = GlStage::new(&dom.canvas)?;
-        if let Some(image) = decode_pair_loading_image(&pair)? {
+        let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
             stage.install_loading_image(&image)?;
             dom.log(
                 &format!(
@@ -342,8 +346,17 @@ impl Runtime {
                 ),
                 false,
             );
-        }
-        install_retail_scene_for_pair(&pair, &mut stage, dom)?;
+            true
+        } else {
+            false
+        };
+        let retail_point_count =
+            install_retail_scene_for_pair(&pair, &mut stage, dom, after_loading_image)?;
+        let retail_frame = if after_loading_image {
+            RetailFrameState::after_loading_image(retail_point_count, 0)
+        } else {
+            RetailFrameState::ready(retail_point_count, 0)
+        };
         let mut last_title_state = None;
         if boot_level == LevelId::TITLE {
             let state = flow.title().screen() as u8;
@@ -386,6 +399,8 @@ impl Runtime {
             scheduler: FrameScheduler::new(),
             pad: PlatformPadState::default(),
             stage,
+            retail_frame,
+            show_loading_image: after_loading_image,
             level_assets: pair,
             audio,
             storage: storage.take(),
@@ -422,7 +437,7 @@ impl Runtime {
                 "validated stream pair does not match the pending transition",
             ));
         }
-        if let Some(image) = decode_pair_loading_image(&pair)? {
+        let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
             self.stage.install_loading_image(&image)?;
             dom.log(
                 &format!(
@@ -432,8 +447,18 @@ impl Runtime {
                 ),
                 false,
             );
-        }
-        install_retail_scene_for_pair(&pair, &mut self.stage, dom)?;
+            true
+        } else {
+            false
+        };
+        let retail_point_count =
+            install_retail_scene_for_pair(&pair, &mut self.stage, dom, after_loading_image)?;
+        self.retail_frame = if after_loading_image {
+            RetailFrameState::after_loading_image(retail_point_count, 0)
+        } else {
+            RetailFrameState::ready(retail_point_count, 0)
+        };
+        self.show_loading_image = after_loading_image;
         let pages = pair.nsf.pages.len();
         let entries = pair_entry_count(&pair);
         let level = pair.level;
@@ -484,6 +509,10 @@ impl Runtime {
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
         if !self.assets_stalled() && self.scheduler.sample(now_us) == FrameDecision::Step {
+            if self.retail_frame.tick_count() == 0 || self.retail_frame.draw_skip() != 0 {
+                let trace = self.retail_frame.tick();
+                self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
+            }
             self.pad.update(held | self.pending_buttons, 0, None);
             self.pending_buttons = 0;
             let snapshot = self.pad.snapshot();
@@ -536,6 +565,7 @@ impl Runtime {
         self.stage.render(VisualState {
             show_title_image,
             show_retail_scene: !assets_stalled && !show_title_image,
+            show_loading_image: !assets_stalled && self.show_loading_image,
         })?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
@@ -1640,14 +1670,25 @@ fn install_retail_scene_for_pair(
     pair: &ValidatedPair,
     stage: &mut GlStage,
     dom: &Dom,
-) -> Result<(), JsValue> {
-    let scene = build_retail_scene(&pair.nsd, &pair.nsf, &pair.nsf_bytes).map_err(|error| {
+    after_loading_image: bool,
+) -> Result<NonZeroU16, JsValue> {
+    let (path_point, draw_count) = if after_loading_image { (2, 1) } else { (1, 0) };
+    let scene = build_retail_scene_at_path_point(
+        &pair.nsd,
+        &pair.nsf,
+        &pair.nsf_bytes,
+        path_point,
+        draw_count,
+    )
+    .map_err(|error| {
         JsValue::from_str(&format!(
-            "retail spawn snapshot for {} is invalid: {error}",
+            "retail first-presented snapshot for {} is invalid: {error}",
             pair.level
         ))
     })?;
     let stats = scene.stats;
+    let point_count = NonZeroU16::new(scene.path_point_count)
+        .ok_or_else(|| JsValue::from_str("retail spawn path unexpectedly has no points"))?;
     stage.install_retail_scene(scene)?;
     if stats.worlds == 0 {
         dom.log(
@@ -1657,7 +1698,7 @@ fn install_retail_scene_for_pair(
     } else {
         dom.log(
             &format!(
-                "Built retail spawn snapshot: {} worlds, {}/{} polygons, {} decoded textures{}.",
+                "Built retail first-presented snapshot: {} worlds, {}/{} polygons, {} decoded textures{}.",
                 stats.worlds,
                 stats.submitted_polygons,
                 stats.visible_polygons,
@@ -1674,7 +1715,7 @@ fn install_retail_scene_for_pair(
             false,
         );
     }
-    Ok(())
+    Ok(point_count)
 }
 
 fn pair_entry_count(pair: &ValidatedPair) -> usize {

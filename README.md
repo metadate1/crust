@@ -17,10 +17,14 @@ input, WebGL2, WebAudio, and the native engine subsystems are implemented. The l
 now retains and remounts each validated destination stream pair, decodes retail LDAT loading
 images, composes the image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
 renderer command backend. The former data-independent diagnostic landscape/player geometry has
-been removed. For 40 of 43 playable starts, gameplay now presents a bounds-checked progress-zero
-ZDAT/SLST/WGEO world snapshot with decoded TPAG textures and retail camera/depth math. This is not
-yet a moving retail world: entity-driven camera updates, objects, animation, effects and gameplay
-coupling remain incomplete, and audio remains synthesized. See
+been removed. For 40 of 43 playable starts, gameplay now presents a bounds-checked initial
+ZDAT/SLST/WGEO path-point snapshot with decoded TPAG textures and retail camera/depth math. The
+loading-image path follows the observed two-tick presentation gate and uses the first presented
+path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
+boundary. Safe ZDAT entity decoding, mutable forward/backward SLST visibility, a bounded retail
+object arena, and the first real GOOL global-call/return and child-spawn path are implemented and
+characterized natively. This is not yet a moving retail world: those pieces are not coupled into
+the browser frame loop, so the installed scene remains frozen and audio remains synthesized. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -45,8 +49,9 @@ a boot target; the other 43 pairs are selectable. Partial stream sets containing
 complete pair are accepted. Each cross-level transition now validates and mounts its destination
 pair on demand; a missing destination pauses the simulation with an actionable error instead of
 continuing against stale data. Image-backed title entries are now materialized, and retail GOOL
-entry/state graphs can be validated and bound natively, but gameplay entries are not yet
-instantiated into the live object graph.
+entry/state graphs can be validated and bound natively. Zone entities and their 304-slot spawn
+flags can also be instantiated into a checked 96-object arena, but that arena is not yet driven by
+the live browser runtime.
 
 ## Controls
 
@@ -82,9 +87,10 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
 ## Workspace
 
 - `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program,
-  scene metadata and tagged-reference validation.
-- `crust-sim` — deterministic 30 Hz clock, checked GOOL program binding/word machine, level/title
-  flow, collision, camera, paging, demos, and retail card payload/state handshakes.
+  ZDAT entity/path, stateful SLST visibility, scene metadata and tagged-reference validation.
+- `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
+  binding/word machine, bounded object arena, level/title flow, collision, camera, paging, demos,
+  and retail card payload/state handshakes.
 - `crust-renderer` — PSX texture/TPAG/UV decoding and cache, projection, ordering, clipping, blend
   passes, title composition and WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, sample cache/mixer, sequence events and a 44.1 kHz software synth.

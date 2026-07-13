@@ -15,9 +15,10 @@ gameplay path.
   stage consumes `crust-renderer` ordering-table commands through the WebGL2 backend.
 - Retail image-backed publisher/Naughty Dog/main-menu title frames composed from validated
   MDAT/IPAL/IMAG graphs and presented by the live WebGL2 stage.
-- Progress-zero retail world snapshots for 40 of 43 playable LDAT starts: ZDAT spawn-zone/path,
-  raw endpoint SLST visibility, WGEO packed vertices/polygons, TPAG/CLUT texture decode, fixed-point
-  camera projection and retail world ordering depth are connected to WebGL2.
+- Initial retail world snapshots for 40 of 43 playable LDAT starts: ZDAT spawn-zone/path, checked
+  stateful SLST visibility, WGEO packed vertices/polygons, TPAG/CLUT texture decode and animation,
+  fixed-point camera projection and retail world ordering depth are connected to WebGL2. Streams
+  with a loading image use the observed tick-two path point/draw count before gameplay is shown.
 - Rust title/publisher sequencing, main menu, options, password, load, map, intro, ending,
   completion, bonus, boss, game-over, and direct-boot state models.
 - Cooperative 30 Hz loop, keyboard, standard-gamepad polling, complete touch pad, pause, mute,
@@ -29,19 +30,22 @@ gameplay path.
 ## Exact remaining parity gaps
 
 - The browser gameplay path does not instantiate retail entries into the complete object graph or
-  run the full retail GOOL instruction/host-call set. `crust-formats` now validates GOOL global and
-  external code/state graphs, and `crust-sim` binds them to pointer-free VM objects and implements
-  the packed `0x82` branch form. Full process frames, state rebinding, global-code calls, events,
-  object hosts and many opcodes remain absent or partial.
+  run the full retail GOOL instruction/host-call set. `crust-formats` validates GOOL global and
+  external code/state graphs and all retail ZDAT entity descriptors. `crust-sim` now has a
+  pointer-free bounded arena and implements the characterized Crash absolute-global call/return,
+  optional-pointer input and child-spawn yield. The arena and VM use distinct handle types and are
+  not integrated; full process frames, state rebinding, events, object hosts and many opcodes remain
+  absent or partial.
 - Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
-  file handles, validates and swaps every requested destination pair, and installs its static spawn
+  file handles, validates and swaps every requested destination pair, and installs its initial
   snapshot, but it does not yet page entries or update that scene at runtime.
 - `crust-renderer` implements texture decode, cache keys, projection, ordering and blend-command
   rules. Its WebGL2 command backend is connected to the live stage and presents decoded loading
-  images, four image-backed retail title states and decoded progress-zero worlds. Title, Hog Wild
+  images, four image-backed retail title states and decoded initial worlds. Title, Hog Wild
   and Whole Hog begin in zero-world dummy zones whose SLST references are deliberately external to
-  their current stream, so they have no standalone spawn snapshot. The static scene is not the
-  exact first presented frame: retail runs entity spawning and `CamUpdate` first, and 22 starts use
+  their current stream, so they have no standalone snapshot. N. Sanity Beach now matches the
+  observed first presented path point, draw count and 679-polygon visibility list, but entity
+  spawning and `CamUpdate` are not yet driving subsequent frames. Twenty-two starts use
   fog/ripple/lightning/dark variants whose dynamic vertex/color effects remain incomplete.
 - `crust-audio` implements SPU ADPCM, loop semantics, caching, 24-voice mixing, sequence events and
   a software synth. The live WebAudio path currently plays an original generated sequence and
@@ -65,9 +69,10 @@ gameplay path.
 
 The workspace includes native tests for malformed readers, ISO fields and extents, stream names and
 catalogs, NSD/NSF/page/entry bounds, tagged references, MDAT title composition, GOOL program/state
-graphs and binding, ZDAT/SLST/WGEO scene graphs, all SLST delta/swap forms, signed packed vertices,
-retail TPAG/CLUT/UV references, fixed math, scheduling, paging, GOOL execution, collision, camera,
-title transitions, bonus returns, demo frames, card operations,
+graphs and binding, ZDAT entities, SLST endpoint/cursor/rollback behavior, WGEO scene graphs, all
+SLST delta/swap forms, the fixed object arena/spawn tree, signed packed vertices, retail
+TPAG/CLUT/UV references, fixed math, presentation order, scheduling, paging, GOOL execution,
+collision, camera, title transitions, bonus returns, demo frames, card operations,
 storage envelopes, input, texture formats/cache/projection/blends, ADPCM, sample mixing and software
 synthesis. Property tests exercise parser/state-machine invariants where arbitrary input is useful.
 

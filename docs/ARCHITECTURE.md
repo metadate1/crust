@@ -50,10 +50,28 @@ backend, which uploads decoded RGBA to WebGL2 and maps the four PSX blend conven
 adjacent passes. It also decodes and briefly presents the retained pair's retail LDAT loading image.
 Image-backed title states are reconstructed from MDAT columns, IMAG indexed tiles and IPAL CLUTs
 through validated EID lookups. A pointer-free spawn-snapshot builder follows LDAT's spawn zone into
-ZDAT path/rectangle data, reconstructs the endpoint SLST list, parses each referenced WGEO, resolves
-TPAG/CLUT texture regions, applies the exact fixed-point world camera and depth ordering, and emits
-ordinary renderer commands. The live stage installs this snapshot on each pair transition. It does
-not yet advance visibility/camera state or integrate entities, GOOL objects, effects and animation.
+ZDAT path/rectangle data, initializes a checked `SlstCursor` at the requested path point, parses
+each referenced WGEO, resolves TPAG/CLUT texture regions, applies draw-count texture animation plus
+the exact fixed-point world camera and depth ordering, and emits ordinary renderer commands. The
+live stage installs the observed post-loading snapshot on each pair transition. A simulation-owned
+two-tick gate keeps the loading image visible until that first gameplay presentation; the loading
+overlay no longer uses a browser-frame timeout. The installed world does not yet advance after that
+boundary or integrate entities, GOOL objects, effects and animation.
+
+## Simulation and GOOL
+
+The retail-frame model records the 30 Hz order `spawn → camera → texture begin → world → GOOL →
+presentation`, signed 8.8 path progress, draw-skip state and draw-count timing. ZDAT entities decode
+into owned descriptors and signed path points. A fixed 96-slot object pool, dedicated main-object
+slot, eight logical roots, 304 spawn flags and generational handles reproduce the bounded spawn-tree
+shape without host pointers.
+
+The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
+values. It implements absolute global calls with typed frames and argument cleanup, returns,
+optional/null pointer input semantics, state-change yields and the child-spawn host effect needed by
+the characterized Crash boot sequence. The arena and VM intentionally remain separate until every
+host effect has a validated integration rule; the live browser therefore does not yet execute this
+retail object frame.
 
 ## Audio
 

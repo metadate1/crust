@@ -1,5 +1,6 @@
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crust_renderer::cache::TextureHandle;
 use crust_renderer::command::{
@@ -85,7 +86,7 @@ pub struct GlStage {
     loading_image_dimensions: Option<[i32; 2]>,
     title_image_dimensions: Option<[i32; 2]>,
     retail_scene_commands: Vec<RetailSceneCommand>,
-    retail_scene_textures: BTreeMap<TextureHandle, DecodedTexture>,
+    retail_scene_textures: BTreeMap<TextureHandle, Arc<DecodedTexture>>,
     last_error: u32,
 }
 
@@ -138,7 +139,7 @@ impl GlStage {
     /// Replaces the complete resident retail world snapshot.
     ///
     /// This preserves the original installation API while using the same
-    /// exact-content texture diff as [`Self::update_retail_scene`].
+    /// immutable-content-identity texture diff as [`Self::update_retail_scene`].
     pub fn install_retail_scene(&mut self, scene: RetailScene) -> Result<(), JsValue> {
         self.update_retail_scene(scene).map(|_| ())
     }
@@ -149,9 +150,11 @@ impl GlStage {
     /// The complete texture manifest is deliberately required even for a
     /// camera-only update. `TextureCache` handles are local to one scene build
     /// and may be reused for different pixels by the next build, so a numeric
-    /// handle alone is not a content identity. The planner compares every
-    /// declared texture exactly and takes the zero-upload command fast path
-    /// only when the CPU copy and GPU residency both match.
+    /// handle alone is not a content identity. The pair-scoped cache returns
+    /// immutable reference-counted pixels; the retained manifest validates
+    /// those allocation identities in O(handles) without cloning or scanning
+    /// pixel bytes. A different allocation is conservatively re-uploaded even
+    /// when its bytes happen to match.
     ///
     /// Every changed or new texture is prepared before any GPU handle is
     /// replaced. Commands, the retained texture set, and CPU texture identity
@@ -182,7 +185,7 @@ impl GlStage {
                 plan.upload_indices
                     .iter()
                     .map(|&index| &scene.textures[index])
-                    .map(|texture| (texture.handle, &texture.pixels)),
+                    .map(|texture| (texture.handle, texture.pixels.as_ref())),
             )
             .map_err(|error| backend_error(&error))?;
 
@@ -293,7 +296,7 @@ impl GlStage {
 }
 
 fn plan_retail_scene_update(
-    current: &BTreeMap<TextureHandle, DecodedTexture>,
+    current: &BTreeMap<TextureHandle, Arc<DecodedTexture>>,
     backend_resident: &BTreeSet<TextureHandle>,
     commands: &[RetailSceneCommand],
     textures: &[RetailSceneTexture],
@@ -310,7 +313,7 @@ fn plan_retail_scene_update(
         }
         let exact_cpu_match = current
             .get(&texture.handle)
-            .is_some_and(|pixels| pixels == &texture.pixels);
+            .is_some_and(|pixels| Arc::ptr_eq(pixels, &texture.pixels));
         if exact_cpu_match && backend_resident.contains(&texture.handle) {
             reused_textures = reused_textures.saturating_add(1);
         } else {
@@ -375,8 +378,10 @@ mod tests {
         palette[1] = color;
         RetailSceneTexture {
             handle: TextureHandle::new(handle),
-            pixels: decode_indexed8(&[1], 1, 1, &palette, BlendMode::Opaque)
-                .expect("one-pixel indexed texture must decode"),
+            pixels: Arc::new(
+                decode_indexed8(&[1], 1, 1, &palette, BlendMode::Opaque)
+                    .expect("one-pixel indexed texture must decode"),
+            ),
         }
     }
 
@@ -402,16 +407,16 @@ mod tests {
     }
 
     #[test]
-    fn planner_reuses_exact_pixels_and_uploads_only_changes() {
-        let exact = decoded_texture(1, 0x001f);
+    fn planner_reuses_shared_pixel_identity_and_uploads_only_changes() {
+        let shared = decoded_texture(1, 0x001f);
         let old_changed = decoded_texture(2, 0x03e0);
         let removed = decoded_texture(4, 0x7c00);
-        let current = [exact.clone(), old_changed, removed]
+        let current = [shared.clone(), old_changed, removed]
             .into_iter()
             .map(|texture| (texture.handle, texture.pixels))
             .collect::<BTreeMap<_, _>>();
         let incoming = vec![
-            exact,
+            shared,
             decoded_texture(2, 0x7fff),
             decoded_texture(3, 0x4210),
         ];
@@ -444,6 +449,7 @@ mod tests {
     fn planner_never_treats_a_reused_numeric_handle_as_content_identity() {
         let installed = decoded_texture(5, 0x001f);
         let replacement = decoded_texture(5, 0x7c00);
+        assert!(!Arc::ptr_eq(&installed.pixels, &replacement.pixels));
         assert_ne!(installed.pixels, replacement.pixels);
         let current = [(installed.handle, installed.pixels)]
             .into_iter()
@@ -464,7 +470,30 @@ mod tests {
     }
 
     #[test]
-    fn planner_uses_zero_upload_fast_path_only_with_complete_exact_manifest() {
+    fn planner_reuploads_equal_pixels_with_a_distinct_content_identity() {
+        let installed = decoded_texture(6, 0x4210);
+        let replacement = decoded_texture(6, 0x4210);
+        assert_eq!(installed.pixels, replacement.pixels);
+        assert!(!Arc::ptr_eq(&installed.pixels, &replacement.pixels));
+        let current = [(installed.handle, installed.pixels)]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        let backend_resident = [TextureHandle::new(6)].into_iter().collect::<BTreeSet<_>>();
+
+        let plan = plan_retail_scene_update(
+            &current,
+            &backend_resident,
+            &[textured_command(6)],
+            &[replacement],
+        )
+        .expect("a distinct immutable allocation is conservatively uploaded");
+
+        assert_eq!(plan.upload_indices, vec![0]);
+        assert_eq!(plan.reused_textures, 0);
+    }
+
+    #[test]
+    fn planner_uses_zero_upload_fast_path_only_with_complete_shared_manifest() {
         let first = decoded_texture(1, 0x001f);
         let second = decoded_texture(2, 0x03e0);
         let current = [first.clone(), second.clone()]
@@ -481,7 +510,7 @@ mod tests {
             &[textured_command(2), textured_command(1)],
             &[first, second],
         )
-        .expect("an exact complete texture manifest can safely update commands only");
+        .expect("a complete shared texture manifest can safely update commands only");
 
         assert!(plan.upload_indices.is_empty());
         assert_eq!(plan.reused_textures, 2);
@@ -500,7 +529,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_reuploads_exact_cpu_copy_missing_from_backend() {
+    fn planner_reuploads_shared_cpu_copy_missing_from_backend() {
         let incoming = decoded_texture(7, 0x4210);
         let current = [(incoming.handle, incoming.pixels.clone())]
             .into_iter()

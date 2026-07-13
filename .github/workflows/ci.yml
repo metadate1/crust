@@ -12,6 +12,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Enforce local-only game-data boundary
+        shell: bash
+        run: |
+          prohibited='(^|/)(local-data|streams)(/|$)|\.(bin|raw|iso|cue|ccd|sub|ecm|chd|cso|img|mdf|mds|nrg|pbp|nsd|nsf|zip|7z|rar|tar|tar\.gz|tgz)$'
+          if git ls-files | grep -Eiq "$prohibited"; then
+            echo "Tracked game data or archive detected:" >&2
+            git ls-files | grep -Ei "$prohibited" >&2
+            exit 1
+          fi
       - name: Install pinned Rust toolchain
         run: |
           rustup set profile minimal

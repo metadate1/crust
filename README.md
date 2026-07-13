@@ -17,11 +17,15 @@ input, WebGL2, WebAudio, and substantial native engine subsystems are implemente
 host retains and remounts each validated destination stream pair, decodes retail LDAT loading
 images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
 renderer command backend. The former data-independent diagnostic landscape/player geometry has
-been removed. For 40 of 43 playable starts, gameplay presents a bounds-checked initial
-ZDAT/SLST/WGEO path-point snapshot with decoded TPAG textures and retail camera/depth math. The
+been removed. For the 40 world-bearing playable starts, gameplay presents bounds-checked
+ZDAT/SLST/WGEO path snapshots with decoded TPAG textures and retail camera/depth math. The
 loading-image path follows the observed two-tick presentation gate and uses the first presented
 path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
-boundary.
+boundary. After that gate, `RetailCameraRuntime` owns the exact zone, path and signed-8.8 progress
+used to rebuild SLST visibility, camera projection and animated texture selection. Source-derived
+automatic modes 0/1/3, tapped transition skipping and path/zone crossings are live. Modes 5/6 feed
+the hosted main object's typed transform, camera zoom, held pad and frame stamp into the checked
+`CamFollow` projection/neighbor/smoothing path whenever that object is available.
 
 The browser now owns a checked retail object runtime for gameplay, bonus, boss and ending states.
 At the cooperative 30 Hz boundary it scans displayed current-zone neighbors, spawns group-three
@@ -29,15 +33,18 @@ ZDAT entities into the bounded arena, binds their GOOL programs from the mounted
 child-spawn effects, and preserves typed arena/VM links. Entity objects now receive their
 zone-relative path position, rotation/mode flags, scale, process defaults, player/object color
 matrix and typed parent/player links; runtime children inherit their parent's transform.
-State-change yields rebind the requested retail state before the next execution, including the
-characterized animation-select and animation-wait path. Initial/call frames share the bounded
-process word array at the parsed `init_sp`, state links apply target-state guards, and checked
-failures quarantine only the affected object instead of skipping an unsupported instruction on the
-next frame. The WebGL stage also has a transactional scene-update path that reuses exact-content
-textures and can replace commands without needless texture uploads. This is still not a moving
-retail world: GOOL mutations do not yet drive the installed scene, camera, collision, input globals,
-gameplay progression, retail audio, saves, or transitions. The displayed retail world remains a
-static spawn snapshot and the current audio remains synthesized. See
+State changes rebind at the synchronous host boundary: a captured once block runs before the state
+stamp, then the target transition block runs after it, including nested calls and hosted spawns;
+newly bound state code resumes on the next object execution. Initial/call frames share the bounded
+process word array at `init_sp`, state links apply target-state guards, and checked failures
+quarantine only the affected object. Checked aligned code/storage/entry tags, paging operations,
+five-word pad history, entity-path orientation, color seeking and the source-defined solid-surface
+paths exercised by the legal trace are implemented without native pointers or C undefined
+behavior. The WebGL stage transactionally replaces the camera/path scene while reusing shared
+immutable texture allocations. This is not yet a playable retail world: GOOL transforms do not yet
+drive rendered object models or complete player physics/collision/progression, zone-object
+termination remains incomplete, event services and save handshakes are partial, and retail
+VAB/SEP/MIDI audio is not connected. The current browser audio remains synthesized. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -64,8 +71,8 @@ pair on demand; a missing destination pauses the simulation with an actionable e
 continuing against stale data. Image-backed title entries are materialized, and retail GOOL
 entry/state graphs can be validated and bound natively. Zone entities and their 304-slot spawn
 flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
-execution slice is observable through the engineering log/debug counters, but it does not yet move
-the rendered world or constitute a playable retail level.
+execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
+through the engineering log/debug counters, but it is not yet a complete playable retail level.
 
 ## Controls
 

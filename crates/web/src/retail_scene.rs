@@ -1,7 +1,8 @@
 //! Safe, pointer-free construction of a retail world path snapshot.
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use crust_formats::binary::Eid;
 use crust_formats::stream::structs::ZonePathPoint;
@@ -42,7 +43,9 @@ pub struct RetailSceneTexture {
     /// scene builds may reuse the number for different decoded pixels, so a
     /// consumer must validate the complete texture manifest before reuse.
     pub handle: TextureHandle,
-    pub pixels: DecodedTexture,
+    /// Immutable decoded pixels leased directly from the pair-scoped cache.
+    /// Cloning a scene manifest clones this lease, not the pixel allocation.
+    pub pixels: Arc<DecodedTexture>,
 }
 
 /// Read-only diagnostics for the current world snapshot.
@@ -99,6 +102,164 @@ impl fmt::Display for RetailSceneError {
 
 impl std::error::Error for RetailSceneError {}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailSceneCacheKey {
+    zone: Eid,
+    path_index: u32,
+}
+
+#[derive(Debug)]
+struct CachedSceneGraph {
+    key: RetailSceneCacheKey,
+    zone_header: ZoneHeader,
+    zone_rect: ZoneRect,
+    path: ZonePath,
+    visibility: Option<SlstCursor>,
+    worlds: Vec<WorldGeometry>,
+}
+
+/// Cumulative evidence that immutable retail scene data is reused.
+///
+/// These counters describe parsing and CPU-side texture decoding only. They
+/// are intentionally not presented as frame-time or low-end-device metrics.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailSceneCacheDiagnostics {
+    pub graph_builds: u64,
+    pub graph_reuses: u64,
+    pub texture_page_installs: u64,
+    pub texture_requests: u64,
+    pub texture_hits: u64,
+    pub texture_misses: u64,
+}
+
+/// Pair-scoped owner of parsed ZDAT/SLST/WGEO data and decoded textures.
+///
+/// The active graph is keyed by the exact zone/path pair. Moving to another
+/// zone or path replaces the graph and texture-page state. Constructing a new
+/// builder at stream-pair mount provides the stronger pair boundary, so no
+/// handles or decoded pixels can survive a level transition accidentally.
+#[derive(Debug)]
+pub struct RetailSceneBuilder {
+    active_graph: Option<CachedSceneGraph>,
+    texture_cache: TextureCache,
+    texture_pages: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    diagnostics: RetailSceneCacheDiagnostics,
+}
+
+impl Default for RetailSceneBuilder {
+    fn default() -> Self {
+        Self {
+            active_graph: None,
+            texture_cache: TextureCache::default(),
+            texture_pages: [None; RETAIL_TEXTURE_PAGE_SLOTS],
+            diagnostics: RetailSceneCacheDiagnostics::default(),
+        }
+    }
+}
+
+impl RetailSceneBuilder {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub const fn diagnostics(&self) -> RetailSceneCacheDiagnostics {
+        self.diagnostics
+    }
+
+    /// Builds the progress-zero spawn-zone scene using this pair-scoped cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the validated pair's scene graph or referenced
+    /// texture data cannot be represented safely.
+    pub fn build(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+    ) -> Result<RetailScene, RetailSceneError> {
+        self.build_at_path_point(nsd, nsf, nsf_bytes, 0, 0)
+    }
+
+    /// Builds an integral spawn-path camera point using this pair-scoped cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an out-of-range point or malformed scene graph.
+    pub fn build_at_path_point(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        path_point_index: usize,
+        draw_count: u32,
+    ) -> Result<RetailScene, RetailSceneError> {
+        let ldat = nsd
+            .ldat()
+            .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
+        let path_index = u32::try_from(ldat.spawn_path_index)
+            .map_err(|_| scene_error("LDAT spawn path index is negative"))?;
+        self.build_at_location(
+            nsd,
+            nsf,
+            nsf_bytes,
+            RetailSceneLocation {
+                zone: ldat.spawn_zone,
+                path_index,
+                path_point_index,
+                draw_count,
+            },
+        )
+    }
+
+    /// Builds an integral arbitrary zone/path camera state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an out-of-range point or malformed scene graph.
+    pub fn build_at_location(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneLocation,
+    ) -> Result<RetailScene, RetailSceneError> {
+        let path_point_index = i32::try_from(location.path_point_index)
+            .map_err(|_| scene_error("active path point index does not fit signed progress"))?;
+        let path_progress = path_point_index
+            .checked_mul(0x100)
+            .ok_or_else(|| scene_error("active path point progress overflows signed 8.8 space"))?;
+        self.build_at_progress(
+            nsd,
+            nsf,
+            nsf_bytes,
+            RetailSceneProgressLocation {
+                zone: location.zone,
+                path_index: location.path_index,
+                path_progress,
+                draw_count: location.draw_count,
+            },
+        )
+    }
+
+    /// Builds an exact signed 8.8 arbitrary zone/path camera state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid progress or malformed referenced data.
+    pub fn build_at_progress(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location)
+    }
+}
+
 /// Builds the progress-zero spawn-zone world scene for one validated pair.
 ///
 /// Texture descriptors which the original C port would resolve outside its
@@ -115,7 +276,7 @@ pub fn build_retail_scene(
     nsf: &Nsf,
     nsf_bytes: &[u8],
 ) -> Result<RetailScene, RetailSceneError> {
-    build_retail_scene_at_path_point(nsd, nsf, nsf_bytes, 0, 0)
+    RetailSceneBuilder::new().build(nsd, nsf, nsf_bytes)
 }
 
 /// Builds one exact integer camera-path state with the corresponding mutable
@@ -132,22 +293,7 @@ pub fn build_retail_scene_at_path_point(
     path_point_index: usize,
     draw_count: u32,
 ) -> Result<RetailScene, RetailSceneError> {
-    let ldat = nsd
-        .ldat()
-        .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
-    let path_index = u32::try_from(ldat.spawn_path_index)
-        .map_err(|_| scene_error("LDAT spawn path index is negative"))?;
-    build_retail_scene_at_location(
-        nsd,
-        nsf,
-        nsf_bytes,
-        RetailSceneLocation {
-            zone: ldat.spawn_zone,
-            path_index,
-            path_point_index,
-            draw_count,
-        },
-    )
+    RetailSceneBuilder::new().build_at_path_point(nsd, nsf, nsf_bytes, path_point_index, draw_count)
 }
 
 /// Builds the world snapshot for an arbitrary validated ZDAT path state.
@@ -165,22 +311,7 @@ pub fn build_retail_scene_at_location(
     nsf_bytes: &[u8],
     location: RetailSceneLocation,
 ) -> Result<RetailScene, RetailSceneError> {
-    let path_point_index = i32::try_from(location.path_point_index)
-        .map_err(|_| scene_error("active path point index does not fit signed progress"))?;
-    let path_progress = path_point_index
-        .checked_mul(0x100)
-        .ok_or_else(|| scene_error("active path point progress overflows signed 8.8 space"))?;
-    build_retail_scene_at_progress(
-        nsd,
-        nsf,
-        nsf_bytes,
-        RetailSceneProgressLocation {
-            zone: location.zone,
-            path_index: location.path_index,
-            path_progress,
-            draw_count: location.draw_count,
-        },
-    )
+    RetailSceneBuilder::new().build_at_location(nsd, nsf, nsf_bytes, location)
 }
 
 /// Builds the world snapshot at exact signed 8.8 retail camera progress.
@@ -199,17 +330,321 @@ pub fn build_retail_scene_at_progress(
     nsf_bytes: &[u8],
     location: RetailSceneProgressLocation,
 ) -> Result<RetailScene, RetailSceneError> {
+    RetailSceneBuilder::new().build_at_progress(nsd, nsf, nsf_bytes, location)
+}
+
+fn build_retail_scene_cached(
+    builder: &mut RetailSceneBuilder,
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    location: RetailSceneProgressLocation,
+) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
         .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
-    let zone_entry = typed_entry(nsf, nsd, location.zone, ZDAT_ENTRY_TYPE, "active ZDAT")?;
+    let path_progress = location
+        .path_progress
+        .checked_abs()
+        .ok_or_else(|| scene_error("signed path progress cannot be i32::MIN"))?;
+    let path_point_index = usize::try_from(path_progress >> 8)
+        .map_err(|_| scene_error("active path point index does not fit the host"))?;
+    let key = RetailSceneCacheKey {
+        zone: location.zone,
+        path_index: location.path_index,
+    };
+    if builder.active_graph.as_ref().map(|graph| graph.key) == Some(key) {
+        builder.diagnostics.graph_reuses = builder.diagnostics.graph_reuses.saturating_add(1);
+    } else {
+        let graph = parse_scene_graph(nsd, nsf, nsf_bytes, key, path_point_index)?;
+        builder.active_graph = Some(graph);
+        builder.texture_cache = TextureCache::default();
+        builder.texture_pages = [None; RETAIL_TEXTURE_PAGE_SLOTS];
+        builder.diagnostics.graph_builds = builder.diagnostics.graph_builds.saturating_add(1);
+    }
+
+    let graph = builder
+        .active_graph
+        .as_mut()
+        .expect("a successful graph parse installs the requested key");
+    if path_point_index >= graph.path.points.len() {
+        return Err(scene_error("active path progress is outside its ZDAT path"));
+    }
+    let draw_count = location.draw_count;
+    let path_point_count = u16::try_from(graph.path.points.len())
+        .map_err(|_| scene_error("spawn path point count does not fit u16"))?;
+    let path_point_index_u16 = u16::try_from(path_point_index)
+        .map_err(|_| scene_error("spawn path point index does not fit u16"))?;
+
+    // LevelUpdate deliberately does not open the SLST when the zone has no
+    // worlds. Title, Hog Wild and Whole Hog use this as an external-transition
+    // dummy start, and their placeholder SLST EID is absent from this stream.
+    if graph.zone_header.worlds.is_empty() {
+        return Ok(RetailScene {
+            commands: Vec::new(),
+            textures: Vec::new(),
+            stats: RetailSceneStats::default(),
+            zone: location.zone,
+            path_index: location.path_index,
+            path_point_count,
+            path_point_index: path_point_index_u16,
+            draw_count,
+        });
+    }
+
+    let visibility = graph
+        .visibility
+        .as_mut()
+        .expect("a world-bearing graph always owns an SLST cursor");
+    visibility
+        .seek(path_point_index)
+        .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
+    let visible_polygons = visibility.visibility().to_vec();
+    validate_visibility(&visible_polygons, &graph.worlds)?;
+
+    let camera = sample_camera(
+        nsd,
+        nsf,
+        nsf_bytes,
+        &graph.zone_header,
+        &graph.zone_rect,
+        &graph.path,
+        location.path_progress,
+    )?;
+    let camera_translation = camera.translation;
+    let camera_matrix =
+        world_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
+    let projection_distance = projection_distance(ldat.field_of_view)?;
+
+    let mut page_ids = BTreeSet::new();
+    for polygon_id in &visible_polygons {
+        let geometry = &graph.worlds[usize::from(polygon_id.world_index)];
+        let polygon = geometry.polygons[usize::from(polygon_id.polygon_index)];
+        if let Some(texture) = geometry
+            .texture_for_polygon(polygon, draw_count)
+            .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?
+        {
+            let reference = RetailTextureReference::new(
+                TpagReference::new(texture.texture_page),
+                TextureInfo2 {
+                    color: texture.color,
+                    region: texture.region,
+                },
+            );
+            if reference.layout().is_ok() {
+                page_ids.insert(texture.texture_page.raw());
+            }
+        }
+    }
+    if page_ids.len() > RETAIL_TEXTURE_PAGE_SLOTS {
+        return Err(scene_error(format!(
+            "spawn scene needs {} simultaneous TPAGs; retail has eight slots",
+            page_ids.len()
+        )));
+    }
+
+    install_missing_texture_pages(
+        &mut builder.texture_cache,
+        &mut builder.texture_pages,
+        &mut builder.diagnostics,
+        nsf,
+        nsf_bytes,
+        &page_ids,
+    )?;
+    builder.texture_cache.begin_frame();
+
+    let world_translations = graph
+        .worlds
+        .iter()
+        .map(|world| {
+            if world.header.is_backdrop {
+                Vec3i::default()
+            } else {
+                rotate(
+                    Vec3i {
+                        x: world.header.translation[0].saturating_sub(camera_translation.x),
+                        y: world.header.translation[1].saturating_sub(camera_translation.y),
+                        z: world.header.translation[2].saturating_sub(camera_translation.z),
+                    },
+                    camera_matrix,
+                )
+                .point
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut textures = BTreeMap::new();
+    let mut texture_handles = HashMap::new();
+    let mut prepared = vec![None; visible_polygons.len()];
+    let mut minimum_depth = 0x07ff_i32;
+    let mut saturated_vertices = 0_usize;
+    let mut skipped_textured_polygons = 0_usize;
+
+    // Retail transforms SLST entries backwards, applies a running minimum OT
+    // depth, and head-inserts. We prepare backwards but later submit forwards
+    // to compensate for the Rust ordering table's FIFO buckets.
+    for (visible_index, polygon_id) in visible_polygons.iter().copied().enumerate().rev() {
+        let world_index = usize::from(polygon_id.world_index);
+        let geometry = &graph.worlds[world_index];
+        let polygon_index = usize::from(polygon_id.polygon_index);
+        let polygon = geometry.polygons[polygon_index];
+        let mut screens = [crust_renderer::command::ScreenPoint::default(); 3];
+        let mut colors = [Rgba8::default(); 3];
+        for vertex_index in 0..3 {
+            let vertex = geometry.vertices[usize::from(polygon.vertex_indices[vertex_index])];
+            let [x, y, z] = vertex.expanded_position();
+            let projected = project(
+                Vec3i { x, y, z },
+                world_translations[world_index],
+                camera_matrix,
+                [0, 0],
+                projection_distance,
+            );
+            if !projected.valid {
+                saturated_vertices = saturated_vertices.saturating_add(1);
+            }
+            screens[vertex_index] = projected.screen;
+            colors[vertex_index] = Rgba8 {
+                r: vertex.color[0],
+                g: vertex.color[1],
+                b: vertex.color[2],
+                a: u8::MAX,
+            };
+        }
+
+        let texture = geometry
+            .texture_for_polygon(polygon, draw_count)
+            .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?;
+        let primitive = if let Some(texture) = texture {
+            let reference = RetailTextureReference::new(
+                TpagReference::new(texture.texture_page),
+                TextureInfo2 {
+                    color: texture.color,
+                    region: texture.region,
+                },
+            );
+            let Ok(layout) = reference.layout() else {
+                skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
+                continue;
+            };
+            let Ok(cached) = builder.texture_cache.load(layout.request) else {
+                skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
+                continue;
+            };
+            // TextureCache handles intentionally live for the whole pair, but
+            // RetailScene handles remain deterministic build-local IDs. This
+            // preserves byte-for-byte scene equality with the static builder
+            // while still reusing the expensive decoded pixels underneath.
+            let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
+                *handle
+            } else {
+                let next = u64::try_from(texture_handles.len())
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
+                let handle = TextureHandle::new(next);
+                texture_handles.insert(layout.request, handle);
+                handle
+            };
+            textures
+                .entry(output_handle)
+                .or_insert_with(|| Arc::clone(&cached.pixels));
+            let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+            PrimitiveCommand::TexturedTriangle(TexturedTriangle {
+                vertices: std::array::from_fn(|index| TexturedVertex {
+                    position: screens[index],
+                    color: colors[index],
+                    uv: Uv {
+                        u: uvs[index][0],
+                        v: uvs[index][1],
+                    },
+                }),
+                texture: output_handle,
+                blend: layout.request.blend_mode,
+            })
+        } else {
+            let color_word = crust_formats::stream::structs::ColorInfo::from_raw(
+                geometry.texture_words[usize::from(polygon.texture_info_word_index)],
+            );
+            PrimitiveCommand::ColoredTriangle(ColoredTriangle {
+                vertices: std::array::from_fn(|index| ColoredVertex {
+                    position: screens[index],
+                    color: colors[index],
+                }),
+                blend: blend_mode(color_word.semi_transparency()),
+                style: PrimitiveStyle::Fill,
+            })
+        };
+
+        let z_sum = screens
+            .iter()
+            .fold(0_i32, |sum, point| sum.saturating_add(point.z));
+        let raw_depth = (0x0800_i32 - i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
+            .saturating_sub(z_sum / 32)
+            .clamp(0, 0x07ff);
+        let depth = raw_depth.min(minimum_depth);
+        minimum_depth = depth;
+        let depth = u16::try_from(depth)
+            .map_err(|_| scene_error("clamped ordering depth does not fit u16"))?;
+        prepared[visible_index] = Some(RetailSceneCommand {
+            depth,
+            zone: location.zone.raw(),
+            polygon: u32::from(polygon_id.raw()),
+            primitive,
+        });
+    }
+
+    let commands = prepared.into_iter().flatten().collect::<Vec<_>>();
+    let textures = textures
+        .into_iter()
+        .map(|(handle, pixels)| RetailSceneTexture { handle, pixels })
+        .collect::<Vec<_>>();
+    let cache_frame = builder.texture_cache.metrics().frame;
+    builder.diagnostics.texture_requests = builder
+        .diagnostics
+        .texture_requests
+        .saturating_add(cache_frame.requests);
+    builder.diagnostics.texture_hits = builder
+        .diagnostics
+        .texture_hits
+        .saturating_add(cache_frame.hits);
+    builder.diagnostics.texture_misses = builder
+        .diagnostics
+        .texture_misses
+        .saturating_add(cache_frame.misses);
+    Ok(RetailScene {
+        stats: RetailSceneStats {
+            worlds: graph.worlds.len(),
+            visible_polygons: visible_polygons.len(),
+            submitted_polygons: commands.len(),
+            unique_textures: textures.len(),
+            saturated_vertices,
+            skipped_textured_polygons,
+        },
+        commands,
+        textures,
+        zone: location.zone,
+        path_index: location.path_index,
+        path_point_count,
+        path_point_index: path_point_index_u16,
+        draw_count,
+    })
+}
+
+fn parse_scene_graph(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    key: RetailSceneCacheKey,
+    path_point_index: usize,
+) -> Result<CachedSceneGraph, RetailSceneError> {
+    let zone_entry = typed_entry(nsf, nsd, key.zone, ZDAT_ENTRY_TYPE, "active ZDAT")?;
     let zone_header = ZoneHeader::parse(entry_item(zone_entry, nsf_bytes, 0, "ZDAT header")?)
         .map_err(|error| scene_error(format!("active ZDAT header: {error}")))?;
     let zone_rect = ZoneRect::parse(entry_item(zone_entry, nsf_bytes, 1, "ZDAT rectangle")?)
         .map_err(|error| scene_error(format!("active ZDAT rectangle: {error}")))?;
-
     let path_item_index = zone_header
-        .path_item_index(location.path_index)
+        .path_item_index(key.path_index)
         .ok_or_else(|| scene_error("active path index is outside its ZDAT"))?;
     let path_item_index = usize::try_from(path_item_index)
         .map_err(|_| scene_error("ZDAT spawn path index does not fit the host"))?;
@@ -220,34 +655,20 @@ pub fn build_retail_scene_at_progress(
         "ZDAT spawn path",
     )?)
     .map_err(|error| scene_error(format!("ZDAT spawn path: {error}")))?;
-    let path_progress = location
-        .path_progress
-        .checked_abs()
-        .ok_or_else(|| scene_error("signed path progress cannot be i32::MIN"))?;
-    let path_point_index = usize::try_from(path_progress >> 8)
-        .map_err(|_| scene_error("active path point index does not fit the host"))?;
     if path_point_index >= path.points.len() {
         return Err(scene_error("active path progress is outside its ZDAT path"));
     }
-    let draw_count = location.draw_count;
-    let path_point_count = u16::try_from(path.points.len())
-        .map_err(|_| scene_error("spawn path point count does not fit u16"))?;
-    let path_point_index_u16 = u16::try_from(path_point_index)
-        .map_err(|_| scene_error("spawn path point index does not fit u16"))?;
 
     // LevelUpdate deliberately does not open the SLST when the zone has no
-    // worlds. Title, Hog Wild and Whole Hog use this as an external-transition
-    // dummy start, and their placeholder SLST EID is absent from this stream.
+    // worlds. Keep that exact boundary in the cached representation too.
     if zone_header.worlds.is_empty() {
-        return Ok(RetailScene {
-            commands: Vec::new(),
-            textures: Vec::new(),
-            stats: RetailSceneStats::default(),
-            zone: location.zone,
-            path_index: location.path_index,
-            path_point_count,
-            path_point_index: path_point_index_u16,
-            draw_count,
+        return Ok(CachedSceneGraph {
+            key,
+            zone_header,
+            zone_rect,
+            path,
+            visibility: None,
+            worlds: Vec::new(),
         });
     }
 
@@ -301,207 +722,48 @@ pub fn build_retail_scene_at_progress(
         .collect::<Vec<_>>();
     let visibility = SlstCursor::new(&slst_items, &world_polygon_counts, path_point_index)
         .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
-    let visible_polygons = visibility.visibility().to_vec();
-    validate_visibility(&visible_polygons, &worlds)?;
 
-    let camera = sample_camera(
-        nsd,
-        nsf,
-        nsf_bytes,
-        &zone_header,
-        &zone_rect,
-        &path,
-        location.path_progress,
-    )?;
-    let camera_translation = camera.translation;
-    let camera_matrix =
-        world_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
-    let projection_distance = projection_distance(ldat.field_of_view)?;
+    Ok(CachedSceneGraph {
+        key,
+        zone_header,
+        zone_rect,
+        path,
+        visibility: Some(visibility),
+        worlds,
+    })
+}
 
-    let mut page_ids = BTreeSet::new();
-    for polygon_id in &visible_polygons {
-        let geometry = &worlds[usize::from(polygon_id.world_index)];
-        let polygon = geometry.polygons[usize::from(polygon_id.polygon_index)];
-        if let Some(texture) = geometry
-            .texture_for_polygon(polygon, draw_count)
-            .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?
-        {
-            let reference = RetailTextureReference::new(
-                TpagReference::new(texture.texture_page),
-                TextureInfo2 {
-                    color: texture.color,
-                    region: texture.region,
-                },
-            );
-            if reference.layout().is_ok() {
-                page_ids.insert(texture.texture_page.raw());
-            }
+fn install_missing_texture_pages(
+    texture_cache: &mut TextureCache,
+    texture_pages: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    diagnostics: &mut RetailSceneCacheDiagnostics,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    required_pages: &BTreeSet<u32>,
+) -> Result<(), RetailSceneError> {
+    for raw_eid in required_pages.iter().copied() {
+        if texture_pages.contains(&Some(raw_eid)) {
+            continue;
         }
-    }
-    if page_ids.len() > RETAIL_TEXTURE_PAGE_SLOTS {
-        return Err(scene_error(format!(
-            "spawn scene needs {} simultaneous TPAGs; retail has eight slots",
-            page_ids.len()
-        )));
-    }
-
-    let mut cache = TextureCache::default();
-    for (slot, raw_eid) in page_ids.iter().copied().enumerate() {
+        let slot = texture_pages
+            .iter()
+            .position(Option::is_none)
+            .or_else(|| {
+                texture_pages.iter().position(|page| {
+                    page.is_some_and(|resident| !required_pages.contains(&resident))
+                })
+            })
+            .ok_or_else(|| scene_error("retail texture slots have no replaceable page"))?;
         let reference = TpagReference::new(Eid::from_raw(raw_eid));
         let page = resolve_texture_page(nsf, nsf_bytes, reference)
             .map_err(|error| scene_error(format!("spawn TPAG: {error}")))?;
-        cache
+        texture_cache
             .install_page(slot, raw_eid, page.bytes().to_vec())
             .map_err(|error| scene_error(format!("install spawn TPAG: {error}")))?;
+        texture_pages[slot] = Some(raw_eid);
+        diagnostics.texture_page_installs = diagnostics.texture_page_installs.saturating_add(1);
     }
-    cache.begin_frame();
-
-    let world_translations = worlds
-        .iter()
-        .map(|world| {
-            if world.header.is_backdrop {
-                Vec3i::default()
-            } else {
-                rotate(
-                    Vec3i {
-                        x: world.header.translation[0].saturating_sub(camera_translation.x),
-                        y: world.header.translation[1].saturating_sub(camera_translation.y),
-                        z: world.header.translation[2].saturating_sub(camera_translation.z),
-                    },
-                    camera_matrix,
-                )
-                .point
-            }
-        })
-        .collect::<Vec<_>>();
-
-    let mut textures = BTreeMap::new();
-    let mut prepared = vec![None; visible_polygons.len()];
-    let mut minimum_depth = 0x07ff_i32;
-    let mut saturated_vertices = 0_usize;
-    let mut skipped_textured_polygons = 0_usize;
-
-    // Retail transforms SLST entries backwards, applies a running minimum OT
-    // depth, and head-inserts. We prepare backwards but later submit forwards
-    // to compensate for the Rust ordering table's FIFO buckets.
-    for (visible_index, polygon_id) in visible_polygons.iter().copied().enumerate().rev() {
-        let world_index = usize::from(polygon_id.world_index);
-        let geometry = &worlds[world_index];
-        let polygon_index = usize::from(polygon_id.polygon_index);
-        let polygon = geometry.polygons[polygon_index];
-        let mut screens = [crust_renderer::command::ScreenPoint::default(); 3];
-        let mut colors = [Rgba8::default(); 3];
-        for vertex_index in 0..3 {
-            let vertex = geometry.vertices[usize::from(polygon.vertex_indices[vertex_index])];
-            let [x, y, z] = vertex.expanded_position();
-            let projected = project(
-                Vec3i { x, y, z },
-                world_translations[world_index],
-                camera_matrix,
-                [0, 0],
-                projection_distance,
-            );
-            if !projected.valid {
-                saturated_vertices = saturated_vertices.saturating_add(1);
-            }
-            screens[vertex_index] = projected.screen;
-            colors[vertex_index] = Rgba8 {
-                r: vertex.color[0],
-                g: vertex.color[1],
-                b: vertex.color[2],
-                a: u8::MAX,
-            };
-        }
-
-        let texture = geometry
-            .texture_for_polygon(polygon, draw_count)
-            .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?;
-        let primitive = if let Some(texture) = texture {
-            let reference = RetailTextureReference::new(
-                TpagReference::new(texture.texture_page),
-                TextureInfo2 {
-                    color: texture.color,
-                    region: texture.region,
-                },
-            );
-            let Ok(layout) = reference.layout() else {
-                skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
-                continue;
-            };
-            let Ok(cached) = cache.load(layout.request) else {
-                skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
-                continue;
-            };
-            textures
-                .entry(cached.handle)
-                .or_insert_with(|| (*cached.pixels).clone());
-            let uvs = layout.coordinates.cache_uvs(cached.content_uv);
-            PrimitiveCommand::TexturedTriangle(TexturedTriangle {
-                vertices: std::array::from_fn(|index| TexturedVertex {
-                    position: screens[index],
-                    color: colors[index],
-                    uv: Uv {
-                        u: uvs[index][0],
-                        v: uvs[index][1],
-                    },
-                }),
-                texture: cached.handle,
-                blend: layout.request.blend_mode,
-            })
-        } else {
-            let color_word = crust_formats::stream::structs::ColorInfo::from_raw(
-                geometry.texture_words[usize::from(polygon.texture_info_word_index)],
-            );
-            PrimitiveCommand::ColoredTriangle(ColoredTriangle {
-                vertices: std::array::from_fn(|index| ColoredVertex {
-                    position: screens[index],
-                    color: colors[index],
-                }),
-                blend: blend_mode(color_word.semi_transparency()),
-                style: PrimitiveStyle::Fill,
-            })
-        };
-
-        let z_sum = screens
-            .iter()
-            .fold(0_i32, |sum, point| sum.saturating_add(point.z));
-        let raw_depth = (0x0800_i32 - i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
-            .saturating_sub(z_sum / 32)
-            .clamp(0, 0x07ff);
-        let depth = raw_depth.min(minimum_depth);
-        minimum_depth = depth;
-        let depth = u16::try_from(depth)
-            .map_err(|_| scene_error("clamped ordering depth does not fit u16"))?;
-        prepared[visible_index] = Some(RetailSceneCommand {
-            depth,
-            zone: location.zone.raw(),
-            polygon: u32::from(polygon_id.raw()),
-            primitive,
-        });
-    }
-
-    let commands = prepared.into_iter().flatten().collect::<Vec<_>>();
-    let textures = textures
-        .into_iter()
-        .map(|(handle, pixels)| RetailSceneTexture { handle, pixels })
-        .collect::<Vec<_>>();
-    Ok(RetailScene {
-        stats: RetailSceneStats {
-            worlds: worlds.len(),
-            visible_polygons: visible_polygons.len(),
-            submitted_polygons: commands.len(),
-            unique_textures: textures.len(),
-            saturated_vertices,
-            skipped_textured_polygons,
-        },
-        commands,
-        textures,
-        zone: location.zone,
-        path_index: location.path_index,
-        path_point_count,
-        path_point_index: path_point_index_u16,
-        draw_count,
-    })
+    Ok(())
 }
 
 fn typed_entry<'a>(
@@ -773,8 +1035,10 @@ mod tests {
     use super::*;
     use crust_formats::disc::DiscImage;
     use crust_formats::stream::{
-        KNOWN_LEVELS, LevelId, StreamKind, StreamName, parse_nsd, parse_nsf,
+        KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, parse_nsd,
+        parse_nsf,
     };
+    use crust_sim::camera::{RetailCameraInput, RetailCameraRuntime};
     use std::path::PathBuf;
 
     #[test]
@@ -846,6 +1110,20 @@ mod tests {
         // The C implementation keeps 24.8 precision until the graphics-side
         // arithmetic shift, so a negative fraction rounds toward -infinity.
         assert_eq!(interpolate_coordinate(-1, 0, 1).unwrap(), -1);
+    }
+
+    #[test]
+    fn scene_builder_diagnostics_start_at_a_pair_boundary() {
+        let first_pair = RetailSceneBuilder::new();
+        let next_pair = RetailSceneBuilder::new();
+        assert_eq!(
+            first_pair.diagnostics(),
+            RetailSceneCacheDiagnostics::default()
+        );
+        assert_eq!(
+            next_pair.diagnostics(),
+            RetailSceneCacheDiagnostics::default()
+        );
     }
 
     #[test]
@@ -936,6 +1214,321 @@ mod tests {
             fractional_progress.stats.visible_polygons,
             first_presented.stats.visible_polygons
         );
+
+        let cached_location = RetailSceneProgressLocation {
+            zone: ldat.spawn_zone,
+            path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+            path_progress: (2 << 8) | 0x80,
+            draw_count: 1,
+        };
+        let mut builder = RetailSceneBuilder::new();
+        let cached_first = builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, cached_location)
+            .unwrap();
+        assert_eq!(cached_first, fractional_progress);
+        let after_first = builder.diagnostics();
+        let cached_second = builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, cached_location)
+            .unwrap();
+        let after_second = builder.diagnostics();
+        assert_eq!(cached_second, cached_first);
+        assert_eq!(cached_second.textures.len(), cached_first.textures.len());
+        for (first, second) in cached_first.textures.iter().zip(&cached_second.textures) {
+            assert_eq!(first.handle, second.handle);
+            assert!(Arc::ptr_eq(&first.pixels, &second.pixels));
+        }
+        assert_eq!(after_first.graph_builds, 1);
+        assert_eq!(after_second.graph_builds, 1);
+        assert_eq!(after_second.graph_reuses, 1);
+        assert_eq!(
+            after_second.texture_page_installs,
+            after_first.texture_page_installs
+        );
+        assert_eq!(after_second.texture_misses, after_first.texture_misses);
+        assert!(after_second.texture_hits > after_first.texture_hits);
+
+        let next_animation = RetailSceneProgressLocation {
+            draw_count: cached_location.draw_count + 1,
+            ..cached_location
+        };
+        let cached_animated = builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, next_animation)
+            .unwrap();
+        let static_animated =
+            build_retail_scene_at_progress(&nsd, &nsf, &nsf_bytes, next_animation).unwrap();
+        assert_eq!(cached_animated, static_animated);
+
+        let spawn_entry = typed_entry(
+            &nsf,
+            &nsd,
+            ldat.spawn_zone,
+            ZDAT_ENTRY_TYPE,
+            "test spawn ZDAT",
+        )
+        .unwrap();
+        let spawn_header = ZoneHeader::parse(
+            entry_item(spawn_entry, &nsf_bytes, 0, "test spawn ZDAT header").unwrap(),
+        )
+        .unwrap();
+        let alternate = spawn_header
+            .neighbors
+            .iter()
+            .copied()
+            .find_map(|zone| {
+                let entry =
+                    typed_entry(&nsf, &nsd, zone, ZDAT_ENTRY_TYPE, "test neighbor ZDAT").ok()?;
+                let header = ZoneHeader::parse(
+                    entry_item(entry, &nsf_bytes, 0, "test neighbor ZDAT header").ok()?,
+                )
+                .ok()?;
+                (0..header.path_count).find_map(|path_index| {
+                    if (zone, path_index) == (cached_location.zone, cached_location.path_index) {
+                        return None;
+                    }
+                    let location = RetailSceneProgressLocation {
+                        zone,
+                        path_index,
+                        path_progress: 0,
+                        draw_count: 0,
+                    };
+                    builder
+                        .build_at_progress(&nsd, &nsf, &nsf_bytes, location)
+                        .ok()
+                        .map(|_| location)
+                })
+            })
+            .expect("N. Sanity spawn graph has a buildable neighbor path");
+        assert_ne!(
+            (alternate.zone, alternate.path_index),
+            (cached_location.zone, cached_location.path_index)
+        );
+        assert_eq!(builder.diagnostics().graph_builds, 2);
+        let cached_after_return = builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, cached_location)
+            .unwrap();
+        assert_eq!(cached_after_return, cached_first);
+        assert_eq!(builder.diagnostics().graph_builds, 3);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn n_sanity_camera_chain_drives_pair_scoped_scene_builds() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        let level = LevelId::N_SANITY_BEACH;
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let mut builder = RetailSceneBuilder::new();
+
+        for draw_count in 0..192 {
+            let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+            let scene = builder
+                .build_at_progress(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    RetailSceneProgressLocation {
+                        zone: step.after.path.zone,
+                        path_index: step.after.path.index,
+                        path_progress: step.after.progress.raw(),
+                        draw_count,
+                    },
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "camera path {}:{} at {:#x}: {error}",
+                        step.after.path.zone,
+                        step.after.path.index,
+                        step.after.progress.raw()
+                    )
+                });
+            assert_eq!(scene.zone, step.after.path.zone);
+            assert_eq!(scene.path_index, step.after.path.index);
+            assert_eq!(scene.path_point_index, step.after.progress.point_index());
+        }
+
+        assert_eq!(
+            camera.location().path,
+            RetailPathId {
+                zone: graph.spawn_path().zone,
+                index: 2,
+            }
+        );
+        let diagnostics = builder.diagnostics();
+        assert_eq!(diagnostics.graph_builds, 5);
+        assert_eq!(diagnostics.graph_reuses, 187);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn every_non_title_camera_drives_300_pair_scoped_scene_builds() {
+        const TICKS_PER_PAIR: u32 = 300;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        let expected_pairs = KNOWN_LEVELS
+            .iter()
+            .filter(|known| known.bootable && known.id != LevelId::TITLE)
+            .count();
+        let mut successes = Vec::with_capacity(expected_pairs);
+        let mut failures = Vec::new();
+
+        for known in KNOWN_LEVELS
+            .iter()
+            .filter(|known| known.bootable && known.id != LevelId::TITLE)
+        {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = match std::fs::read(&nsd_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    failures.push(format!(
+                        "{} NSD {}: {error}",
+                        known.name,
+                        nsd_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let nsf_bytes = match std::fs::read(&nsf_path) {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    failures.push(format!(
+                        "{} NSF {}: {error}",
+                        known.name,
+                        nsf_path.display()
+                    ));
+                    continue;
+                }
+            };
+            let nsd = match parse_nsd(&nsd_bytes, known.id) {
+                Ok(nsd) => nsd,
+                Err(error) => {
+                    failures.push(format!("{} NSD parse: {error}", known.name));
+                    continue;
+                }
+            };
+            let nsf = match parse_nsf(&nsf_bytes, &nsd) {
+                Ok(nsf) => nsf,
+                Err(error) => {
+                    failures.push(format!("{} NSF parse: {error}", known.name));
+                    continue;
+                }
+            };
+            let graph = match RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes) {
+                Ok(graph) => graph,
+                Err(error) => {
+                    failures.push(format!("{} camera graph: {error}", known.name));
+                    continue;
+                }
+            };
+            let mut camera = match RetailCameraRuntime::new(&graph) {
+                Ok(camera) => camera,
+                Err(error) => {
+                    failures.push(format!("{} camera start: {error}", known.name));
+                    continue;
+                }
+            };
+            // This owner is deliberately constructed once per mounted pair;
+            // no parsed graph, TPAG slot, handle, or decoded pixel survives
+            // into the following level.
+            let mut builder = RetailSceneBuilder::new();
+            let mut built_ticks = 0_u32;
+
+            for draw_count in 0..TICKS_PER_PAIR {
+                let step = match camera.update(&graph, RetailCameraInput::default()) {
+                    Ok(step) => step,
+                    Err(error) => {
+                        failures.push(format!(
+                            "{} tick {draw_count} camera at {}:{} {:#x}: {error}",
+                            known.name,
+                            camera.location().path.zone,
+                            camera.location().path.index,
+                            camera.location().progress.raw(),
+                        ));
+                        break;
+                    }
+                };
+                let location = RetailSceneProgressLocation {
+                    zone: step.after.path.zone,
+                    path_index: step.after.path.index,
+                    path_progress: step.after.progress.raw(),
+                    draw_count,
+                };
+                let scene = match builder.build_at_progress(&nsd, &nsf, &nsf_bytes, location) {
+                    Ok(scene) => scene,
+                    Err(error) => {
+                        failures.push(format!(
+                            "{} tick {draw_count} scene at {}:{} {:#x}: {error}",
+                            known.name, location.zone, location.path_index, location.path_progress,
+                        ));
+                        break;
+                    }
+                };
+                let expected_point = step.after.progress.point_index();
+                if scene.zone != location.zone
+                    || scene.path_index != location.path_index
+                    || scene.path_point_index != expected_point
+                    || scene.draw_count != draw_count
+                {
+                    failures.push(format!(
+                        "{} tick {draw_count} scene identity mismatch: camera {}:{} {:#x}, scene {}:{} point {} draw {}",
+                        known.name,
+                        location.zone,
+                        location.path_index,
+                        location.path_progress,
+                        scene.zone,
+                        scene.path_index,
+                        scene.path_point_index,
+                        scene.draw_count,
+                    ));
+                    break;
+                }
+                built_ticks += 1;
+            }
+
+            if built_ticks == TICKS_PER_PAIR {
+                let diagnostics = builder.diagnostics();
+                eprintln!(
+                    "{}: {built_ticks} camera scenes, {} graph builds, {} graph reuses, final {}:{} {:#x}",
+                    known.name,
+                    diagnostics.graph_builds,
+                    diagnostics.graph_reuses,
+                    camera.location().path.zone,
+                    camera.location().path.index,
+                    camera.location().progress.raw(),
+                );
+                successes.push(known.name);
+            }
+        }
+
+        eprintln!(
+            "camera/scene 300-tick successes ({}/{}): {successes:#?}",
+            successes.len(),
+            expected_pairs,
+        );
+        if !failures.is_empty() {
+            eprintln!("camera/scene failures: {failures:#?}");
+        }
+        assert_eq!(expected_pairs, 42);
+        assert!(
+            failures.is_empty(),
+            "camera/scene characterization failures:\n{}",
+            failures.join("\n")
+        );
+        assert_eq!(successes.len(), expected_pairs);
     }
 
     #[test]

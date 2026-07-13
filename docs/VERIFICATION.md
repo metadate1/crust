@@ -1,8 +1,8 @@
 # Verification record
 
 This file records observed checks for the initial private rewrite delivery on 2026-07-12 and the
-stream, title, GOOL, entity, SLST and first-presentation vertical slices on 2026-07-13. It does not
-turn subsystem tests into a claim of retail gameplay parity.
+stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13. It
+does not turn subsystem tests into a claim of retail gameplay parity.
 
 ## Reference characterization
 
@@ -54,20 +54,30 @@ or stream bytes into the repository:
   children with their retail argument lists. Deterministic integration tests also verify
   zone-relative entity path position, rotation/mode flags, `0x1000` scale, subtype/PID/path/process
   defaults, player-vs-object color matrices and child transform inheritance.
-- The raw-program test followed ShadC's state change into a separately validated state program,
-  selected its checked tagged animation reference, and exercised animation frame/wait progression
-  against explicit frame stamps. State rebinding records the retail state stamp and first-frame /
-  keep-event-stack status bits.
 - Parsed programs retain the complete checked item-four state table. State links apply the retail
   `status_c`/target-flags guard (including the `0x1002` invincibility augmentation), while initial
-  and global-call frames share the process/register word array at `init_sp`. Focused tests cover
-  argument addressing, packed frame words, frame-relative reads and writes, and guarded links.
-- The three-frame N. Sanity execution trace now performs the packed `0x83` animation change and
-  completes the rebound frame without errors. Its remaining stops are explicit checked boundaries:
-  four initial `0x8e` suboperation-six entity-node color seeks and one frame-three `0x26` tagged
-  input-reference operation. Neither boundary is treated as a successful no-op, and a faulted
-  object's exact generational identity is quarantined so its pre-incremented PC cannot resume past
-  the failed instruction on a later frame.
+  and global-call frames share the process/register word array at `init_sp`. Code PCs, storage
+  indices and entry slots use aligned checked tags; animation references intentionally remain byte
+  offsets. Focused tests cover argument addressing, packed frames, frame-relative access and links.
+- State rebind captures and clears the once pointer, runs its nested code synchronously before the
+  state stamp, then runs the target external transition block after the stamp. Nested calls/returns,
+  animation selection and hosted child spawns preserve this order; target state code resumes on a
+  later object execution.
+- Paging opcode `0x8b` cases one through six reproduce the checked reference-count/query behavior
+  with explicit page/entry metadata. Opcode `0x1a` reads the same five-word pad history installed by
+  the browser. The legal trace also crossed `0x85` suboperation zero path orientation, `0x8e`
+  suboperation six entity colors, and the source-defined suboperation-three and suboperation-one
+  solid query branches using validated ZDAT octrees and colors.
+- The 300-frame N. Sanity run is intentionally not error-free. Its first source-derived fault is
+  frame one: ShadC executable 29/state one, external word 40 `0x8e06de26` (post-fetch PC 41), where
+  an active executable-31 object needs animation-derived bounds. The equivalent C branch reads
+  uninitialized local vectors, so Rust returns `UnsupportedSolidObjectBounds(ObjectHandle(6))` and
+  quarantines that exact object instead of reproducing undefined behavior or skipping the opcode.
+- All 43 playable pairs built owned pointer-free camera graphs. Every non-title boot pair then ran
+  300 automatic-camera ticks through one pair-scoped scene builder: 42 pairs and 12,600 exact
+  camera-to-scene zone/path/point/draw identities passed with zero failures. N. Sanity's opening
+  automatic chain crossed four paths in 192 ticks; a separate legal `CamFollow` golden projected
+  its 43-point mode-five path and crossed to path five from a supplied retail player transform.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
@@ -120,16 +130,16 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
   simulation stopped as `BLOCKED`, retained `0x19`, and displayed the missing local filename rather
   than advancing or presenting the destination against stale assets.
 
-The later first-presentation build was reloaded at `http://127.0.0.1:4174/` in the visible Codex
-in-app browser. Its DOM contained the complete loader, two local file inputs and one canvas; there
-was no framework error overlay and the captured warning/error console was empty. The served canvas
-backing size was 1024×768 and the HTTP response used `Cache-Control: no-store`. Browser automation
-in this environment could not populate the operating-system file chooser, so this specific build's
-raw-BIN import and WebGL scene presentation are not claimed as browser-exercised. The same raw BIN
-was exercised directly by the opt-in Rust disc-to-scene and hosted-runtime tests described above.
-A user can select it through the visible local-file control without changing the no-upload
-architecture. The newly connected 30 Hz retail object loop has not been claimed as a completed
-browser gameplay flow; its scene, input, audio and progression effects are not yet connected.
+The final camera/GOOL/cache artifact was rebuilt and reloaded at `http://127.0.0.1:4174/` in the
+visible Codex in-app browser. Its DOM contained the complete local loader, disabled pre-mount runtime
+controls and canvas; there was no framework error overlay and the captured console log was empty.
+The response used `Cache-Control: no-store`, and the served Wasm hash matched the generated file.
+Browser automation in this environment could not populate the operating-system file chooser, so
+this exact artifact's raw-BIN import, hosted CamFollow and WebGL game scene are not claimed as
+browser-exercised. The same BIN was exercised in place by all opt-in Rust tests described above. A
+user can select it through the visible local-file control without changing the no-upload model.
+The object/camera/scene path is connected in code and compiled to Wasm, but no completed retail
+gameplay flow is claimed.
 
 Screenshots and game data remained outside Git. See `COMPATIBILITY.md` for features that were not
 exercised or are not yet connected to the live browser runtime.
@@ -138,17 +148,18 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 248 asset-free tests passed, zero failed; 16 legally local tests
+- locked native workspace suite: 304 asset-free tests passed, zero failed; 21 legally local tests
   remain ignored by default.
-- all 16 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+- all 21 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
-  hosted N. Sanity execution, scene formats, all 43 fractional boot snapshots, 40 standalone
-  snapshots, 39 loading images, 1,427 representative texture references and all four image-backed
-  title states. The entity and scene-format tests also passed using the raw BIN alone.
+  hosted N. Sanity execution, three camera goldens, scene formats, 12,600 camera-driven scenes,
+  all 43 fractional boot snapshots, 40 standalone snapshots, 39 loading images, 1,427
+  representative texture references and all four image-backed title states. The entity and
+  scene-format tests also passed using the raw BIN alone.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 613,599 bytes (SHA-256
-  `69ad65de8e2dbe9ae133a03cbdc80898fa7272e9e97fa03ba7b455614136ba4c`).
+- generated web release: passed; Wasm payload was 708,708 bytes (SHA-256
+  `29fe55bf04ff702982292ceaed6454612767c67a81c8b30d15c182354283ec08`).
 
 ## Reproducible commands
 
@@ -164,6 +175,11 @@ C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test --workspace --all-targets --locked -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_camera --locked -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  every_non_title_camera_drives_300_pair_scoped_scene_builds -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture

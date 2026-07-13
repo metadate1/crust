@@ -14,13 +14,21 @@ use std::rc::Rc;
 
 use crust_audio::output::OutputOptions;
 use crust_formats::binary::Eid;
-use crust_formats::stream::{KNOWN_LEVELS, LevelId as FormatLevelId, ZoneEntity, ZoneHeader};
+use crust_formats::stream::{
+    KNOWN_LEVELS, LevelId as FormatLevelId, RetailZoneGraph, ZoneEntity, ZoneHeader,
+};
 use crust_platform::input::{
     PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP,
-    PadState as PlatformPadState, keyboard_code, standard_gamepad,
+    PadSnapshot as PlatformPadSnapshot, PadState as PlatformPadState, keyboard_code,
+    standard_gamepad,
 };
 use crust_renderer::texture::{DecodedTexture, decode_loading_image};
 use crust_renderer::title::decode_title_card;
+use crust_sim::Vec3;
+use crust_sim::camera::{
+    RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation, RetailCameraRuntime,
+    RetailCameraStep,
+};
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
 };
@@ -28,6 +36,7 @@ use crust_sim::flow::{
     FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, MenuChoice, TitlePhase,
     TitleScreen,
 };
+use crust_sim::gool::{RetailPadSnapshot, process_register};
 use crust_sim::object_arena::NeighborZone;
 use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
@@ -46,7 +55,7 @@ use web_sys::{
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
-use crate::retail_scene::build_retail_scene_at_path_point;
+use crate::retail_scene::{RetailSceneBuilder, RetailSceneProgressLocation};
 use crate::storage::StorageState;
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
@@ -318,6 +327,9 @@ struct Runtime {
     retail_metrics: RetailRuntimeMetrics,
     retail_runtime_error: Option<String>,
     retail_runtime_warning: Option<String>,
+    retail_scene_builder: RetailSceneBuilder,
+    retail_zone_graph: RetailZoneGraph,
+    retail_camera: RetailCameraRuntime,
     show_loading_image: bool,
     level_assets: ValidatedPair,
     audio: Option<WebAudio>,
@@ -407,8 +419,35 @@ impl Runtime {
         } else {
             false
         };
-        let retail_point_count =
-            install_retail_scene_for_pair(&pair, &mut stage, dom, after_loading_image)?;
+        let retail_zone_graph = RetailZoneGraph::from_pair(&pair.nsd, &pair.nsf, &pair.nsf_bytes)
+            .map_err(|error| {
+            JsValue::from_str(&format!(
+                "retail camera graph for {} is invalid: {error}",
+                pair.level
+            ))
+        })?;
+        let retail_camera = RetailCameraRuntime::new(&retail_zone_graph).map_err(|error| {
+            JsValue::from_str(&format!(
+                "retail camera state for {} is invalid: {error}",
+                pair.level
+            ))
+        })?;
+        dom.log(
+            &format!(
+                "Validated a pointer-free camera graph with {} zones and {} paths.",
+                retail_zone_graph.zone_count(),
+                retail_zone_graph.path_count(),
+            ),
+            false,
+        );
+        let mut retail_scene_builder = RetailSceneBuilder::new();
+        let retail_point_count = install_retail_scene_for_pair(
+            &pair,
+            &mut retail_scene_builder,
+            &mut stage,
+            dom,
+            after_loading_image,
+        )?;
         let retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image(retail_point_count, 0)
         } else {
@@ -463,6 +502,9 @@ impl Runtime {
             retail_metrics: RetailRuntimeMetrics::default(),
             retail_runtime_error: None,
             retail_runtime_warning: None,
+            retail_scene_builder,
+            retail_zone_graph,
+            retail_camera,
             show_loading_image: after_loading_image,
             level_assets: pair,
             audio,
@@ -509,6 +551,19 @@ impl Runtime {
             ),
             false,
         );
+        let retail_zone_graph = RetailZoneGraph::from_pair(&pair.nsd, &pair.nsf, &pair.nsf_bytes)
+            .map_err(|error| {
+            JsValue::from_str(&format!(
+                "destination camera graph for {} is invalid: {error}",
+                pair.level
+            ))
+        })?;
+        let retail_camera = RetailCameraRuntime::new(&retail_zone_graph).map_err(|error| {
+            JsValue::from_str(&format!(
+                "destination camera state for {} is invalid: {error}",
+                pair.level
+            ))
+        })?;
         let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
             self.stage.install_loading_image(&image)?;
             dom.log(
@@ -523,8 +578,16 @@ impl Runtime {
         } else {
             false
         };
-        let retail_point_count =
-            install_retail_scene_for_pair(&pair, &mut self.stage, dom, after_loading_image)?;
+        // A validated pair transition gets a fresh owner so parsed graph data,
+        // TPAG mappings, and decoded pixels cannot cross the mount boundary.
+        let mut retail_scene_builder = RetailSceneBuilder::new();
+        let retail_point_count = install_retail_scene_for_pair(
+            &pair,
+            &mut retail_scene_builder,
+            &mut self.stage,
+            dom,
+            after_loading_image,
+        )?;
         self.retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image(retail_point_count, 0)
         } else {
@@ -535,6 +598,9 @@ impl Runtime {
         let entries = pair_entry_count(&pair);
         let level = pair.level;
         self.level_assets = pair;
+        self.retail_scene_builder = retail_scene_builder;
+        self.retail_zone_graph = retail_zone_graph;
+        self.retail_camera = retail_camera;
         self.retail_objects = RetailRuntime::new(RETAIL_GLOBAL_WORDS);
         self.retail_neighbors = retail_neighbors;
         self.retail_tick_state = RetailTickState::NeedsSpawn;
@@ -547,7 +613,11 @@ impl Runtime {
         self.scheduler.set_paused(false);
         self.scheduler.reset_deadline();
         dom.log(
-            &format!("Mounted destination {level}: validated {pages} pages and {entries} entries."),
+            &format!(
+                "Mounted destination {level}: validated {pages} pages, {entries} entries, {} camera zones and {} paths.",
+                self.retail_zone_graph.zone_count(),
+                self.retail_zone_graph.path_count(),
+            ),
             false,
         );
         Ok(())
@@ -587,48 +657,95 @@ impl Runtime {
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
         if !self.assets_stalled() && self.scheduler.sample(now_us) == FrameDecision::Step {
-            if self.retail_frame.tick_count() == 0 || self.retail_frame.draw_skip() != 0 {
-                let trace = self.retail_frame.tick();
-                self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
-            }
             self.pad.update(held | self.pending_buttons, 0, None);
             self.pending_buttons = 0;
             let snapshot = self.pad.snapshot();
+            self.retail_objects
+                .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
+                .map_err(|error| {
+                    JsValue::from_str(&format!("could not bind retail pad state: {error:?}"))
+                })?;
             let sim_pad = SimPadState {
                 held: u32::from(snapshot.held),
                 tapped: u32::from(snapshot.tapped),
             };
+
+            let retail_state = is_retail_runtime_state(self.flow.state());
+            if retail_state
+                && self.retail_runtime_error.is_none()
+                && snapshot.tapped & PAD_START != 0
+            {
+                self.retail_tick_state = match self.retail_tick_state {
+                    RetailTickState::NeedsSpawn => RetailTickState::PausedBeforeSpawn,
+                    RetailTickState::PausedBeforeSpawn => RetailTickState::NeedsSpawn,
+                    RetailTickState::Running => RetailTickState::Paused,
+                    RetailTickState::Paused => RetailTickState::Running,
+                };
+                dom.log(
+                    if self.paused() {
+                        "Retail object simulation paused."
+                    } else {
+                        "Retail object simulation resumed."
+                    },
+                    false,
+                );
+            }
+
+            if retail_state && !self.paused() && self.retail_runtime_error.is_none() {
+                // Retail orders initial entity spawning before camera/world
+                // work, and GOOL after it. Keep all three stages in this one
+                // cooperative tick so pause cannot split their state.
+                if self.retail_tick_state == RetailTickState::NeedsSpawn {
+                    self.spawn_retail_objects(dom);
+                }
+                let camera_location = match self.update_retail_camera(snapshot) {
+                    Ok(step) => Some(step.after),
+                    Err(error) => {
+                        let message = format!("retail camera update failed: {error}");
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = RetailTickState::Paused;
+                        None
+                    }
+                };
+                if let Some(camera_location) = camera_location {
+                    let trace = self.retail_frame.tick();
+                    self.show_loading_image =
+                        matches!(trace.presented(), PresentedFrame::LoadingImage);
+                    if let PresentedFrame::Gameplay { draw_count, .. } = trace.presented()
+                        && is_retail_runtime_state(self.flow.state())
+                        && let Err(error) = self.update_retail_scene(camera_location, draw_count)
+                    {
+                        let message = format!("retail scene update failed: {}", js_message(&error));
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = match self.retail_tick_state {
+                            RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn => {
+                                RetailTickState::PausedBeforeSpawn
+                            }
+                            RetailTickState::Running | RetailTickState::Paused => {
+                                RetailTickState::Paused
+                            }
+                        };
+                    }
+                }
+                if self.retail_runtime_error.is_none()
+                    && self.retail_tick_state == RetailTickState::Running
+                {
+                    self.tick_retail_runtime(dom);
+                }
+            } else if !retail_state {
+                let trace = self.retail_frame.tick();
+                self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
+            }
+
             self.handle_menu_input(sim_pad, dom)?;
             // Menu commands can synchronously enter a different level. Drain
             // that event first so the confirming button cannot advance the
             // destination simulation against the previous stream pair.
             self.handle_events(dom)?;
             if self.pending_asset_level.is_none() {
-                if is_retail_runtime_state(self.flow.state()) {
-                    if snapshot.tapped & PAD_START != 0 {
-                        self.retail_tick_state = match self.retail_tick_state {
-                            RetailTickState::NeedsSpawn => RetailTickState::PausedBeforeSpawn,
-                            RetailTickState::PausedBeforeSpawn => RetailTickState::NeedsSpawn,
-                            RetailTickState::Running => RetailTickState::Paused,
-                            RetailTickState::Paused => RetailTickState::Running,
-                        };
-                        dom.log(
-                            if self.paused() {
-                                "Retail object simulation paused."
-                            } else {
-                                "Retail object simulation resumed."
-                            },
-                            false,
-                        );
-                    }
-                    if matches!(
-                        self.retail_tick_state,
-                        RetailTickState::NeedsSpawn | RetailTickState::Running
-                    ) && self.retail_runtime_error.is_none()
-                    {
-                        self.tick_retail_runtime(dom);
-                    }
-                } else {
+                if !is_retail_runtime_state(self.flow.state()) {
                     self.flow.tick(sim_pad).map_err(|error| {
                         JsValue::from_str(&format!("simulation flow failed: {error:?}"))
                     })?;
@@ -668,79 +785,53 @@ impl Runtime {
         Ok(())
     }
 
-    fn tick_retail_runtime(&mut self, dom: &Dom) {
-        if self.retail_tick_state == RetailTickState::NeedsSpawn {
-            let result = {
-                let neighbors = self
-                    .retail_neighbors
-                    .iter()
-                    .map(|neighbor| NeighborZone {
-                        eid: neighbor.eid,
-                        display_flags: neighbor.display_flags,
-                        entities: neighbor.entities.as_slice(),
-                    })
-                    .collect::<Vec<_>>();
-                let mut host = NsfProgramHost::new(
-                    &self.level_assets.nsd,
-                    &self.level_assets.nsf,
-                    &self.level_assets.nsf_bytes,
-                );
-                self.retail_objects.spawn_and_run_frame(
-                    &neighbors,
-                    &mut host,
-                    RETAIL_INSTRUCTION_BUDGET,
-                )
-            };
-            match result {
-                Ok(report) => {
-                    let attempts = report.spawn_attempts.len() as u64;
-                    let successful = report
-                        .spawn_attempts
-                        .iter()
-                        .filter(|attempt| attempt.result.is_ok())
-                        .count() as u64;
-                    let failed = attempts.saturating_sub(successful);
-                    let frame_executions = report.frame.executions.len();
-                    let frame_execution_errors = report
-                        .frame
-                        .executions
-                        .iter()
-                        .filter(|execution| execution.result.is_err())
-                        .count();
-                    self.retail_metrics.spawn_attempts = attempts;
-                    self.retail_metrics.successful_spawns = successful;
-                    self.retail_metrics.failed_spawns = failed;
-                    self.retail_metrics.record_frame(&report.frame);
-                    self.retail_tick_state = RetailTickState::Running;
-                    if let Some(error) = report
-                        .frame
-                        .executions
-                        .iter()
-                        .find_map(|execution| execution.result.as_ref().err())
-                    {
-                        self.retail_runtime_warning = Some(format!(
-                            "Retail GOOL hit {frame_execution_errors} checked object execution error(s) on frame 0; first error: {error:?}"
-                        ));
-                    }
-                    dom.log(
-                        &format!(
-                            "Retail GOOL frame 0 scanned {} displayed neighbor zones: {successful}/{attempts} group-3 entities bound, {frame_executions} executions ({frame_execution_errors} errors), {} runtime children, {} effects.",
-                            self.retail_neighbors.len(),
-                            report.frame.spawned_children.len(),
-                            report.frame.effects.len(),
-                        ),
-                        failed != 0 || frame_execution_errors != 0,
-                    );
-                }
-                Err(error) => {
-                    let message = format!("retail GOOL startup failed: {error:?}");
-                    dom.log(&message, true);
-                    self.retail_runtime_error = Some(message);
-                }
-            }
-            return;
+    fn spawn_retail_objects(&mut self, dom: &Dom) {
+        let attempts = {
+            let neighbors = self
+                .retail_neighbors
+                .iter()
+                .map(|neighbor| NeighborZone {
+                    eid: neighbor.eid,
+                    display_flags: neighbor.display_flags,
+                    entities: neighbor.entities.as_slice(),
+                })
+                .collect::<Vec<_>>();
+            let mut host = NsfProgramHost::new(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+            );
+            self.retail_objects
+                .spawn_current_zone_neighbors(&neighbors, &mut host)
+        };
+        let attempt_count = attempts.len() as u64;
+        let successful = attempts
+            .iter()
+            .filter(|attempt| attempt.result.is_ok())
+            .count() as u64;
+        let failed = attempt_count.saturating_sub(successful);
+        self.retail_metrics.spawn_attempts = attempt_count;
+        self.retail_metrics.successful_spawns = successful;
+        self.retail_metrics.failed_spawns = failed;
+        self.retail_tick_state = RetailTickState::Running;
+        if let Some(error) = attempts
+            .iter()
+            .find_map(|attempt| attempt.result.as_ref().err())
+        {
+            self.retail_runtime_warning = Some(format!(
+                "Retail spawn scan rejected {failed} object(s); first error: {error:?}"
+            ));
         }
+        dom.log(
+            &format!(
+                "Retail spawn scan covered {} displayed neighbor zones: {successful}/{attempt_count} group-3 entities bound.",
+                self.retail_neighbors.len(),
+            ),
+            failed != 0,
+        );
+    }
 
+    fn tick_retail_runtime(&mut self, dom: &Dom) {
         let result = {
             let mut host = NsfProgramHost::new(
                 &self.level_assets.nsd,
@@ -752,6 +843,12 @@ impl Runtime {
         };
         match result {
             Ok(frame) => {
+                let frame_executions = frame.executions.len();
+                let frame_execution_errors = frame
+                    .executions
+                    .iter()
+                    .filter(|execution| execution.result.is_err())
+                    .count();
                 let errors_before = self.retail_metrics.execution_errors;
                 let first_error = frame
                     .executions
@@ -770,6 +867,16 @@ impl Runtime {
                     dom.log(&message, true);
                     self.retail_runtime_warning = Some(message);
                 }
+                if frame.frame_index == 0 {
+                    dom.log(
+                        &format!(
+                            "Retail GOOL frame 0 ran {frame_executions} objects ({frame_execution_errors} errors), created {} runtime children and emitted {} effects.",
+                            frame.spawned_children.len(),
+                            frame.effects.len(),
+                        ),
+                        frame_execution_errors != 0,
+                    );
+                }
             }
             Err(error) => {
                 let message = format!("retail GOOL frame failed: {error:?}");
@@ -779,12 +886,114 @@ impl Runtime {
         }
     }
 
+    fn update_retail_scene(
+        &mut self,
+        location: RetailCameraLocation,
+        draw_count: u32,
+    ) -> Result<(), JsValue> {
+        let path_progress = location.progress.raw();
+        let scene = self
+            .retail_scene_builder
+            .build_at_progress(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                RetailSceneProgressLocation {
+                    zone: location.path.zone,
+                    path_index: location.path.index,
+                    path_progress,
+                    draw_count,
+                },
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "retail scene update at progress {path_progress:#x}: {error}"
+                ))
+            })?;
+        self.stage.update_retail_scene(scene)?;
+        Ok(())
+    }
+
+    fn update_retail_camera(
+        &mut self,
+        snapshot: PlatformPadSnapshot,
+    ) -> Result<RetailCameraStep, String> {
+        let location = self.retail_camera.location();
+        let mode = self
+            .retail_zone_graph
+            .path(location.path)
+            .ok_or_else(|| {
+                format!(
+                    "camera graph has no active path {}:{}",
+                    location.path.zone, location.path.index
+                )
+            })?
+            .camera_mode;
+        if matches!(mode, 5 | 6)
+            && let Some(input) = self.retail_follow_input(snapshot)?
+        {
+            return self
+                .retail_camera
+                .update_follow(&self.retail_zone_graph, input)
+                .map_err(|error| error.to_string());
+        }
+        self.retail_camera
+            .update(
+                &self.retail_zone_graph,
+                RetailCameraInput {
+                    tapped: u32::from(snapshot.tapped),
+                },
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn retail_follow_input(
+        &self,
+        snapshot: PlatformPadSnapshot,
+    ) -> Result<Option<RetailCameraFollowInput>, String> {
+        let Some(arena_handle) = self.retail_objects.arena().main_object() else {
+            return Ok(None);
+        };
+        let object_handle = self
+            .retail_objects
+            .object_for_arena(arena_handle)
+            .ok_or_else(|| "retail main object has no paired VM handle".to_owned())?;
+        let machine = self.retail_objects.machine();
+        let player = machine
+            .object(object_handle.vm())
+            .map_err(|error| format!("retail main object is unavailable: {error:?}"))?;
+        let register = |index| {
+            player
+                .register(index)
+                .map_err(|error| format!("retail main object register {index}: {error:?}"))
+        };
+        let level_id = i32::try_from(self.level_assets.level.get())
+            .map_err(|_| "mounted level identifier does not fit the camera input".to_owned())?;
+        Ok(Some(RetailCameraFollowInput {
+            player_translation: Vec3 {
+                x: register(process_register::TRANSLATION_X)?.cast_signed(),
+                y: register(process_register::TRANSLATION_Y)?.cast_signed(),
+                z: register(process_register::TRANSLATION_Z)?.cast_signed(),
+            },
+            player_cam_zoom: register(process_register::CAMERA_ZOOM)?.cast_signed(),
+            held_buttons: u32::from(snapshot.held),
+            level_id,
+            // CamUpdate precedes GoolUpdate, so it observes the stamp installed
+            // by the previous retail object frame.
+            frames_elapsed: machine.frames_elapsed(),
+            // Gem events are still a typed host boundary. Zero is the exact
+            // LevelInit value and remains correct until that event is hosted.
+            gem_stamp: 0,
+        }))
+    }
+
     fn paused(&self) -> bool {
         if is_retail_runtime_state(self.flow.state()) {
-            matches!(
-                self.retail_tick_state,
-                RetailTickState::PausedBeforeSpawn | RetailTickState::Paused
-            )
+            self.retail_runtime_error.is_some()
+                || matches!(
+                    self.retail_tick_state,
+                    RetailTickState::PausedBeforeSpawn | RetailTickState::Paused
+                )
         } else {
             self.flow.paused()
         }
@@ -1093,7 +1302,7 @@ impl Runtime {
                     &format!("LID 0x{:02X} / GAMEPLAY", level.raw()),
                     level_name(*level),
                     self.retail_runtime_message(
-                        "Retail entities and GOOL are ticking · input globals are not yet bound",
+                        "Keyboard, gamepad, and touch controls feed the retail GOOL pad state",
                     ),
                 );
                 dom.set_menu(&[])?;
@@ -1719,6 +1928,16 @@ fn poll_gamepad() -> Result<u16, JsValue> {
     Ok(standard_gamepad(&buttons, &axes))
 }
 
+fn retail_pad_snapshot(snapshot: PlatformPadSnapshot) -> RetailPadSnapshot {
+    RetailPadSnapshot {
+        tapped: u32::from(snapshot.tapped),
+        held: u32::from(snapshot.held),
+        held_previous: u32::from(snapshot.held_previous),
+        tapped_previous: u32::from(snapshot.tapped_previous),
+        held_previous_2: u32::from(snapshot.held_previous_2),
+    }
+}
+
 fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Result<(), JsValue> {
     let level = current_level(&runtime.flow);
     Reflect::set(
@@ -1770,6 +1989,89 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         debug,
         &JsValue::from_str("retailFrame"),
         &JsValue::from_f64(runtime.retail_objects.frame_index() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailPathProgress"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.location().progress.raw())),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraZone"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.location().path.zone.raw())),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraPath"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.location().path.index)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraGameState"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.game_state())),
+    )?;
+    let camera_location = runtime.retail_camera.location();
+    let follow_active = runtime.retail_objects.arena().main_object().is_some()
+        && runtime
+            .retail_zone_graph
+            .path(camera_location.path)
+            .is_some_and(|path| matches!(path.camera_mode, 5 | 6));
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraFollowActive"),
+        &JsValue::from_bool(follow_active),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraFollowSpeed"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.follow_state().speed)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailCameraFollowZoom"),
+        &JsValue::from_f64(f64::from(runtime.retail_camera.follow_state().zoom)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailDrawCount"),
+        &JsValue::from_f64(f64::from(runtime.retail_frame.draw_count())),
+    )?;
+    let scene_cache = runtime.retail_scene_builder.diagnostics();
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSceneGraphBuilds"),
+        &JsValue::from_f64(scene_cache.graph_builds as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSceneGraphReuses"),
+        &JsValue::from_f64(scene_cache.graph_reuses as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSceneTexturePageInstalls"),
+        &JsValue::from_f64(scene_cache.texture_page_installs as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSceneTextureHits"),
+        &JsValue::from_f64(scene_cache.texture_hits as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSceneTextureMisses"),
+        &JsValue::from_f64(scene_cache.texture_misses as f64),
+    )?;
+    let pad = runtime.pad.snapshot();
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailPadHeld"),
+        &JsValue::from_f64(f64::from(pad.held)),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailPadTapped"),
+        &JsValue::from_f64(f64::from(pad.tapped)),
     )?;
     Reflect::set(
         debug,
@@ -2038,24 +2340,26 @@ fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTextu
 
 fn install_retail_scene_for_pair(
     pair: &ValidatedPair,
+    builder: &mut RetailSceneBuilder,
     stage: &mut GlStage,
     dom: &Dom,
     after_loading_image: bool,
 ) -> Result<NonZeroU16, JsValue> {
     let (path_point, draw_count) = if after_loading_image { (2, 1) } else { (1, 0) };
-    let scene = build_retail_scene_at_path_point(
-        &pair.nsd,
-        &pair.nsf,
-        &pair.nsf_bytes,
-        path_point,
-        draw_count,
-    )
-    .map_err(|error| {
-        JsValue::from_str(&format!(
-            "retail first-presented snapshot for {} is invalid: {error}",
-            pair.level
-        ))
-    })?;
+    let scene = builder
+        .build_at_path_point(
+            &pair.nsd,
+            &pair.nsf,
+            &pair.nsf_bytes,
+            path_point,
+            draw_count,
+        )
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "retail first-presented snapshot for {} is invalid: {error}",
+                pair.level
+            ))
+        })?;
     let stats = scene.stats;
     let point_count = NonZeroU16::new(scene.path_point_count)
         .ok_or_else(|| JsValue::from_str("retail spawn path unexpectedly has no points"))?;

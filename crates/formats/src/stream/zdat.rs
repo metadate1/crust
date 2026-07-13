@@ -10,6 +10,8 @@ const ZONE_NEIGHBOR_CAPACITY: usize = 8;
 const LOAD_LIST_ENTRY_CAPACITY: usize = 8;
 const LOAD_LIST_PAGE_CAPACITY: usize = 32;
 const ZONE_PATH_NEIGHBOR_CAPACITY: usize = 4;
+const GOOL_EXECUTABLE_COUNT: u8 = 64;
+const GOOL_SPAWN_COUNT: u16 = 304;
 
 /// One serialized world slot from a ZDAT header.
 ///
@@ -232,6 +234,107 @@ pub struct ZoneNeighborPath {
     pub neighbor_zone_index: u8,
     pub path_index: u8,
     pub goal: u8,
+}
+
+/// One signed point from a ZDAT entity's movement path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ZoneEntityPathPoint {
+    pub x: i16,
+    pub y: i16,
+    pub z: i16,
+}
+
+impl ZoneEntityPathPoint {
+    pub const BYTE_LEN: usize = 6;
+
+    fn parse(reader: &mut Reader<'_>) -> Result<Self, FormatError> {
+        Ok(Self {
+            x: reader.i16_le()?,
+            y: reader.i16_le()?,
+            z: reader.i16_le()?,
+        })
+    }
+}
+
+/// One pointer-free ZDAT entity descriptor consumed by GOOL spawning.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZoneEntity {
+    /// Serialized placeholder overwritten by `ZdatOnLoad` in the C runtime.
+    pub serialized_parent: EntryRef,
+    pub spawn_flags: u16,
+    pub group: u16,
+    pub id: u16,
+    /// The same three words are interpreted as rotation or mode flags
+    /// according to `spawn_flags & 1`; preserve their exact signed values.
+    pub initializer: [i16; 3],
+    /// Index into the LDAT 64-entry executable map.
+    pub executable: u8,
+    pub subtype: u8,
+    pub path_points: Vec<ZoneEntityPathPoint>,
+}
+
+impl ZoneEntity {
+    pub const HEADER_BYTE_LEN: usize = 20;
+
+    /// Parses the exact 32-bit `zone_entity` disk representation.
+    pub fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
+        let header = checked_slice(bytes, 0, Self::HEADER_BYTE_LEN, "ZDAT entity header")?;
+        let mut reader = Reader::new(header);
+        let serialized_parent = EntryRef::from_raw(reader.u32_le()?);
+        let spawn_flags = reader.u16_le()?;
+        let group = reader.u16_le()?;
+        let id = reader.u16_le()?;
+        if id >= GOOL_SPAWN_COUNT {
+            return Err(FormatError::at(
+                8,
+                "ZDAT entity id exceeds the retail spawn table",
+            ));
+        }
+        let path_length = reader.u16_le()?;
+        if path_length == 0 {
+            return Err(FormatError::at(10, "ZDAT entity path contains no points"));
+        }
+        let initializer = [reader.i16_le()?, reader.i16_le()?, reader.i16_le()?];
+        let executable = reader.u8()?;
+        if executable >= GOOL_EXECUTABLE_COUNT {
+            return Err(FormatError::at(
+                18,
+                "ZDAT entity executable is outside the LDAT map",
+            ));
+        }
+        let subtype = reader.u8()?;
+        debug_assert_eq!(reader.position(), Self::HEADER_BYTE_LEN);
+
+        let points_bytes = usize::from(path_length)
+            .checked_mul(ZoneEntityPathPoint::BYTE_LEN)
+            .ok_or_else(|| FormatError::at(10, "ZDAT entity path byte count overflows"))?;
+        let required_len = Self::HEADER_BYTE_LEN
+            .checked_add(points_bytes)
+            .ok_or_else(|| FormatError::at(10, "ZDAT entity byte count overflows"))?;
+        let points = checked_slice(
+            bytes,
+            Self::HEADER_BYTE_LEN,
+            points_bytes,
+            "ZDAT entity path points",
+        )?;
+        debug_assert_eq!(required_len, Self::HEADER_BYTE_LEN + points.len());
+        let mut reader = Reader::new(points);
+        let mut path_points = Vec::with_capacity(usize::from(path_length));
+        for _ in 0..path_length {
+            path_points.push(ZoneEntityPathPoint::parse(&mut reader)?);
+        }
+
+        Ok(Self {
+            serialized_parent,
+            spawn_flags,
+            group,
+            id,
+            initializer,
+            executable,
+            subtype,
+            path_points,
+        })
+    }
 }
 
 /// A complete variable-length ZDAT camera path.
@@ -487,6 +590,61 @@ mod tests {
     }
 
     #[test]
+    fn entity_layout_preserves_spawn_and_gool_fields() {
+        let mut bytes = vec![0_u8; ZoneEntity::HEADER_BYTE_LEN + 2 * ZoneEntityPathPoint::BYTE_LEN];
+        put_u32(&mut bytes, 0, 0x1234_5679);
+        put_u16(&mut bytes, 4, 1);
+        put_u16(&mut bytes, 6, 3);
+        put_u16(&mut bytes, 8, 42);
+        put_u16(&mut bytes, 10, 2);
+        for (index, value) in [-10_i16, 20, -30].into_iter().enumerate() {
+            put_i16(&mut bytes, 12 + index * 2, value);
+        }
+        bytes[18] = 7;
+        bytes[19] = 9;
+        for (index, value) in [-100_i16, 200, -300, 400, -500, 600]
+            .into_iter()
+            .enumerate()
+        {
+            put_i16(&mut bytes, 20 + index * 2, value);
+        }
+
+        let entity = ZoneEntity::parse(&bytes).unwrap();
+        assert_eq!(entity.serialized_parent, EntryRef::from_raw(0x1234_5679));
+        assert_eq!(entity.spawn_flags, 1);
+        assert_eq!(entity.group, 3);
+        assert_eq!(entity.id, 42);
+        assert_eq!(entity.initializer, [-10, 20, -30]);
+        assert_eq!(entity.executable, 7);
+        assert_eq!(entity.subtype, 9);
+        assert_eq!(
+            entity.path_points,
+            [
+                ZoneEntityPathPoint {
+                    x: -100,
+                    y: 200,
+                    z: -300,
+                },
+                ZoneEntityPathPoint {
+                    x: 400,
+                    y: -500,
+                    z: 600,
+                },
+            ]
+        );
+        assert!(ZoneEntity::parse(&bytes[..bytes.len() - 1]).is_err());
+
+        put_u16(&mut bytes, 10, 0);
+        assert!(ZoneEntity::parse(&bytes).is_err());
+        put_u16(&mut bytes, 10, 2);
+        put_u16(&mut bytes, 8, GOOL_SPAWN_COUNT);
+        assert!(ZoneEntity::parse(&bytes).is_err());
+        put_u16(&mut bytes, 8, 42);
+        bytes[18] = GOOL_EXECUTABLE_COUNT;
+        assert!(ZoneEntity::parse(&bytes).is_err());
+    }
+
+    #[test]
     fn zone_rectangle_validates_octree_root_and_depths() {
         let mut bytes = vec![0_u8; ZoneRect::BYTE_LEN + 16];
         put_u32(&mut bytes, 0, (-100_i32).cast_unsigned());
@@ -560,6 +718,7 @@ mod tests {
         fn malformed_zdat_inputs_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..1200)) {
             let _ = ZoneHeader::parse(&bytes);
             let _ = ZonePath::parse(&bytes);
+            let _ = ZoneEntity::parse(&bytes);
             let _ = ZoneLoadList::parse(&bytes);
             let _ = ZoneRect::parse(&bytes);
         }

@@ -16,11 +16,11 @@ pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,
     parse_nsf,
 };
-pub use slst::{PolygonId, SlstDelta, SlstDirection, SlstItem};
+pub use slst::{PolygonId, SlstCursor, SlstDelta, SlstDirection, SlstItem};
 pub use wgeo::{WorldGeometry, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry};
 pub use zdat::{
-    ZoneColors, ZoneGraphics, ZoneHeader, ZoneLoadList, ZoneNeighborPath, ZonePath, ZoneRect,
-    ZoneWorld,
+    ZoneColors, ZoneEntity, ZoneEntityPathPoint, ZoneGraphics, ZoneHeader, ZoneLoadList,
+    ZoneNeighborPath, ZonePath, ZoneRect, ZoneWorld,
 };
 
 #[cfg(test)]

@@ -19,8 +19,10 @@ pub mod demo;
 pub mod flow;
 pub mod gool;
 pub mod math;
+pub mod object_arena;
 pub mod paging;
 pub mod player;
+pub mod retail_frame;
 pub mod scheduler;
 
 pub use math::{Angle12, Bounds3, Vec2, Vec3};

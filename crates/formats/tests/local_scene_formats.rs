@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use crust_formats::disc::{DiscImage, DiscStreamSet};
 use crust_formats::stream::{
-    KNOWN_LEVELS, SlstItem, StreamKind, StreamName, ZoneHeader, ZonePath, ZoneRect, parse_nsd,
-    parse_nsf, parse_world_geometry,
+    KNOWN_LEVELS, PolygonId, SlstDirection, SlstItem, StreamKind, StreamName, WorldGeometry,
+    ZoneHeader, ZonePath, ZoneRect, parse_nsd, parse_nsf, parse_world_geometry,
 };
 
 const WGEO_ENTRY_TYPE: u32 = 3;
@@ -35,6 +35,35 @@ fn mix_fingerprint(fingerprint: &mut u64, value: u32) {
     for byte in value.to_le_bytes() {
         *fingerprint ^= u64::from(byte);
         *fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+}
+
+fn validate_polygon_references(
+    level_name: &str,
+    zone_eid: impl std::fmt::Display,
+    path_index: u32,
+    point_index: usize,
+    polygons: &[PolygonId],
+    geometries: &[WorldGeometry],
+) {
+    for polygon in polygons {
+        let world = geometries
+            .get(usize::from(polygon.world_index))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{level_name} ZDAT {zone_eid} path {path_index} point {point_index} \
+                     references inactive world {}",
+                    polygon.world_index
+                )
+            });
+        assert!(
+            usize::from(polygon.polygon_index) < world.polygons.len(),
+            "{level_name} ZDAT {zone_eid} path {path_index} point {point_index} \
+             references WGEO {} polygon {}, but it has {} polygons",
+            polygon.world_index,
+            polygon.polygon_index,
+            world.polygons.len()
+        );
     }
 }
 
@@ -80,6 +109,12 @@ fn parses_all_retail_scene_entries_and_spawn_zones() {
     let mut slst_items = 0_usize;
     let mut spawn_zones = 0_usize;
     let mut spawn_fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+    let mut decoded_slst_paths = 0_usize;
+    let mut decoded_slst_states = 0_usize;
+    let mut decoded_slst_transitions = 0_usize;
+    let mut slst_inverse_round_trips = 0_usize;
+    let mut validated_polygon_references = 0_usize;
+    let mut slst_fingerprint = 0xcbf2_9ce4_8422_2325_u64;
 
     for level in KNOWN_LEVELS {
         let nsd_bytes = read_stream(
@@ -149,6 +184,37 @@ fn parses_all_retail_scene_entries_and_spawn_zones() {
                     let header = ZoneHeader::parse(item_zero).unwrap_or_else(|error| {
                         panic!("{} ZDAT {} header: {error}", level.name, entry.eid)
                     });
+                    let geometries: Vec<_> = header
+                        .worlds
+                        .iter()
+                        .enumerate()
+                        .map(|(world_index, world)| {
+                            let geometry_entry = nsf
+                                .resolve_entry(&nsd, world.geometry)
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "{} ZDAT {} world {world_index} WGEO {}: {error}",
+                                        level.name, entry.eid, world.geometry
+                                    )
+                                });
+                            assert_eq!(
+                                geometry_entry.entry_type, WGEO_ENTRY_TYPE,
+                                "{} ZDAT {} world {world_index} entry type",
+                                level.name, entry.eid
+                            );
+                            parse_world_geometry(
+                                geometry_entry.item(0).unwrap().bytes(&nsf_bytes).unwrap(),
+                                geometry_entry.item(1).unwrap().bytes(&nsf_bytes).unwrap(),
+                                geometry_entry.item(2).unwrap().bytes(&nsf_bytes).unwrap(),
+                            )
+                            .unwrap_or_else(|error| {
+                                panic!(
+                                    "{} ZDAT {} world {world_index} WGEO {}: {error}",
+                                    level.name, entry.eid, world.geometry
+                                )
+                            })
+                        })
+                        .collect();
                     let rect_bytes = entry
                         .item(1)
                         .unwrap_or_else(|| panic!("ZDAT {} has no rectangle item", entry.eid))
@@ -198,6 +264,188 @@ fn parses_all_retail_scene_entries_and_spawn_zones() {
                                 level.name,
                                 visibility.eid
                             );
+
+                            let items: Vec<_> = visibility
+                                .items
+                                .iter()
+                                .map(|item| {
+                                    SlstItem::parse(item.bytes(&nsf_bytes).unwrap()).unwrap_or_else(
+                                        |error| {
+                                            panic!(
+                                                "{} ZDAT {} path {path_index} SLST {} item {}: \
+                                                 {error}",
+                                                level.name, entry.eid, visibility.eid, item.index
+                                            )
+                                        },
+                                    )
+                                })
+                                .collect();
+                            assert!(
+                                matches!(items.first(), Some(SlstItem::Raw { .. })),
+                                "{} ZDAT {} path {path_index} SLST {} first item is not raw",
+                                level.name,
+                                entry.eid,
+                                visibility.eid
+                            );
+                            assert!(
+                                matches!(items.last(), Some(SlstItem::Raw { .. })),
+                                "{} ZDAT {} path {path_index} SLST {} last item is not raw",
+                                level.name,
+                                entry.eid,
+                                visibility.eid
+                            );
+
+                            mix_fingerprint(&mut slst_fingerprint, level.id.get());
+                            mix_fingerprint(&mut slst_fingerprint, entry.eid.raw());
+                            mix_fingerprint(&mut slst_fingerprint, path_index);
+                            mix_fingerprint(&mut slst_fingerprint, path.visibility_list.raw());
+                            mix_fingerprint(
+                                &mut slst_fingerprint,
+                                u32::try_from(geometries.len()).unwrap(),
+                            );
+                            for (world, geometry) in header.worlds.iter().zip(&geometries) {
+                                mix_fingerprint(&mut slst_fingerprint, world.geometry.raw());
+                                mix_fingerprint(
+                                    &mut slst_fingerprint,
+                                    u32::try_from(geometry.polygons.len()).unwrap(),
+                                );
+                            }
+
+                            let first = items[0].apply(&[], SlstDirection::Forward).unwrap_or_else(
+                                |error| {
+                                    panic!(
+                                        "{} ZDAT {} path {path_index} SLST {} first raw item: \
+                                         {error}",
+                                        level.name, entry.eid, visibility.eid
+                                    )
+                                },
+                            );
+                            let mut forward_states = Vec::with_capacity(path.points.len());
+                            forward_states.push(first);
+                            for (item_index, item) in
+                                items.iter().enumerate().take(path.points.len()).skip(1)
+                            {
+                                let source = forward_states.last().unwrap();
+                                let decoded = item
+                                    .apply(source, SlstDirection::Forward)
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "{} ZDAT {} path {path_index} SLST {} item \
+                                             {item_index} forward: {error}",
+                                            level.name, entry.eid, visibility.eid
+                                        )
+                                    });
+                                let restored = item
+                                    .apply(&decoded, SlstDirection::Backward)
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "{} ZDAT {} path {path_index} SLST {} item \
+                                             {item_index} inverse backward: {error}",
+                                            level.name, entry.eid, visibility.eid
+                                        )
+                                    });
+                                assert_eq!(
+                                    restored, *source,
+                                    "{} ZDAT {} path {path_index} SLST {} item {item_index} \
+                                     forward/backward round-trip",
+                                    level.name, entry.eid, visibility.eid
+                                );
+                                forward_states.push(decoded);
+                                decoded_slst_transitions += 1;
+                                slst_inverse_round_trips += 1;
+                            }
+
+                            let endpoint = items[path.points.len()]
+                                .apply(&[], SlstDirection::Backward)
+                                .unwrap_or_else(|error| {
+                                    panic!(
+                                        "{} ZDAT {} path {path_index} SLST {} endpoint raw item: \
+                                         {error}",
+                                        level.name, entry.eid, visibility.eid
+                                    )
+                                });
+                            assert_eq!(
+                                endpoint,
+                                *forward_states.last().unwrap(),
+                                "{} ZDAT {} path {path_index} SLST {} forward endpoint/raw \
+                                 mismatch",
+                                level.name,
+                                entry.eid,
+                                visibility.eid
+                            );
+
+                            let mut backward = endpoint;
+                            for item_index in (1..path.points.len()).rev() {
+                                let decoded = items[item_index]
+                                    .apply(&backward, SlstDirection::Backward)
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "{} ZDAT {} path {path_index} SLST {} item \
+                                             {item_index} backward: {error}",
+                                            level.name, entry.eid, visibility.eid
+                                        )
+                                    });
+                                assert_eq!(
+                                    decoded,
+                                    forward_states[item_index - 1],
+                                    "{} ZDAT {} path {path_index} SLST {} item {item_index} \
+                                     backward state",
+                                    level.name,
+                                    entry.eid,
+                                    visibility.eid
+                                );
+                                let restored = items[item_index]
+                                    .apply(&decoded, SlstDirection::Forward)
+                                    .unwrap_or_else(|error| {
+                                        panic!(
+                                            "{} ZDAT {} path {path_index} SLST {} item \
+                                             {item_index} inverse forward: {error}",
+                                            level.name, entry.eid, visibility.eid
+                                        )
+                                    });
+                                assert_eq!(
+                                    restored, backward,
+                                    "{} ZDAT {} path {path_index} SLST {} item {item_index} \
+                                     backward/forward round-trip",
+                                    level.name, entry.eid, visibility.eid
+                                );
+                                backward = decoded;
+                                slst_inverse_round_trips += 1;
+                            }
+                            assert_eq!(
+                                backward, forward_states[0],
+                                "{} ZDAT {} path {path_index} SLST {} backward endpoint/raw \
+                                 mismatch",
+                                level.name, entry.eid, visibility.eid
+                            );
+
+                            for (point_index, polygons) in forward_states.iter().enumerate() {
+                                validate_polygon_references(
+                                    level.name,
+                                    entry.eid,
+                                    path_index,
+                                    point_index,
+                                    polygons,
+                                    &geometries,
+                                );
+                                mix_fingerprint(
+                                    &mut slst_fingerprint,
+                                    u32::try_from(point_index).unwrap(),
+                                );
+                                mix_fingerprint(
+                                    &mut slst_fingerprint,
+                                    u32::try_from(polygons.len()).unwrap(),
+                                );
+                                for polygon in polygons {
+                                    mix_fingerprint(
+                                        &mut slst_fingerprint,
+                                        u32::from(polygon.raw()),
+                                    );
+                                }
+                                validated_polygon_references += polygons.len();
+                            }
+                            decoded_slst_paths += 1;
+                            decoded_slst_states += forward_states.len();
                             resolved_path_slsts += 1;
                         } else {
                             // A few neighbor-zone paths name visibility entries
@@ -293,6 +541,19 @@ fn parses_all_retail_scene_entries_and_spawn_zones() {
     assert_eq!(slst_items, 138_038);
     assert_eq!(spawn_zones, 43);
     assert_eq!(spawn_fingerprint, 0xc273_d37f_ea8d_2f99);
+    assert_eq!(decoded_slst_paths, 1_726);
+    assert_eq!(decoded_slst_states, 136_312);
+    assert_eq!(decoded_slst_transitions, 134_586);
+    assert_eq!(slst_inverse_round_trips, 269_172);
+    assert_eq!(validated_polygon_references, 89_666_970);
+    assert_eq!(slst_fingerprint, 0x1400_935c_08cf_e148);
+    eprintln!(
+        "SLST traversal characterization: {decoded_slst_paths} paths, \
+         {decoded_slst_states} states, {decoded_slst_transitions} transitions, \
+         {slst_inverse_round_trips} inverse round-trips, \
+         {validated_polygon_references} WGEO polygon references, \
+         fingerprint {slst_fingerprint:#018x}"
+    );
     eprintln!(
         "retail scene characterization: {zdat_entries} ZDAT, {zdat_paths} paths \
          ({resolved_path_slsts} local SLST/{external_path_slsts} external), \

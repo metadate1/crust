@@ -4,6 +4,8 @@ use crate::binary::{FormatError, Reader, checked_slice};
 
 const DELTA_HEADER_WORDS: usize = 2;
 const NULL_INDEX: i64 = 0x00ff_ff00;
+const PACKED_WORLD_COUNT: usize = 8;
+const PACKED_POLYGON_COUNT: usize = 1 << 12;
 
 /// One packed world/polygon reference from a visibility list.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -170,6 +172,283 @@ impl SlstItem {
             },
         }
     }
+}
+
+/// Mutable, bounds-checked visibility state for one camera path.
+///
+/// A retail SLST has one visibility point per interior state, a raw list at
+/// each end, and one delta item for every adjacent point transition. The
+/// cursor owns a validated copy of those parsed items so callers cannot mutate
+/// a delta while it is live. Initialization mirrors `LevelUpdate`: points in
+/// the first half decode forward from item zero, while the midpoint and second
+/// half decode backward from the final raw item.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SlstCursor {
+    items: Box<[SlstItem]>,
+    world_polygon_counts: Box<[usize]>,
+    point_index: usize,
+    visibility: Vec<PolygonId>,
+}
+
+impl SlstCursor {
+    /// Creates visibility state at `point_index` from the nearest raw endpoint.
+    ///
+    /// `world_polygon_counts` is ordered exactly like the active ZDAT world
+    /// table. It may contain at most eight entries because an SLST polygon ID
+    /// has a three-bit world index. Both raw endpoints, all parsed delta
+    /// invariants, and every visibility result reached during initialization
+    /// are validated before the cursor is returned.
+    pub fn new(
+        items: &[SlstItem],
+        world_polygon_counts: &[usize],
+        point_index: usize,
+    ) -> Result<Self, FormatError> {
+        validate_world_layout(world_polygon_counts)?;
+        let point_count = validate_runtime_items(items, world_polygon_counts)?;
+        if point_index >= point_count {
+            return Err(FormatError::global(format!(
+                "SLST point index {point_index} is outside {point_count} path points"
+            )));
+        }
+
+        // This is the source runtime's exact tie-break: an odd path's middle
+        // point is initialized from the final raw list.
+        let from_first = point_index < point_count / 2;
+        let endpoint_item = if from_first { 0 } else { point_count };
+        let endpoint_point = if from_first { 0 } else { point_count - 1 };
+        let direction = if from_first {
+            SlstDirection::Forward
+        } else {
+            SlstDirection::Backward
+        };
+        let visibility = items[endpoint_item].apply(&[], direction)?;
+        validate_visibility(&visibility, world_polygon_counts)?;
+
+        let mut cursor = Self {
+            items: items.to_vec().into_boxed_slice(),
+            world_polygon_counts: world_polygon_counts.to_vec().into_boxed_slice(),
+            point_index: endpoint_point,
+            visibility,
+        };
+        cursor.seek(point_index)?;
+        Ok(cursor)
+    }
+
+    /// Number of camera-path points represented by this SLST.
+    #[must_use]
+    pub fn point_count(&self) -> usize {
+        self.items.len() - 1
+    }
+
+    /// Current zero-based camera-path point.
+    #[must_use]
+    pub const fn point_index(&self) -> usize {
+        self.point_index
+    }
+
+    /// Current polygon references in their exact deterministic retail order.
+    #[must_use]
+    pub fn visibility(&self) -> &[PolygonId] {
+        &self.visibility
+    }
+
+    /// Applies the next adjacent delta atomically.
+    pub fn step_forward(&mut self) -> Result<(), FormatError> {
+        let next_point = self
+            .point_index
+            .checked_add(1)
+            .ok_or_else(|| FormatError::global("SLST point index overflows"))?;
+        if next_point >= self.point_count() {
+            return Err(FormatError::global(
+                "SLST cursor cannot step past the final path point",
+            ));
+        }
+        self.apply_step(next_point, next_point, SlstDirection::Forward)
+    }
+
+    /// Applies the preceding adjacent delta atomically.
+    pub fn step_backward(&mut self) -> Result<(), FormatError> {
+        let previous_point = self
+            .point_index
+            .checked_sub(1)
+            .ok_or_else(|| FormatError::global("SLST cursor is at the first path point"))?;
+        self.apply_step(self.point_index, previous_point, SlstDirection::Backward)
+    }
+
+    /// Moves through adjacent deltas to `point_index`.
+    ///
+    /// The operation is transactional: if any edit or polygon reference is
+    /// malformed, both the point and ordered visibility remain unchanged.
+    pub fn seek(&mut self, point_index: usize) -> Result<(), FormatError> {
+        if point_index >= self.point_count() {
+            return Err(FormatError::global(format!(
+                "SLST point index {point_index} is outside {} path points",
+                self.point_count()
+            )));
+        }
+        let saved_point = self.point_index;
+        let saved_visibility = self.visibility.clone();
+        let result = (|| {
+            while self.point_index < point_index {
+                self.step_forward()?;
+            }
+            while self.point_index > point_index {
+                self.step_backward()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.point_index = saved_point;
+            self.visibility = saved_visibility;
+        }
+        result
+    }
+
+    fn apply_step(
+        &mut self,
+        item_index: usize,
+        next_point: usize,
+        direction: SlstDirection,
+    ) -> Result<(), FormatError> {
+        let item = self.items.get(item_index).ok_or_else(|| {
+            FormatError::global(format!("SLST delta item {item_index} is absent"))
+        })?;
+        let candidate = item.apply(&self.visibility, direction)?;
+        validate_visibility(&candidate, &self.world_polygon_counts)?;
+        self.visibility = candidate;
+        self.point_index = next_point;
+        Ok(())
+    }
+}
+
+fn validate_world_layout(world_polygon_counts: &[usize]) -> Result<(), FormatError> {
+    if world_polygon_counts.len() > PACKED_WORLD_COUNT {
+        return Err(FormatError::global(format!(
+            "SLST world layout contains {} worlds; packed IDs support at most {PACKED_WORLD_COUNT}",
+            world_polygon_counts.len()
+        )));
+    }
+    Ok(())
+}
+
+fn validate_runtime_items(
+    items: &[SlstItem],
+    world_polygon_counts: &[usize],
+) -> Result<usize, FormatError> {
+    if items.len() < 2 {
+        return Err(FormatError::global(
+            "SLST runtime requires a raw item at both path endpoints",
+        ));
+    }
+    let point_count = items.len() - 1;
+    if point_count > usize::from(u16::MAX) {
+        return Err(FormatError::global(
+            "SLST path point count exceeds its 16-bit retail representation",
+        ));
+    }
+
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            SlstItem::Raw {
+                item_type,
+                polygons,
+            } => {
+                if item_type & 1 != 0 {
+                    return Err(FormatError::global(format!(
+                        "SLST raw item {index} has a delta type"
+                    )));
+                }
+                if index != 0 && index != point_count {
+                    return Err(FormatError::global(format!(
+                        "SLST transition item {index} is raw rather than a delta"
+                    )));
+                }
+                validate_visibility(polygons, world_polygon_counts)?;
+            }
+            SlstItem::Delta { item_type, delta } => {
+                if item_type & 1 == 0 {
+                    return Err(FormatError::global(format!(
+                        "SLST delta item {index} has a raw-list type"
+                    )));
+                }
+                if index == 0 || index == point_count {
+                    return Err(FormatError::global(format!(
+                        "SLST endpoint item {index} is a delta rather than raw"
+                    )));
+                }
+                validate_delta_invariants(delta, index)?;
+            }
+        }
+    }
+    Ok(point_count)
+}
+
+fn validate_delta_invariants(delta: &SlstDelta, item_index: usize) -> Result<(), FormatError> {
+    if delta.words.len() < DELTA_HEADER_WORDS || delta.words.len() > usize::from(u16::MAX) {
+        return Err(FormatError::global(format!(
+            "SLST delta item {item_index} has an invalid serialized word count"
+        )));
+    }
+    if delta.split_index != delta.words[0] || delta.swaps_index != delta.words[1] {
+        return Err(FormatError::global(format!(
+            "SLST delta item {item_index} cached indices disagree with its words"
+        )));
+    }
+    let split = usize::from(delta.split_index);
+    let swaps = usize::from(delta.swaps_index);
+    if !(DELTA_HEADER_WORDS <= split && split <= swaps && swaps <= delta.words.len()) {
+        return Err(FormatError::global(format!(
+            "SLST delta item {item_index} indices do not partition its words"
+        )));
+    }
+    let removal_items = validate_edit_segment(&delta.words, DELTA_HEADER_WORDS, split)?;
+    let addition_items = validate_edit_segment(&delta.words, split, swaps)?;
+    let parsed_swaps = parse_swaps(&delta.words, swaps)?;
+    if removal_items != delta.removal_items
+        || addition_items != delta.addition_items
+        || parsed_swaps != delta.swaps
+    {
+        return Err(FormatError::global(format!(
+            "SLST delta item {item_index} cached edits disagree with its words"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_visibility(
+    visibility: &[PolygonId],
+    world_polygon_counts: &[usize],
+) -> Result<(), FormatError> {
+    if visibility.len() > usize::from(u16::MAX) {
+        return Err(FormatError::global(
+            "SLST visibility exceeds its 16-bit retail length",
+        ));
+    }
+    for (index, polygon) in visibility.iter().copied().enumerate() {
+        if usize::from(polygon.world_index) >= PACKED_WORLD_COUNT
+            || usize::from(polygon.polygon_index) >= PACKED_POLYGON_COUNT
+            || PolygonId::from_raw(polygon.raw()) != polygon
+        {
+            return Err(FormatError::global(format!(
+                "SLST polygon {index} does not fit its packed 1/3/12-bit representation"
+            )));
+        }
+        let polygon_count = world_polygon_counts
+            .get(usize::from(polygon.world_index))
+            .ok_or_else(|| {
+                FormatError::global(format!(
+                    "SLST polygon {index} references inactive world {}",
+                    polygon.world_index
+                ))
+            })?;
+        if usize::from(polygon.polygon_index) >= *polygon_count {
+            return Err(FormatError::global(format!(
+                "SLST polygon {index} references world {} polygon {}, but it has {polygon_count} polygons",
+                polygon.world_index, polygon.polygon_index
+            )));
+        }
+    }
+    Ok(())
 }
 
 impl SlstDelta {
@@ -539,6 +818,15 @@ mod tests {
         }
     }
 
+    fn raw_item(polygons: &[PolygonId]) -> SlstItem {
+        let words: Vec<_> = polygons.iter().map(|polygon| polygon.raw()).collect();
+        SlstItem::parse(&item_bytes(0, &words)).unwrap()
+    }
+
+    fn delta_item(words: &[u16]) -> SlstItem {
+        SlstItem::parse(&item_bytes(1, words)).unwrap()
+    }
+
     #[test]
     fn polygon_id_matches_reversed_c_bitfield_order() {
         let id = PolygonId {
@@ -633,6 +921,150 @@ mod tests {
 
         let reserved_format_b = [2, 2, 0x1000, 0];
         assert!(SlstItem::parse(&item_bytes(1, &reserved_format_b)).is_err());
+    }
+
+    #[test]
+    fn runtime_cursor_seeks_and_steps_in_exact_order_from_both_endpoints() {
+        let first = polygon(0, 1);
+        let replaced = polygon(0, 2);
+        let last = polygon(0, 3);
+        let replacement = polygon(1, 9);
+        let inserted = polygon(1, 10);
+        let states = [
+            vec![first, replaced, last],
+            vec![first, replacement, last],
+            vec![first, replacement, inserted, last],
+            vec![first, inserted, last],
+        ];
+        let items = vec![
+            raw_item(&states[0]),
+            // Replace B at source index one with D.
+            delta_item(&[
+                5,
+                8,
+                2,
+                replaced.raw(),
+                u16::MAX,
+                1,
+                replacement.raw(),
+                u16::MAX,
+            ]),
+            // Insert E after source index one.
+            delta_item(&[3, 6, u16::MAX, 2, inserted.raw(), u16::MAX]),
+            // Remove D from source index one.
+            delta_item(&[5, 6, 2, replacement.raw(), u16::MAX, u16::MAX]),
+            raw_item(&states[3]),
+        ];
+
+        // Point one is in the first half and therefore decodes from item zero.
+        let mut from_first = SlstCursor::new(&items, &[16, 16], 1).unwrap();
+        assert_eq!(from_first.point_count(), states.len());
+        assert_eq!(from_first.point_index(), 1);
+        assert_eq!(from_first.visibility(), states[1]);
+        from_first.step_backward().unwrap();
+        assert_eq!(from_first.visibility(), states[0]);
+        from_first.step_forward().unwrap();
+        assert_eq!(from_first.visibility(), states[1]);
+
+        // Point two is in the second half and decodes backward from the final
+        // raw item, including the source runtime's midpoint tie-break.
+        let mut from_last = SlstCursor::new(&items, &[16, 16], 2).unwrap();
+        assert_eq!(from_last.point_index(), 2);
+        assert_eq!(from_last.visibility(), states[2]);
+        from_last.seek(0).unwrap();
+        assert_eq!(from_last.visibility(), states[0]);
+        from_last.seek(3).unwrap();
+        assert_eq!(from_last.visibility(), states[3]);
+        from_last.seek(2).unwrap();
+        assert_eq!(from_last.visibility(), states[2]);
+
+        let before = from_last.visibility().to_vec();
+        assert!(from_last.seek(states.len()).is_err());
+        assert_eq!(from_last.point_index(), 2);
+        assert_eq!(from_last.visibility(), before);
+    }
+
+    #[test]
+    fn runtime_cursor_rejects_bad_shapes_and_packed_references() {
+        let a = polygon(0, 1);
+        let raw = raw_item(&[a]);
+        assert!(SlstCursor::new(&[], &[2], 0).is_err());
+        assert!(SlstCursor::new(std::slice::from_ref(&raw), &[2], 0).is_err());
+        assert!(SlstCursor::new(&[raw.clone(), raw.clone()], &[2], 1).is_err());
+        assert!(SlstCursor::new(&[raw.clone(), raw.clone()], &[1; 9], 0).is_err());
+
+        let invalid_world = PolygonId {
+            world_index: 8,
+            polygon_index: 0,
+            flag: false,
+        };
+        let invalid_world_raw = SlstItem::Raw {
+            item_type: 0,
+            polygons: vec![invalid_world],
+        };
+        assert!(
+            SlstCursor::new(&[invalid_world_raw.clone(), invalid_world_raw], &[2], 0,).is_err()
+        );
+        let invalid_polygon = PolygonId {
+            world_index: 0,
+            polygon_index: 0x1000,
+            flag: false,
+        };
+        let invalid_polygon_raw = SlstItem::Raw {
+            item_type: 0,
+            polygons: vec![invalid_polygon],
+        };
+        assert!(
+            SlstCursor::new(
+                &[invalid_polygon_raw.clone(), invalid_polygon_raw],
+                &[0x1001],
+                0,
+            )
+            .is_err()
+        );
+        assert!(SlstCursor::new(&[raw_item(&[a]), raw_item(&[a])], &[1], 0).is_err());
+
+        let interior_raw = [raw.clone(), raw.clone(), raw];
+        assert!(SlstCursor::new(&interior_raw, &[2], 0).is_err());
+    }
+
+    #[test]
+    fn runtime_cursor_keeps_state_when_a_delta_or_its_result_is_malformed() {
+        let a = polygon(0, 0);
+        let invalid_world = polygon(1, 0);
+        // A valid delta payload inserts an inactive-world reference. Endpoint
+        // raws stay valid so the cursor can reject the transition itself.
+        let invalid_reference_items = [
+            raw_item(&[a]),
+            delta_item(&[3, 6, u16::MAX, 1, invalid_world.raw(), u16::MAX]),
+            raw_item(&[a]),
+        ];
+        let mut cursor = SlstCursor::new(&invalid_reference_items, &[1], 0).unwrap();
+        assert!(cursor.step_forward().is_err());
+        assert_eq!(cursor.point_index(), 0);
+        assert_eq!(cursor.visibility(), [a]);
+
+        // This removal run names source index five in a one-item list. Parsing
+        // succeeds because the edit is structurally complete; application is
+        // rejected without partially moving the cursor.
+        let invalid_edit_items = [
+            raw_item(&[a]),
+            delta_item(&[5, 6, 6, a.raw(), u16::MAX, u16::MAX]),
+            raw_item(&[a]),
+        ];
+        let mut cursor = SlstCursor::new(&invalid_edit_items, &[1], 0).unwrap();
+        assert!(cursor.seek(1).is_err());
+        assert_eq!(cursor.point_index(), 0);
+        assert_eq!(cursor.visibility(), [a]);
+
+        // Parsed fields are currently public decoded data. A caller-mutated
+        // word vector must be rejected before `apply` can index stale caches.
+        let mut mutated = delta_item(&[2, 2]);
+        let SlstItem::Delta { delta, .. } = &mut mutated else {
+            unreachable!();
+        };
+        delta.words.clear();
+        assert!(SlstCursor::new(&[raw_item(&[a]), mutated, raw_item(&[a])], &[1], 0).is_err());
     }
 
     proptest! {

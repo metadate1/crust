@@ -21,6 +21,22 @@ pub const MAX_EFFECTS: usize = 256;
 pub const MAX_CODE_WORDS: usize = 1 << 14;
 pub const NULL_INPUT_VALUE: u32 = 3;
 
+/// A checked GOOL instruction-space selector. Retail executable code lives in
+/// the external entry while opcode `0x86` calls absolute offsets in the
+/// executable's shared/global code item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeSegment {
+    External,
+    Global,
+}
+
+/// Logical instruction address used instead of storing native code pointers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CodeAddress {
+    pub segment: CodeSegment,
+    pub pc: usize,
+}
+
 /// Decoded instruction word.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Instruction {
@@ -155,6 +171,14 @@ pub enum VmEffect {
         open: bool,
         reference: u32,
     },
+    SpawnChildren {
+        parent: ObjectHandle,
+        executable: u8,
+        subtype: u8,
+        count: u32,
+        alternate_parent: bool,
+        arguments: Vec<u32>,
+    },
     Transition(i32),
     SaveState(ObjectHandle),
     LoadState(ObjectHandle),
@@ -176,23 +200,15 @@ pub enum VmError {
     MissingLink { object: ObjectHandle, link: u8 },
     StackUnderflow(ObjectHandle),
     StackOverflow(ObjectHandle),
-    CallStackUnderflow(ObjectHandle),
     CallStackOverflow(ObjectHandle),
     InvalidJump { object: ObjectHandle, target: i64 },
     DivisionByZero,
     ArithmeticOverflow,
     InvalidShift(i32),
+    SpawnCountTooLarge(u32),
     UnknownOpcode(u8),
     UnknownControl(u8),
-    UnsupportedControlFlow(ControlFlowOperation),
     EffectQueueFull,
-}
-
-/// Packed retail control-flow operations that require a wider runtime slice.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ControlFlowOperation {
-    StateChange(u16),
-    Return,
 }
 
 /// Why an interpreter invocation yielded.
@@ -210,12 +226,20 @@ pub struct Execution {
     pub steps: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CallFrame {
+    return_address: CodeAddress,
+    argument_base: usize,
+    previous_frame_base: usize,
+}
+
 /// One VM object. All word arrays have explicit limits.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmObject {
     handle: ObjectHandle,
     global_code: Vec<u32>,
     code: Vec<u32>,
+    code_segment: CodeSegment,
     pc: usize,
     initial_stack_pointer: u32,
     frame_base: usize,
@@ -223,7 +247,7 @@ pub struct VmObject {
     external: Vec<u32>,
     registers: Vec<u32>,
     stack: Vec<u32>,
-    call_stack: Vec<usize>,
+    call_stack: Vec<CallFrame>,
     links: [Option<ObjectHandle>; 8],
     state: u16,
     state_flags: u32,
@@ -242,6 +266,7 @@ impl VmObject {
             handle,
             global_code: Vec::new(),
             code,
+            code_segment: CodeSegment::External,
             pc: 0,
             initial_stack_pointer: 0,
             frame_base: 0,
@@ -306,6 +331,14 @@ impl VmObject {
     #[must_use]
     pub const fn pc(&self) -> usize {
         self.pc
+    }
+
+    #[must_use]
+    pub const fn code_address(&self) -> CodeAddress {
+        CodeAddress {
+            segment: self.code_segment,
+            pc: self.pc,
+        }
     }
 
     #[must_use]
@@ -394,6 +427,7 @@ impl VmObject {
                 target: pc as i64,
             });
         }
+        self.code_segment = CodeSegment::External;
         self.pc = pc;
         self.halted = false;
         Ok(())
@@ -474,21 +508,25 @@ impl Machine {
         handle: ObjectHandle,
         condition: &mut bool,
     ) -> Result<Option<HaltReason>, VmError> {
-        let word =
-            {
-                let object = self.object_mut(handle)?;
-                if object.halted {
-                    return Ok(Some(HaltReason::Halted));
-                }
-                let word = object.code.get(object.pc).copied().ok_or(
-                    VmError::ProgramCounterOutOfBounds {
-                        object: handle,
-                        pc: object.pc,
-                    },
-                )?;
-                object.pc += 1;
-                word
+        let word = {
+            let object = self.object_mut(handle)?;
+            if object.halted {
+                return Ok(Some(HaltReason::Halted));
+            }
+            let code = match object.code_segment {
+                CodeSegment::External => &object.code,
+                CodeSegment::Global => &object.global_code,
             };
+            let word = code
+                .get(object.pc)
+                .copied()
+                .ok_or(VmError::ProgramCounterOutOfBounds {
+                    object: handle,
+                    pc: object.pc,
+                })?;
+            object.pc += 1;
+            word
+        };
         let instruction = Instruction::decode(word);
         let a = Operand::decode(instruction.operand_a);
         let b = Operand::decode(instruction.operand_b);
@@ -560,6 +598,19 @@ impl Machine {
                 };
                 self.push(handle, shifted as u32)?;
             }
+            0x16 => {
+                // Retail translates A before B. Stack inputs therefore pop in
+                // that order, and null is an absent pointer rather than the
+                // PS1 compatibility value used by ordinary GOP reads.
+                let source = self.read_optional_input(handle, a)?;
+                let destination = self.read_optional_input(handle, b)?;
+                if let Some(destination) = destination {
+                    self.push(handle, destination)?;
+                    if let Some(source) = source {
+                        self.push(handle, source)?;
+                    }
+                }
+            }
             0x17 => {
                 let value = !self.read_operand(handle, a)?;
                 self.write_operand(handle, b, value)?;
@@ -622,13 +673,9 @@ impl Machine {
                 return self.control_flow(handle, word, condition);
             }
             0x86 => {
-                let link = self.read_operand(handle, a)?;
-                let offset = i64::from(sign_extend(u32::from(instruction.operand_b), 12));
-                if link == 0 {
-                    self.jump_relative(handle, offset)?;
-                } else {
-                    self.call_relative(handle, offset)?;
-                }
+                let argument_count = ((word >> 20) & 0x0f) as usize;
+                let target = (word & 0x3fff) as usize;
+                self.call_global(handle, target, argument_count)?;
             }
             0x87 | 0x90 => {
                 let link_index = (instruction.operand_a & 7) as usize;
@@ -660,6 +707,10 @@ impl Machine {
                     state,
                 })?;
                 return Ok(Some(HaltReason::StateChanged(state)));
+            }
+            0x8a | 0x91 => {
+                self.spawn_children(handle, word, instruction.opcode == 0x91)?;
+                return Ok(Some(HaltReason::Yielded));
             }
             0x8b => {
                 let open = self.read_operand(handle, a)? != 0;
@@ -752,12 +803,16 @@ impl Machine {
                 stack.truncate(stack.len() - argument_count);
                 Ok(None)
             }
-            1 => Err(VmError::UnsupportedControlFlow(
-                ControlFlowOperation::StateChange((instruction & 0x3fff) as u16),
-            )),
-            2 => Err(VmError::UnsupportedControlFlow(
-                ControlFlowOperation::Return,
-            )),
+            1 => {
+                let state = (instruction & 0x3fff) as u16;
+                self.object_mut(handle)?.state = state;
+                self.emit(VmEffect::StateChanged {
+                    object: handle,
+                    state,
+                })?;
+                Ok(Some(HaltReason::StateChanged(state)))
+            }
+            2 => self.return_from_call(handle),
             _ => unreachable!(),
         }
     }
@@ -833,6 +888,18 @@ impl Machine {
         }
     }
 
+    fn read_optional_input(
+        &mut self,
+        handle: ObjectHandle,
+        operand: Operand,
+    ) -> Result<Option<u32>, VmError> {
+        match operand {
+            Operand::Null => Ok(None),
+            Operand::StackDouble => Err(VmError::InvalidOperand(0x0bf0)),
+            operand => self.read_operand(handle, operand).map(Some),
+        }
+    }
+
     fn write_operand(
         &mut self,
         handle: ObjectHandle,
@@ -903,8 +970,11 @@ impl Machine {
         let target = i64::try_from(object.pc)
             .unwrap_or(i64::MAX)
             .saturating_add(offset);
-        if target < 0 || usize::try_from(target).map_or(true, |target| target >= object.code.len())
-        {
+        let code_len = match object.code_segment {
+            CodeSegment::External => object.code.len(),
+            CodeSegment::Global => object.global_code.len(),
+        };
+        if target < 0 || usize::try_from(target).map_or(true, |target| target >= code_len) {
             return Err(VmError::InvalidJump {
                 object: handle,
                 target,
@@ -914,13 +984,96 @@ impl Machine {
         Ok(())
     }
 
-    fn call_relative(&mut self, handle: ObjectHandle, offset: i64) -> Result<(), VmError> {
-        let return_pc = self.object(handle)?.pc;
-        if self.object(handle)?.call_stack.len() == MAX_CALL_DEPTH {
+    fn call_global(
+        &mut self,
+        handle: ObjectHandle,
+        target: usize,
+        argument_count: usize,
+    ) -> Result<(), VmError> {
+        let object = self.object(handle)?;
+        if object.call_stack.len() == MAX_CALL_DEPTH {
             return Err(VmError::CallStackOverflow(handle));
         }
-        self.jump_relative(handle, offset)?;
-        self.object_mut(handle)?.call_stack.push(return_pc);
+        if object.stack.len() < argument_count {
+            return Err(VmError::StackUnderflow(handle));
+        }
+        if target == 0x3fff {
+            self.object_mut(handle)?.halted = true;
+            return Ok(());
+        }
+        if target >= object.global_code.len() {
+            return Err(VmError::InvalidJump {
+                object: handle,
+                target: target as i64,
+            });
+        }
+        let frame = CallFrame {
+            return_address: object.code_address(),
+            argument_base: object.stack.len() - argument_count,
+            previous_frame_base: object.frame_base,
+        };
+        let object = self.object_mut(handle)?;
+        object.frame_base = object.stack.len();
+        object.call_stack.push(frame);
+        object.code_segment = CodeSegment::Global;
+        object.pc = target;
+        Ok(())
+    }
+
+    fn return_from_call(&mut self, handle: ObjectHandle) -> Result<Option<HaltReason>, VmError> {
+        let Some(frame) = self.object_mut(handle)?.call_stack.pop() else {
+            self.object_mut(handle)?.halted = true;
+            return Ok(Some(HaltReason::Halted));
+        };
+        let object = self.object_mut(handle)?;
+        object.stack.truncate(frame.argument_base);
+        object.frame_base = frame.previous_frame_base;
+        object.code_segment = frame.return_address.segment;
+        object.pc = frame.return_address.pc;
+        Ok(None)
+    }
+
+    fn spawn_children(
+        &mut self,
+        handle: ObjectHandle,
+        instruction: u32,
+        alternate_parent: bool,
+    ) -> Result<(), VmError> {
+        let encoded_argument_count = ((instruction >> 20) & 0x0f) as usize;
+        let executable = ((instruction >> 12) & 0xff) as u8;
+        let subtype = ((instruction >> 6) & 0x3f) as u8;
+        let encoded_count = instruction & 0x3f;
+        let stack_len = self.object(handle)?.stack.len();
+        if stack_len < encoded_argument_count {
+            return Err(VmError::StackUnderflow(handle));
+        }
+
+        let (count, argument_count) = if encoded_count == 0 {
+            let Some(argument_count) = encoded_argument_count.checked_sub(1) else {
+                return Err(VmError::StackUnderflow(handle));
+            };
+            (self.object(handle)?.stack[stack_len - 1], argument_count)
+        } else {
+            (encoded_count, encoded_argument_count)
+        };
+        if count > MAX_OBJECTS as u32 {
+            return Err(VmError::SpawnCountTooLarge(count));
+        }
+
+        let argument_start = stack_len - encoded_argument_count;
+        let argument_end = argument_start + argument_count;
+        let arguments = self.object(handle)?.stack[argument_start..argument_end].to_vec();
+        self.object_mut(handle)?.stack.truncate(argument_start);
+        if (count as i32) > 0 {
+            self.emit(VmEffect::SpawnChildren {
+                parent: handle,
+                executable,
+                subtype,
+                count,
+                alternate_parent,
+                arguments,
+            })?;
+        }
         Ok(())
     }
 
@@ -1066,7 +1219,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_retail_state_change_and_return_are_explicit() {
+    fn packed_retail_state_change_yields_for_host_rebinding_and_terminal_return_halts() {
         let state_object = handle(0);
         let return_object = handle(1);
         let mut machine = Machine::new(0);
@@ -1079,15 +1232,146 @@ mod tests {
 
         assert_eq!(
             machine.run(state_object, 1),
-            Err(VmError::UnsupportedControlFlow(
-                ControlFlowOperation::StateChange(7)
-            ))
+            Ok(Execution {
+                reason: HaltReason::StateChanged(7),
+                steps: 1,
+            })
+        );
+        assert_eq!(machine.object(state_object).unwrap().state(), 7);
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::StateChanged {
+                object: state_object,
+                state: 7,
+            }]
         );
         assert_eq!(
             machine.run(return_object, 1),
-            Err(VmError::UnsupportedControlFlow(
-                ControlFlowOperation::Return
-            ))
+            Ok(Execution {
+                reason: HaltReason::Halted,
+                steps: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn exact_crash_jal_calls_absolute_global_word_and_returns_to_external_code() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![0x8609_806e, Instruction::encode(0x00, REG0, REG1)]).unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        object.global_code = vec![0; 132];
+        object.global_code[110] = control_flow(2, 0, 0, 0, 0);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 2).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 2,
+            }
+        );
+        assert_eq!(
+            machine.object(h).unwrap().code_address(),
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 1,
+            }
+        );
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[5]);
+    }
+
+    #[test]
+    fn nested_global_calls_restore_their_code_segments() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![(0x86_u32 << 24) | 2]).unwrap();
+        object.global_code = vec![0; 9];
+        object.global_code[2] = (0x86_u32 << 24) | 8;
+        object.global_code[3] = control_flow(2, 0, 0, 0, 0);
+        object.global_code[8] = control_flow(2, 0, 0, 0, 0);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 3).unwrap();
+        assert_eq!(
+            machine.object(h).unwrap().code_address(),
+            CodeAddress {
+                segment: CodeSegment::Global,
+                pc: 3,
+            }
+        );
+        machine.run(h, 1).unwrap();
+        assert_eq!(
+            machine.object(h).unwrap().code_address(),
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn global_return_discards_declared_call_arguments() {
+        let h = handle(0);
+        let call_with_two_arguments = (0x86_u32 << 24) | (2 << 20);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x00, REG0, REG1),
+                Instruction::encode(0x00, REG0, REG1),
+                call_with_two_arguments,
+            ],
+        )
+        .unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        object.global_code = vec![control_flow(2, 0, 0, 0, 0)];
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 4).unwrap();
+        assert!(machine.object(h).unwrap().stack().is_empty());
+        assert_eq!(
+            machine.object(h).unwrap().code_address(),
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn exact_crash_child_spawn_yields_a_pointer_free_host_request() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![Instruction::encode(0x00, REG0, REG1), 0x8a10_5001]).unwrap();
+        object.set_register(0, 0).unwrap();
+        object.set_register(1, 0).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.run(h, 2).unwrap(),
+            Execution {
+                reason: HaltReason::Yielded,
+                steps: 2,
+            }
+        );
+        assert!(machine.object(h).unwrap().stack().is_empty());
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::SpawnChildren {
+                parent: h,
+                executable: 5,
+                subtype: 0,
+                count: 1,
+                alternate_parent: false,
+                arguments: vec![0],
+            }]
         );
     }
 
@@ -1138,6 +1422,37 @@ mod tests {
         machine.insert_object(object).unwrap();
         machine.run(h, 1).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[7]);
+    }
+
+    #[test]
+    fn retail_dual_input_pop_and_repush_preserves_the_crash_stack_word() {
+        let h = handle(0);
+        let code = vec![Instruction::encode(0x00, REG0, REG1), 0x16be_0e1f];
+        let mut object = VmObject::new(h, code).unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 2).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[5]);
+    }
+
+    #[test]
+    fn retail_dual_input_pushes_destination_then_source_and_honors_null_destination() {
+        let h = handle(0);
+        let code = vec![
+            Instruction::encode(0x16, REG0, REG1),
+            Instruction::encode(0x16, REG0, 0x0be0),
+        ];
+        let mut object = VmObject::new(h, code).unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 2).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[3, 2]);
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod object_arena;
 pub mod paging;
 pub mod player;
 pub mod retail_frame;
+pub mod retail_runtime;
 pub mod scheduler;
 
 pub use math::{Angle12, Bounds3, Vec2, Vec3};

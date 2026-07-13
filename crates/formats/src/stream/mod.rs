@@ -10,7 +10,7 @@ mod wgeo;
 mod zdat;
 
 pub use catalog::{KNOWN_LEVELS, KnownLevel, LevelId, StreamKind, StreamName, known_level};
-pub use gool::{GOOL_PC_NONE, GoolProgram, load_gool_program};
+pub use gool::{GOOL_PC_NONE, GoolProgram, load_gool_program, load_gool_state_program};
 pub use nsd::{LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, Nsd, NsdHeader, NsdKind, NsdPte, parse_nsd};
 pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,

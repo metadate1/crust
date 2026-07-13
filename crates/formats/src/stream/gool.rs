@@ -21,6 +21,7 @@ const GLOBAL_CODE_ITEM: usize = 1;
 const GLOBAL_DATA_ITEM: usize = 2;
 const GLOBAL_MAP_ITEM: usize = 3;
 const GLOBAL_STATE_ITEM: usize = 4;
+const GLOBAL_ANIMATION_ITEM: usize = 5;
 const EXTERNAL_CODE_ITEM: usize = 1;
 const EXTERNAL_DATA_ITEM: usize = 2;
 
@@ -32,9 +33,11 @@ pub struct GoolProgram {
     header: GoolHeader,
     state_index: u16,
     state: GoolState,
+    states: Vec<GoolState>,
     global_code: Vec<u32>,
     code: Vec<u32>,
     internal_words: Vec<u32>,
+    animation_data: Vec<u8>,
     external_words: Vec<u32>,
     code_pc: Option<usize>,
     event_pc: Option<usize>,
@@ -67,6 +70,14 @@ impl GoolProgram {
         self.state
     }
 
+    /// All descriptors from global item four. The VM uses their flags to
+    /// apply retail's guarded state-link behavior before asking the host to
+    /// bind a target state's external entry.
+    #[must_use]
+    pub fn states(&self) -> &[GoolState] {
+        &self.states
+    }
+
     #[must_use]
     pub fn global_code(&self) -> &[u32] {
         &self.global_code
@@ -80,6 +91,12 @@ impl GoolProgram {
     #[must_use]
     pub fn internal_words(&self) -> &[u32] {
         &self.internal_words
+    }
+
+    /// Raw global item-five bytes addressed by GOOL animation references.
+    #[must_use]
+    pub fn animation_data(&self) -> &[u8] {
+        &self.animation_data
     }
 
     #[must_use]
@@ -112,15 +129,7 @@ pub fn load_gool_program(
     subtype: u16,
 ) -> Result<GoolProgram, FormatError> {
     let global = unique_entry(metadata, nsf, global_eid, "global GOOL")?;
-    let header_bytes = item_bytes(global, GLOBAL_HEADER_ITEM, nsf_bytes, "GOOL header")?;
-    if header_bytes.len() < GoolHeader::BYTE_LEN {
-        return Err(FormatError::at(
-            global.items[GLOBAL_HEADER_ITEM].byte_range().start,
-            "GOOL header is shorter than 24 bytes",
-        ));
-    }
-    let header = GoolHeader::parse(header_bytes)?;
-    let global_code = parse_words(global, GLOBAL_CODE_ITEM, nsf_bytes, "GOOL shared code")?;
+    let header = parse_global_header(global, nsf_bytes)?;
     let internal_words = parse_words(global, GLOBAL_DATA_ITEM, nsf_bytes, "GOOL internal data")?;
     let map_bytes = item_bytes(global, GLOBAL_MAP_ITEM, nsf_bytes, "GOOL state maps")?;
     let state_map = parse_halfwords(
@@ -156,6 +165,69 @@ pub fn load_gool_program(
         ));
     }
 
+    load_resolved_state_program(
+        metadata,
+        nsf,
+        nsf_bytes,
+        global_eid,
+        global,
+        header,
+        internal_words,
+        state_index,
+    )
+}
+
+/// Resolves one explicit state index for an already selected global GOOL.
+///
+/// This is the pointer-free host operation used after opcode `0x82` changes
+/// an object's state. Unlike [`load_gool_program`], it does not consult the
+/// subtype map.
+pub fn load_gool_state_program(
+    metadata: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    global_eid: Eid,
+    state_index: u16,
+) -> Result<GoolProgram, FormatError> {
+    let global = unique_entry(metadata, nsf, global_eid, "global GOOL")?;
+    let header = parse_global_header(global, nsf_bytes)?;
+    let internal_words = parse_words(global, GLOBAL_DATA_ITEM, nsf_bytes, "GOOL internal data")?;
+    load_resolved_state_program(
+        metadata,
+        nsf,
+        nsf_bytes,
+        global_eid,
+        global,
+        header,
+        internal_words,
+        state_index,
+    )
+}
+
+fn parse_global_header(global: &Entry, nsf_bytes: &[u8]) -> Result<GoolHeader, FormatError> {
+    let header_bytes = item_bytes(global, GLOBAL_HEADER_ITEM, nsf_bytes, "GOOL header")?;
+    if header_bytes.len() < GoolHeader::BYTE_LEN {
+        return Err(FormatError::at(
+            global.items[GLOBAL_HEADER_ITEM].byte_range().start,
+            "GOOL header is shorter than 24 bytes",
+        ));
+    }
+    GoolHeader::parse(header_bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_resolved_state_program(
+    metadata: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    global_eid: Eid,
+    global: &Entry,
+    header: GoolHeader,
+    internal_words: Vec<u32>,
+    state_index: u16,
+) -> Result<GoolProgram, FormatError> {
+    let global_code = parse_words(global, GLOBAL_CODE_ITEM, nsf_bytes, "GOOL shared code")?;
+
     let states_bytes = item_bytes(global, GLOBAL_STATE_ITEM, nsf_bytes, "GOOL states")?;
     if states_bytes.len() % GoolState::BYTE_LEN != 0 {
         return Err(FormatError::at(
@@ -163,18 +235,28 @@ pub fn load_gool_program(
             "GOOL state item length is not a multiple of 16 bytes",
         ));
     }
+    let states = states_bytes
+        .chunks_exact(GoolState::BYTE_LEN)
+        .map(GoolState::parse)
+        .collect::<Result<Vec<_>, _>>()?;
     let state_offset = usize::from(state_index)
         .checked_mul(GoolState::BYTE_LEN)
         .ok_or_else(|| FormatError::global("GOOL state offset overflows"))?;
-    let state_bytes = states_bytes
-        .get(state_offset..state_offset + GoolState::BYTE_LEN)
+    let state = states
+        .get(usize::from(state_index))
+        .copied()
         .ok_or_else(|| {
             FormatError::at(
                 global.items[GLOBAL_STATE_ITEM].byte_range().start,
                 format!("GOOL state {state_index} is outside the state item"),
             )
         })?;
-    let state = GoolState::parse(state_bytes)?;
+    let animation_data = global
+        .item(GLOBAL_ANIMATION_ITEM)
+        .map(|item| item.bytes(nsf_bytes))
+        .transpose()?
+        .unwrap_or_default()
+        .to_vec();
 
     let external_eid = internal_words
         .get(usize::from(state.external_index))
@@ -225,9 +307,11 @@ pub fn load_gool_program(
         header,
         state_index,
         state,
+        states,
         global_code,
         code,
         internal_words,
+        animation_data,
         external_words,
         code_pc,
         event_pc,
@@ -421,7 +505,11 @@ mod tests {
         push_u16(&mut states, GOOL_PC_NONE);
         push_u16(&mut states, 1);
         push_u16(&mut states, state_code_pc);
-        let global = entry(global_eid, &[header, shared_code, internal, maps, states]);
+        let animation_data = vec![0xde, 0xad, 0xbe, 0xef];
+        let global = entry(
+            global_eid,
+            &[header, shared_code, internal, maps, states, animation_data],
+        );
 
         let mut code = Vec::new();
         push_u32(&mut code, 0x0000_0000);
@@ -462,13 +550,19 @@ mod tests {
         assert_eq!(program.header().initial_stack_pointer, 32);
         assert_eq!(program.state_index(), 0);
         assert_eq!(program.state().flags, 0x1122_3344);
+        assert_eq!(program.states(), &[program.state()]);
         assert_eq!(program.global_code(), &[0x8200_0000]);
         assert_eq!(program.code(), &[0, 0x8200_0000]);
         assert_eq!(program.internal_words(), &[program.external_eid().raw()]);
+        assert_eq!(program.animation_data(), &[0xde, 0xad, 0xbe, 0xef]);
         assert_eq!(program.external_words(), &[0x1234_5678]);
         assert_eq!(program.code_pc(), Some(0));
         assert_eq!(program.event_pc(), None);
         assert_eq!(program.transition_pc(), Some(1));
+
+        let rebound = load_gool_state_program(&metadata, &nsf, &bytes, global_eid, 0).unwrap();
+        assert_eq!(rebound, program);
+        assert!(load_gool_state_program(&metadata, &nsf, &bytes, global_eid, 1).is_err());
     }
 
     #[test]

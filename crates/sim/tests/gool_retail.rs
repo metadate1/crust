@@ -123,11 +123,23 @@ fn parsed_retail_entry_executes_state_code_and_packed_branch() {
     assert_eq!(object.status_c(), 0x5566_7788);
     assert_eq!(object.transition_pc(), Some(4));
     assert_eq!(object.global_code(), &[0x8200_0000]);
+    // GoolObjectChangeState places the initial frame directly in the shared
+    // process/register union at header.init_sp. The fourth word is the
+    // synthetic zero wait consumed before code interpretation begins.
+    assert_eq!(object.register(32), Ok(0xffff));
+    assert_eq!(object.register(33), Ok(0xa600_0000));
+    assert_eq!(object.register(34), Ok(32 * 4));
+    assert_eq!(object.register(35), Ok(0));
 
     let mut machine = Machine::new(0);
     machine.insert_object(object).unwrap();
     let execution = machine.run(handle, 4).unwrap();
     assert_eq!(execution.reason, HaltReason::BudgetExhausted);
     assert_eq!(machine.object(handle).unwrap().pc(), 5);
-    assert_eq!(machine.object(handle).unwrap().stack(), &[5, 5]);
+    assert_eq!(
+        machine.object(handle).unwrap().stack(),
+        &[0xffff, 0xa600_0000, 32 * 4, 5, 5]
+    );
+    assert_eq!(machine.object(handle).unwrap().register(35), Ok(5));
+    assert_eq!(machine.object(handle).unwrap().register(36), Ok(5));
 }

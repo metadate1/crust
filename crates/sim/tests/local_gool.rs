@@ -6,10 +6,20 @@ use crust_formats::binary::Eid;
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
     LevelId, NsdKind, StreamKind, StreamName, load_gool_program, parse_nsd, parse_nsf,
+    structs::GoolState,
 };
 use crust_sim::gool::{
-    CodeAddress, CodeSegment, Execution, HaltReason, Machine, ObjectHandle, VmEffect, VmObject,
+    AnimationReference, CodeAddress, CodeSegment, Execution, HaltReason, Machine, ObjectHandle,
+    VmEffect, VmObject, VmStateProgram,
 };
+
+fn words(bytes: &[u8]) -> Vec<u32> {
+    assert!(bytes.len().is_multiple_of(4));
+    bytes
+        .chunks_exact(4)
+        .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+        .collect()
+}
 
 #[test]
 #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
@@ -131,7 +141,11 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
             pc: 99,
         }
     );
-    assert!(boot_machine.object(boot_handle).unwrap().stack().is_empty());
+    let boot_stack = boot_machine.object(boot_handle).unwrap().stack();
+    assert_eq!(boot_stack.len(), 3);
+    assert_eq!(boot_stack[0], 0xffff);
+    assert_eq!(boot_stack[1] & 0xff00_0000, 0xa600_0000);
+    assert_eq!(boot_stack[2], program.header().initial_stack_pointer * 4);
     assert_eq!(
         boot_machine.effects(),
         &[
@@ -153,4 +167,91 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
             },
         ]
     );
+
+    // The second retail child is ShadC. Its first instruction reads the
+    // third spawn argument through fp[-1]; that init block also contains the
+    // packed writes for the final three halfwords of its color matrix.
+    let shadow_eid = metadata.ldat().unwrap().executable_map[29];
+    let shadow_program = load_gool_program(&metadata, &nsf, &nsf_bytes, shadow_eid, 0).unwrap();
+    assert_eq!(shadow_program.code()[0], 0x11b7_fe4d);
+    assert_eq!(shadow_program.code()[17], 0x240a_8802);
+    let shadow_handle = ObjectHandle::new(2).unwrap();
+    let mut shadow = VmObject::from_gool_program(shadow_handle, &shadow_program).unwrap();
+    shadow.initialize_arguments(&[0, 4096, 0]).unwrap();
+    shadow.set_link(1, Some(boot_handle)).unwrap();
+    shadow.set_link(4, Some(boot_handle)).unwrap();
+    shadow.set_link(5, Some(boot_handle)).unwrap();
+    let shadow_global = nsf.resolve_entry(&metadata, shadow_eid).unwrap();
+    let animation_data = shadow_global.item(5).unwrap().bytes(&nsf_bytes).unwrap();
+    shadow.bind_animation_data(animation_data);
+    boot_machine.insert_object(shadow).unwrap();
+    assert_eq!(
+        boot_machine.run(shadow_handle, 64).unwrap().reason,
+        HaltReason::StateChanged(1)
+    );
+    assert_eq!(
+        boot_machine.object(shadow_handle).unwrap().register(0x4d),
+        Ok(0)
+    );
+
+    let states = shadow_global.item(4).unwrap().bytes(&nsf_bytes).unwrap();
+    let state_one = GoolState::parse(&states[16..32]).unwrap();
+    let external_eid =
+        Eid::from_raw(shadow_program.internal_words()[usize::from(state_one.external_index)]);
+    let external = nsf.resolve_entry(&metadata, external_eid).unwrap();
+    let state_one_program = VmStateProgram::new(
+        1,
+        state_one,
+        words(external.item(1).unwrap().bytes(&nsf_bytes).unwrap()),
+        words(external.item(2).unwrap().bytes(&nsf_bytes).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(state_one.code_pc, 22);
+    boot_machine
+        .rebind_state_program(shadow_handle, &state_one_program, &[])
+        .unwrap();
+    boot_machine.set_frames_elapsed(1);
+    let execution = boot_machine.run(shadow_handle, 64).unwrap();
+    assert_eq!(
+        execution.reason,
+        HaltReason::AnimationChanged { frame: 0, wait: 1 }
+    );
+    assert!(execution.steps > 2);
+    let animation_word = boot_machine
+        .object(shadow_handle)
+        .unwrap()
+        .register(0x2a)
+        .unwrap();
+    let animation = AnimationReference::from_word(animation_word).unwrap();
+    assert_eq!(animation.offset(), 0);
+    assert_eq!(
+        boot_machine
+            .object(shadow_handle)
+            .unwrap()
+            .animation_data(animation)
+            .unwrap(),
+        animation_data
+    );
+    assert!(boot_machine.effects().iter().any(|effect| matches!(
+        effect,
+        VmEffect::AnimationFrameChanged {
+            object,
+            frame: 0,
+            ..
+        } if *object == shadow_handle
+    )));
+    assert_eq!(
+        boot_machine.run(shadow_handle, 64).unwrap(),
+        Execution {
+            reason: HaltReason::AnimationWaiting { remaining: 1 },
+            steps: 0,
+        }
+    );
+    boot_machine.set_frames_elapsed(2);
+    let resumed = boot_machine.run(shadow_handle, 64).unwrap();
+    assert!(matches!(
+        resumed.reason,
+        HaltReason::AnimationChanged { frame: 0, .. }
+    ));
+    assert!(resumed.steps > 0);
 }

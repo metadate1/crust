@@ -8,6 +8,7 @@ mod slst;
 pub mod structs;
 mod wgeo;
 mod zdat;
+mod zone_graph;
 
 pub use catalog::{KNOWN_LEVELS, KnownLevel, LevelId, StreamKind, StreamName, known_level};
 pub use gool::{GOOL_PC_NONE, GoolProgram, load_gool_program, load_gool_state_program};
@@ -22,6 +23,7 @@ pub use zdat::{
     ZoneColors, ZoneEntity, ZoneEntityPathPoint, ZoneGraphics, ZoneHeader, ZoneLoadList,
     ZoneNeighborPath, ZonePath, ZoneRect, ZoneWorld,
 };
+pub use zone_graph::{RetailPathId, RetailZoneGraph, RetailZoneNode};
 
 #[cfg(test)]
 mod local_tests {

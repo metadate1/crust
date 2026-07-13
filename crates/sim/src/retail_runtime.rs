@@ -18,7 +18,8 @@ use crust_formats::{
 use crate::{
     gool::{
         COLOR_COUNT, Execution, HaltReason, MAX_OBJECTS, Machine, ObjectHandle as VmObjectHandle,
-        VmEffect, VmError, VmObject, VmStateProgram,
+        RetailPadSnapshot, RetailSolidEnvironment, RetailSolidZone, VmEffect, VmError, VmObject,
+        VmStateProgram,
     },
     object_arena::{
         EntitySpawnDescriptor, NeighborZone, ObjectArena, ObjectHandle as ArenaObjectHandle,
@@ -26,6 +27,11 @@ use crate::{
         TreeParent,
     },
 };
+
+/// A malformed transition graph must not monopolize the browser's
+/// cooperative frame. Retail follows state links synchronously; this bound
+/// preserves that ordering while reporting cycles as a typed VM failure.
+const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
 
 /// One live object identity at the arena/VM boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -110,6 +116,16 @@ pub trait ProgramHost {
     ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
         Ok(None)
     }
+
+    /// Optionally owns the serialized octree neighborhoods needed by active
+    /// solid-surface GOOL queries. Authored hosts that never arm the retail
+    /// collision gate need not provide one.
+    fn solid_environment(
+        &mut self,
+        _zone: Eid,
+    ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+        Ok(None)
+    }
 }
 
 /// A direct host over one already-validated NSD/NSF stream pair.
@@ -183,6 +199,13 @@ impl ProgramHost for NsfProgramHost<'_> {
             program.code().to_vec(),
             program.external_words().to_vec(),
         )
+        .map(|state| {
+            state.with_paging_metadata(
+                program.page_count(),
+                program.resident_pages(),
+                program.entry_pages().iter().copied(),
+            )
+        })
         .map_err(NsfProgramError::Vm)
     }
 
@@ -227,6 +250,71 @@ impl ProgramHost for NsfProgramHost<'_> {
             object_colors: header.graphics.object_colors.words,
             player_colors: header.graphics.player_colors.words,
         }))
+    }
+
+    fn solid_environment(
+        &mut self,
+        zone: Eid,
+    ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+        let entry = self
+            .nsf
+            .resolve_entry(self.metadata, zone)
+            .map_err(NsfProgramError::Format)?;
+        if entry.entry_type != 7 {
+            return Err(NsfProgramError::Format(FormatError::global(format!(
+                "zone {zone} resolves to entry type {}, expected ZDAT type 7",
+                entry.entry_type
+            ))));
+        }
+        let header_item = entry.item(0).ok_or_else(|| {
+            NsfProgramError::Format(FormatError::global(format!(
+                "zone {zone} has no ZDAT header item"
+            )))
+        })?;
+        let header = ZoneHeader::parse(
+            header_item
+                .bytes(self.nsf_bytes)
+                .map_err(NsfProgramError::Format)?,
+        )
+        .map_err(NsfProgramError::Format)?;
+        let mut neighbors = Vec::with_capacity(header.neighbors.len());
+        for neighbor in &header.neighbors {
+            let entry = self
+                .nsf
+                .resolve_entry(self.metadata, *neighbor)
+                .map_err(NsfProgramError::Format)?;
+            if entry.entry_type != 7 {
+                return Err(NsfProgramError::Format(FormatError::global(format!(
+                    "solid-query neighbor {neighbor} resolves to entry type {}, expected ZDAT type 7",
+                    entry.entry_type
+                ))));
+            }
+            let rect_item = entry.item(1).ok_or_else(|| {
+                NsfProgramError::Format(FormatError::global(format!(
+                    "solid-query neighbor {neighbor} has no ZDAT rectangle item"
+                )))
+            })?;
+            let bytes = rect_item
+                .bytes(self.nsf_bytes)
+                .map_err(NsfProgramError::Format)?;
+            let rect = ZoneRect::parse(bytes).map_err(NsfProgramError::Format)?;
+            neighbors.push(
+                RetailSolidZone::new(
+                    rect.origin,
+                    rect.dimensions,
+                    rect.octree_root,
+                    rect.octree_max_depth,
+                    bytes.to_vec(),
+                )
+                .map_err(NsfProgramError::Vm)?,
+            );
+        }
+        Ok(Some(RetailSolidEnvironment::new(
+            header.graphics.flags,
+            header.graphics.object_colors.words,
+            header.graphics.player_colors.words,
+            neighbors,
+        )))
     }
 }
 
@@ -422,6 +510,23 @@ impl RetailRuntime {
     #[must_use]
     pub const fn frame_index(&self) -> u64 {
         self.frame_index
+    }
+
+    /// Installs one port's complete retail pad history before object
+    /// interpretation. `PadUpdate` computes these five words once per
+    /// cooperative tick; GOOL opcode `0x1a` and native-style physics must
+    /// observe the same immutable snapshot for the whole frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a VM error when `port` is outside the two retail controller
+    /// slots.
+    pub fn set_pad_snapshot(
+        &mut self,
+        port: usize,
+        snapshot: RetailPadSnapshot,
+    ) -> Result<(), VmError> {
+        self.machine.set_pad_snapshot(port, snapshot)
     }
 
     #[must_use]
@@ -680,7 +785,7 @@ impl RetailRuntime {
         budget: usize,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<Execution, RuntimeError<H::Error>> {
-        self.rebind_pending_state(object, host)?;
+        self.rebind_pending_state(object, host, spawned_children)?;
         let mut callback_error = None;
         let execution = {
             let Self {
@@ -711,7 +816,7 @@ impl RetailRuntime {
         let execution = execution.map_err(RuntimeError::Vm)?;
         if let HaltReason::StateChanged(state) = execution.reason {
             self.pending_states.insert(object.vm, state);
-            self.rebind_pending_state(object, host)?;
+            self.rebind_pending_state(object, host, spawned_children)?;
         }
         Ok(execution)
     }
@@ -720,27 +825,104 @@ impl RetailRuntime {
         &mut self,
         object: RuntimeObjectHandle,
         host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
-        let Some(state) = self.pending_states.get(&object.vm).copied() else {
+        for _ in 0..MAX_SYNCHRONOUS_STATE_CHANGES {
+            let Some(state) = self.pending_states.get(&object.vm).copied() else {
+                return Ok(());
+            };
+            let spawned = self
+                .arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+            let program = host
+                .bind_state_program(StateProgramBinding {
+                    object,
+                    zone: spawned.zone(),
+                    executable: spawned.origin().executable(),
+                    state,
+                })
+                .map_err(RuntimeError::Program)?;
+            self.machine
+                .rebind_state_program(object.vm, &program, &[])
+                .map_err(RuntimeError::Vm)?;
+            self.pending_states.remove(&object.vm);
+
+            // `GoolObjectChangeState` executes an armed once block before it
+            // writes `state_stamp`, then enters the target state's transition
+            // block. Both interpreter invocations stay inside this host
+            // boundary so child creation and further state links remain
+            // synchronous.
+            let mut callback_error = None;
+            let once_execution = {
+                let Self {
+                    arena,
+                    machine,
+                    handles,
+                    ..
+                } = self;
+                machine.run_pending_once_with_host_effects(object.vm, |machine, effect| {
+                    let result = Self::apply_host_effect(
+                        arena,
+                        handles,
+                        machine,
+                        host,
+                        effect,
+                        spawned_children,
+                    );
+                    if let Err(error) = result {
+                        callback_error = Some(error);
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    Ok(())
+                })
+            };
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            once_execution.map_err(RuntimeError::Vm)?;
+
+            let mut callback_error = None;
+            let transition_execution = {
+                let Self {
+                    arena,
+                    machine,
+                    handles,
+                    ..
+                } = self;
+                machine.run_transition_with_host_effects(object.vm, |machine, effect| {
+                    let result = Self::apply_host_effect(
+                        arena,
+                        handles,
+                        machine,
+                        host,
+                        effect,
+                        spawned_children,
+                    );
+                    if let Err(error) = result {
+                        callback_error = Some(error);
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    Ok(())
+                })
+            };
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            let transition_execution = transition_execution.map_err(RuntimeError::Vm)?;
+            if let Some(Execution {
+                reason: HaltReason::StateChanged(state),
+                ..
+            }) = transition_execution
+            {
+                self.pending_states.insert(object.vm, state);
+                continue;
+            }
             return Ok(());
-        };
-        let spawned = self
-            .arena
-            .get(object.arena)
-            .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
-        let program = host
-            .bind_state_program(StateProgramBinding {
-                object,
-                zone: spawned.zone(),
-                executable: spawned.origin().executable(),
-                state,
-            })
-            .map_err(RuntimeError::Program)?;
-        self.machine
-            .rebind_state_program(object.vm, &program, &[])
-            .map_err(RuntimeError::Vm)?;
-        self.pending_states.remove(&object.vm);
-        Ok(())
+        }
+        Err(RuntimeError::Vm(
+            VmError::SynchronousStateChangeBudgetExhausted(object.vm),
+        ))
     }
 
     fn apply_host_effect<H: ProgramHost>(
@@ -823,6 +1005,9 @@ impl RetailRuntime {
             }
             let install_result = (|| {
                 let environment = host.zone_environment(zone).map_err(RuntimeError::Program)?;
+                let solid_environment = host
+                    .solid_environment(zone)
+                    .map_err(RuntimeError::Program)?;
                 Self::initialize_vm_process(
                     arena,
                     handles,
@@ -831,6 +1016,9 @@ impl RetailRuntime {
                     environment,
                     &mut vm_object,
                 )?;
+                if let Some(environment) = solid_environment {
+                    vm_object.bind_retail_solid_environment(environment);
+                }
                 Self::initialize_vm_links(arena, handles, machine, object, &mut vm_object)?;
                 Self::install_vm_object(machine, vm_object)?;
                 arena
@@ -878,6 +1066,9 @@ impl RetailRuntime {
         let environment = host
             .zone_environment(binding.zone)
             .map_err(RuntimeError::Program)?;
+        let solid_environment = host
+            .solid_environment(binding.zone)
+            .map_err(RuntimeError::Program)?;
         Self::initialize_vm_process(
             &self.arena,
             &self.handles,
@@ -886,6 +1077,9 @@ impl RetailRuntime {
             environment,
             &mut vm_object,
         )?;
+        if let Some(environment) = solid_environment {
+            vm_object.bind_retail_solid_environment(environment);
+        }
         Self::initialize_vm_links(
             &self.arena,
             &self.handles,
@@ -918,6 +1112,7 @@ impl RetailRuntime {
         vm_object
             .initialize_retail_process(binding.subtype, machine.frames_elapsed())
             .map_err(RuntimeError::Vm)?;
+        vm_object.set_main_player_identity(binding.object.arena.is_dedicated_main());
 
         match binding.origin {
             ProgramOrigin::Entity(entity) => vm_object
@@ -1003,13 +1198,7 @@ impl RetailRuntime {
         machine: &mut Machine,
         vm_object: VmObject,
     ) -> Result<(), RuntimeError<E>> {
-        let handle = vm_object.handle();
-        if machine.object(handle).is_ok() {
-            *machine.object_mut(handle).map_err(RuntimeError::Vm)? = vm_object;
-            Ok(())
-        } else {
-            machine.insert_object(vm_object).map_err(RuntimeError::Vm)
-        }
+        machine.upsert_object(vm_object).map_err(RuntimeError::Vm)
     }
 
     fn refresh_player_links<E>(

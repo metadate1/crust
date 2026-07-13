@@ -4,11 +4,14 @@
 //! layout. Native pointers are never represented; objects, registers, pages,
 //! events, and call targets are checked logical indices.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crust_formats::stream::{GOOL_PC_NONE, GoolProgram, ZoneEntity, structs::GoolState};
+use crust_formats::binary::{Eid, PageIndex};
+use crust_formats::stream::{
+    GOOL_PC_NONE, GoolProgram, ZoneEntity, ZoneEntityPathPoint, structs::GoolState,
+};
 
-use crate::math::{Angle12, seek};
+use crate::math::{Angle12, integer_sqrt, seek};
 
 pub const MAX_OBJECTS: usize = 96;
 /// Exact `gool_object.regs[0x1FC]` word span from the retail 32-bit layout.
@@ -17,6 +20,15 @@ pub const TABLE_WORD_COUNT: usize = 1024;
 pub const MAX_STACK_WORDS: usize = 256;
 pub const MAX_CALL_DEPTH: usize = 64;
 pub const MAX_EFFECTS: usize = 256;
+/// Defensive host bound for one retail `once_p` invocation. Retail runs the
+/// block synchronously until its return link; the bound turns malformed or
+/// recursive input into a typed failure instead of hanging the browser.
+pub const MAX_ONCE_INSTRUCTIONS: usize = 16_384;
+/// Defensive host bound for one synchronous retail transition-block
+/// invocation. Retail has no native instruction limit; malformed local data
+/// becomes a typed failure here instead of hanging the browser's 30 Hz loop.
+pub const MAX_TRANSITION_INSTRUCTIONS: usize = 16_384;
+pub const RETAIL_PAD_COUNT: usize = 2;
 /// Halfword count in the retail `gool_colors` union.
 pub const COLOR_COUNT: usize = 24;
 /// Fourteen-bit retail code/PC address space.
@@ -26,11 +38,79 @@ const ANIMATION_REFERENCE_TAG: u32 = 0xa700_0000;
 const ANIMATION_REFERENCE_MASK: u32 = 0x00ff_ffff;
 const CODE_REFERENCE_TAG: u32 = 0xa600_0000;
 const CODE_REFERENCE_GLOBAL: u32 = 0x0080_0000;
-const CODE_REFERENCE_PC_MASK: u32 = 0x0000_3fff;
+const CODE_REFERENCE_PC_BITS: u32 = 0x0000_3fff;
+const CODE_REFERENCE_PC_SHIFT: u32 = 2;
+const CODE_REFERENCE_PC_MASK: u32 = CODE_REFERENCE_PC_BITS << CODE_REFERENCE_PC_SHIFT;
+const CODE_REFERENCE_PAYLOAD_MASK: u32 = CODE_REFERENCE_GLOBAL | CODE_REFERENCE_PC_MASK;
+const STORAGE_REFERENCE_TAG: u32 = 0xa500_0000;
+const STORAGE_REFERENCE_REGION_SHIFT: u32 = 22;
+const STORAGE_REFERENCE_REGION_MASK: u32 = 3 << STORAGE_REFERENCE_REGION_SHIFT;
+const STORAGE_REFERENCE_OBJECT_SHIFT: u32 = 15;
+const STORAGE_REFERENCE_OBJECT_BITS: u32 = 0x7f;
+const STORAGE_REFERENCE_OBJECT_MASK: u32 =
+    STORAGE_REFERENCE_OBJECT_BITS << STORAGE_REFERENCE_OBJECT_SHIFT;
+const STORAGE_REFERENCE_INDEX_BITS: u32 = 0x1fff;
+const STORAGE_REFERENCE_INDEX_SHIFT: u32 = 2;
+const STORAGE_REFERENCE_INDEX_MASK: u32 =
+    STORAGE_REFERENCE_INDEX_BITS << STORAGE_REFERENCE_INDEX_SHIFT;
+const STORAGE_REFERENCE_PAYLOAD_MASK: u32 =
+    STORAGE_REFERENCE_REGION_MASK | STORAGE_REFERENCE_OBJECT_MASK | STORAGE_REFERENCE_INDEX_MASK;
+const ENTRY_REFERENCE_TAG: u32 = 0xa400_0000;
+const ENTRY_REFERENCE_SLOT_BITS: u32 = 0x003f_ffff;
+const ENTRY_REFERENCE_SLOT_SHIFT: u32 = 2;
+const ENTRY_REFERENCE_PAYLOAD_MASK: u32 = ENTRY_REFERENCE_SLOT_BITS << ENTRY_REFERENCE_SLOT_SHIFT;
 const INITIAL_FRAME_FLAGS: u32 = 0xffff;
+const STATE_FRAME_WORDS: usize = 3;
 const INITIAL_FRAME_WORDS: usize = 4;
+const ONCE_FRAME_WORDS: usize = 3;
 const SYNTHETIC_STACK_POINTER: usize = REGISTER_COUNT - MAX_STACK_WORDS;
 const NORMAL_INTERPRETER_FLAGS: u32 = 4;
+const MOVE_DIRECTIONS: [u32; 16] = [8, 0, 2, 1, 4, 8, 3, 8, 6, 7, 8, 8, 5, 8, 8, 8];
+const PROCESS_VECTOR_COUNT: usize = 6;
+const PROCESS_VECTOR_WORDS: usize = 3;
+const PROCESS_VECTOR_BASE: usize = process_register::TRANSLATION_X;
+const STATUS_A_TOWARD_GOAL: u32 = 0x4;
+const STATUS_A_CHANGE_PATH_DIRECTION: u32 = 0x10;
+const STATUS_A_INVALID_PATH: u32 = 0x200;
+const STATUS_B_TRACK_PATH_ROTATION: u32 = 0x2;
+const STATUS_B_TRACK_PATH_SIGN: u32 = 0x4;
+const STATUS_B_TRACK_PATH_PITCH: u32 = 0x800;
+const STATUS_B_ORIENT_ON_PATH: u32 = 0x8000;
+/// Delta-bit encoding of the source PC `atan_table[1024]`. Every table step
+/// is zero or one, so prefix popcount reproduces all exact 12-bit values in
+/// 128 bytes instead of carrying a second 2 KiB integer table.
+const RETAIL_ATAN_INCREMENTS: [u64; 16] = [
+    0x6d6d_6dad_b5b6_b6d6,
+    0xd6d6_dada_db5b_5b6b,
+    0x5ada_dad6_d6d6_d6d6,
+    0x5ad6_d6b5_ad6d_6b5b,
+    0x6b56_b5ab_5ad6_b56b,
+    0xd5aa_d5ab_56ad_5ab5,
+    0xd556_aad5_5aab_55aa,
+    0xaaaa_aaad_5555_aaaa,
+    0xaaaa_aa55_5555_55aa,
+    0xa555_2aaa_5555_4aaa,
+    0x4a95_2a95_4aa9_54aa,
+    0x4a54_a52a_54a5_4a95,
+    0xa525_294a_4a52_9529,
+    0x2524_a494_9494_94a4,
+    0x9249_24a4_924a_4929,
+    0x8924_9249_2492_4924,
+];
+
+/// Exact five-word input history consumed by retail GOOL control tests.
+///
+/// The browser platform owns physical/demo input normalization. Keeping this
+/// snapshot in the VM makes opcode `0x1a` deterministic and prevents GOOL
+/// from depending on browser APIs directly.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailPadSnapshot {
+    pub tapped: u32,
+    pub held: u32,
+    pub held_previous: u32,
+    pub tapped_previous: u32,
+    pub held_previous_2: u32,
+}
 
 /// Exact word indices in retail `gool_process`, relative to the start of the
 /// process union. Pointer-bearing fields stay represented by checked handles
@@ -106,10 +186,41 @@ pub enum CodeSegment {
 }
 
 /// Logical instruction address used instead of storing native code pointers.
+/// The packed representation stores its 14-bit word PC above two zero low
+/// bits, preserving the alignment discriminator of a retail code pointer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CodeAddress {
     pub segment: CodeSegment,
     pub pc: usize,
+}
+
+impl CodeAddress {
+    /// Decodes one pointer-free GOOL code word. Reserved payload bits must be
+    /// zero so arbitrary process values can never become executable offsets.
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !CODE_REFERENCE_PAYLOAD_MASK != CODE_REFERENCE_TAG {
+            return None;
+        }
+        Some(Self {
+            segment: if word & CODE_REFERENCE_GLOBAL == 0 {
+                CodeSegment::External
+            } else {
+                CodeSegment::Global
+            },
+            pc: ((word & CODE_REFERENCE_PC_MASK) >> CODE_REFERENCE_PC_SHIFT) as usize,
+        })
+    }
+
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        CODE_REFERENCE_TAG
+            | match self.segment {
+                CodeSegment::External => 0,
+                CodeSegment::Global => CODE_REFERENCE_GLOBAL,
+            }
+            | (((self.pc as u32) & CODE_REFERENCE_PC_BITS) << CODE_REFERENCE_PC_SHIFT)
+    }
 }
 
 /// Pointer-free reference to a byte offset in one object's global animation
@@ -151,6 +262,119 @@ impl AnimationReference {
     }
 }
 
+/// One bounded storage region addressable by opcode `0x26`.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[repr(u8)]
+pub enum StorageRegion {
+    Internal = 0,
+    External = 1,
+    Register = 2,
+    Constant = 3,
+}
+
+/// Pointer-free encoding of a translated GOOL input operand.
+///
+/// Retail pushes native addresses from opcode `0x26`. The Rust VM instead
+/// packs an object handle, storage region and checked word index under a tag
+/// disjoint from code and animation references. Its low two bits remain zero
+/// like the source word pointer, so it cannot be mistaken for a named EID.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct StorageReference {
+    object: ObjectHandle,
+    region: StorageRegion,
+    index: u16,
+}
+
+impl StorageReference {
+    fn checked(object: ObjectHandle, region: StorageRegion, index: usize) -> Result<Self, VmError> {
+        if index > STORAGE_REFERENCE_INDEX_BITS as usize {
+            return Err(VmError::InvalidStorageReference(STORAGE_REFERENCE_TAG));
+        }
+        Ok(Self {
+            object,
+            region,
+            index: index as u16,
+        })
+    }
+
+    #[must_use]
+    pub const fn object(self) -> ObjectHandle {
+        self.object
+    }
+
+    #[must_use]
+    pub const fn region(self) -> StorageRegion {
+        self.region
+    }
+
+    #[must_use]
+    pub const fn index(self) -> u16 {
+        self.index
+    }
+
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        STORAGE_REFERENCE_TAG
+            | ((self.region as u32) << STORAGE_REFERENCE_REGION_SHIFT)
+            | ((self.object.get() as u32) << STORAGE_REFERENCE_OBJECT_SHIFT)
+            | ((self.index as u32) << STORAGE_REFERENCE_INDEX_SHIFT)
+    }
+
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !STORAGE_REFERENCE_PAYLOAD_MASK != STORAGE_REFERENCE_TAG {
+            return None;
+        }
+        let region = match (word >> STORAGE_REFERENCE_REGION_SHIFT) & 3 {
+            0 => StorageRegion::Internal,
+            1 => StorageRegion::External,
+            2 => StorageRegion::Register,
+            3 => StorageRegion::Constant,
+            _ => unreachable!(),
+        };
+        let Some(object) = ObjectHandle::new(
+            ((word >> STORAGE_REFERENCE_OBJECT_SHIFT) & STORAGE_REFERENCE_OBJECT_BITS) as u16,
+        ) else {
+            return None;
+        };
+        Some(Self {
+            object,
+            region,
+            index: ((word & STORAGE_REFERENCE_INDEX_MASK) >> STORAGE_REFERENCE_INDEX_SHIFT) as u16,
+        })
+    }
+}
+
+/// Stable, checked replacement for one relocated retail `entry *`.
+///
+/// The packed payload indexes a machine-owned `(EID, page)` record. This is
+/// deliberately distinct from [`StorageReference`]: after `NSOpen` resolves
+/// an EID, retail's `misc_entry` remains bound to that entry even if GOOL
+/// overwrites the cell that originally held the EID. Slots are shifted above
+/// two zero low bits to retain the aligned-pointer/EID discriminator.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct EntryReference {
+    slot: u32,
+}
+
+impl EntryReference {
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        ENTRY_REFERENCE_TAG | (self.slot << ENTRY_REFERENCE_SLOT_SHIFT)
+    }
+
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !ENTRY_REFERENCE_PAYLOAD_MASK == ENTRY_REFERENCE_TAG {
+            Some(Self {
+                slot: (word & ENTRY_REFERENCE_PAYLOAD_MASK) >> ENTRY_REFERENCE_SLOT_SHIFT,
+            })
+        } else {
+            None
+        }
+    }
+}
+
 /// Pointer-free view of the three retail transform vectors.
 ///
 /// Rotation preserves the serialized/runtime `ang` component order (Y, X,
@@ -172,6 +396,322 @@ impl Default for RetailTransform {
     }
 }
 
+/// Coordinate space carried by a retail entity's parent entry.
+///
+/// ZDAT (type 7) paths store quarter-scale points relative to the zone
+/// rectangle. MDAT (type 17) paths store unscaled points relative to zero.
+/// Keeping that distinction typed prevents the VM from retaining the C
+/// engine's relocated `parent_zone` pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailEntityPathSpace {
+    Zone { origin: [i32; 3] },
+    Model,
+}
+
+/// One owned ZDAT rectangle/octree used by synchronous GOOL solid queries.
+/// Child links remain serialized byte offsets and are validated at each
+/// traversal rather than becoming native pointers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetailSolidZone {
+    origin: [i32; 3],
+    dimensions: [u32; 3],
+    root: u16,
+    max_depth: [u16; 3],
+    bytes: Vec<u8>,
+}
+
+impl RetailSolidZone {
+    pub fn new(
+        origin: [i32; 3],
+        dimensions: [u32; 3],
+        root: u16,
+        max_depth: [u16; 3],
+        bytes: Vec<u8>,
+    ) -> Result<Self, VmError> {
+        if max_depth.iter().any(|depth| *depth > 31) {
+            return Err(VmError::MalformedSolidOctree { offset: 0 });
+        }
+        if root != 0 && root & 1 == 0 && usize::from(root) >= bytes.len() {
+            return Err(VmError::MalformedSolidOctree {
+                offset: usize::from(root),
+            });
+        }
+        Ok(Self {
+            origin,
+            dimensions,
+            root,
+            max_depth,
+            bytes,
+        })
+    }
+}
+
+/// Pointer-free zone state needed by `ZoneFindNearestObjectNode3`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetailSolidEnvironment {
+    graphics_flags: u32,
+    object_colors: [u16; COLOR_COUNT],
+    player_colors: [u16; COLOR_COUNT],
+    neighbors: Vec<RetailSolidZone>,
+}
+
+const RETAIL_SOLID_RECT_BYTES: usize = 36;
+const MAX_SOLID_QUERY_STEPS: usize = 128;
+const RETAIL_SIZE_MAP: [i32; 16] = [
+    0, -256, -128, -64, -48, -40, -32, -26, -20, -14, -8, 8, 16, 24, 32, 64,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailSolidRect {
+    origin: [i32; 3],
+    dimensions: [i32; 3],
+}
+
+impl RetailSolidRect {
+    fn from_zone(zone: &RetailSolidZone) -> Result<Self, VmError> {
+        let mut origin = [0_i32; 3];
+        let mut dimensions = [0_i32; 3];
+        for axis in 0..3 {
+            origin[axis] = zone.origin[axis]
+                .checked_mul(0x100)
+                .ok_or(VmError::ArithmeticOverflow)?;
+            dimensions[axis] = i32::try_from(zone.dimensions[axis])
+                .ok()
+                .and_then(|value| value.checked_mul(0x100))
+                .ok_or(VmError::ArithmeticOverflow)?;
+            origin[axis]
+                .checked_add(dimensions[axis])
+                .ok_or(VmError::ArithmeticOverflow)?;
+        }
+        Ok(Self { origin, dimensions })
+    }
+
+    fn contains_unscaled_zone_point(
+        zone: &RetailSolidZone,
+        point: [i32; 3],
+    ) -> Result<bool, VmError> {
+        let rect = Self::from_zone(zone)?;
+        for (axis, coordinate) in point.into_iter().enumerate() {
+            let end = rect.origin[axis]
+                .checked_add(rect.dimensions[axis])
+                .ok_or(VmError::ArithmeticOverflow)?;
+            if coordinate < rect.origin[axis] || coordinate > end {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+}
+
+fn retail_solid_child(
+    zone: &RetailSolidZone,
+    node: u16,
+    rect: &mut RetailSolidRect,
+    point: &mut [i32; 3],
+    level: usize,
+    flags: u8,
+) -> Result<u16, VmError> {
+    if level > 64 {
+        return Err(VmError::MalformedSolidOctree {
+            offset: usize::from(node),
+        });
+    }
+    if node == 0 || node & 1 != 0 {
+        let node_type = (node & 0x000e) >> 1;
+        let subtype = (node & 0x03f0) >> 4;
+        let valid =
+            node & 1 != 0 && (flags & 8 == 0 || node_type != 3) && node_type != 4 && subtype != 11;
+        let axis = if flags & 1 != 0 {
+            Some(1)
+        } else if flags & 2 != 0 {
+            Some(2)
+        } else {
+            None
+        };
+        if let Some(axis) = axis {
+            point[axis] = if valid {
+                rect.origin[axis]
+                    .checked_add(rect.dimensions[axis])
+                    .ok_or(VmError::ArithmeticOverflow)?
+            } else {
+                rect.origin[axis]
+                    .checked_sub(1)
+                    .ok_or(VmError::ArithmeticOverflow)?
+            };
+        }
+        return Ok(if valid { node } else { 0 });
+    }
+
+    let offset = usize::from(node);
+    if offset < RETAIL_SOLID_RECT_BYTES {
+        return Err(VmError::MalformedSolidOctree { offset });
+    }
+    let mut selected = [0_usize; 3];
+    let mut counts = [1_usize; 3];
+    let level = u16::try_from(level).map_err(|_| VmError::MalformedSolidOctree { offset })?;
+    for axis in 0..3 {
+        if level < zone.max_depth[axis] {
+            counts[axis] = 2;
+            rect.dimensions[axis] /= 2;
+            let split = rect.origin[axis]
+                .checked_add(rect.dimensions[axis])
+                .ok_or(VmError::ArithmeticOverflow)?;
+            if point[axis] >= split {
+                selected[axis] = 1;
+                rect.origin[axis] = split;
+            }
+        }
+    }
+    let index = (selected[0] * counts[1] + selected[1]) * counts[2] + selected[2];
+    let child_offset = offset
+        .checked_add(
+            index
+                .checked_mul(2)
+                .ok_or(VmError::MalformedSolidOctree { offset })?,
+        )
+        .ok_or(VmError::MalformedSolidOctree { offset })?;
+    let child =
+        zone.bytes
+            .get(child_offset..child_offset + 2)
+            .ok_or(VmError::MalformedSolidOctree {
+                offset: child_offset,
+            })?;
+    retail_solid_child(
+        zone,
+        u16::from_le_bytes([child[0], child[1]]),
+        rect,
+        point,
+        usize::from(level) + 1,
+        flags,
+    )
+}
+
+fn find_retail_solid_node(
+    environment: &RetailSolidEnvironment,
+    translation: [i32; 3],
+    flags: u8,
+    y_offset: i32,
+) -> Result<(Option<u16>, [i32; 3]), VmError> {
+    let mut point = translation;
+    point[1] = point[1]
+        .checked_add(y_offset)
+        .ok_or(VmError::ArithmeticOverflow)?;
+    for _ in 0..MAX_SOLID_QUERY_STEPS {
+        let mut containing = None;
+        for zone in &environment.neighbors {
+            if RetailSolidRect::contains_unscaled_zone_point(zone, point)? {
+                containing = Some(zone);
+                break;
+            }
+        }
+        let Some(zone) = containing else {
+            return Ok((None, point));
+        };
+        let mut rect = RetailSolidRect::from_zone(zone)?;
+        let node = retail_solid_child(zone, zone.root, &mut rect, &mut point, 0, flags)?;
+        if node != 0 {
+            return Ok((Some(node), point));
+        }
+        // The C loop rescans the same ordered neighbor list after a zero leaf.
+        // `retail_solid_child` has moved the local query coordinate just past
+        // that leaf, so a valid tree eventually resolves another leaf or exits.
+    }
+    Err(VmError::MalformedSolidOctree { offset: 0 })
+}
+
+fn scaled_retail_colors(
+    source: &[u16; COLOR_COUNT],
+    subtype: i32,
+) -> Result<[u16; COLOR_COUNT], VmError> {
+    let percentage = match subtype {
+        i32::MIN..=39 => 100,
+        // These selectors have level-specific hard-coded matrices in five
+        // retail levels. Until a level selector is owned here, do not silently
+        // substitute the generic zero matrix.
+        40..=44 | 64..=i32::MAX => {
+            return Err(VmError::LevelDependentColorSubtype(subtype as u8));
+        }
+        45..=47 => 0,
+        48..=63 => {
+            const PERCENTAGES: [u32; 16] = [
+                2, 16, 30, 44, 58, 72, 86, 100, 112, 124, 136, 148, 160, 172, 184, 196,
+            ];
+            PERCENTAGES[usize::try_from(subtype - 48).map_err(|_| VmError::ArithmeticOverflow)?]
+        }
+    };
+    let factor = (percentage << 12) / 100;
+    let mut scaled = *source;
+    for (destination, source) in scaled[..9].iter_mut().zip(&source[..9]) {
+        let value = i64::from(*source as i16) * i64::from(factor);
+        *destination = ((value >> 12) as i16) as u16;
+    }
+    for (destination, source) in scaled[9..12].iter_mut().zip(&source[9..12]) {
+        *destination = ((u32::from(*source) * factor) >> 12) as u16;
+    }
+    Ok(scaled)
+}
+
+fn seek_retail_colors(current: &mut [u16; COLOR_COUNT], target: [u16; COLOR_COUNT], step: u16) {
+    for (current, mut target) in current.iter_mut().zip(target) {
+        if step != 0 {
+            let delta = target.wrapping_sub(*current) as i16;
+            let step_signed = step as i16;
+            if delta > step_signed {
+                target = current.wrapping_add(step);
+            } else if delta < -step_signed {
+                target = current.wrapping_sub(step);
+            }
+        }
+        *current = target;
+    }
+}
+
+impl RetailSolidEnvironment {
+    #[must_use]
+    pub fn new(
+        graphics_flags: u32,
+        object_colors: [u16; COLOR_COUNT],
+        player_colors: [u16; COLOR_COUNT],
+        neighbors: Vec<RetailSolidZone>,
+    ) -> Self {
+        Self {
+            graphics_flags,
+            object_colors,
+            player_colors,
+            neighbors,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetailEntityPath {
+    space: RetailEntityPathSpace,
+    points: Vec<ZoneEntityPathPoint>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PathOrientation {
+    location: [i32; 3],
+    status_a: u32,
+    misc_c_y: i32,
+    rotation_z: i32,
+    target_rotation_x: i32,
+    target_rotation_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PathOrientationInputs {
+    location: [i32; 3],
+    status_a: u32,
+    status_b: u32,
+    object_progress: i32,
+    inertia_limit: i32,
+    misc_c_y: i32,
+    rotation_z: i32,
+    target_rotation_x: i32,
+    target_rotation_y: i32,
+}
+
 /// Checked external code/data binding for a state selected by GOOL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmStateProgram {
@@ -182,6 +722,9 @@ pub struct VmStateProgram {
     code_pc: Option<usize>,
     event_pc: Option<usize>,
     transition_pc: Option<usize>,
+    page_count: u32,
+    resident_pages: Vec<PageIndex>,
+    entry_pages: Vec<(Eid, PageIndex)>,
 }
 
 impl VmStateProgram {
@@ -208,7 +751,26 @@ impl VmStateProgram {
             code_pc,
             event_pc,
             transition_pc,
+            page_count: 0,
+            resident_pages: Vec::new(),
+            entry_pages: Vec::new(),
         })
+    }
+
+    /// Attaches validated stream paging metadata to a rebound state's code
+    /// and external table. Authored unit programs may omit it; the NSF host
+    /// supplies it so EIDs first referenced by later states remain resolvable.
+    #[must_use]
+    pub fn with_paging_metadata(
+        mut self,
+        page_count: u32,
+        resident_pages: impl IntoIterator<Item = PageIndex>,
+        entry_pages: impl IntoIterator<Item = (Eid, PageIndex)>,
+    ) -> Self {
+        self.page_count = page_count;
+        self.resident_pages = resident_pages.into_iter().collect();
+        self.entry_pages = entry_pages.into_iter().collect();
+        self
     }
 
     #[must_use]
@@ -228,20 +790,297 @@ fn validate_state_pc(state: u16, raw: u16, code_len: usize) -> Result<Option<usi
     Ok(Some(pc))
 }
 
-fn retail_entity_coordinate(point: i16, zone_origin: i32) -> i32 {
-    i32::from(point)
-        .wrapping_mul(4)
-        .wrapping_add(zone_origin)
-        .wrapping_mul(0x100)
+fn retail_path_coordinate(point: i16, space: RetailEntityPathSpace, axis: usize) -> i32 {
+    match space {
+        RetailEntityPathSpace::Zone { origin } => i32::from(point)
+            .wrapping_mul(4)
+            .wrapping_add(origin[axis])
+            .wrapping_mul(0x100),
+        RetailEntityPathSpace::Model => i32::from(point).wrapping_mul(0x100),
+    }
+}
+
+fn checked_path_coordinate(
+    point: i16,
+    space: RetailEntityPathSpace,
+    axis: usize,
+) -> Result<i32, VmError> {
+    let (scale, origin) = match space {
+        RetailEntityPathSpace::Zone { origin } => (4_i64, i64::from(origin[axis])),
+        RetailEntityPathSpace::Model => (1, 0),
+    };
+    let coordinate = (i64::from(point) * scale + origin) * 0x100;
+    i32::try_from(coordinate).map_err(|_| VmError::ArithmeticOverflow)
+}
+
+fn checked_i32(value: i64) -> Result<i32, VmError> {
+    i32::try_from(value).map_err(|_| VmError::ArithmeticOverflow)
+}
+
+fn checked_abs(value: i32) -> Result<i32, VmError> {
+    value.checked_abs().ok_or(VmError::ArithmeticOverflow)
+}
+
+fn path_point_location(path: &RetailEntityPath, index: usize) -> Result<[i32; 3], VmError> {
+    let point = path
+        .points
+        .get(index)
+        .ok_or(VmError::EntityPathProgressOutOfBounds {
+            progress: i32::try_from(index)
+                .unwrap_or(i32::MAX)
+                .saturating_mul(0x100),
+            point_count: path.points.len(),
+        })?;
+    Ok([
+        checked_path_coordinate(point.x, path.space, 0)?,
+        checked_path_coordinate(point.y, path.space, 1)?,
+        checked_path_coordinate(point.z, path.space, 2)?,
+    ])
+}
+
+fn orient_retail_path(
+    path: &RetailEntityPath,
+    progress: i32,
+    inputs: PathOrientationInputs,
+) -> Result<PathOrientation, VmError> {
+    let absolute = progress.checked_abs().ok_or(VmError::ArithmeticOverflow)?;
+    let index = usize::try_from(absolute >> 8).map_err(|_| VmError::ArithmeticOverflow)?;
+    if index >= path.points.len() {
+        return Err(VmError::EntityPathProgressOutOfBounds {
+            progress,
+            point_count: path.points.len(),
+        });
+    }
+    let mut segment = index;
+    let mut fractional = (progress as u32 & 0xff) as i32;
+    if index == path.points.len() - 1 && index != 0 {
+        segment -= 1;
+        fractional += 0x100;
+    }
+    let location = path_point_location(path, segment)?;
+    let mut output = PathOrientation {
+        location,
+        status_a: inputs.status_a,
+        misc_c_y: inputs.misc_c_y,
+        rotation_z: inputs.rotation_z,
+        target_rotation_x: inputs.target_rotation_x,
+        target_rotation_y: inputs.target_rotation_y,
+    };
+    if path.points.len() == 1 {
+        return Ok(output);
+    }
+    let next = path_point_location(path, segment + 1)?;
+    let direction = [
+        next[0]
+            .checked_sub(location[0])
+            .ok_or(VmError::ArithmeticOverflow)?,
+        next[1]
+            .checked_sub(location[1])
+            .ok_or(VmError::ArithmeticOverflow)?,
+        next[2]
+            .checked_sub(location[2])
+            .ok_or(VmError::ArithmeticOverflow)?,
+    ];
+
+    if inputs.status_b & STATUS_B_ORIENT_ON_PATH != 0 {
+        let dx = i64::from(direction[0] >> 8);
+        let dz = i64::from(direction[2] >> 8);
+        let squared = dx
+            .checked_mul(dx)
+            .and_then(|value| value.checked_add(dz.checked_mul(dz)?))
+            .ok_or(VmError::ArithmeticOverflow)?;
+        let distance = i64::from(retail_sqrt(squared)?);
+        // The source helper returns CODE_ERROR here and its caller ignores
+        // that result, retaining the already-computed segment origin.
+        if distance == 0 {
+            return Ok(output);
+        }
+        let object_distance = [
+            inputs.location[0]
+                .checked_sub(location[0])
+                .ok_or(VmError::ArithmeticOverflow)?,
+            inputs.location[2]
+                .checked_sub(location[2])
+                .ok_or(VmError::ArithmeticOverflow)?,
+        ];
+        let dot = i64::from(object_distance[0] >> 4) * i64::from(direction[0] >> 4)
+            + i64::from(object_distance[1] >> 4) * i64::from(direction[2] >> 4);
+        let projection = checked_i32(dot / (distance * distance))?;
+        if projection >= 0x100 && index < path.points.len() - 1 {
+            let next_progress = i32::try_from(index + 1)
+                .ok()
+                .and_then(|value| value.checked_mul(0x100))
+                .ok_or(VmError::ArithmeticOverflow)?;
+            return orient_retail_path(path, next_progress, inputs);
+        }
+        let projection_part = dot / distance;
+        let projected_x =
+            checked_i32(((projection_part >> 4) * i64::from(direction[0] >> 4)) / distance)?;
+        let projected_z =
+            checked_i32(((projection_part >> 4) * i64::from(direction[2] >> 4)) / distance)?;
+        let x = checked_abs(
+            projected_x
+                .checked_sub(object_distance[0])
+                .ok_or(VmError::ArithmeticOverflow)?,
+        )?;
+        let z = checked_abs(
+            projected_z
+                .checked_sub(object_distance[1])
+                .ok_or(VmError::ArithmeticOverflow)?,
+        )?;
+        output.misc_c_y = if z < x {
+            x.checked_add(z / 2).ok_or(VmError::ArithmeticOverflow)?
+        } else {
+            z.checked_add(x / 2).ok_or(VmError::ArithmeticOverflow)?
+        };
+        if output.misc_c_y > inputs.inertia_limit
+            || projection >= 0x100
+            || (projection < 0 && index == 0)
+        {
+            output.status_a |= STATUS_A_INVALID_PATH;
+        }
+        let cross = i64::from(direction[2]) * i64::from(inputs.location[0] >> 8)
+            - i64::from(direction[0]) * i64::from(inputs.location[2] >> 8)
+            - i64::from(location[0] >> 8) * i64::from(next[2])
+            + i64::from(location[2] >> 8) * i64::from(next[0]);
+        if cross < 0 {
+            output.misc_c_y = output
+                .misc_c_y
+                .checked_neg()
+                .ok_or(VmError::ArithmeticOverflow)?;
+        }
+    }
+
+    let previous_status_a = output.status_a;
+    if inputs.object_progress >= 0 && index < path.points.len() - 1 {
+        output.status_a &= !STATUS_A_TOWARD_GOAL;
+    } else {
+        output.status_a |= STATUS_A_TOWARD_GOAL;
+    }
+    if (previous_status_a & STATUS_A_TOWARD_GOAL) == (output.status_a & STATUS_A_TOWARD_GOAL)
+        || output.status_a & STATUS_A_CHANGE_PATH_DIRECTION != 0
+    {
+        output.status_a &= !STATUS_A_CHANGE_PATH_DIRECTION;
+    } else {
+        output.status_a |= STATUS_A_CHANGE_PATH_DIRECTION;
+    }
+
+    if inputs.status_b & STATUS_B_TRACK_PATH_SIGN != 0 {
+        output.target_rotation_x = if inputs.status_b & STATUS_B_TRACK_PATH_ROTATION != 0
+            && output.status_a & STATUS_A_TOWARD_GOAL != 0
+        {
+            retail_atan2(
+                direction[0]
+                    .checked_neg()
+                    .ok_or(VmError::ArithmeticOverflow)?,
+                direction[2]
+                    .checked_neg()
+                    .ok_or(VmError::ArithmeticOverflow)?,
+            )
+        } else {
+            retail_atan2(direction[0], direction[2])
+        };
+    }
+    if inputs.status_b & STATUS_B_TRACK_PATH_PITCH != 0 {
+        let x = checked_abs(direction[0])?;
+        let z = checked_abs(direction[2])?;
+        let horizontal = if z < x {
+            x.checked_add(z / 2).ok_or(VmError::ArithmeticOverflow)?
+        } else {
+            z.checked_add(x / 2).ok_or(VmError::ArithmeticOverflow)?
+        };
+        if inputs.status_b & STATUS_B_TRACK_PATH_SIGN != 0 {
+            output.rotation_z = retail_atan2(direction[0], direction[2]);
+            output.target_rotation_y = retail_atan2(direction[1], horizontal)
+                .checked_neg()
+                .ok_or(VmError::ArithmeticOverflow)?;
+        } else {
+            output.rotation_z = retail_atan2(
+                direction[0]
+                    .checked_neg()
+                    .ok_or(VmError::ArithmeticOverflow)?,
+                direction[2]
+                    .checked_neg()
+                    .ok_or(VmError::ArithmeticOverflow)?,
+            );
+            output.target_rotation_y = retail_atan2(direction[1], horizontal);
+        }
+    }
+    for axis in 0..3 {
+        let delta = (i64::from(direction[axis]) * i64::from(fractional)) >> 8;
+        output.location[axis] = checked_i32(i64::from(location[axis]) + delta)?;
+    }
+    Ok(output)
+}
+
+fn retail_atan2(y: i32, x: i32) -> i32 {
+    let negative_y = y < 0;
+    let negative_x = x < 0;
+    let y = i64::from(y).unsigned_abs();
+    let x = i64::from(x).unsigned_abs();
+    if y | x == 0 {
+        return 0;
+    }
+    let mut angle = if y >= x {
+        0x400 - retail_atan_ratio(x, y)
+    } else {
+        retail_atan_ratio(y, x)
+    };
+    if negative_x {
+        angle = 0x800 - angle;
+    }
+    if negative_y { -angle } else { angle }
+}
+
+fn retail_sqrt(value: i64) -> Result<i32, VmError> {
+    let value = i32::try_from(value).map_err(|_| VmError::ArithmeticOverflow)?;
+    if value == 0 {
+        return Ok(0);
+    }
+    if value < 0 {
+        return Err(VmError::ArithmeticOverflow);
+    }
+    let leading = (value.leading_zeros() & !1) as usize;
+    let index = if leading < 24 {
+        (value as u32) >> (24 - leading)
+    } else {
+        (value as u32) << (leading - 24)
+    };
+    if !(64..=255).contains(&index) {
+        return Err(VmError::ArithmeticOverflow);
+    }
+    // Source sqrt_table[i - 64] is exactly floor(sqrt(i) * 512).
+    let table = integer_sqrt(u64::from(index) << 18);
+    let scaled = table
+        .checked_shl(((31 - leading) / 2) as u32)
+        .ok_or(VmError::ArithmeticOverflow)?;
+    i32::try_from(scaled >> 12).map_err(|_| VmError::ArithmeticOverflow)
+}
+
+fn retail_atan_ratio(numerator: u64, denominator: u64) -> i32 {
+    let ratio = if numerator >> 21 != 0 {
+        numerator / (denominator >> 10).max(1)
+    } else {
+        (numerator << 10) / denominator
+    }
+    .min(0x3ff) as usize;
+    let block = ratio / 64;
+    let bit = ratio % 64;
+    let prior = RETAIL_ATAN_INCREMENTS[..block]
+        .iter()
+        .map(|word| word.count_ones())
+        .sum::<u32>();
+    let mask = if bit == 63 {
+        u64::MAX
+    } else {
+        (1_u64 << (bit + 1)) - 1
+    };
+    i32::try_from(prior + (RETAIL_ATAN_INCREMENTS[block] & mask).count_ones())
+        .expect("retail atan table values fit i32")
 }
 
 fn encode_code_reference(address: CodeAddress) -> u32 {
-    CODE_REFERENCE_TAG
-        | match address.segment {
-            CodeSegment::External => 0,
-            CodeSegment::Global => CODE_REFERENCE_GLOBAL,
-        }
-        | (u32::try_from(address.pc).unwrap_or(u32::MAX) & CODE_REFERENCE_PC_MASK)
+    address.to_word()
 }
 
 /// Decoded instruction word.
@@ -427,7 +1266,16 @@ pub enum VmError {
     InternalTableTooLarge(usize),
     ExternalTableTooLarge(usize),
     InvalidInitialStackPointer(u32),
+    InvalidPadPort(usize),
     EntityPathTooLong(usize),
+    EntityPathProgressOutOfBounds {
+        progress: i32,
+        point_count: usize,
+    },
+    InvalidProcessVector(u8),
+    MalformedSolidOctree {
+        offset: usize,
+    },
     ProgramCounterOutOfBounds {
         object: ObjectHandle,
         pc: usize,
@@ -437,6 +1285,12 @@ pub enum VmError {
     InvalidColor(usize),
     InvalidAnimationOffset(usize),
     InvalidAnimationReference(u32),
+    InvalidCodeReference(u32),
+    InvalidOnceCodeSegment(CodeSegment),
+    InvalidStorageReference(u32),
+    InvalidEntryReference(u32),
+    EntryReferenceTableFull,
+    UnsupportedReferenceOperand(u16),
     AnimationDataUnbound,
     InvalidStateProgramCounter {
         state: u16,
@@ -462,6 +1316,15 @@ pub enum VmError {
     ArithmeticOverflow,
     InvalidShift(i32),
     SpawnCountTooLarge(u32),
+    MissingEntryReferencePage(Eid),
+    ConflictingEntryPage {
+        eid: Eid,
+        first: PageIndex,
+        second: PageIndex,
+    },
+    PagingReferenceUnderflow(PageIndex),
+    InvalidPagingOperation(u32),
+    LevelDependentColorSubtype(u8),
     /// Opcode `0x8e` delegates to zone-solid queries whose checked Rust host
     /// is not wired yet. Preserve the packed selector fields so callers can
     /// characterize the exact retail boundary without treating collision as
@@ -472,13 +1335,38 @@ pub enum VmError {
         output_vector: u8,
         operand: u16,
     },
-    /// Opcode `0x26` exposes GOOL storage addresses as scalar words. A future
-    /// host must bind those addresses to validated tagged references before
-    /// they can safely cross paging/audio instructions.
-    UnsupportedInputReference {
-        source: u16,
-        destination: u16,
+    MissingSolidEnvironment(ObjectHandle),
+    /// An active source `object_bounds` candidate requires animation-derived
+    /// local bounds and frame-order registration that are not yet hosted.
+    UnsupportedSolidObjectBounds(ObjectHandle),
+    /// Transform-vector suboperations whose required camera, animation, or
+    /// matrix host state has not yet been made pointer-free remain explicit.
+    UnsupportedTransformVectors {
+        suboperation: u8,
+        input_vector: u8,
+        output_vector: u8,
+        operand: u16,
     },
+    /// Opcodes `0x88`/`0x89` are event-service returns, not ordinary state
+    /// changes. Keep their packed contract visible until nested event-service
+    /// invocation is implemented.
+    UnsupportedEventServiceReturn {
+        opcode: u8,
+        condition_type: u8,
+        return_type: u8,
+        register: u8,
+    },
+    OnceBudgetExhausted(ObjectHandle),
+    UnexpectedOnceHalt {
+        object: ObjectHandle,
+        reason: HaltReason,
+    },
+    TransitionBudgetExhausted(ObjectHandle),
+    UnexpectedTransitionHalt {
+        object: ObjectHandle,
+        reason: HaltReason,
+    },
+    SynchronousStateChangeBudgetExhausted(ObjectHandle),
     UnknownOpcode(u8),
     UnknownControl(u8),
     EffectQueueFull,
@@ -499,6 +1387,13 @@ pub enum HaltReason {
     AnimationWaiting {
         remaining: u8,
     },
+    /// A state-change `once_p` block returned through its suspend link. The
+    /// production runtime consumes this internal synchronous boundary before
+    /// exposing the rebound state to the following frame.
+    OnceCompleted,
+    /// A state transition block returned through the nested frame installed
+    /// by `GoolObjectChangeState`.
+    TransitionCompleted,
     BudgetExhausted,
 }
 
@@ -511,8 +1406,27 @@ pub struct Execution {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CallFrame {
     return_address: CodeAddress,
+    return_halted: bool,
     argument_base: usize,
     previous_frame_base: usize,
+    behavior: ReturnBehavior,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReturnBehavior {
+    Continue,
+    SuspendOnce {
+        state_stamp: u32,
+    },
+    SuspendTransition {
+        previous_animation_wait: Option<AnimationWait>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingOnce {
+    address: CodeAddress,
+    state_stamp: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -535,12 +1449,21 @@ pub struct VmObject {
     external: Vec<u32>,
     registers: Vec<u32>,
     colors: [u16; COLOR_COUNT],
+    base_colors: [u16; COLOR_COUNT],
+    entity_spawn_flags: Option<u16>,
+    entity_path: Option<RetailEntityPath>,
+    solid_environment: Option<RetailSolidEnvironment>,
+    is_main_player: bool,
+    page_count: u32,
+    resident_pages: Vec<PageIndex>,
+    entry_pages: Vec<(Eid, PageIndex)>,
     animation_data: Vec<u8>,
     animation_frame: u32,
     animation_wait: Option<AnimationWait>,
     stack: Vec<u32>,
     state_argument_count: usize,
     call_stack: Vec<CallFrame>,
+    pending_once: Option<PendingOnce>,
     links: [Option<ObjectHandle>; 8],
     state: u16,
     state_flags_by_index: Vec<u32>,
@@ -568,12 +1491,21 @@ impl VmObject {
             external: vec![0; TABLE_WORD_COUNT],
             registers: vec![0; REGISTER_COUNT],
             colors: [0; COLOR_COUNT],
+            base_colors: [0; COLOR_COUNT],
+            entity_spawn_flags: None,
+            entity_path: None,
+            solid_environment: None,
+            is_main_player: false,
+            page_count: 0,
+            resident_pages: Vec::new(),
+            entry_pages: Vec::new(),
             animation_data: Vec::new(),
             animation_frame: 0,
             animation_wait: None,
             stack: Vec::with_capacity(MAX_STACK_WORDS),
             state_argument_count: 0,
             call_stack: Vec::with_capacity(MAX_CALL_DEPTH),
+            pending_once: None,
             links: [Some(handle), None, None, None, None, None, None, None],
             state: 0,
             state_flags_by_index: Vec::new(),
@@ -615,6 +1547,9 @@ impl VmObject {
         object.internal[..program.internal_words().len()].copy_from_slice(program.internal_words());
         object.external[..program.external_words().len()].copy_from_slice(program.external_words());
         object.bind_animation_data(program.animation_data());
+        object.page_count = program.page_count();
+        object.resident_pages = program.resident_pages().to_vec();
+        object.entry_pages = program.entry_pages().to_vec();
         object.state = program.state_index();
         object.state_flags_by_index = program.states().iter().map(|state| state.flags).collect();
         object.set_register(process_register::STATE_FLAGS, program.state().flags)?;
@@ -646,6 +1581,18 @@ impl VmObject {
             segment: self.code_segment,
             pc: self.pc,
         }
+    }
+
+    fn checked_code_address(&self, word: u32) -> Result<CodeAddress, VmError> {
+        let address = CodeAddress::from_word(word).ok_or(VmError::InvalidCodeReference(word))?;
+        let code_len = match address.segment {
+            CodeSegment::External => self.code.len(),
+            CodeSegment::Global => self.global_code.len(),
+        };
+        if address.pc >= code_len {
+            return Err(VmError::InvalidCodeReference(word));
+        }
+        Ok(address)
     }
 
     #[must_use]
@@ -808,10 +1755,9 @@ impl VmObject {
         self.set_register(process_register::STATE_STAMP, frame_stamp)
     }
 
-    fn mark_retail_state_change(&mut self, frame_stamp: u32) -> Result<(), VmError> {
+    fn mark_retail_state_change(&mut self) -> Result<(), VmError> {
         let status_a = self.register(process_register::STATUS_A)? | INITIAL_STATUS_A;
-        self.set_register(process_register::STATUS_A, status_a)?;
-        self.set_register(process_register::STATE_STAMP, frame_stamp)
+        self.set_register(process_register::STATUS_A, status_a)
     }
 
     /// Applies the descriptor-owned fields written by `GoolObjectSpawn` and
@@ -821,6 +1767,22 @@ impl VmObject {
         entity: &ZoneEntity,
         zone_origin: [i32; 3],
     ) -> Result<(), VmError> {
+        self.initialize_retail_entity_path(
+            entity,
+            RetailEntityPathSpace::Zone {
+                origin: zone_origin,
+            },
+        )
+    }
+
+    /// Owns the validated entity path and its parent-entry coordinate space.
+    /// No relocated ZDAT/MDAT pointers cross into the VM.
+    pub fn initialize_retail_entity_path(
+        &mut self,
+        entity: &ZoneEntity,
+        path_space: RetailEntityPathSpace,
+    ) -> Result<(), VmError> {
+        self.entity_spawn_flags = Some(entity.spawn_flags);
         let path_length = u32::try_from(entity.path_points.len())
             .map_err(|_| VmError::EntityPathTooLong(entity.path_points.len()))?;
         let path_length = path_length
@@ -830,6 +1792,10 @@ impl VmObject {
             .path_points
             .first()
             .ok_or(VmError::EntityPathTooLong(0))?;
+        self.entity_path = Some(RetailEntityPath {
+            space: path_space,
+            points: entity.path_points.clone(),
+        });
 
         self.set_register(process_register::PID_FLAGS, u32::from(entity.id) << 8)?;
         self.set_register(process_register::PATH_PROGRESS, 0)?;
@@ -849,9 +1815,9 @@ impl VmObject {
 
         let mut transform = self.retail_transform()?;
         transform.translation = [
-            retail_entity_coordinate(first.x, zone_origin[0]),
-            retail_entity_coordinate(first.y, zone_origin[1]),
-            retail_entity_coordinate(first.z, zone_origin[2]),
+            retail_path_coordinate(first.x, path_space, 0),
+            retail_path_coordinate(first.y, path_space, 1),
+            retail_path_coordinate(first.z, path_space, 2),
         ];
         if entity.spawn_flags & 1 == 0 {
             transform.rotation_yxz = entity.initializer.map(i32::from);
@@ -896,8 +1862,98 @@ impl VmObject {
         })
     }
 
+    fn process_vector(&self, index: u8) -> Result<[i32; 3], VmError> {
+        let index = usize::from(index);
+        if index >= PROCESS_VECTOR_COUNT {
+            return Err(VmError::InvalidProcessVector(index as u8));
+        }
+        let base = PROCESS_VECTOR_BASE + index * PROCESS_VECTOR_WORDS;
+        Ok([
+            self.register(base)? as i32,
+            self.register(base + 1)? as i32,
+            self.register(base + 2)? as i32,
+        ])
+    }
+
+    fn set_process_vector(&mut self, index: u8, vector: [i32; 3]) -> Result<(), VmError> {
+        let index = usize::from(index);
+        if index >= PROCESS_VECTOR_COUNT {
+            return Err(VmError::InvalidProcessVector(index as u8));
+        }
+        let base = PROCESS_VECTOR_BASE + index * PROCESS_VECTOR_WORDS;
+        for (component, value) in vector.into_iter().enumerate() {
+            self.set_register(base + component, value as u32)?;
+        }
+        Ok(())
+    }
+
+    fn orient_process_vector_on_path(
+        &mut self,
+        progress: i32,
+        vector_index: u8,
+    ) -> Result<(), VmError> {
+        // GoolOpTransformVectors checks `process.entity`; runtime children
+        // therefore retain their vector unchanged after B has been translated.
+        let Some(path) = self.entity_path.as_ref() else {
+            return Ok(());
+        };
+        let location = self.process_vector(vector_index)?;
+        let status_a = self.register(process_register::STATUS_A)?;
+        let status_b = self.register(process_register::STATUS_B)?;
+        let object_progress = self.register(process_register::PATH_PROGRESS)? as i32;
+        let inertia_limit = self.register(process_register::UNKNOWN_154)? as i32;
+        let misc_c_y = self.register(process_register::MODE_FLAGS_B)? as i32;
+        let rotation_z = self.register(process_register::ROTATION_Z)? as i32;
+        // `misc_b` is an `ang` in Y,X,Z memory order. Its final two words are
+        // also `target_rot.x` and `target_rot.y` in the overlapping union.
+        let target_rotation_x = self.register(process_register::MISC_B_X)? as i32;
+        let target_rotation_y = self.register(process_register::MISC_B_Z)? as i32;
+        let oriented = orient_retail_path(
+            path,
+            progress,
+            PathOrientationInputs {
+                location,
+                status_a,
+                status_b,
+                object_progress,
+                inertia_limit,
+                misc_c_y,
+                rotation_z,
+                target_rotation_x,
+                target_rotation_y,
+            },
+        )?;
+
+        self.set_process_vector(vector_index, oriented.location)?;
+        self.set_register(process_register::FLOOR_Y, oriented.location[1] as u32)?;
+        self.set_register(process_register::STATUS_A, oriented.status_a)?;
+        self.set_register(process_register::MODE_FLAGS_B, oriented.misc_c_y as u32)?;
+        self.set_register(process_register::ROTATION_Z, oriented.rotation_z as u32)?;
+        self.set_register(
+            process_register::MISC_B_X,
+            oriented.target_rotation_x as u32,
+        )?;
+        self.set_register(
+            process_register::MISC_B_Z,
+            oriented.target_rotation_y as u32,
+        )
+    }
+
     pub fn set_retail_colors(&mut self, colors: [u16; COLOR_COUNT]) {
+        self.base_colors = colors;
         self.colors = colors;
+    }
+
+    /// Owns the current ZDAT solid-query inputs without retaining relocated
+    /// entry or octree pointers from the source runtime.
+    pub fn bind_retail_solid_environment(&mut self, environment: RetailSolidEnvironment) {
+        self.solid_environment = Some(environment);
+    }
+
+    /// Records the runtime identity represented by retail's global `crash`
+    /// pointer without placing a native pointer in the VM process image.
+    pub fn set_main_player_identity(&mut self, is_main_player: bool) {
+        self.is_main_player = is_main_player;
     }
 
     #[must_use]
@@ -905,16 +1961,45 @@ impl VmObject {
         &self.colors
     }
 
+    fn scale_colors_for_entity_node(&mut self) -> Result<(), VmError> {
+        let Some(spawn_flags) = self.entity_spawn_flags else {
+            // `ZoneColorsScaleSeekByEntityNode` returns immediately for
+            // runtime children and every other object without a ZDAT entity.
+            return Ok(());
+        };
+        let node = (spawn_flags >> 3) as i16;
+        if node == -1 {
+            return Ok(());
+        }
+        let subtype = if self.is_main_player && self.state_flags & 0x20 != 0 {
+            // `ZoneColorsScaleSeek` forces subtype 0x37 (100 percent) for
+            // Crash while this state flag is armed.
+            0x37
+        } else {
+            (((node as u16) & 0x03f0) >> 4) as u8
+        };
+        self.colors = scaled_retail_colors(&self.base_colors, i32::from(subtype))?;
+        Ok(())
+    }
+
     /// Installs arguments exactly where retail frame-relative operands expect
     /// them: immediately below the initial frame pointer. The runtime calls
     /// this once after binding a newly spawned object and before interpreting
     /// its state code.
     pub fn initialize_arguments(&mut self, arguments: &[u32]) -> Result<(), VmError> {
+        self.initialize_state_frame(arguments, true)
+    }
+
+    fn initialize_state_frame(
+        &mut self,
+        arguments: &[u32],
+        push_initial_wait: bool,
+    ) -> Result<(), VmError> {
         let stack_origin = usize::try_from(self.initial_stack_pointer)
             .map_err(|_| VmError::InvalidInitialStackPointer(self.initial_stack_pointer))?;
         let required = arguments
             .len()
-            .checked_add(INITIAL_FRAME_WORDS)
+            .checked_add(STATE_FRAME_WORDS + usize::from(push_initial_wait))
             .ok_or(VmError::StackOverflow(self.handle))?;
         if required > MAX_STACK_WORDS
             || stack_origin
@@ -926,6 +2011,7 @@ impl VmObject {
         self.stack.clear();
         self.state_argument_count = arguments.len();
         self.call_stack.clear();
+        self.pending_once = None;
         for argument in arguments {
             self.push_stack_word(*argument)?;
         }
@@ -941,11 +2027,15 @@ impl VmObject {
         self.push_stack_word(INITIAL_FRAME_FLAGS)?;
         self.push_stack_word(return_pc)?;
         self.push_stack_word(prior_rsp)?;
-        self.push_stack_word(0)?;
-        self.animation_wait = Some(AnimationWait {
-            stamp: 0,
-            frames: 0,
-        });
+        if push_initial_wait {
+            self.push_stack_word(0)?;
+            self.animation_wait = Some(AnimationWait {
+                stamp: 0,
+                frames: 0,
+            });
+        } else {
+            self.animation_wait = None;
+        }
         Ok(())
     }
 
@@ -1003,6 +2093,7 @@ impl VmObject {
         &mut self,
         program: &VmStateProgram,
         arguments: &[u32],
+        frame_stamp: u32,
     ) -> Result<(), VmError> {
         if self.state != program.state_index {
             return Err(VmError::StateProgramMismatch {
@@ -1010,13 +2101,51 @@ impl VmObject {
                 provided: program.state_index,
             });
         }
-        if arguments.len() > MAX_STACK_WORDS {
+        let once_word = self.register(process_register::ONCE_POINTER)?;
+        let once = if once_word == 0 {
+            None
+        } else {
+            let address = self.checked_code_address(once_word)?;
+            if address.segment != CodeSegment::Global {
+                return Err(VmError::InvalidOnceCodeSegment(address.segment));
+            }
+            Some(PendingOnce {
+                address,
+                state_stamp: frame_stamp,
+            })
+        };
+        let required = arguments
+            .len()
+            .checked_add(if once.is_some() {
+                STATE_FRAME_WORDS + ONCE_FRAME_WORDS
+            } else {
+                INITIAL_FRAME_WORDS
+            })
+            .ok_or(VmError::StackOverflow(self.handle))?;
+        if required > MAX_STACK_WORDS {
             return Err(VmError::StackOverflow(self.handle));
         }
 
         self.code.clone_from(&program.code);
         self.external.fill(0);
         self.external[..program.external.len()].copy_from_slice(&program.external);
+        self.page_count = self.page_count.max(program.page_count);
+        for page in &program.resident_pages {
+            if !self.resident_pages.contains(page) {
+                self.resident_pages.push(*page);
+            }
+        }
+        for (eid, page) in &program.entry_pages {
+            if let Some((_, known_page)) = self
+                .entry_pages
+                .iter_mut()
+                .find(|(known_eid, _)| known_eid == eid)
+            {
+                *known_page = *page;
+            } else {
+                self.entry_pages.push((*eid, *page));
+            }
+        }
         self.set_register(process_register::STATE_FLAGS, program.state.flags)?;
         self.set_register(process_register::STATUS_C, program.state.status_c)?;
         self.event_pc = program.event_pc;
@@ -1025,7 +2154,17 @@ impl VmObject {
         self.pc = program.code_pc.unwrap_or(0);
         self.halted = program.code_pc.is_none();
         self.animation_wait = None;
-        self.initialize_arguments(arguments)
+        // Retail clears `once_p` only after the target external program and
+        // state PCs have been rebound, but before replacing fp/sp.
+        self.set_register(process_register::ONCE_POINTER, 0)?;
+        self.initialize_state_frame(arguments, once.is_none())?;
+        self.mark_retail_state_change()?;
+        if let Some(once) = once {
+            self.pending_once = Some(once);
+        } else {
+            self.set_register(process_register::STATE_STAMP, frame_stamp)?;
+        }
+        Ok(())
     }
 
     pub fn set_internal(&mut self, index: usize, value: u32) -> Result<(), VmError> {
@@ -1078,6 +2217,22 @@ pub struct Machine {
     ticks_per_frame: i32,
     draw_count: u32,
     frames_elapsed: u32,
+    pads: [RetailPadSnapshot; RETAIL_PAD_COUNT],
+    operand_constants: [u32; 2],
+    input_constant_index: usize,
+    output_constant_index: usize,
+    // Function-static vectors from `GoolOpReactSolidSurfaces`. They are shared
+    // across objects exactly like the source globals, but remain ordinary
+    // deterministic machine state rather than hidden Rust statics.
+    solid_trans3: [i32; 3],
+    solid_trans4: [i32; 3],
+    paging_page_capacity: u32,
+    entry_pages: BTreeMap<Eid, PageIndex>,
+    paging_page_references: BTreeMap<PageIndex, u32>,
+    paging_baseline_pages: BTreeSet<PageIndex>,
+    paging_loaded_pages: BTreeSet<PageIndex>,
+    paging_resolved_pages: BTreeSet<PageIndex>,
+    paging_entry_references: Vec<(Eid, PageIndex)>,
 }
 
 impl Machine {
@@ -1091,6 +2246,19 @@ impl Machine {
             ticks_per_frame: 34,
             draw_count: 0,
             frames_elapsed: 0,
+            pads: [RetailPadSnapshot::default(); RETAIL_PAD_COUNT],
+            operand_constants: [0; 2],
+            input_constant_index: 0,
+            output_constant_index: 0,
+            solid_trans3: [0; 3],
+            solid_trans4: [0; 3],
+            paging_page_capacity: 0,
+            entry_pages: BTreeMap::new(),
+            paging_page_references: BTreeMap::new(),
+            paging_baseline_pages: BTreeSet::new(),
+            paging_loaded_pages: BTreeSet::new(),
+            paging_resolved_pages: BTreeSet::new(),
+            paging_entry_references: Vec::new(),
         }
     }
 
@@ -1119,6 +2287,30 @@ impl Machine {
         self.frames_elapsed
     }
 
+    /// Replaces one complete retail pad history snapshot.
+    ///
+    /// `crust-platform` advances the five history words once per simulation
+    /// frame; the VM merely consumes that already-normalized state.
+    pub fn set_pad_snapshot(
+        &mut self,
+        port: usize,
+        snapshot: RetailPadSnapshot,
+    ) -> Result<(), VmError> {
+        *self
+            .pads
+            .get_mut(port)
+            .ok_or(VmError::InvalidPadPort(port))? = snapshot;
+        Ok(())
+    }
+
+    /// Returns one complete retail pad history snapshot.
+    pub fn pad_snapshot(&self, port: usize) -> Result<RetailPadSnapshot, VmError> {
+        self.pads
+            .get(port)
+            .copied()
+            .ok_or(VmError::InvalidPadPort(port))
+    }
+
     pub fn insert_object(&mut self, object: VmObject) -> Result<(), VmError> {
         let handle = object.handle;
         if self.objects.contains_key(&handle) {
@@ -1127,7 +2319,69 @@ impl Machine {
         if self.objects.len() == MAX_OBJECTS {
             return Err(VmError::TooManyObjects);
         }
+        self.register_paging_metadata(
+            object.page_count,
+            &object.resident_pages,
+            &object.entry_pages,
+        )?;
         self.objects.insert(handle, object);
+        Ok(())
+    }
+
+    /// Installs or replaces one validated VM object while preserving all
+    /// stream-level paging metadata. Runtime pool reuse must take this path;
+    /// assigning through `object_mut` would bypass EID/page registration.
+    pub fn upsert_object(&mut self, object: VmObject) -> Result<(), VmError> {
+        let handle = object.handle;
+        if !self.objects.contains_key(&handle) && self.objects.len() == MAX_OBJECTS {
+            return Err(VmError::TooManyObjects);
+        }
+        self.register_paging_metadata(
+            object.page_count,
+            &object.resident_pages,
+            &object.entry_pages,
+        )?;
+        self.objects.insert(handle, object);
+        Ok(())
+    }
+
+    fn register_paging_metadata(
+        &mut self,
+        page_count: u32,
+        resident_pages: &[PageIndex],
+        entry_pages: &[(Eid, PageIndex)],
+    ) -> Result<(), VmError> {
+        for (eid, page) in entry_pages {
+            if let Some(first) = self.entry_pages.get(eid).copied()
+                && first != *page
+            {
+                return Err(VmError::ConflictingEntryPage {
+                    eid: *eid,
+                    first,
+                    second: *page,
+                });
+            }
+        }
+        self.paging_page_capacity = self.paging_page_capacity.max(page_count);
+        for (eid, page) in entry_pages {
+            self.entry_pages.insert(*eid, *page);
+        }
+        // The browser source loads every NSF page into a physical type-1
+        // page at NSInit. Residency is therefore independent of reference
+        // count; count zero makes a slot available but does not unload it.
+        for index in 0..page_count {
+            let page = PageIndex::new(index);
+            self.paging_baseline_pages.insert(page);
+            self.paging_loaded_pages.insert(page);
+        }
+        for page in resident_pages {
+            self.paging_baseline_pages.insert(*page);
+            self.paging_loaded_pages.insert(*page);
+            // Global/external pages are translated as part of binding. Other
+            // physical type-1 pages stay resident but their entry offsets are
+            // not resolved until NSOpen translates that page.
+            self.paging_resolved_pages.insert(*page);
+        }
         Ok(())
     }
 
@@ -1151,9 +2405,216 @@ impl Machine {
         arguments: &[u32],
     ) -> Result<(), VmError> {
         let frame_stamp = self.frames_elapsed;
+        self.register_paging_metadata(
+            program.page_count,
+            &program.resident_pages,
+            &program.entry_pages,
+        )?;
         let object = self.object_mut(handle)?;
-        object.rebind_state_program(program, arguments)?;
-        object.mark_retail_state_change(frame_stamp)
+        object.rebind_state_program(program, arguments, frame_stamp)
+    }
+
+    /// Starts the `once_p` block captured by the most recent state rebind.
+    /// The nested frame is byte-for-byte equivalent to
+    /// `GoolObjectPushFrame(obj, 0, 0xffff)` while its return behavior models
+    /// `SUSPEND_ON_RET | SUSPEND_ON_RETLNK | STATUS_PRESERVE`.
+    fn begin_pending_once(&mut self, handle: ObjectHandle) -> Result<bool, VmError> {
+        let Some(pending) = self.object_mut(handle)?.pending_once.take() else {
+            return Ok(false);
+        };
+        if pending.address.segment != CodeSegment::Global {
+            return Err(VmError::InvalidOnceCodeSegment(pending.address.segment));
+        }
+        let object = self.object(handle)?;
+        if pending.address.pc >= object.global_code.len() {
+            return Err(VmError::InvalidCodeReference(pending.address.to_word()));
+        }
+        if object.call_stack.len() == MAX_CALL_DEPTH {
+            return Err(VmError::CallStackOverflow(handle));
+        }
+        if object.stack.len() + ONCE_FRAME_WORDS > MAX_STACK_WORDS {
+            return Err(VmError::StackOverflow(handle));
+        }
+
+        let stack_origin = object.initial_stack_pointer as usize;
+        let stack_len = object.stack.len();
+        let stack_pointer = stack_origin
+            .checked_add(stack_len)
+            .ok_or(VmError::StackOverflow(handle))?;
+        if stack_pointer + ONCE_FRAME_WORDS > REGISTER_COUNT {
+            return Err(VmError::StackOverflow(handle));
+        }
+        let return_address = object.code_address();
+        let return_halted = object.halted;
+        let previous_frame_base = object.frame_base;
+        let prior_rsp_bytes = stack_pointer
+            .checked_mul(4)
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let prior_rfp_bytes = previous_frame_base
+            .checked_mul(4)
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let frame = CallFrame {
+            return_address,
+            return_halted,
+            argument_base: stack_len,
+            previous_frame_base,
+            behavior: ReturnBehavior::SuspendOnce {
+                state_stamp: pending.state_stamp,
+            },
+        };
+        {
+            let object = self.object_mut(handle)?;
+            object.frame_base = stack_pointer;
+            object.call_stack.push(frame);
+        }
+        self.push(handle, INITIAL_FRAME_FLAGS)?;
+        self.push(handle, return_address.to_word())?;
+        self.push(
+            handle,
+            (u32::from(prior_rfp_bytes) << 16) | u32::from(prior_rsp_bytes),
+        )?;
+        let object = self.object_mut(handle)?;
+        object.code_segment = pending.address.segment;
+        object.pc = pending.address.pc;
+        object.halted = false;
+        Ok(true)
+    }
+
+    /// Executes a captured state-change once block synchronously, including
+    /// any already-supported host effects. Returns `Ok(None)` when the state
+    /// change did not carry an armed `once_p` pointer.
+    pub fn run_pending_once_with_host_effects<F>(
+        &mut self,
+        handle: ObjectHandle,
+        mut host: F,
+    ) -> Result<Option<Execution>, VmError>
+    where
+        F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
+    {
+        if !self.begin_pending_once(handle)? {
+            return Ok(None);
+        }
+        let execution = self.run_with_host_effects_mode(
+            handle,
+            MAX_ONCE_INSTRUCTIONS,
+            &mut host,
+            false,
+            false,
+        )?;
+        match execution.reason {
+            HaltReason::OnceCompleted => Ok(Some(execution)),
+            HaltReason::BudgetExhausted => Err(VmError::OnceBudgetExhausted(handle)),
+            reason => Err(VmError::UnexpectedOnceHalt {
+                object: handle,
+                reason,
+            }),
+        }
+    }
+
+    /// Pushes and enters the target state's external transition block exactly
+    /// as `GoolObjectChangeState` does after installing the initial wait word
+    /// and recording `state_stamp`.
+    fn begin_transition_block(&mut self, handle: ObjectHandle) -> Result<bool, VmError> {
+        let object = self.object(handle)?;
+        let Some(transition_pc) = object.transition_pc else {
+            return Ok(false);
+        };
+        if transition_pc >= object.code.len() {
+            return Err(VmError::InvalidJump {
+                object: handle,
+                target: transition_pc as i64,
+            });
+        }
+        if object.call_stack.len() == MAX_CALL_DEPTH {
+            return Err(VmError::CallStackOverflow(handle));
+        }
+        if object.stack.len() + ONCE_FRAME_WORDS > MAX_STACK_WORDS {
+            return Err(VmError::StackOverflow(handle));
+        }
+
+        let stack_origin = object.initial_stack_pointer as usize;
+        let stack_len = object.stack.len();
+        let stack_pointer = stack_origin
+            .checked_add(stack_len)
+            .ok_or(VmError::StackOverflow(handle))?;
+        if stack_pointer + ONCE_FRAME_WORDS > REGISTER_COUNT {
+            return Err(VmError::StackOverflow(handle));
+        }
+        let return_address = object.code_address();
+        let return_halted = object.halted;
+        let previous_frame_base = object.frame_base;
+        let previous_animation_wait = object.animation_wait;
+        let prior_rsp_bytes = stack_pointer
+            .checked_mul(4)
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let prior_rfp_bytes = previous_frame_base
+            .checked_mul(4)
+            .and_then(|bytes| u16::try_from(bytes).ok())
+            .ok_or(VmError::StackOverflow(handle))?;
+        let frame = CallFrame {
+            return_address,
+            return_halted,
+            argument_base: stack_len,
+            previous_frame_base,
+            behavior: ReturnBehavior::SuspendTransition {
+                previous_animation_wait,
+            },
+        };
+        {
+            let object = self.object_mut(handle)?;
+            object.frame_base = stack_pointer;
+            object.call_stack.push(frame);
+        }
+        self.push(handle, INITIAL_FRAME_FLAGS)?;
+        self.push(handle, return_address.to_word())?;
+        self.push(
+            handle,
+            (u32::from(prior_rfp_bytes) << 16) | u32::from(prior_rsp_bytes),
+        )?;
+        let object = self.object_mut(handle)?;
+        object.code_segment = CodeSegment::External;
+        object.pc = transition_pc;
+        object.halted = false;
+        Ok(true)
+    }
+
+    /// Executes the rebound state's transition block synchronously, including
+    /// supported host effects. Animation opcodes mutate animation state but do
+    /// not suspend this invocation because retail supplies only
+    /// `SUSPEND_ON_RET | SUSPEND_ON_RETLNK` here.
+    ///
+    /// A returned [`HaltReason::StateChanged`] is intentional: the production
+    /// runtime must immediately bind that state before exposing the object to
+    /// the next cooperative frame.
+    pub fn run_transition_with_host_effects<F>(
+        &mut self,
+        handle: ObjectHandle,
+        mut host: F,
+    ) -> Result<Option<Execution>, VmError>
+    where
+        F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
+    {
+        if !self.begin_transition_block(handle)? {
+            return Ok(None);
+        }
+        let execution = self.run_with_host_effects_mode(
+            handle,
+            MAX_TRANSITION_INSTRUCTIONS,
+            &mut host,
+            false,
+            false,
+        )?;
+        match execution.reason {
+            HaltReason::TransitionCompleted | HaltReason::StateChanged(_) => Ok(Some(execution)),
+            HaltReason::BudgetExhausted => Err(VmError::TransitionBudgetExhausted(handle)),
+            reason => Err(VmError::UnexpectedTransitionHalt {
+                object: handle,
+                reason,
+            }),
+        }
     }
 
     #[must_use]
@@ -1195,12 +2656,26 @@ impl Machine {
         &mut self,
         handle: ObjectHandle,
         budget: usize,
-        mut host: F,
+        host: F,
     ) -> Result<Execution, VmError>
     where
         F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
     {
-        if let Some(execution) = self.animation_gate(handle)? {
+        self.run_with_host_effects_mode(handle, budget, host, true, true)
+    }
+
+    fn run_with_host_effects_mode<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
+        mut host: F,
+        suspend_on_animation: bool,
+        apply_animation_gate: bool,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
+    {
+        if apply_animation_gate && let Some(execution) = self.animation_gate(handle)? {
             return Ok(execution);
         }
         let mut condition = false;
@@ -1216,6 +2691,9 @@ impl Machine {
                         return Err(VmError::MissingHostEffect);
                     }
                     host(self, &effect)?;
+                    continue;
+                }
+                if !suspend_on_animation && matches!(reason, HaltReason::AnimationChanged { .. }) {
                     continue;
                 }
                 return Ok(Execution {
@@ -1401,6 +2879,25 @@ impl Machine {
                 let value = !self.read_operand(handle, a)?;
                 self.write_operand(handle, b, value)?;
             }
+            0x18 => {
+                let offset = (word & 0x3fff) as usize;
+                if offset >= self.object(handle)?.global_code.len() {
+                    return Err(VmError::InvalidJump {
+                        object: handle,
+                        target: offset as i64,
+                    });
+                }
+                let reference = encode_code_reference(CodeAddress {
+                    segment: CodeSegment::Global,
+                    pc: offset,
+                });
+                let register = ((word >> 14) & 0x3f) as usize;
+                if register == 0x1f {
+                    self.push(handle, reference)?;
+                } else {
+                    self.object_mut(handle)?.set_register(register, reference)?;
+                }
+            }
             0x19 => {
                 let value = self.read_operand(handle, a)? as i32;
                 self.write_operand(
@@ -1408,6 +2905,10 @@ impl Machine {
                     b,
                     value.checked_abs().ok_or(VmError::ArithmeticOverflow)? as u32,
                 )?;
+            }
+            0x1a => {
+                let result = self.test_controls(word, 0)?;
+                self.push(handle, result)?;
             }
             0x1b => {
                 let acceleration = self.read_operand(handle, a)? as i32;
@@ -1505,10 +3006,18 @@ impl Machine {
                 self.push(handle, u32::from(current.wrapping_add(delta).raw()))?;
             }
             0x26 => {
-                return Err(VmError::UnsupportedInputReference {
-                    source: instruction.operand_a,
-                    destination: instruction.operand_b,
-                });
+                // Retail translates A before B, then pushes B's address and
+                // (when non-null) A's address. Tagged storage references keep
+                // the same aliasing and stack-pop behavior without exposing
+                // native pointers.
+                let source = self.input_reference(handle, a)?;
+                let destination = self.input_reference(handle, b)?;
+                if let Some(destination) = destination {
+                    self.push(handle, destination.to_word())?;
+                    if let Some(source) = source {
+                        self.push(handle, source.to_word())?;
+                    }
+                }
             }
             0x27 => {
                 if b != Operand::Null {
@@ -1612,6 +3121,31 @@ impl Machine {
                     wait: wait as u8,
                 }));
             }
+            0x85 => {
+                // Retail translates B once before dispatching the packed
+                // transform selector. For stack operands that pop must occur
+                // even when the object has no entity path.
+                let input = self.read_optional_input(handle, b)?;
+                let suboperation = ((word >> 18) & 7) as u8;
+                let input_vector = ((word >> 12) & 7) as u8;
+                let output_vector = ((word >> 15) & 7) as u8;
+                match suboperation {
+                    0 => {
+                        if let Some(progress) = input {
+                            self.object_mut(handle)?
+                                .orient_process_vector_on_path(progress as i32, input_vector)?;
+                        }
+                    }
+                    _ => {
+                        return Err(VmError::UnsupportedTransformVectors {
+                            suboperation,
+                            input_vector,
+                            output_vector,
+                            operand: instruction.operand_b,
+                        });
+                    }
+                }
+            }
             0x86 => {
                 let argument_count = ((word >> 20) & 0x0f) as usize;
                 let target = (word & 0x3fff) as usize;
@@ -1640,13 +3174,12 @@ impl Machine {
                 })?;
             }
             0x88 | 0x89 => {
-                let state = (self.read_operand(handle, b)? >> 8) as u16;
-                self.object_mut(handle)?.state = state;
-                self.emit(VmEffect::StateChanged {
-                    object: handle,
-                    state,
-                })?;
-                return Ok(Some(HaltReason::StateChanged(state)));
+                return Err(VmError::UnsupportedEventServiceReturn {
+                    opcode: instruction.opcode,
+                    condition_type: ((word >> 20) & 3) as u8,
+                    return_type: ((word >> 22) & 3) as u8,
+                    register: ((word >> 14) & 0x3f) as u8,
+                });
             }
             0x8a | 0x91 => {
                 if self.spawn_children(handle, word, instruction.opcode == 0x91)? {
@@ -1654,13 +3187,7 @@ impl Machine {
                 }
             }
             0x8b => {
-                let open = self.read_operand(handle, a)? != 0;
-                let reference = self.read_operand(handle, b)?;
-                self.emit(VmEffect::Paging {
-                    object: handle,
-                    open,
-                    reference,
-                })?;
+                self.paging_operation(handle, a, b)?;
             }
             0x8c => {
                 let voice = self.read_operand(handle, a)?;
@@ -1681,16 +3208,404 @@ impl Machine {
                 })?;
             }
             0x8e => {
-                return Err(VmError::UnsupportedSolidSurface {
-                    suboperation: ((word >> 18) & 7) as u8,
-                    input_vector: ((word >> 12) & 7) as u8,
-                    output_vector: ((word >> 15) & 7) as u8,
-                    operand: instruction.operand_b,
-                });
+                let suboperation = ((word >> 18) & 7) as u8;
+                let input_vector = ((word >> 12) & 7) as u8;
+                let output_vector = ((word >> 15) & 7) as u8;
+                // The source interpreter translates B once through each of
+                // the independent input/output constant cursors before the
+                // solid-surface switch, even for color-scale suboperation 6.
+                // Preserve those shared-buffer alias and stack-SP effects.
+                let _ = self.input_reference(handle, b)?;
+                let output_reference = self.output_reference(handle, b)?;
+                if suboperation == 6 {
+                    self.object_mut(handle)?.scale_colors_for_entity_node()?;
+                } else if suboperation == 1 {
+                    self.react_solid_surface_suboperation_one(
+                        handle,
+                        input_vector,
+                        output_vector,
+                        output_reference,
+                    )?;
+                } else if suboperation == 3 {
+                    self.react_solid_surface_suboperation_three(
+                        handle,
+                        input_vector,
+                        output_vector,
+                        output_reference,
+                    )?;
+                } else {
+                    return Err(VmError::UnsupportedSolidSurface {
+                        suboperation,
+                        input_vector,
+                        output_vector,
+                        operand: instruction.operand_b,
+                    });
+                }
             }
             opcode => return Err(VmError::UnknownOpcode(opcode)),
         }
         Ok(None)
+    }
+
+    fn potential_solid_bound_candidate<F>(
+        &self,
+        predicate: F,
+    ) -> Result<Option<ObjectHandle>, VmError>
+    where
+        F: Fn(u32) -> bool,
+    {
+        for (candidate, object) in &self.objects {
+            if predicate(object.register(process_register::STATUS_B)?) {
+                return Ok(Some(*candidate));
+            }
+        }
+        Ok(None)
+    }
+
+    fn react_solid_surface_suboperation_one(
+        &mut self,
+        handle: ObjectHandle,
+        input_vector: u8,
+        output_vector: u8,
+        output_reference: Option<StorageReference>,
+    ) -> Result<(), VmError> {
+        // Like every source case, suboperation one materializes this copy even
+        // though it never subsequently consumes it.
+        let _input = self.object(handle)?.process_vector(input_vector)?;
+        let translation = self.object(handle)?.process_vector(0)?;
+        let environment = self
+            .object(handle)?
+            .solid_environment
+            .clone()
+            .ok_or(VmError::MissingSolidEnvironment(handle))?;
+        let parent = self.object(handle)?.links[1];
+        let player_related = if self.object(handle)?.is_main_player {
+            true
+        } else if let Some(parent) = parent {
+            self.object(parent)?.is_main_player
+        } else {
+            false
+        };
+
+        // Crash and its children first run `ZoneFindNearestObjectNode2` on a
+        // throwaway transform. Its status gate is source-certain. The C body
+        // then reads uninitialized `va`/`vb` if any matching frame bound is
+        // active; never recreate that undefined behavior from arbitrary live
+        // object transforms. With no potential candidate, only the octree and
+        // deterministic parent-size side effect remain.
+        if player_related
+            && self.object(handle)?.register(process_register::STATUS_B)? & 0x0400_0000 != 0
+        {
+            let (node, _) = find_retail_solid_node(&environment, translation, 1, 0)?;
+            if let Some(candidate) =
+                self.potential_solid_bound_candidate(|status| status & 0x4002_0000 == 0x0002_0000)?
+            {
+                return Err(VmError::UnsupportedSolidObjectBounds(candidate));
+            }
+            let parent = parent.ok_or(VmError::MissingLink {
+                object: handle,
+                link: 1,
+            })?;
+            let increment: u32 = if self.object(parent)?.state_flags & 0x18 != 0 {
+                0
+            } else {
+                0x18
+            };
+            let size = node.map_or(increment, |node| {
+                let index = usize::from((node & 0x3c00) >> 10);
+                increment.wrapping_add(RETAIL_SIZE_MAP[index] as u32)
+            });
+            self.object_mut(parent)?
+                .set_register(process_register::SIZE, size)?;
+        }
+
+        // The second query is unconditional, writes its selected Y back into
+        // `trans`, and excludes type-three leaves through flag 8. Its result is
+        // stored in the overlapping `misc_node` word before either vector
+        // output. Animation-derived object hits still require the ordered
+        // source frame-bound host and remain typed.
+        let (node, nearest) = find_retail_solid_node(&environment, translation, 9, 0)?;
+        if let Some(candidate) =
+            self.potential_solid_bound_candidate(|status| status & 0x0002_0000 != 0)?
+        {
+            return Err(VmError::UnsupportedSolidObjectBounds(candidate));
+        }
+        self.object_mut(handle)?
+            .set_register(process_register::MISC_VALUE, node.map_or(0, u32::from))?;
+        if let Some(reference) = output_reference {
+            self.write_storage_span3(reference, self.solid_trans3.map(|value| value as u32))?;
+        }
+        self.object_mut(handle)?
+            .set_process_vector(output_vector, nearest)
+    }
+
+    fn react_solid_surface_suboperation_three(
+        &mut self,
+        handle: ObjectHandle,
+        input_vector: u8,
+        output_vector: u8,
+        output_reference: Option<StorageReference>,
+    ) -> Result<(), VmError> {
+        // The source copies this vector before entering the switch even though
+        // suboperation three does not subsequently consume the copy.
+        let _input = self.object(handle)?.process_vector(input_vector)?;
+        let translation = self.object(handle)?.process_vector(0)?;
+        // `trans3` is static in C, but this case overwrites it on every call.
+        // `ZoneFindNearestObjectNode3` mutates only a local copy and never
+        // writes through its vector pointer, so the final vector is exactly
+        // the current translation.
+        self.solid_trans3 = translation;
+
+        let child_status = self.object(handle)?.register(process_register::STATUS_B)?;
+        let mut active_parent = None;
+        if child_status & 0x0400_0000 != 0 {
+            let parent = self.object(handle)?.links[1].ok_or(VmError::MissingLink {
+                object: handle,
+                link: 1,
+            })?;
+            if self.object(parent)?.register(process_register::STATUS_B)? & 0x0400_0000 != 0 {
+                active_parent = Some(parent);
+            }
+        }
+
+        if let Some(parent) = active_parent {
+            let environment = self
+                .object(handle)?
+                .solid_environment
+                .clone()
+                .ok_or(VmError::MissingSolidEnvironment(handle))?;
+            let flags = if environment.graphics_flags & 1 != 0 {
+                6
+            } else {
+                5
+            };
+            let (node, _) = find_retail_solid_node(&environment, translation, flags & 3, 25_000)?;
+
+            // Source collision bounds are a per-frame traversal-order list of
+            // animation-derived AABBs, not all live objects. NODE==0xffff is
+            // the exact source skip gate and covers the characterized legal
+            // path. Any other candidate remains an honest typed host boundary
+            // until that ordered bounds list is owned by Rust.
+            if let Some(candidate) = self.objects.iter().find_map(|(candidate, object)| {
+                if *candidate == handle {
+                    return None;
+                }
+                object
+                    .register(process_register::NODE)
+                    .ok()
+                    .filter(|node| *node != 0xffff)
+                    .map(|_| *candidate)
+            }) {
+                return Err(VmError::UnsupportedSolidObjectBounds(candidate));
+            }
+
+            let color_environment = self
+                .object(parent)?
+                .solid_environment
+                .clone()
+                .ok_or(VmError::MissingSolidEnvironment(parent))?;
+            let use_player_colors =
+                self.object(handle)?.is_main_player || self.object(parent)?.is_main_player;
+            let source = if use_player_colors {
+                color_environment.player_colors
+            } else {
+                color_environment.object_colors
+            };
+            let mut subtype = node.map_or(-1, |node| i32::from((node & 0x03f0) >> 4));
+            if subtype < 39 {
+                subtype = -1;
+            }
+            if self.object(parent)?.is_main_player && self.object(parent)?.state_flags & 0x20 != 0 {
+                subtype = 0x37;
+            }
+            let target = scaled_retail_colors(&source, subtype)?;
+            seek_retail_colors(&mut self.object_mut(parent)?.colors, target, 0x015e);
+        }
+
+        // `trans4` is the other C static. Nothing assigns it anywhere, so its
+        // language-defined static initialization remains a zero vector. The
+        // source stores it before storing `trans3`; preserve that overlap order.
+        if let Some(reference) = output_reference {
+            self.write_storage_span3(reference, self.solid_trans4.map(|value| value as u32))?;
+        }
+        let trans3 = self.solid_trans3;
+        self.object_mut(handle)?
+            .set_process_vector(output_vector, trans3)
+    }
+
+    fn test_controls(&self, instruction: u32, port: usize) -> Result<u32, VmError> {
+        let pad = self.pad_snapshot(port)?;
+        let button_mask = instruction & 0x0fff;
+        let test_type = (instruction >> 12) & 3;
+        let direction_test_type = (instruction >> 14) & 3;
+        let direction_test = (instruction >> 16) & 0x0f;
+        let negate = (instruction >> 20) & 1;
+
+        // Preserve the integer mask returned by the C interpreter. A button
+        // success is not normalized to one: CROSS, for example, returns 0x40.
+        let mut condition = match test_type {
+            0 => 1,
+            1 => pad.tapped & 0x0fff & button_mask,
+            2 => pad.held & 0x0fff & button_mask,
+            // The second `test_type == 3` branch in the retail source is
+            // unreachable. The shipped behavior is the two-frame tapped
+            // test represented here, not a two-frame held test.
+            3 => button_mask & (pad.tapped | pad.tapped_previous),
+            _ => unreachable!(),
+        };
+        if condition == 0 {
+            return Ok(negate);
+        }
+        if direction_test_type == 0 {
+            return Ok(condition ^ negate);
+        }
+
+        condition = match direction_test_type {
+            1 if (9..=12).contains(&direction_test) => pad.tapped & (1_u32 << (direction_test + 3)),
+            1 => {
+                let direction = MOVE_DIRECTIONS[((pad.held >> 12) & 0x0f) as usize];
+                let previous = MOVE_DIRECTIONS[((pad.held_previous >> 12) & 0x0f) as usize];
+                u32::from(direction == direction_test && direction != previous)
+            }
+            2 if (9..=12).contains(&direction_test) => pad.held & (1_u32 << (direction_test + 3)),
+            2 => {
+                let direction = MOVE_DIRECTIONS[((pad.held >> 12) & 0x0f) as usize];
+                u32::from(direction == direction_test)
+            }
+            3 => {
+                let direction = MOVE_DIRECTIONS[((pad.held >> 12) & 0x0f) as usize];
+                let previous = MOVE_DIRECTIONS[((pad.held_previous >> 12) & 0x0f) as usize];
+                u32::from(direction == direction_test || previous == direction_test)
+            }
+            _ => unreachable!(),
+        };
+        Ok(condition ^ negate)
+    }
+
+    fn paging_operation(
+        &mut self,
+        handle: ObjectHandle,
+        operation_operand: Operand,
+        argument_operand: Operand,
+    ) -> Result<(), VmError> {
+        let operation = self.read_operand(handle, operation_operand)?;
+        // `GoolOpPaging` retains the address produced by GOP translation. It
+        // does not first dereference B like an ordinary scalar opcode.
+        let argument = self.input_reference(handle, argument_operand)?;
+        match operation {
+            1 | 6 => {
+                let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
+                let (entry, page) = self.resolve_entry_argument(reference)?;
+                self.paging_loaded_pages.insert(page);
+                self.paging_resolved_pages.insert(page);
+                let count = self.paging_page_references.entry(page).or_default();
+                *count = count.saturating_add(1);
+                // Native `misc_entry` is represented by the checked logical
+                // entry token rather than a relocated host pointer or a
+                // reference back to the mutable source EID cell.
+                self.object_mut(handle)?
+                    .set_register(process_register::MISC_VALUE, entry.to_word())?;
+                self.emit(VmEffect::Paging {
+                    object: handle,
+                    open: true,
+                    reference: entry.to_word(),
+                })?;
+            }
+            2 => {
+                let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
+                let (entry, page) = self.resolve_entry_argument(reference)?;
+                let result = self.close_paging_page(page, true);
+                self.object_mut(handle)?
+                    .set_register(process_register::MISC_VALUE, result)?;
+                self.emit(VmEffect::Paging {
+                    object: handle,
+                    open: false,
+                    reference: entry.to_word(),
+                })?;
+            }
+            3 => {
+                let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
+                let (entry, page) = self.resolve_entry_argument(reference)?;
+                self.emit(VmEffect::Paging {
+                    object: handle,
+                    open: false,
+                    reference: entry.to_word(),
+                })?;
+                // `NSClose(ref, 0)` is a query: resolved PC PTEs return
+                // literal one; unresolved pages return zero. It does not
+                // decrement the count.
+                let result = self.close_paging_page(page, false);
+                self.push(handle, result)?;
+                // Retail case three deliberately falls through to case four.
+                self.push(handle, self.available_page_count())?;
+            }
+            4 => self.push(handle, self.available_page_count())?,
+            5 => {
+                let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
+                let count = usize::try_from(self.read_storage_reference(reference)?)
+                    .map_err(|_| VmError::InvalidPagingOperation(operation))?;
+                let stack_len = self.object(handle)?.stack.len();
+                let start = stack_len
+                    .checked_sub(count)
+                    .ok_or(VmError::StackUnderflow(handle))?;
+                let words = self.object(handle)?.stack[start..].to_vec();
+                let mut required_entries = 0_u32;
+                for word in words {
+                    let storage = StorageReference::from_word(word)
+                        .ok_or(VmError::InvalidStorageReference(word))?;
+                    let entry_word = self.read_storage_reference(storage)?;
+                    let (page, resolved) =
+                        if let Some(entry) = EntryReference::from_word(entry_word) {
+                            (self.entry_reference_page(entry)?, true)
+                        } else {
+                            if StorageReference::from_word(entry_word).is_some() {
+                                return Err(VmError::InvalidStorageReference(entry_word));
+                            }
+                            let eid = Eid::from_raw(entry_word);
+                            let page = self
+                                .entry_pages
+                                .get(&eid)
+                                .copied()
+                                .ok_or(VmError::MissingEntryReferencePage(eid))?;
+                            (page, self.paging_resolved_pages.contains(&page))
+                        };
+                    // The resolved-PTE/type-1 branch counts every requested
+                    // entry, with no page deduplication. Physically resident
+                    // but untranslated pages remain in the raw-EID branch and
+                    // contribute zero until NSOpen resolves their offsets.
+                    if resolved {
+                        debug_assert!(self.paging_loaded_pages.contains(&page));
+                        required_entries = required_entries.saturating_add(1);
+                    }
+                }
+                self.object_mut(handle)?.stack.truncate(start);
+                self.push(handle, required_entries)?;
+            }
+            _ => return Err(VmError::InvalidPagingOperation(operation)),
+        }
+        Ok(())
+    }
+
+    fn close_paging_page(&mut self, page: PageIndex, decrement: bool) -> u32 {
+        if !self.paging_loaded_pages.contains(&page) {
+            return 0;
+        }
+        let count = self.paging_page_references.entry(page).or_default();
+        if decrement && *count != 0 {
+            *count -= 1;
+        }
+        // Resolved PC-source PTEs return literal one for count=0; type-1 NSF
+        // pages also remain resident when count=1 decrements to zero.
+        1
+    }
+
+    fn available_page_count(&self) -> u32 {
+        let referenced = self
+            .paging_page_references
+            .values()
+            .filter(|references| **references != 0)
+            .count() as u32;
+        self.paging_page_capacity.saturating_sub(referenced)
     }
 
     fn control_flow(
@@ -1799,6 +3714,288 @@ impl Machine {
         self.push(handle, u32::from(operation(left, right)))
     }
 
+    fn store_input_constant(&mut self, value: u32) -> usize {
+        self.input_constant_index ^= 1;
+        self.operand_constants[self.input_constant_index] = value;
+        self.input_constant_index
+    }
+
+    fn store_output_constant(&mut self, value: u32) -> usize {
+        self.output_constant_index ^= 1;
+        self.operand_constants[self.output_constant_index] = value;
+        self.output_constant_index
+    }
+
+    fn input_reference(
+        &mut self,
+        handle: ObjectHandle,
+        operand: Operand,
+    ) -> Result<Option<StorageReference>, VmError> {
+        let reference = match operand {
+            Operand::Internal(index) => {
+                self.object(handle)?
+                    .internal
+                    .get(usize::from(index))
+                    .ok_or(VmError::InvalidRegister(usize::from(index)))?;
+                StorageReference::checked(handle, StorageRegion::Internal, usize::from(index))?
+            }
+            Operand::External(index) => {
+                self.object(handle)?
+                    .external
+                    .get(usize::from(index))
+                    .ok_or(VmError::InvalidRegister(usize::from(index)))?;
+                StorageReference::checked(handle, StorageRegion::External, usize::from(index))?
+            }
+            Operand::Immediate(value) => {
+                let index = self.store_input_constant(value as u32);
+                StorageReference::checked(handle, StorageRegion::Constant, index)?
+            }
+            Operand::FrameRelative(offset) => {
+                let base = self.object(handle)?.frame_base;
+                let index = base.checked_add_signed(isize::from(offset)).ok_or(
+                    VmError::UnsupportedReferenceOperand(0x0b00 | (u16::from(offset as u8) & 0x3f)),
+                )?;
+                self.object(handle)?.register(index)?;
+                StorageReference::checked(handle, StorageRegion::Register, index)?
+            }
+            Operand::Null => return Ok(None),
+            Operand::StackDouble => return Err(VmError::UnsupportedReferenceOperand(0x0bf0)),
+            Operand::LinkRegister { link, register } => {
+                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
+                    return Ok(None);
+                };
+                self.object(target)?.register(usize::from(register))?;
+                StorageReference::checked(target, StorageRegion::Register, usize::from(register))?
+            }
+            Operand::ObjectRegister(index) => {
+                self.object(handle)?.register(usize::from(index))?;
+                StorageReference::checked(handle, StorageRegion::Register, usize::from(index))?
+            }
+            Operand::Stack => {
+                let object = self.object(handle)?;
+                let stack_index = object
+                    .stack
+                    .len()
+                    .checked_sub(1)
+                    .ok_or(VmError::StackUnderflow(handle))?;
+                let register_index = (object.initial_stack_pointer as usize)
+                    .checked_add(stack_index)
+                    .ok_or(VmError::StackOverflow(handle))?;
+                self.pop(handle)?;
+                StorageReference::checked(handle, StorageRegion::Register, register_index)?
+            }
+        };
+        Ok(Some(reference))
+    }
+
+    fn output_reference(
+        &mut self,
+        handle: ObjectHandle,
+        operand: Operand,
+    ) -> Result<Option<StorageReference>, VmError> {
+        let reference = match operand {
+            Operand::Internal(index) => {
+                self.object(handle)?
+                    .internal
+                    .get(usize::from(index))
+                    .ok_or(VmError::InvalidRegister(usize::from(index)))?;
+                StorageReference::checked(handle, StorageRegion::Internal, usize::from(index))?
+            }
+            Operand::External(index) => {
+                self.object(handle)?
+                    .external
+                    .get(usize::from(index))
+                    .ok_or(VmError::InvalidRegister(usize::from(index)))?;
+                StorageReference::checked(handle, StorageRegion::External, usize::from(index))?
+            }
+            Operand::Immediate(value) => {
+                // Retail has independent input/output cursors over one shared
+                // two-word constant buffer. Merely translating an output
+                // immediate writes it, even if the caller never stores.
+                let index = self.store_output_constant(value as u32);
+                StorageReference::checked(handle, StorageRegion::Constant, index)?
+            }
+            Operand::FrameRelative(offset) => {
+                let base = self.object(handle)?.frame_base;
+                let index = base.checked_add_signed(isize::from(offset)).ok_or(
+                    VmError::UnsupportedReferenceOperand(0x0b00 | (u16::from(offset as u8) & 0x3f)),
+                )?;
+                self.object(handle)?.register(index)?;
+                StorageReference::checked(handle, StorageRegion::Register, index)?
+            }
+            Operand::Null => return Ok(None),
+            Operand::StackDouble => return Err(VmError::UnsupportedReferenceOperand(0x0bf0)),
+            Operand::LinkRegister { link, register } => {
+                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
+                    return Ok(None);
+                };
+                self.object(target)?.register(usize::from(register))?;
+                StorageReference::checked(target, StorageRegion::Register, usize::from(register))?
+            }
+            Operand::ObjectRegister(index) => {
+                self.object(handle)?.register(usize::from(index))?;
+                StorageReference::checked(handle, StorageRegion::Register, usize::from(index))?
+            }
+            Operand::Stack => {
+                let (register_index, previous) = {
+                    let object = self.object(handle)?;
+                    let register_index = (object.initial_stack_pointer as usize)
+                        .checked_add(object.stack.len())
+                        .ok_or(VmError::StackOverflow(handle))?;
+                    (register_index, object.register(register_index)?)
+                };
+                // Translating an output stack GOP advances SP but does not
+                // itself write the pointed-to word. Retain the stale bounded
+                // register value until a caller stores through the reference.
+                self.push(handle, previous)?;
+                StorageReference::checked(handle, StorageRegion::Register, register_index)?
+            }
+        };
+        Ok(Some(reference))
+    }
+
+    /// Resolves one tagged storage word through bounded VM-owned arrays.
+    pub fn read_storage_reference(&self, reference: StorageReference) -> Result<u32, VmError> {
+        let index = usize::from(reference.index);
+        match reference.region {
+            StorageRegion::Internal => self
+                .object(reference.object)?
+                .internal
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word())),
+            StorageRegion::External => self
+                .object(reference.object)?
+                .external
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word())),
+            StorageRegion::Register => self
+                .object(reference.object)?
+                .register(index)
+                .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
+            StorageRegion::Constant => self
+                .operand_constants
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word())),
+        }
+    }
+
+    fn write_storage_reference(
+        &mut self,
+        reference: StorageReference,
+        value: u32,
+    ) -> Result<(), VmError> {
+        let index = usize::from(reference.index);
+        match reference.region {
+            StorageRegion::Internal => {
+                *self
+                    .object_mut(reference.object)?
+                    .internal
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                Ok(())
+            }
+            StorageRegion::External => {
+                *self
+                    .object_mut(reference.object)?
+                    .external
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                Ok(())
+            }
+            StorageRegion::Register => self
+                .object_mut(reference.object)?
+                .set_register(index, value)
+                .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
+            StorageRegion::Constant => {
+                *self
+                    .operand_constants
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                Ok(())
+            }
+        }
+    }
+
+    fn write_storage_span3(
+        &mut self,
+        reference: StorageReference,
+        values: [u32; 3],
+    ) -> Result<(), VmError> {
+        let base = usize::from(reference.index);
+        let references = [0_usize, 1, 2].map(|offset| {
+            let index = base
+                .checked_add(offset)
+                .ok_or(VmError::InvalidStorageReference(reference.to_word()))?;
+            StorageReference::checked(reference.object, reference.region, index)
+        });
+        let references = [references[0]?, references[1]?, references[2]?];
+        // Validate the complete C `vec` span before mutating so malformed
+        // tagged storage cannot leave a partial triple behind.
+        for reference in references {
+            self.read_storage_reference(reference)?;
+        }
+        for (reference, value) in references.into_iter().zip(values) {
+            self.write_storage_reference(reference, value)?;
+        }
+        Ok(())
+    }
+
+    fn intern_entry_reference(
+        &mut self,
+        eid: Eid,
+        page: PageIndex,
+    ) -> Result<EntryReference, VmError> {
+        if let Some(slot) = self
+            .paging_entry_references
+            .iter()
+            .position(|candidate| *candidate == (eid, page))
+        {
+            return Ok(EntryReference { slot: slot as u32 });
+        }
+        let slot = u32::try_from(self.paging_entry_references.len())
+            .map_err(|_| VmError::EntryReferenceTableFull)?;
+        if slot > ENTRY_REFERENCE_SLOT_BITS {
+            return Err(VmError::EntryReferenceTableFull);
+        }
+        self.paging_entry_references.push((eid, page));
+        Ok(EntryReference { slot })
+    }
+
+    fn entry_reference_page(&self, reference: EntryReference) -> Result<PageIndex, VmError> {
+        self.paging_entry_references
+            .get(reference.slot as usize)
+            .map(|(_, page)| *page)
+            .ok_or(VmError::InvalidEntryReference(reference.to_word()))
+    }
+
+    fn resolve_entry_argument(
+        &mut self,
+        reference: StorageReference,
+    ) -> Result<(EntryReference, PageIndex), VmError> {
+        let word = self.read_storage_reference(reference)?;
+        if let Some(entry) = EntryReference::from_word(word) {
+            let page = self.entry_reference_page(entry)?;
+            return Ok((entry, page));
+        }
+        // A relocated entry token is immutable. Never retain or recursively
+        // follow a mutable storage-cell reference; doing so would change the
+        // entry identity after GOOL overwrites that cell and permits cycles.
+        if StorageReference::from_word(word).is_some() {
+            return Err(VmError::InvalidStorageReference(word));
+        }
+        let eid = Eid::from_raw(word);
+        let page = self
+            .entry_pages
+            .get(&eid)
+            .copied()
+            .ok_or(VmError::MissingEntryReferencePage(eid))?;
+        let entry = self.intern_entry_reference(eid, page)?;
+        Ok((entry, page))
+    }
+
     fn read_operand(&mut self, handle: ObjectHandle, operand: Operand) -> Result<u32, VmError> {
         match operand {
             Operand::Internal(index) => self
@@ -1813,7 +4010,10 @@ impl Machine {
                 .get(usize::from(index))
                 .copied()
                 .ok_or(VmError::InvalidRegister(usize::from(index))),
-            Operand::Immediate(value) => Ok(value as u32),
+            Operand::Immediate(value) => {
+                self.store_input_constant(value as u32);
+                Ok(value as u32)
+            }
             Operand::FrameRelative(offset) => {
                 let base = self.object(handle)?.frame_base;
                 let index = base
@@ -1852,47 +4052,10 @@ impl Machine {
         operand: Operand,
         value: u32,
     ) -> Result<(), VmError> {
-        match operand {
-            Operand::Internal(index) => {
-                *self
-                    .object_mut(handle)?
-                    .internal
-                    .get_mut(usize::from(index))
-                    .ok_or(VmError::InvalidRegister(usize::from(index)))? = value;
-                Ok(())
-            }
-            Operand::External(index) => {
-                *self
-                    .object_mut(handle)?
-                    .external
-                    .get_mut(usize::from(index))
-                    .ok_or(VmError::InvalidRegister(usize::from(index)))? = value;
-                Ok(())
-            }
-            Operand::FrameRelative(offset) => {
-                let base = self.object(handle)?.frame_base;
-                let index = base
-                    .checked_add_signed(isize::from(offset))
-                    .ok_or(VmError::InvalidOperand(0))?;
-                self.object_mut(handle)?.set_register(index, value)
-            }
-            Operand::ObjectRegister(index) => self
-                .object_mut(handle)?
-                .set_register(usize::from(index), value),
-            Operand::Stack => self.push(handle, value),
-            Operand::LinkRegister { link, register } => {
-                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
-                    return Ok(());
-                };
-                self.object_mut(target)?
-                    .set_register(usize::from(register), value)
-            }
-            // Retail output translation returns nullptr for the null GOP and
-            // every writer checks it before storing. Input translation still
-            // occurred first, so stack-pop side effects are preserved.
-            Operand::Null => Ok(()),
-            Operand::Immediate(_) | Operand::StackDouble => Err(VmError::InvalidOperand(0)),
+        if let Some(reference) = self.output_reference(handle, operand)? {
+            self.write_storage_reference(reference, value)?;
         }
+        Ok(())
     }
 
     fn push(&mut self, handle: ObjectHandle, value: u32) -> Result<(), VmError> {
@@ -1969,8 +4132,10 @@ impl Machine {
         }
         let frame = CallFrame {
             return_address,
+            return_halted: object.halted,
             argument_base,
             previous_frame_base,
+            behavior: ReturnBehavior::Continue,
         };
         {
             let object = self.object_mut(handle)?;
@@ -1999,7 +4164,30 @@ impl Machine {
         object.frame_base = frame.previous_frame_base;
         object.code_segment = frame.return_address.segment;
         object.pc = frame.return_address.pc;
-        Ok(None)
+        object.halted = frame.return_halted;
+        match frame.behavior {
+            ReturnBehavior::Continue => Ok(None),
+            ReturnBehavior::SuspendOnce { state_stamp } => {
+                self.push(handle, 0)?;
+                let object = self.object_mut(handle)?;
+                object.animation_wait = Some(AnimationWait {
+                    stamp: 0,
+                    frames: 0,
+                });
+                object.set_register(process_register::STATE_STAMP, state_stamp)?;
+                Ok(Some(HaltReason::OnceCompleted))
+            }
+            ReturnBehavior::SuspendTransition {
+                previous_animation_wait,
+            } => {
+                // Any animation wait word pushed inside the transition frame
+                // was discarded with that frame. Restore the state-code wait
+                // represented by the stack beneath it; retail does not carry
+                // a separate transition animation suspension.
+                self.object_mut(handle)?.animation_wait = previous_animation_wait;
+                Ok(Some(HaltReason::TransitionCompleted))
+            }
+        }
     }
 
     fn spawn_children(
@@ -2100,6 +4288,110 @@ mod tests {
         assert_eq!(Operand::decode(0x9ff), Operand::Immediate(-256));
         assert_eq!(Operand::decode(0xbe0), Operand::Null);
         assert_eq!(Operand::decode(STACK), Operand::Stack);
+    }
+
+    #[test]
+    fn aligned_tagged_references_round_trip_without_eid_low_bits() {
+        let code = CodeAddress {
+            segment: CodeSegment::Global,
+            pc: CODE_REFERENCE_PC_BITS as usize,
+        };
+        let code_word = code.to_word();
+        assert_eq!(
+            code_word,
+            CODE_REFERENCE_TAG
+                | CODE_REFERENCE_GLOBAL
+                | (CODE_REFERENCE_PC_BITS << CODE_REFERENCE_PC_SHIFT)
+        );
+        assert_eq!(CodeAddress::from_word(code_word), Some(code));
+
+        let storage = StorageReference::checked(
+            handle((MAX_OBJECTS - 1) as u16),
+            StorageRegion::Constant,
+            STORAGE_REFERENCE_INDEX_BITS as usize,
+        )
+        .unwrap();
+        let storage_word = storage.to_word();
+        assert_eq!(
+            storage_word,
+            STORAGE_REFERENCE_TAG
+                | ((StorageRegion::Constant as u32) << STORAGE_REFERENCE_REGION_SHIFT)
+                | (((MAX_OBJECTS - 1) as u32) << STORAGE_REFERENCE_OBJECT_SHIFT)
+                | (STORAGE_REFERENCE_INDEX_BITS << STORAGE_REFERENCE_INDEX_SHIFT)
+        );
+        assert_eq!(StorageReference::from_word(storage_word), Some(storage));
+
+        let entry = EntryReference {
+            slot: ENTRY_REFERENCE_SLOT_BITS,
+        };
+        let entry_word = entry.to_word();
+        assert_eq!(
+            entry_word,
+            ENTRY_REFERENCE_TAG | ENTRY_REFERENCE_PAYLOAD_MASK
+        );
+        assert_eq!(EntryReference::from_word(entry_word), Some(entry));
+
+        for word in [code_word, storage_word, entry_word] {
+            assert_eq!(word & 3, 0, "logical pointer tokens remain word-aligned");
+            assert!(!Eid::from_raw(word).is_named());
+            assert!(matches!(
+                crust_formats::binary::EntryRef::from_raw(word),
+                crust_formats::binary::EntryRef::Offset(_)
+            ));
+        }
+    }
+
+    #[test]
+    fn aligned_tagged_references_reject_low_bits_and_reserved_payloads() {
+        let code_word = CodeAddress {
+            segment: CodeSegment::External,
+            pc: 7,
+        }
+        .to_word();
+        let storage_word = StorageReference::checked(
+            handle(3),
+            StorageRegion::Register,
+            process_register::STATE_STAMP,
+        )
+        .unwrap()
+        .to_word();
+        let entry_word = EntryReference { slot: 7 }.to_word();
+
+        for low_bits in 1..=3 {
+            assert_eq!(CodeAddress::from_word(code_word | low_bits), None);
+            assert_eq!(StorageReference::from_word(storage_word | low_bits), None);
+            assert_eq!(EntryReference::from_word(entry_word | low_bits), None);
+        }
+        assert_eq!(
+            CodeAddress::from_word(CODE_REFERENCE_TAG | 0x0001_0000),
+            None
+        );
+        assert_eq!(
+            StorageReference::checked(
+                handle(0),
+                StorageRegion::Internal,
+                (STORAGE_REFERENCE_INDEX_BITS + 1) as usize,
+            ),
+            Err(VmError::InvalidStorageReference(STORAGE_REFERENCE_TAG))
+        );
+
+        let named_eid_word = entry_word | 1;
+        assert!(Eid::from_raw(named_eid_word).is_named());
+        assert_eq!(EntryReference::from_word(named_eid_word), None);
+    }
+
+    #[test]
+    fn animation_references_preserve_unaligned_byte_offsets() {
+        // Opcode 0x27 forms a `uint8_t *` into animation item five. Unlike
+        // code, storage and entry pointers, that source address has no
+        // word-alignment contract, so its exact byte offset remains payload.
+        let reference = AnimationReference::checked(1, 4).unwrap();
+        assert_eq!(reference.to_word(), ANIMATION_REFERENCE_TAG | 1);
+        assert_eq!(
+            AnimationReference::from_word(reference.to_word()),
+            Some(reference)
+        );
+        assert_eq!(reference.offset(), 1);
     }
 
     #[test]
@@ -2434,6 +4726,336 @@ mod tests {
     }
 
     #[test]
+    fn state_rebind_captures_clears_and_synchronously_returns_from_once_pointer() {
+        let h = handle(0);
+        let once_pc = 0x6e_usize;
+        // Exact N. Sanity Crash MOVC word at external pc 945: arm global
+        // offset 0x6e in process word 36 (`once_p`).
+        let mut object = VmObject::new(h, vec![0x1809_006e, control_flow(1, 0, 0, 0, 7)]).unwrap();
+        object.global_code.resize(once_pc + 4, 0);
+        // Exercise an ordinary nested JAL inside the once invocation. Only
+        // the outer retail frame has suspend/status-preserve behavior.
+        object.global_code[once_pc] = (0x86_u32 << 24) | ((once_pc + 2) as u32);
+        object.global_code[once_pc + 1] = control_flow(2, 0, 0, 0, 0);
+        object.global_code[once_pc + 2] = Instruction::encode(0x11, 0x0805, REG0);
+        object.global_code[once_pc + 3] = control_flow(2, 0, 0, 0, 0);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 2).unwrap().reason,
+            HaltReason::StateChanged(7)
+        );
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::ONCE_POINTER),
+            Ok(CodeAddress {
+                segment: CodeSegment::Global,
+                pc: once_pc,
+            }
+            .to_word())
+        );
+
+        let target = VmStateProgram::new(
+            7,
+            GoolState {
+                flags: 0x20,
+                status_c: 0x40,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: 0,
+            },
+            vec![control_flow(2, 0, 0, 0, 0)],
+            Vec::new(),
+        )
+        .unwrap();
+        machine.set_frames_elapsed(9);
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+
+        let rebound = machine.object(h).unwrap();
+        assert_eq!(rebound.register(process_register::ONCE_POINTER), Ok(0));
+        // Retail writes state_stamp only after the once interpreter returns.
+        assert_eq!(rebound.register(process_register::STATE_STAMP), Ok(0));
+        assert_eq!(rebound.stack().len(), STATE_FRAME_WORDS);
+        assert_eq!(
+            rebound.stack(),
+            &[
+                INITIAL_FRAME_FLAGS,
+                CodeAddress {
+                    segment: CodeSegment::External,
+                    pc: 0,
+                }
+                .to_word(),
+                (SYNTHETIC_STACK_POINTER * 4) as u32,
+            ]
+        );
+
+        assert_eq!(
+            machine
+                .run_pending_once_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::OnceCompleted,
+                steps: 4,
+            })
+        );
+        let completed = machine.object(h).unwrap();
+        assert_eq!(completed.register(0), Ok(0x500));
+        assert_eq!(completed.register(process_register::STATE_STAMP), Ok(9));
+        assert_eq!(completed.frame_base, SYNTHETIC_STACK_POINTER);
+        assert!(completed.call_stack.is_empty());
+        assert_eq!(
+            completed.stack(),
+            &[
+                INITIAL_FRAME_FLAGS,
+                CodeAddress {
+                    segment: CodeSegment::External,
+                    pc: 0,
+                }
+                .to_word(),
+                (SYNTHETIC_STACK_POINTER * 4) as u32,
+                0,
+            ]
+        );
+        assert_eq!(
+            machine
+                .run_pending_once_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn once_pointer_requires_a_checked_global_code_tag_before_rebind_mutates_state() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![control_flow(1, 0, 0, 0, 1)]).unwrap();
+        object.global_code = vec![control_flow(2, 0, 0, 0, 0)];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::StateChanged(1)
+        );
+        let invalid = CODE_REFERENCE_TAG | 1;
+        machine
+            .object_mut(h)
+            .unwrap()
+            .set_register(process_register::ONCE_POINTER, invalid)
+            .unwrap();
+        let target = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: 0,
+            },
+            vec![control_flow(2, 0, 0, 0, 0)],
+            Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            machine.rebind_state_program(h, &target, &[]),
+            Err(VmError::InvalidCodeReference(invalid))
+        );
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::ONCE_POINTER),
+            Ok(invalid)
+        );
+        assert_eq!(CodeAddress::from_word(invalid), None);
+    }
+
+    #[test]
+    fn once_mode_records_animation_but_does_not_suspend_before_return_link() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0x1809_0000, control_flow(1, 0, 0, 0, 1)]).unwrap();
+        object.bind_animation_data(&[0; 4]);
+        object.global_code = vec![
+            (0x83_u32 << 24) | (1 << 22) | (1 << 16),
+            control_flow(2, 0, 0, 0, 0),
+        ];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 2).unwrap().reason,
+            HaltReason::StateChanged(1)
+        );
+        let target = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: 0,
+            },
+            vec![control_flow(2, 0, 0, 0, 0)],
+            Vec::new(),
+        )
+        .unwrap();
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+        assert_eq!(
+            machine
+                .run_pending_once_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::OnceCompleted,
+                steps: 2,
+            })
+        );
+        assert!(machine.effects().iter().any(|effect| matches!(
+            effect,
+            VmEffect::AnimationFrameChanged { object, frame: 0, .. } if *object == h
+        )));
+        assert_eq!(machine.object(h).unwrap().stack().last(), Some(&0));
+    }
+
+    #[test]
+    fn transition_block_observes_state_stamp_and_returns_to_state_code() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        let mut object = VmObject::new(h, vec![control_flow(1, 0, 0, 0, 1)]).unwrap();
+        object.global_code = vec![
+            Instruction::encode(0x11, 0x0801, REG1),
+            control_flow(2, 0, 0, 0, 0),
+        ];
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::StateChanged(1)
+        );
+
+        let state_code_pc = 3;
+        let target = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: state_code_pc as u16,
+            },
+            vec![
+                0x8600_0000,
+                Instruction::encode(0x11, REG0 + process_register::STATE_STAMP as u16, REG0),
+                control_flow(2, 0, 0, 0, 0),
+                control_flow(2, 0, 0, 0, 0),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        machine.set_frames_elapsed(9);
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+        let state_stack = machine.object(h).unwrap().stack().to_vec();
+
+        assert_eq!(
+            machine
+                .run_transition_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::TransitionCompleted,
+                steps: 5,
+            })
+        );
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.register(0), Ok(9));
+        assert_eq!(object.register(1), Ok(0x100));
+        assert_eq!(object.register(process_register::STATE_STAMP), Ok(9));
+        assert_eq!(object.code_address().segment, CodeSegment::External);
+        assert_eq!(object.pc(), state_code_pc);
+        assert_eq!(object.frame_base, SYNTHETIC_STACK_POINTER);
+        assert!(object.call_stack.is_empty());
+        assert_eq!(object.stack(), state_stack);
+    }
+
+    #[test]
+    fn transition_animation_and_spawn_effect_do_not_suspend_or_replace_state_wait() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![control_flow(1, 0, 0, 0, 1)]).unwrap();
+        object.bind_animation_data(&[0; 4]);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::StateChanged(1)
+        );
+
+        let state_code_pc = 4;
+        let target = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: state_code_pc as u16,
+            },
+            vec![
+                (0x83_u32 << 24) | (1 << 22) | (5 << 16),
+                Instruction::encode(0x11, 0x0801, STACK),
+                0x8a10_5001,
+                control_flow(2, 0, 0, 0, 0),
+                control_flow(2, 0, 0, 0, 0),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        machine.set_frames_elapsed(12);
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+        let state_stack = machine.object(h).unwrap().stack().to_vec();
+        let mut callback_count = 0;
+
+        assert_eq!(
+            machine
+                .run_transition_with_host_effects(h, |_machine, effect| {
+                    assert!(matches!(effect, VmEffect::SpawnChildren { .. }));
+                    callback_count += 1;
+                    Ok(())
+                })
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::TransitionCompleted,
+                steps: 4,
+            })
+        );
+        assert_eq!(callback_count, 1);
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.pc(), state_code_pc);
+        assert_eq!(object.stack(), state_stack);
+        assert_eq!(
+            object.animation_wait,
+            Some(AnimationWait {
+                stamp: 0,
+                frames: 0,
+            })
+        );
+        assert!(machine.effects().iter().any(|effect| matches!(
+            effect,
+            VmEffect::AnimationFrameChanged { object, frame: 0, .. } if *object == h
+        )));
+        assert!(machine.effects().iter().any(|effect| matches!(
+            effect,
+            VmEffect::SpawnChildren {
+                parent,
+                executable: 5,
+                arguments,
+                ..
+            } if *parent == h && arguments == &[0x100]
+        )));
+    }
+
+    #[test]
     fn packed_animation_change_uses_checked_word_offset_frame_wait_and_flip() {
         let h = handle(0);
         let instruction = (0x83_u32 << 24) | (2 << 22) | (3 << 16) | (2 << 7) | 5;
@@ -2502,6 +5124,379 @@ mod tests {
     }
 
     #[test]
+    fn legal_solid_suboperation_three_gated_path_clears_b_and_copies_translation() {
+        let h = handle(0);
+        let instruction = 0x8e0e_de26;
+        assert_eq!(instruction >> 24, 0x8e);
+        let mut object = VmObject::new(h, vec![instruction]).unwrap();
+        object
+            .set_process_vector(0, [2_073_344, 1_371_648, 34_188_544])
+            .unwrap();
+        object.set_process_vector(5, [-1, -2, -3]).unwrap();
+        object.set_register(process_register::ACK, 1).unwrap();
+        object
+            .set_register(process_register::ANIMATION_STAMP, 2)
+            .unwrap();
+        object
+            .set_register(process_register::STATE_STAMP, 3)
+            .unwrap();
+        // The child status gate short-circuits before the parent gate. No
+        // environment or parent link is required to preserve the C no-query.
+        object
+            .set_register(process_register::STATUS_B, 0x0000_0400)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(
+            [
+                object.register(process_register::ACK).unwrap(),
+                object.register(process_register::ANIMATION_STAMP).unwrap(),
+                object.register(process_register::STATE_STAMP).unwrap(),
+            ],
+            [0; 3]
+        );
+        assert_eq!(
+            object.process_vector(5).unwrap(),
+            [2_073_344, 1_371_648, 34_188_544]
+        );
+    }
+
+    #[test]
+    fn legal_solid_suboperation_three_active_octree_seeks_parent_colors() {
+        let child = handle(0);
+        let parent = handle(1);
+        let instruction = 0x8e0e_de26;
+        // Odd leaf, type zero, subtype 48 (two-percent color scale).
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0301,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let object_colors = [2_000_u16; COLOR_COUNT];
+        let player_colors = [1_000_u16; COLOR_COUNT];
+        let environment = RetailSolidEnvironment::new(0, object_colors, player_colors, vec![zone]);
+
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        parent_object
+            .set_register(process_register::NODE, 0xffff)
+            .unwrap();
+        parent_object.set_main_player_identity(true);
+        parent_object.set_retail_colors([30; COLOR_COUNT]);
+        parent_object.bind_retail_solid_environment(environment.clone());
+
+        let translation = [25_600, 25_600, 25_600];
+        let mut child_object = VmObject::new(child, vec![instruction]).unwrap();
+        child_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        child_object.set_process_vector(0, translation).unwrap();
+        child_object.set_process_vector(5, [-1, -2, -3]).unwrap();
+        child_object
+            .set_register(process_register::ACK, 11)
+            .unwrap();
+        child_object
+            .set_register(process_register::ANIMATION_STAMP, 12)
+            .unwrap();
+        child_object
+            .set_register(process_register::STATE_STAMP, 13)
+            .unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        machine.run(child, 1).unwrap();
+
+        let child_object = machine.object(child).unwrap();
+        assert_eq!(child_object.process_vector(5).unwrap(), translation);
+        assert_eq!(
+            [
+                child_object.register(process_register::ACK).unwrap(),
+                child_object
+                    .register(process_register::ANIMATION_STAMP)
+                    .unwrap(),
+                child_object
+                    .register(process_register::STATE_STAMP)
+                    .unwrap(),
+            ],
+            [0; 3]
+        );
+        let colors = machine.object(parent).unwrap().retail_colors();
+        // Two percent of 1000 is 19 with the source's 12-bit factor. All
+        // first twelve components are close enough to copy directly; the
+        // unchanged color matrix/intensity seeks upward by exactly 350.
+        assert_eq!(colors[..12], [19; 12]);
+        assert_eq!(colors[12..], [380; 12]);
+    }
+
+    #[test]
+    fn solid_suboperation_one_reuses_static_trans3_and_writes_nearest_node() {
+        let child = handle(0);
+        let parent = handle(1);
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0301,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone]);
+        let translation = [25_600, 25_600, 25_600];
+        let mut child_object = VmObject::new(child, vec![0x8e0e_de26, 0x8e06_de26]).unwrap();
+        child_object.set_process_vector(0, translation).unwrap();
+        child_object.set_process_vector(5, [-1, -2, -3]).unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment);
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object.set_main_player_identity(true);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        machine.run(child, 2).unwrap();
+
+        let child_object = machine.object(child).unwrap();
+        assert_eq!(
+            child_object.register(process_register::MISC_VALUE),
+            Ok(0x0301)
+        );
+        assert_eq!(
+            [
+                child_object.register(process_register::ACK).unwrap(),
+                child_object
+                    .register(process_register::ANIMATION_STAMP)
+                    .unwrap(),
+                child_object
+                    .register(process_register::STATE_STAMP)
+                    .unwrap(),
+            ],
+            translation.map(|value| value as u32),
+            "suboperation one must output the prior function-static trans3"
+        );
+        assert_eq!(
+            child_object.process_vector(5).unwrap(),
+            [translation[0], 256_000, translation[2]]
+        );
+    }
+
+    #[test]
+    fn solid_suboperation_one_active_shadow_query_updates_parent_size_without_bounds() {
+        let child = handle(0);
+        let parent = handle(1);
+        // Size selector three lives in bits 10..13 independently of the
+        // nearest-node subtype bits.
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0c01,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone]);
+        let mut child_object = VmObject::new(child, vec![0x8e06_de26]).unwrap();
+        child_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        child_object
+            .set_process_vector(0, [25_600, 25_600, 25_600])
+            .unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment);
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object.set_main_player_identity(true);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        machine.run(child, 1).unwrap();
+
+        assert_eq!(
+            machine
+                .object(parent)
+                .unwrap()
+                .register(process_register::SIZE),
+            Ok((-40_i32) as u32)
+        );
+        assert_eq!(
+            machine
+                .object(child)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0x0c01)
+        );
+    }
+
+    #[test]
+    fn solid_suboperation_one_rejects_active_undefined_shadow_bounds() {
+        let child = handle(0);
+        let parent = handle(1);
+        let candidate = handle(2);
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0301,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone]);
+        let mut child_object = VmObject::new(child, vec![0x8e06_de26]).unwrap();
+        child_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        child_object
+            .set_process_vector(0, [25_600, 25_600, 25_600])
+            .unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment);
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object.set_main_player_identity(true);
+        let mut candidate_object = VmObject::new(candidate, vec![0]).unwrap();
+        candidate_object
+            .set_register(process_register::STATUS_B, 0x0002_0000)
+            .unwrap();
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(candidate_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        assert_eq!(
+            machine.run(child, 1),
+            Err(VmError::UnsupportedSolidObjectBounds(candidate))
+        );
+        assert_eq!(
+            machine
+                .object(parent)
+                .unwrap()
+                .register(process_register::SIZE),
+            Ok(0)
+        );
+    }
+
+    #[test]
+    fn active_solid_object_bounds_remain_an_explicit_host_boundary() {
+        let child = handle(0);
+        let parent = handle(1);
+        let candidate = handle(2);
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0301,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone]);
+
+        let mut child_object = VmObject::new(child, vec![0x8e0e_de26]).unwrap();
+        child_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        child_object
+            .set_process_vector(0, [25_600, 25_600, 25_600])
+            .unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment.clone());
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        parent_object
+            .set_register(process_register::NODE, 0xffff)
+            .unwrap();
+        parent_object.bind_retail_solid_environment(environment);
+        let mut candidate_object = VmObject::new(candidate, vec![0]).unwrap();
+        candidate_object
+            .set_register(process_register::NODE, 0x0301)
+            .unwrap();
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(candidate_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        assert_eq!(
+            machine.run(child, 1),
+            Err(VmError::UnsupportedSolidObjectBounds(candidate))
+        );
+    }
+
+    #[test]
+    fn entity_node_color_opcode_applies_retail_uniform_scale_layout() {
+        let h = handle(0);
+        let instruction = (0x8e_u32 << 24) | (6 << 18);
+        let mut object = VmObject::new(h, vec![instruction]).unwrap();
+        let mut colors = [0_u16; COLOR_COUNT];
+        colors[0] = (-1000_i16) as u16;
+        colors[9] = 1000;
+        colors[12] = 777;
+        colors[21] = 888;
+        object.set_retail_colors(colors);
+        // Node subtype 53 selects percent_map[5] = 72 percent.
+        object.entity_spawn_flags = Some(0x0350 << 3);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let colors = machine.object(h).unwrap().retail_colors();
+        assert_eq!(colors[0] as i16, -720);
+        assert_eq!(colors[9], 719);
+        assert_eq!(colors[12], 777);
+        assert_eq!(colors[21], 888);
+    }
+
+    #[test]
+    fn main_player_state_flag_forces_retail_full_color_scale() {
+        let h = handle(0);
+        let instruction = (0x8e_u32 << 24) | (6 << 18);
+        let mut object = VmObject::new(h, vec![instruction]).unwrap();
+        let mut colors = [0_u16; COLOR_COUNT];
+        colors[0] = (-1000_i16) as u16;
+        colors[9] = 1000;
+        object.set_retail_colors(colors);
+        // Node subtype 53 normally selects 72 percent, but retail forces
+        // subtype 0x37 (100 percent) for Crash while state flag 0x20 is set.
+        object.entity_spawn_flags = Some(0x0350 << 3);
+        object.set_main_player_identity(true);
+        object
+            .set_register(process_register::STATE_FLAGS, 0x20)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let colors = machine.object(h).unwrap().retail_colors();
+        assert_eq!(colors[0] as i16, -1000);
+        assert_eq!(colors[9], 1000);
+    }
+
+    #[test]
+    fn entity_node_color_opcode_keeps_level_dependent_selectors_explicit() {
+        let h = handle(0);
+        let instruction = (0x8e_u32 << 24) | (6 << 18);
+        let mut object = VmObject::new(h, vec![instruction]).unwrap();
+        object.entity_spawn_flags = Some(40 << 7);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::LevelDependentColorSubtype(40))
+        );
+    }
+
+    #[test]
     fn animation_reference_opcode_rejects_unbound_global_item() {
         let h = handle(0);
         let instruction = Instruction::encode(0x27, 0x0800, REG0);
@@ -2548,6 +5543,50 @@ mod tests {
 
         machine.run(h, 1).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[5]);
+    }
+
+    #[test]
+    fn movc_writes_checked_global_code_references_to_register_or_stack() {
+        let h = handle(0);
+        let register_reference = (0x18_u32 << 24) | (3 << 14) | 2;
+        let stack_reference = (0x18_u32 << 24) | (0x1f << 14) | 1;
+        let mut object = VmObject::new(h, vec![register_reference, stack_reference]).unwrap();
+        object.global_code = vec![0; 3];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 2).unwrap();
+        assert_eq!(
+            machine.object(h).unwrap().register(3),
+            Ok(encode_code_reference(CodeAddress {
+                segment: CodeSegment::Global,
+                pc: 2,
+            }))
+        );
+        assert_eq!(
+            machine.object(h).unwrap().stack(),
+            &[encode_code_reference(CodeAddress {
+                segment: CodeSegment::Global,
+                pc: 1,
+            })]
+        );
+    }
+
+    #[test]
+    fn movc_rejects_a_global_code_offset_outside_item_one() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![(0x18_u32 << 24) | 3]).unwrap();
+        object.global_code = vec![0; 3];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::InvalidJump {
+                object: h,
+                target: 3,
+            })
+        );
     }
 
     #[test]
@@ -2692,15 +5731,13 @@ mod tests {
     }
 
     #[test]
-    fn events_audio_paging_state_and_transitions_are_effects() {
+    fn events_audio_and_misc_transitions_are_effects() {
         let a = handle(0);
         let b = handle(1);
         let code = vec![
             Instruction::encode(0x87, 3 << 9, REG0),
             Instruction::encode(0x8c, REG1, REG0),
-            Instruction::encode(0x8b, REG1, REG0),
             Instruction::encode(0x1c, REG1, REG0),
-            Instruction::encode(0x88, 0, REG0),
         ];
         let mut object = VmObject::new(a, code).unwrap();
         object.set_link(3, Some(b)).unwrap();
@@ -2712,8 +5749,8 @@ mod tests {
             .insert_object(VmObject::new(b, vec![Instruction::encode(0x82, 0, 0)]).unwrap())
             .unwrap();
         assert_eq!(
-            machine.run(a, 20).unwrap().reason,
-            HaltReason::StateChanged(9)
+            machine.run(a, 3).unwrap().reason,
+            HaltReason::BudgetExhausted
         );
         assert!(machine.effects().contains(&VmEffect::Event {
             sender: a,
@@ -2729,6 +5766,26 @@ mod tests {
     }
 
     #[test]
+    fn event_service_returns_remain_an_explicit_nested_interpreter_boundary() {
+        let h = handle(0);
+        // Real Crash word: conditional guarded return to state 0x1e. It is
+        // valid only inside `GOOL_FLAG_EVENT_SERVICE`, so ordinary execution
+        // must not misinterpret it as a direct state change.
+        let object = VmObject::new(h, vec![0x8957_c01e]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::UnsupportedEventServiceReturn {
+                opcode: 0x89,
+                condition_type: 1,
+                return_type: 1,
+                register: 0x1f,
+            })
+        );
+    }
+
+    #[test]
     fn null_input_uses_documented_psx_compatibility_value() {
         let h = handle(0);
         let code = vec![Instruction::encode(0x00, 0xbe0, REG0)];
@@ -2738,6 +5795,65 @@ mod tests {
         machine.insert_object(object).unwrap();
         machine.run(h, 1).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[7]);
+    }
+
+    #[test]
+    fn retail_pad_snapshot_and_control_opcode_preserve_mask_results() {
+        let h = handle(0);
+        let cross_tapped = (0x1a_u32 << 24) | (1 << 12) | 0x40;
+        let previous_square_tapped = (0x1a_u32 << 24) | (3 << 12) | 0x80;
+        let up_tapped = (0x1a_u32 << 24) | (1 << 14) | (9 << 16);
+        let diagonal_held = (0x1a_u32 << 24) | (2 << 14) | (1 << 16);
+        let object = VmObject::new(
+            h,
+            vec![
+                cross_tapped,
+                previous_square_tapped,
+                up_tapped,
+                diagonal_held,
+            ],
+        )
+        .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let snapshot = RetailPadSnapshot {
+            tapped: 0x1040,
+            held: 0x3000,
+            held_previous: 0,
+            tapped_previous: 0x80,
+            held_previous_2: 0x4000,
+        };
+        machine.set_pad_snapshot(0, snapshot).unwrap();
+        assert_eq!(machine.pad_snapshot(0), Ok(snapshot));
+        assert_eq!(
+            machine.set_pad_snapshot(RETAIL_PAD_COUNT, snapshot),
+            Err(VmError::InvalidPadPort(RETAIL_PAD_COUNT))
+        );
+
+        machine.run(h, 4).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[0x40, 0x80, 0x1000, 1]);
+    }
+
+    #[test]
+    fn control_opcode_applies_two_frame_taps_and_exact_not_bit() {
+        let h = handle(0);
+        let previous_cross_tapped = (0x1a_u32 << 24) | (3 << 12) | 0x40;
+        let missing_cross_negated = (0x1a_u32 << 24) | (1 << 20) | (1 << 12) | 0x40;
+        let object = VmObject::new(h, vec![previous_cross_tapped, missing_cross_negated]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .set_pad_snapshot(
+                0,
+                RetailPadSnapshot {
+                    tapped_previous: 0x40,
+                    ..RetailPadSnapshot::default()
+                },
+            )
+            .unwrap();
+
+        machine.run(h, 2).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[0x40, 1]);
     }
 
     #[test]
@@ -2860,20 +5976,272 @@ mod tests {
     }
 
     #[test]
-    fn pointer_exposing_dual_input_reports_exact_tagging_boundary() {
+    fn pointer_exposing_dual_input_pushes_checked_storage_references() {
         let h = handle(0);
         let mut machine = Machine::new(0);
         machine
             .insert_object(VmObject::new(h, vec![0x2604_d04c]).unwrap())
             .unwrap();
 
+        machine.run(h, 1).unwrap();
+        let stack = machine.object(h).unwrap().stack();
+        assert_eq!(stack.len(), 2);
+        let destination = StorageReference::from_word(stack[0]).unwrap();
+        let source = StorageReference::from_word(stack[1]).unwrap();
+        assert_eq!(destination.object(), h);
+        assert_eq!(destination.region(), StorageRegion::Internal);
+        assert_eq!(destination.index(), 0x04c);
+        assert_eq!(source.index(), 0x04d);
+        assert_eq!(machine.read_storage_reference(destination), Ok(0));
+    }
+
+    #[test]
+    fn input_and_output_immediates_use_independent_cursors_over_shared_constants() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(
+                VmObject::new(
+                    h,
+                    vec![
+                        // Capture input immediate 0x100 in shared slot one.
+                        0x2680_1000,
+                        // Solid subop six still translates B=0x200 through
+                        // input and output cursors before its entity-less no-op.
+                        0x8e18_0802,
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        machine.run(h, 1).unwrap();
+        let source = StorageReference::from_word(machine.object(h).unwrap().stack()[1]).unwrap();
+        assert_eq!(source.region(), StorageRegion::Constant);
+        assert_eq!(source.index(), 1);
+        assert_eq!(machine.read_storage_reference(source), Ok(0x100));
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(
+            machine.read_storage_reference(source),
+            Ok(0x200),
+            "output cursor 0->1 must overwrite the live slot-one input pointer"
+        );
+    }
+
+    #[test]
+    fn tagged_pointer_list_feeds_paging_count_and_available_page_operations() {
+        let h = handle(0);
+        let eid_a = Eid::from_raw(0x7500_2055);
+        let eid_b = Eid::from_raw(0x7500_2073);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x26, 1, 0),
+                Instruction::encode(0x8b, 2, 3),
+                Instruction::encode(0x8b, 4, 0x0be0),
+            ],
+        )
+        .unwrap();
+        object.internal[0] = eid_a.raw();
+        object.internal[1] = eid_b.raw();
+        object.internal[2] = 5;
+        object.internal[3] = 2;
+        object.internal[4] = 4;
+        object.page_count = 10;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = vec![(eid_a, PageIndex::new(2)), (eid_b, PageIndex::new(3))];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let references = machine.object(h).unwrap().stack();
+        assert_eq!(references.len(), 2);
+        assert_eq!(
+            StorageReference::from_word(references[0]).unwrap().index(),
+            0
+        );
+        assert_eq!(
+            StorageReference::from_word(references[1]).unwrap().index(),
+            1
+        );
+        machine.run(h, 2).unwrap();
+        // Pages two and three are physically resident type-1 pages but have
+        // not had entry offsets translated. Raw EIDs therefore require no
+        // additional resolved entries yet, and all slots remain available.
+        assert_eq!(machine.object(h).unwrap().stack(), &[0, 10]);
+    }
+
+    #[test]
+    fn paging_open_misc_close_query_and_zero_close_follow_source_counts() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let other_eid = Eid::from_raw(0x7500_2073);
+        let misc = 0x0e00 | process_register::MISC_VALUE as u16;
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x8b, 1, 0),
+                Instruction::encode(0x8b, 2, misc),
+                Instruction::encode(0x8b, 3, misc),
+                Instruction::encode(0x8b, 4, misc),
+                Instruction::encode(0x8b, 4, 7),
+                Instruction::encode(0x8b, 4, 7),
+                Instruction::encode(0x26, 0x0be0, 7),
+                Instruction::encode(0x8b, 5, 8),
+                Instruction::encode(0x8b, 6, 0x0be0),
+            ],
+        )
+        .unwrap();
+        object.internal[0] = eid.raw();
+        object.internal[1] = 1;
+        object.internal[2] = 6;
+        object.internal[3] = 3;
+        object.internal[4] = 2;
+        object.internal[5] = 5;
+        object.internal[6] = 4;
+        object.internal[7] = eid.raw();
+        object.internal[8] = 1;
+        object.page_count = 4;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = vec![(eid, PageIndex::new(2)), (other_eid, PageIndex::new(3))];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let entry_token = machine
+            .object(h)
+            .unwrap()
+            .register(process_register::MISC_VALUE)
+            .unwrap();
+        assert!(EntryReference::from_word(entry_token).is_some());
+        assert!(StorageReference::from_word(entry_token).is_none());
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 1);
+
+        // The resolved token owns entry identity. Mutating the original EID
+        // cell cannot redirect op6(misc) to another page.
+        machine.object_mut(h).unwrap().internal[0] = other_eid.raw();
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 2);
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(entry_token)
+        );
+        assert_eq!(machine.paging_page_references.get(&PageIndex::new(3)), None);
+
+        // Case 3 uses source PC NSClose(count=0): a resolved type-1 page
+        // returns literal one, then deliberately falls through to available
+        // pages. Only one distinct page has a nonzero reference count.
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[1, 3]);
+
+        // B points at misc_entry, which contains the logical token written by
+        // open. The first close decrements two references to one and writes
+        // the resolved type-1 result to misc_flag.
+        machine.run(h, 1).unwrap();
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(1)
+        );
+        assert!(machine.paging_loaded_pages.contains(&PageIndex::new(2)));
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 1);
+
+        // Close through a fresh EID cell to reach zero; PC type-1 pages remain
+        // resident at ref0 and still return literal one.
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 0);
+        assert!(machine.paging_loaded_pages.contains(&PageIndex::new(2)));
+
+        // NSPageDecRef is idempotent at zero.
+        machine.run(h, 1).unwrap();
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(1)
+        );
+        machine.run(h, 3).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[1, 3, 1, 4]);
+    }
+
+    #[test]
+    fn paging_rejects_a_self_referential_storage_cell_instead_of_following_it() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![Instruction::encode(0x8b, 1, 0)]).unwrap();
+        let self_reference = StorageReference::checked(h, StorageRegion::Internal, 0)
+            .unwrap()
+            .to_word();
+        object.internal[0] = self_reference;
+        object.internal[1] = 1;
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
         assert_eq!(
             machine.run(h, 1),
-            Err(VmError::UnsupportedInputReference {
-                source: 0x04d,
-                destination: 0x04c,
-            })
+            Err(VmError::InvalidStorageReference(self_reference))
         );
+    }
+
+    #[test]
+    fn checked_upsert_registers_replacement_paging_metadata() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(h, vec![control_flow(3, 0, 0, 0, 0)]).unwrap())
+            .unwrap();
+        let mut replacement = VmObject::new(h, vec![control_flow(3, 0, 0, 0, 0)]).unwrap();
+        replacement.page_count = 7;
+        replacement.resident_pages = vec![PageIndex::new(1)];
+        replacement.entry_pages = vec![(eid, PageIndex::new(3))];
+        machine.upsert_object(replacement).unwrap();
+
+        assert_eq!(machine.paging_page_capacity, 7);
+        assert_eq!(machine.entry_pages.get(&eid), Some(&PageIndex::new(3)));
+        assert!(machine.paging_baseline_pages.contains(&PageIndex::new(1)));
+        assert!(machine.paging_loaded_pages.contains(&PageIndex::new(1)));
+        assert!(machine.paging_resolved_pages.contains(&PageIndex::new(1)));
+        assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(3)));
+        assert_eq!(machine.available_page_count(), 7);
+    }
+
+    #[test]
+    fn rebound_state_registers_later_entry_paging_metadata_at_ref_zero() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(h, vec![control_flow(2, 0, 0, 0, 0)]).unwrap())
+            .unwrap();
+        let target = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: 0,
+            },
+            vec![control_flow(2, 0, 0, 0, 0)],
+            Vec::new(),
+        )
+        .unwrap()
+        .with_paging_metadata(5, [PageIndex::new(0)], [(eid, PageIndex::new(4))]);
+
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+
+        assert_eq!(machine.entry_pages.get(&eid), Some(&PageIndex::new(4)));
+        assert!(machine.paging_loaded_pages.contains(&PageIndex::new(4)));
+        assert_eq!(machine.paging_page_references.get(&PageIndex::new(4)), None);
+        assert_eq!(machine.available_page_count(), 5);
     }
 
     #[test]
@@ -2893,11 +6261,214 @@ mod tests {
         );
     }
 
+    fn entity_with_path(points: Vec<ZoneEntityPathPoint>) -> ZoneEntity {
+        ZoneEntity {
+            serialized_parent: crust_formats::binary::EntryRef::from_raw(0),
+            spawn_flags: 0,
+            group: 0,
+            id: 1,
+            initializer: [0; 3],
+            executable: 0,
+            subtype: 0,
+            path_points: points,
+        }
+    }
+
+    #[test]
+    fn transform_vectors_orients_zone_translation_from_stack_progress() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0x8502_8e1f]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object
+            .initialize_retail_entity(
+                &entity_with_path(vec![
+                    ZoneEntityPathPoint {
+                        x: 10,
+                        y: 20,
+                        z: 30,
+                    },
+                    ZoneEntityPathPoint {
+                        x: 35,
+                        y: 19,
+                        z: 30,
+                    },
+                ]),
+                [100, 200, 300],
+            )
+            .unwrap();
+        object
+            .set_register(
+                process_register::STATUS_B,
+                STATUS_B_TRACK_PATH_SIGN | STATUS_B_TRACK_PATH_PITCH,
+            )
+            .unwrap();
+        object
+            .set_register(process_register::PATH_PROGRESS, 34)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        machine.push(h, 34).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(0), Ok([39_240, 71_544, 107_520]));
+        assert_eq!(object.register(process_register::FLOOR_Y), Ok(71_544));
+        assert_eq!(object.register(process_register::ROTATION_Z), Ok(0x400));
+        assert_eq!(object.register(process_register::MISC_B_X), Ok(0x400));
+        // Source atan_table[40] == 0x1a for the -4:100 path pitch.
+        assert_eq!(object.register(process_register::MISC_B_Z), Ok(0x1a));
+        assert_eq!(object.stack().len(), 3, "stack progress must be consumed");
+    }
+
+    #[test]
+    fn transform_vectors_uses_model_space_and_last_point_rule() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0x8502_8e1f]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object
+            .initialize_retail_entity_path(
+                &entity_with_path(vec![
+                    ZoneEntityPathPoint { x: 0, y: 0, z: 0 },
+                    ZoneEntityPathPoint {
+                        x: 10,
+                        y: 20,
+                        z: -10,
+                    },
+                ]),
+                RetailEntityPathSpace::Model,
+            )
+            .unwrap();
+        object
+            .set_register(process_register::PATH_PROGRESS, (-0x100_i32) as u32)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        machine.push(h, 0x100).unwrap();
+
+        machine.run(h, 1).unwrap();
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(0), Ok([2_560, 5_120, -2_560]));
+        assert_eq!(object.register(process_register::FLOOR_Y), Ok(5_120));
+        assert_ne!(
+            object.register(process_register::STATUS_A).unwrap() & STATUS_A_TOWARD_GOAL,
+            0
+        );
+    }
+
+    #[test]
+    fn transform_vectors_rejects_malformed_path_progress_and_vector_index() {
+        let entity = entity_with_path(vec![
+            ZoneEntityPathPoint { x: 0, y: 0, z: 0 },
+            ZoneEntityPathPoint { x: 1, y: 0, z: 0 },
+        ]);
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0x8502_8e1f]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.initialize_retail_entity(&entity, [0; 3]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        machine.push(h, 0x200).unwrap();
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::EntityPathProgressOutOfBounds {
+                progress: 0x200,
+                point_count: 2,
+            })
+        );
+
+        let h = handle(1);
+        let mut object = VmObject::new(h, vec![0x8502_ee1f]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object.initialize_retail_entity(&entity, [0; 3]).unwrap();
+        machine.insert_object(object).unwrap();
+        machine.run(h, 0).unwrap();
+        machine.push(h, 0).unwrap();
+        assert_eq!(machine.run(h, 1), Err(VmError::InvalidProcessVector(6)));
+    }
+
+    #[test]
+    fn path_projection_sets_inertia_and_direction_flags_with_source_math() {
+        let path = RetailEntityPath {
+            space: RetailEntityPathSpace::Model,
+            points: vec![
+                ZoneEntityPathPoint { x: 0, y: 0, z: 0 },
+                ZoneEntityPathPoint { x: 0, y: 0, z: 100 },
+            ],
+        };
+        let result = orient_retail_path(
+            &path,
+            0,
+            PathOrientationInputs {
+                location: [0x100, 0, 50 * 0x100],
+                status_a: STATUS_A_TOWARD_GOAL,
+                status_b: STATUS_B_ORIENT_ON_PATH,
+                object_progress: 0,
+                inertia_limit: 100,
+                misc_c_y: 0,
+                rotation_z: 0,
+                target_rotation_x: 0,
+                target_rotation_y: 0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.location, [0; 3]);
+        assert_eq!(result.misc_c_y, 386);
+        assert_eq!(
+            result.status_a,
+            STATUS_A_INVALID_PATH | STATUS_A_CHANGE_PATH_DIRECTION
+        );
+        assert_eq!(retail_sqrt(10_000), Ok(99));
+        assert_eq!(retail_atan2(-1_024, 25_600), -0x1a);
+    }
+
     proptest! {
         #[test]
         fn instruction_fields_round_trip(opcode in any::<u8>(), a in 0_u16..0x1000, b in 0_u16..0x1000) {
             let decoded = Instruction::decode(Instruction::encode(opcode, a, b));
             prop_assert_eq!(decoded, Instruction { opcode, operand_a: a, operand_b: b });
+        }
+
+        #[test]
+        fn straight_model_path_interpolation_matches_signed_eight_eight_progress(
+            fraction in 0_i32..=255,
+        ) {
+            let path = RetailEntityPath {
+                space: RetailEntityPathSpace::Model,
+                points: vec![
+                    ZoneEntityPathPoint { x: -20, y: 4, z: 9 },
+                    ZoneEntityPathPoint { x: 44, y: -12, z: 25 },
+                ],
+            };
+            let result = orient_retail_path(
+                &path,
+                fraction,
+                PathOrientationInputs {
+                    location: [0; 3],
+                    status_a: 0,
+                    status_b: 0,
+                    object_progress: fraction,
+                    inertia_limit: 0,
+                    misc_c_y: 0,
+                    rotation_z: 0,
+                    target_rotation_x: 0,
+                    target_rotation_y: 0,
+                },
+            ).unwrap();
+            prop_assert_eq!(
+                result.location,
+                [
+                    -20 * 0x100 + 64 * fraction,
+                    4 * 0x100 - 16 * fraction,
+                    9 * 0x100 + 16 * fraction,
+                ],
+            );
         }
     }
 }

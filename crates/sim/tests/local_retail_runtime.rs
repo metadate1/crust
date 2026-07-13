@@ -4,9 +4,12 @@ use std::path::PathBuf;
 
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
-    LevelId, StreamKind, StreamName, ZoneEntity, ZoneHeader, parse_nsd, parse_nsf,
+    LevelId, StreamKind, StreamName, ZoneEntity, ZoneHeader, load_gool_state_program, parse_nsd,
+    parse_nsf,
 };
-use crust_sim::gool::{HaltReason, VmEffect, VmError};
+use crust_sim::gool::{
+    CodeAddress, CodeSegment, ObjectHandle as VmObjectHandle, VmEffect, VmError,
+};
 use crust_sim::object_arena::{NeighborZone, ObjectOrigin};
 use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime, RuntimeError};
 
@@ -71,7 +74,7 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
     let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
     let mut runtime = RetailRuntime::new(256);
     let first = runtime
-        .spawn_and_run_frame(&neighbors, &mut host, 67)
+        .spawn_and_run_frame(&neighbors, &mut host, 256)
         .unwrap();
     assert_eq!(first.spawn_attempts.len(), 7);
     assert!(
@@ -105,7 +108,7 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
         .collect::<Vec<_>>();
     assert_eq!(crash_spawns, [(5, 0, vec![0]), (29, 0, vec![0, 4096, 0])]);
 
-    let shadow = first
+    let _shadow = first
         .frame
         .spawned_children
         .iter()
@@ -120,89 +123,199 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
             })
         })
         .expect("Crash must synchronously bind ShadC");
-    assert!(first.frame.executions.iter().any(|execution| {
-        execution.object == shadow
-            && execution
-                .result
-                .as_ref()
-                .is_ok_and(|result| result.reason == HaltReason::StateChanged(1))
-    }));
-
-    // Production state rebinding must resolve state one through the same NSF
-    // host and carry global animation item five into the following frames.
-    let second = runtime.run_frame(&mut host, 67).unwrap();
-    let shadow_second = second
+    let path_object = first
+        .frame
         .executions
         .iter()
-        .find(|execution| execution.object == shadow)
-        .unwrap()
-        .result
-        .as_ref()
-        .unwrap();
-    assert_eq!(
-        shadow_second.reason,
-        HaltReason::AnimationChanged { frame: 0, wait: 1 }
-    );
-    assert!(shadow_second.steps > 2);
-
-    let third = runtime.run_frame(&mut host, 67).unwrap();
-    let shadow_third = third
-        .executions
-        .iter()
-        .find(|execution| execution.object == shadow)
-        .unwrap()
-        .result
-        .as_ref()
-        .unwrap();
-    assert!(matches!(
-        shadow_third.reason,
-        HaltReason::AnimationChanged { frame: 0, .. }
-    ));
-    assert!(shadow_third.steps > 0);
-
-    let errors_by_frame = [
-        ("initial", first.frame.executions.as_slice()),
-        ("rebound", second.executions.as_slice()),
-        ("resumed", third.executions.as_slice()),
-    ]
-    .map(|(label, executions)| {
-        (
-            label,
-            executions
-                .iter()
-                .filter_map(|execution| execution.result.as_ref().err())
-                .collect::<Vec<_>>(),
-        )
-    });
-
-    // The remaining boundaries are explicit and data-derived. All four
-    // initial exe-34 objects request 0x8e suboperation six, whose entity-node
-    // color-seek host state is not available yet. Once 0x83 resumes, the
-    // former InvalidOperand(0) is gone: opcode 0x11 correctly discards a
-    // popped value through its null output. Crash then reaches the exact 0x26
-    // address-tagging boundary on the third frame.
-    assert_eq!(errors_by_frame[0].0, "initial");
-    assert_eq!(errors_by_frame[0].1.len(), 4);
+        .find(|execution| {
+            runtime
+                .arena()
+                .get(execution.object.arena())
+                .is_some_and(|object| {
+                    matches!(
+                        object.origin(),
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 14
+                                && descriptor.group == 3
+                                && descriptor.executable == 31
+                                && descriptor.subtype == 0
+                    )
+                })
+        })
+        .expect("N. Sanity path object must execute in frame one");
     assert!(
-        errors_by_frame[0].1.iter().all(|error| matches!(
-            error,
-            RuntimeError::Vm(VmError::UnsupportedSolidSurface {
-                suboperation: 6,
-                input_vector: 5,
-                output_vector: 4,
-                operand: 0x0e26,
-            })
-        )),
-        "unexpected initial retail boundaries: {errors_by_frame:?}"
+        path_object.result.is_ok(),
+        "0x85 path orientation must cross its old boundary: {:?}",
+        path_object.result
     );
-    assert_eq!(errors_by_frame[1].0, "rebound");
-    assert!(errors_by_frame[1].1.is_empty());
-    assert_eq!(errors_by_frame[2].0, "resumed");
+    let path_vm = runtime.machine().object(path_object.object.vm()).unwrap();
+    assert_eq!(
+        [
+            path_vm.register(8).unwrap().cast_signed(),
+            path_vm.register(9).unwrap().cast_signed(),
+            path_vm.register(10).unwrap().cast_signed(),
+        ],
+        [1_842_944, 1_076_736, 31_948_288]
+    );
+    assert_eq!(path_vm.register(47), Ok(1_076_736));
+    assert_eq!(path_vm.register(13), Ok(0x400));
+    assert_eq!(path_vm.register(21), Ok(0x400));
+    let mut first_fault = None;
+    for execution in &first.frame.executions {
+        if let Err(error) = &execution.result {
+            let origin = runtime
+                .arena()
+                .get(execution.object.arena())
+                .expect("faulted object remains in the arena")
+                .origin();
+            let address = runtime
+                .machine()
+                .object(execution.object.vm())
+                .expect("faulted object remains in the VM")
+                .code_address();
+            let state = runtime
+                .machine()
+                .object(execution.object.vm())
+                .expect("faulted object remains in the VM")
+                .state();
+            let expected = matches!(
+                error,
+                RuntimeError::Vm(VmError::UnsupportedSolidObjectBounds(candidate))
+                    if candidate.get() == 6
+            );
+            first_fault = Some((
+                1_u32,
+                execution.object,
+                origin,
+                address,
+                state,
+                format!("{error:?}"),
+                expected,
+            ));
+            break;
+        }
+    }
+    for frame in 2_u32..=300 {
+        let report = runtime.run_frame(&mut host, 256).unwrap();
+        for execution in &report.executions {
+            if let Err(error) = &execution.result
+                && first_fault.is_none()
+            {
+                let origin = runtime
+                    .arena()
+                    .get(execution.object.arena())
+                    .expect("faulted object remains in the arena")
+                    .origin();
+                let address = runtime
+                    .machine()
+                    .object(execution.object.vm())
+                    .expect("faulted object remains in the VM")
+                    .code_address();
+                let state = runtime
+                    .machine()
+                    .object(execution.object.vm())
+                    .expect("faulted object remains in the VM")
+                    .state();
+                let expected = matches!(
+                    error,
+                    RuntimeError::Vm(VmError::UnsupportedSolidObjectBounds(candidate))
+                        if candidate.get() == 6
+                );
+                first_fault = Some((
+                    frame,
+                    execution.object,
+                    origin,
+                    address,
+                    state,
+                    format!("{error:?}"),
+                    expected,
+                ));
+            }
+        }
+    }
+    eprintln!("first source-derived fault through 300 frames: {first_fault:?}");
+    let Some((frame, object, origin, address, state, error, expected)) = first_fault else {
+        panic!("the legal trace unexpectedly crossed every typed VM boundary");
+    };
+    assert_eq!(frame, 1);
+    assert_eq!(
+        origin,
+        ObjectOrigin::Runtime {
+            executable: 29,
+            subtype: 0,
+        }
+    );
+    assert_eq!(
+        address,
+        CodeAddress {
+            segment: CodeSegment::External,
+            // Fetch is post-incremented: after exact suboperation three,
+            // ShadC's next typed collision boundary is external word 40.
+            pc: 41,
+        }
+    );
+    assert_eq!(state, 1);
+    let solid_vm = runtime.machine().object(object.vm()).unwrap();
+    assert_eq!(
+        [
+            solid_vm.register(38).unwrap(),
+            solid_vm.register(39).unwrap(),
+            solid_vm.register(40).unwrap(),
+        ],
+        [0; 3],
+        "static trans4 must clear B's three process words"
+    );
+    assert_eq!(
+        [
+            solid_vm.register(23).unwrap(),
+            solid_vm.register(24).unwrap(),
+            solid_vm.register(25).unwrap(),
+        ],
+        [
+            solid_vm.register(8).unwrap(),
+            solid_vm.register(9).unwrap(),
+            solid_vm.register(10).unwrap(),
+        ],
+        "ZoneFindNearestObjectNode3 never writes back its local query vector"
+    );
+    let executable = nsd.ldat().unwrap().executable_map[29];
+    let state_program = load_gool_state_program(&nsd, &nsf, &nsf_bytes, executable, state).unwrap();
+    let instruction = state_program.code()[address.pc - 1];
+    assert_eq!(instruction, 0x8e06_de26);
+    let bound_candidate = VmObjectHandle::new(6).unwrap();
+    let candidate_execution = first
+        .frame
+        .executions
+        .iter()
+        .find(|execution| execution.object.vm() == bound_candidate)
+        .unwrap();
     assert!(matches!(
-        errors_by_frame[2].1.as_slice(),
-        [RuntimeError::Vm(VmError::UnsupportedInputReference {
-            source: 0x04d,
-            destination: 0x04c,
-        })]
+        runtime
+            .arena()
+            .get(candidate_execution.object.arena())
+            .unwrap()
+            .origin(),
+        ObjectOrigin::Entity(descriptor)
+            if descriptor.id == 14
+                && descriptor.group == 3
+                && descriptor.executable == 31
+                && descriptor.subtype == 0
     ));
+    assert_eq!(
+        runtime
+            .machine()
+            .object(bound_candidate)
+            .unwrap()
+            .register(27),
+        Ok(0x0003_2814),
+        "the legal candidate is collidable and passes the source shadow-bound mask"
+    );
+    eprintln!(
+        "active object-bound boundary within solid suboperation one is state {state} external word {} = {instruction:#010x}",
+        address.pc - 1
+    );
+    assert!(
+        expected,
+        "unexpected first fault for object {object:?}: {error}"
+    );
 }

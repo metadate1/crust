@@ -1,10 +1,10 @@
 use crust_formats::binary::{Eid, EntryRef};
 use crust_formats::stream::{GOOL_PC_NONE, ZoneEntity, ZoneEntityPathPoint, structs::GoolState};
 use crust_sim::gool::{
-    HaltReason, Instruction, ObjectHandle as VmObjectHandle, RetailTransform, VmError, VmObject,
-    VmStateProgram, process_register,
+    HaltReason, Instruction, ObjectHandle as VmObjectHandle, RetailPadSnapshot, RetailTransform,
+    VmError, VmObject, VmStateProgram, process_register,
 };
-use crust_sim::object_arena::{NeighborZone, TreeParent};
+use crust_sim::object_arena::{NeighborZone, ObjectOrigin, TreeParent};
 use crust_sim::retail_runtime::{
     ProgramBinding, ProgramHost, ProgramOrigin, RetailRuntime, RetailZoneEnvironment, RuntimeError,
     StateProgramBinding,
@@ -111,6 +111,8 @@ impl ProgramHost for RecordingHost {
             7 => vec![CHANGE_TO_STATE_ONE],
             // Fail after fetch so a retry would incorrectly skip to RETURN.
             8 => vec![Instruction::encode(0xff, REG0, REG1), RETURN],
+            // Test the port-zero retail CROSS-tapped control query.
+            10 => vec![0x1a00_1040],
             _ => vec![RETURN],
         };
         let mut object = VmObject::new(binding.object.vm(), code).map_err(|_| "VM object")?;
@@ -147,6 +149,42 @@ impl ProgramHost for RecordingHost {
     ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
         Ok(Some(zone_environment()))
     }
+}
+
+#[test]
+fn browser_pad_snapshot_reaches_retail_gool_before_the_frame_runs() {
+    let entities = [entity(34, 3, 10, 0)];
+    let neighbors = [NeighborZone {
+        eid: ZONE_A,
+        display_flags: 2,
+        entities: &entities,
+    }];
+    let snapshot = RetailPadSnapshot {
+        tapped: 0x40,
+        held: 0x40,
+        held_previous: 0,
+        tapped_previous: 0,
+        held_previous_2: 0,
+    };
+    let mut runtime = RetailRuntime::new(0);
+    runtime.set_pad_snapshot(0, snapshot).unwrap();
+
+    let report = runtime
+        .spawn_and_run_frame(&neighbors, &mut RecordingHost::default(), 1)
+        .unwrap();
+    let object = report.spawn_attempts[0].result.as_ref().unwrap();
+
+    assert_eq!(report.frame.executions[0].result.as_ref().unwrap().steps, 1);
+    assert_eq!(
+        runtime
+            .machine()
+            .object(object.vm())
+            .unwrap()
+            .stack()
+            .last(),
+        Some(&0x40),
+        "GOOL 0x1a must observe the same CROSS tap as browser UI code"
+    );
 }
 
 #[test]
@@ -381,6 +419,153 @@ fn retail_state_changes_rebind_before_the_next_cooperative_frame() {
         second.executions[0].result.as_ref().unwrap().reason,
         HaltReason::Halted
     );
+}
+
+struct TransitionStateHost;
+
+impl ProgramHost for TransitionStateHost {
+    type Error = &'static str;
+
+    fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+        let code = match binding.origin {
+            ProgramOrigin::Entity(_) => vec![CHANGE_TO_STATE_ONE],
+            ProgramOrigin::RuntimeChild { .. } => vec![RETURN],
+        };
+        VmObject::new(binding.object.vm(), code).map_err(|_| "VM object")
+    }
+
+    fn bind_state_program(
+        &mut self,
+        binding: StateProgramBinding,
+    ) -> Result<VmStateProgram, Self::Error> {
+        VmStateProgram::new(
+            binding.state,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: 3,
+            },
+            vec![
+                Instruction::encode(0x11, 0x0801, 0x0e1f),
+                0x8a10_5001,
+                RETURN,
+                RETURN,
+            ],
+            Vec::new(),
+        )
+        .map_err(|_| "state program")
+    }
+}
+
+#[test]
+fn production_rebind_runs_transition_block_and_its_host_effect_synchronously() {
+    let entities = [entity(35, 3, 11, 0)];
+    let neighbors = [NeighborZone {
+        eid: ZONE_A,
+        display_flags: 2,
+        entities: &entities,
+    }];
+    let mut runtime = RetailRuntime::new(0);
+    let report = runtime
+        .spawn_and_run_frame(&neighbors, &mut TransitionStateHost, 1)
+        .unwrap();
+    let object = *report.spawn_attempts[0].result.as_ref().unwrap();
+
+    assert_eq!(
+        report.frame.executions[0].result.as_ref().unwrap().reason,
+        HaltReason::StateChanged(1)
+    );
+    assert_eq!(runtime.machine().object(object.vm()).unwrap().state(), 1);
+    assert!(!runtime.is_object_faulted(object));
+    assert_eq!(report.frame.spawned_children.len(), 1);
+    let child = report.frame.spawned_children[0];
+    assert_eq!(
+        runtime.arena().get(child.arena()).unwrap().origin(),
+        ObjectOrigin::Runtime {
+            executable: 5,
+            subtype: 0,
+        }
+    );
+    assert!(report.frame.effects.iter().any(|effect| matches!(
+        effect,
+        crust_sim::gool::VmEffect::SpawnChildren {
+            parent,
+            executable: 5,
+            arguments,
+            ..
+        } if *parent == object.vm() && arguments == &[0x100]
+    )));
+}
+
+#[derive(Default)]
+struct TransitionChainHost {
+    rebound_states: Vec<u16>,
+}
+
+impl ProgramHost for TransitionChainHost {
+    type Error = &'static str;
+
+    fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+        VmObject::new(binding.object.vm(), vec![CHANGE_TO_STATE_ONE]).map_err(|_| "VM object")
+    }
+
+    fn bind_state_program(
+        &mut self,
+        binding: StateProgramBinding,
+    ) -> Result<VmStateProgram, Self::Error> {
+        self.rebound_states.push(binding.state);
+        let transition = if binding.state == 1 {
+            0x8240_0002
+        } else {
+            RETURN
+        };
+        VmStateProgram::new(
+            binding.state,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: 1,
+            },
+            vec![transition, RETURN],
+            Vec::new(),
+        )
+        .map_err(|_| "state program")
+    }
+}
+
+#[test]
+fn transition_state_link_rebinds_the_next_state_before_the_frame_returns() {
+    let entities = [entity(36, 3, 11, 0)];
+    let neighbors = [NeighborZone {
+        eid: ZONE_A,
+        display_flags: 2,
+        entities: &entities,
+    }];
+    let mut host = TransitionChainHost::default();
+    let mut runtime = RetailRuntime::new(0);
+    let report = runtime
+        .spawn_and_run_frame(&neighbors, &mut host, 1)
+        .unwrap();
+    let object = *report.spawn_attempts[0].result.as_ref().unwrap();
+
+    assert_eq!(host.rebound_states, [1, 2]);
+    assert_eq!(runtime.machine().object(object.vm()).unwrap().state(), 2);
+    assert!(!runtime.is_object_faulted(object));
+    assert_eq!(
+        report.frame.executions[0].result.as_ref().unwrap().reason,
+        HaltReason::StateChanged(1)
+    );
+    assert!(report.frame.effects.iter().any(|effect| matches!(
+        effect,
+        crust_sim::gool::VmEffect::StateChanged { object: vm, state: 2 }
+            if *vm == object.vm()
+    )));
 }
 
 #[test]

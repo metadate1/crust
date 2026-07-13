@@ -100,6 +100,22 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
     let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
     let crash_eid = metadata.ldat().unwrap().executable_map[0];
     let program = load_gool_program(&metadata, &nsf, &nsf_bytes, crash_eid, 0).unwrap();
+    assert_eq!(program.page_count(), metadata.header.page_count);
+    assert_eq!(
+        program.resident_pages(),
+        [
+            metadata.pte(crash_eid).unwrap().page_index(),
+            metadata.pte(program.external_eid()).unwrap().page_index(),
+        ]
+    );
+    for index in [0x4c, 0x4d] {
+        let eid = Eid::from_raw(program.internal_words()[index]);
+        assert!(
+            program
+                .entry_pages()
+                .contains(&(eid, metadata.pte(eid).unwrap().page_index(),))
+        );
+    }
     assert_eq!(program.code()[70], 0x8609_806e);
     assert_eq!(program.global_code()[131], 0x8289_4000);
     assert_eq!(program.code()[72], 0x16be_0e1f);

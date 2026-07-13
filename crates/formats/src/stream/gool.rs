@@ -7,7 +7,7 @@
 //! item 1 and external words in item 2. This module resolves that graph with
 //! logical EIDs and owned words, never relocated native pointers.
 
-use crate::binary::{Eid, FormatError, Reader};
+use crate::binary::{Eid, FormatError, PageIndex, Reader};
 
 use super::nsd::Nsd;
 use super::nsf::{Entry, Nsf};
@@ -42,6 +42,9 @@ pub struct GoolProgram {
     code_pc: Option<usize>,
     event_pc: Option<usize>,
     transition_pc: Option<usize>,
+    page_count: u32,
+    resident_pages: [PageIndex; 2],
+    entry_pages: Vec<(Eid, PageIndex)>,
 }
 
 impl GoolProgram {
@@ -117,6 +120,26 @@ impl GoolProgram {
     #[must_use]
     pub const fn transition_pc(&self) -> Option<usize> {
         self.transition_pc
+    }
+
+    /// Number of physical NSF pages in the mounted retail level.
+    #[must_use]
+    pub const fn page_count(&self) -> u32 {
+        self.page_count
+    }
+
+    /// Pages containing the bound global and external GOOL entries.
+    #[must_use]
+    pub const fn resident_pages(&self) -> [PageIndex; 2] {
+        self.resident_pages
+    }
+
+    /// Named EIDs found in either GOOL data table and their validated NSD
+    /// page-table destinations. This lets the VM resolve opcode `0x26`
+    /// storage references without relocating data words to native pointers.
+    #[must_use]
+    pub fn entry_pages(&self) -> &[(Eid, PageIndex)] {
+        &self.entry_pages
     }
 }
 
@@ -300,6 +323,24 @@ fn load_resolved_state_program(
         "transition",
     )?;
     let code_pc = validate_pc(state.code_pc, code.len(), state_absolute + 14, "code")?;
+    let mut entry_pages = Vec::new();
+    for raw in internal_words.iter().chain(&external_words).copied() {
+        let eid = Eid::from_raw(raw);
+        if !eid.is_named() || entry_pages.iter().any(|(known, _)| *known == eid) {
+            continue;
+        }
+        if let Some(pte) = metadata.pte(eid) {
+            entry_pages.push((eid, pte.page_index()));
+        }
+    }
+    let global_page = metadata
+        .pte(global_eid)
+        .ok_or_else(|| FormatError::global("global GOOL EID lost its page-table record"))?
+        .page_index();
+    let external_page = metadata
+        .pte(external_eid)
+        .ok_or_else(|| FormatError::global("external GOOL EID lost its page-table record"))?
+        .page_index();
 
     Ok(GoolProgram {
         global_eid,
@@ -316,6 +357,9 @@ fn load_resolved_state_program(
         code_pc,
         event_pc,
         transition_pc,
+        page_count: metadata.header.page_count,
+        resident_pages: [global_page, external_page],
+        entry_pages,
     })
 }
 

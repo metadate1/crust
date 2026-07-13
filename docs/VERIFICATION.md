@@ -35,8 +35,10 @@ polygons from both the extracted pair and directly from the raw BIN.
 
 The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
 verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
-optional-pointer word `0x16be0e1f`, and the first two child-spawn yields with argument cleanup,
-without treating any serialized word as a native pointer.
+optional-pointer word `0x16be0e1f`, and both initial child-spawn requests with synchronous callbacks
+and argument cleanup in one 67-instruction invocation, without treating any serialized word as a
+native pointer. A negative dynamic child count was also verified as a non-spawning argument-pop
+rather than an overflow error.
 
 ## Browser checks actually performed
 
@@ -101,7 +103,7 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 223 asset-free tests passed, zero failed; 14 legally local tests
+- locked native workspace suite: 228 asset-free tests passed, zero failed; 14 legally local tests
   remain ignored by default.
 - all 14 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,

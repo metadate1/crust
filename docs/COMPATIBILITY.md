@@ -33,9 +33,10 @@ gameplay path.
   run the full retail GOOL instruction/host-call set. `crust-formats` validates GOOL global and
   external code/state graphs and all retail ZDAT entity descriptors. `crust-sim` now has a
   pointer-free bounded arena and implements the characterized Crash absolute-global call/return,
-  optional-pointer input and child-spawn yield. The arena and VM use distinct handle types and are
-  not integrated; full process frames, state rebinding, events, object hosts and many opcodes remain
-  absent or partial.
+  optional-pointer input and synchronous child-spawn host boundary. A hosted runner applies that
+  effect before the next instruction. The arena has a corresponding runtime child/reclaim path, but
+  it and the VM use distinct handle types and are not integrated; full process frames, state
+  rebinding, events, object hosts and many opcodes remain absent or partial.
 - Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
   file handles, validates and swaps every requested destination pair, and installs its initial
   snapshot, but it does not yet page entries or update that scene at runtime.

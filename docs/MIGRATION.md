@@ -37,6 +37,9 @@ An external `git archive` copy produced these results:
 - GOOL programs are retained as owned code/state/EID tables. Serialized PCs are validated within
   the 14-bit code space and never converted to host pointers. External/global code addresses and
   return frames are explicit values; global calls remove their validated argument span on return.
+  Child-spawn opcodes stop at a synchronous host boundary, then continue in the same hosted
+  interpreter invocation before the next instruction. They pop arguments for every signed count
+  and expose `0x91`'s bounded reclaim permission rather than an alternate parent.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.

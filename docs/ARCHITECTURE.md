@@ -69,9 +69,12 @@ shape without host pointers.
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. It implements absolute global calls with typed frames and argument cleanup, returns,
 optional/null pointer input semantics, state-change yields and the child-spawn host effect needed by
-the characterized Crash boot sequence. The arena and VM intentionally remain separate until every
-host effect has a validated integration rule; the live browser therefore does not yet execute this
-retail object frame.
+the characterized Crash boot sequence. The ordinary runner stops at that synchronous boundary;
+`run_with_host_effects` applies the callback before the following instruction while preserving the
+same interpreter invocation. The arena has a separate runtime-child path with bounded `0x91`
+reclaim selection, dedicated-player activation/reset and no runtime-child entity spawn ID. The
+arena's generational handle and the VM's current index handle remain separate, so effects are not
+yet coupled into the live browser object frame.
 
 ## Audio
 

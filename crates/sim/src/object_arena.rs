@@ -20,6 +20,7 @@ const ACTIVE_ZONE_DISPLAY_BIT: u32 = 1 << 1;
 const SPAWNABLE_ENTITY_GROUP: u16 = 3;
 const SPAWN_ACTIVE_BIT: u32 = 1;
 const SPAWN_BLOCKED_BIT: u32 = 2;
+const RECLAIMABLE_STATE_FLAG: u32 = 0x0008_0000;
 
 /// Ordinary zone-spawned objects are inserted under retail root three.
 pub const ZONE_OBJECT_ROOT: RootHandle = RootHandle(3);
@@ -165,6 +166,15 @@ pub enum SpawnError {
     ObjectPoolFull,
 }
 
+/// Expected failures while creating a GOOL runtime child.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeCreateError {
+    InvalidParent(ObjectHandle),
+    MainObjectUnavailable,
+    ObjectPoolFull,
+    BrokenTree(TreeError),
+}
+
 /// Errors from validated tree operations.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TreeError {
@@ -220,12 +230,38 @@ pub enum ObjectAllocation {
     DedicatedMain,
 }
 
+/// Whether a live object came from persistent zone data or a GOOL opcode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectOrigin {
+    Entity(EntitySpawnDescriptor),
+    Runtime { executable: u8, subtype: u8 },
+}
+
+impl ObjectOrigin {
+    #[must_use]
+    pub const fn executable(self) -> u8 {
+        match self {
+            Self::Entity(descriptor) => descriptor.executable,
+            Self::Runtime { executable, .. } => executable,
+        }
+    }
+
+    #[must_use]
+    pub const fn subtype(self) -> u8 {
+        match self {
+            Self::Entity(descriptor) => descriptor.subtype,
+            Self::Runtime { subtype, .. } => subtype,
+        }
+    }
+}
+
 /// Spawn metadata attached to one live logical object.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SpawnedObject {
     zone: Eid,
-    descriptor: EntitySpawnDescriptor,
+    origin: ObjectOrigin,
     allocation: ObjectAllocation,
+    state_flags: u32,
     parent: TreeParent,
     first_child: Option<ObjectHandle>,
     next_sibling: Option<ObjectHandle>,
@@ -238,13 +274,26 @@ impl SpawnedObject {
     }
 
     #[must_use]
-    pub const fn descriptor(&self) -> EntitySpawnDescriptor {
-        self.descriptor
+    pub const fn origin(&self) -> ObjectOrigin {
+        self.origin
+    }
+
+    #[must_use]
+    pub const fn entity_descriptor(&self) -> Option<EntitySpawnDescriptor> {
+        match self.origin {
+            ObjectOrigin::Entity(descriptor) => Some(descriptor),
+            ObjectOrigin::Runtime { .. } => None,
+        }
     }
 
     #[must_use]
     pub const fn allocation(&self) -> ObjectAllocation {
         self.allocation
+    }
+
+    #[must_use]
+    pub const fn state_flags(&self) -> u32 {
+        self.state_flags
     }
 
     #[must_use]
@@ -381,10 +430,103 @@ impl ObjectArena {
         } else {
             ZONE_OBJECT_ROOT
         });
-        let handle = self.allocate(zone, descriptor, allocation, parent)?;
+        let handle = self.allocate(zone, ObjectOrigin::Entity(descriptor), allocation, parent)?;
         self.insert_at_head(parent, handle);
         self.spawn_table.mark_active(descriptor.id);
         Ok(handle)
+    }
+
+    /// Creates a child requested by GOOL opcode `0x8a` or `0x91`.
+    ///
+    /// Runtime children do not consume or clear an entity spawn-table ID. If
+    /// the ordinary pool is full, `allow_reclaim` mirrors opcode `0x91` by
+    /// terminating the first safe preorder object whose state has retail flag
+    /// `0x80000`. The live parent and its ancestors are excluded so a checked
+    /// handle can never be invalidated halfway through creation.
+    pub fn create_child(
+        &mut self,
+        parent: ObjectHandle,
+        zone: Eid,
+        executable: u8,
+        subtype: u8,
+        allow_reclaim: bool,
+    ) -> Result<ObjectHandle, RuntimeCreateError> {
+        self.object(parent)
+            .map_err(|_| RuntimeCreateError::InvalidParent(parent))?;
+
+        // Retail reuses the separately allocated player/Crash object for
+        // executable/subtype zero rather than consuming the ordinary pool.
+        if executable == 0 && subtype == 0 {
+            let tree_parent = TreeParent::Object(parent);
+            let main = if let Some(main) = self.main_object() {
+                self.add_child(tree_parent, main)
+                    .map_err(RuntimeCreateError::BrokenTree)?;
+                let object = self
+                    .object_mut(main)
+                    .map_err(RuntimeCreateError::BrokenTree)?;
+                object.zone = zone;
+                object.origin = ObjectOrigin::Runtime {
+                    executable,
+                    subtype,
+                };
+                object.state_flags = 0;
+                main
+            } else {
+                let main = self
+                    .allocate(
+                        zone,
+                        ObjectOrigin::Runtime {
+                            executable,
+                            subtype,
+                        },
+                        ObjectAllocation::DedicatedMain,
+                        tree_parent,
+                    )
+                    .map_err(|_| RuntimeCreateError::MainObjectUnavailable)?;
+                self.insert_at_head(tree_parent, main);
+                main
+            };
+            return Ok(main);
+        }
+
+        if self.free_len == 0 {
+            if !allow_reclaim {
+                return Err(RuntimeCreateError::ObjectPoolFull);
+            }
+            let candidate = self
+                .first_reclaimable_outside_parent_chain(parent)?
+                .ok_or(RuntimeCreateError::ObjectPoolFull)?;
+            self.despawn_subtree(candidate)
+                .map_err(RuntimeCreateError::BrokenTree)?;
+        }
+
+        let tree_parent = TreeParent::Object(parent);
+        let handle = self
+            .allocate(
+                zone,
+                ObjectOrigin::Runtime {
+                    executable,
+                    subtype,
+                },
+                ObjectAllocation::Pool,
+                tree_parent,
+            )
+            .map_err(|error| match error {
+                SpawnError::ObjectPoolFull => RuntimeCreateError::ObjectPoolFull,
+                _ => unreachable!("pool allocation has no entity validation"),
+            })?;
+        self.insert_at_head(tree_parent, handle);
+        Ok(handle)
+    }
+
+    /// Synchronizes the VM state flags used by opcode `0x91` reclamation.
+    pub fn set_state_flags(
+        &mut self,
+        handle: ObjectHandle,
+        state_flags: u32,
+    ) -> Result<(), TreeError> {
+        self.object_mut(handle)?.state_flags = state_flags;
+        Ok(())
     }
 
     /// Runs the current-zone neighbor scan without reordering any input.
@@ -472,7 +614,7 @@ impl ObjectArena {
     fn allocate(
         &mut self,
         zone: Eid,
-        descriptor: EntitySpawnDescriptor,
+        origin: ObjectOrigin,
         allocation: ObjectAllocation,
         parent: TreeParent,
     ) -> Result<ObjectHandle, SpawnError> {
@@ -495,8 +637,9 @@ impl ObjectArena {
         };
         slot.object = Some(SpawnedObject {
             zone,
-            descriptor,
+            origin,
             allocation,
+            state_flags: 0,
             parent,
             first_child: None,
             next_sibling: None,
@@ -527,6 +670,37 @@ impl ObjectArena {
             slot: u8::try_from(slot_index).ok()?,
             generation: slot.generation,
         })
+    }
+
+    fn first_reclaimable_outside_parent_chain(
+        &self,
+        parent: ObjectHandle,
+    ) -> Result<Option<ObjectHandle>, RuntimeCreateError> {
+        let mut protected = [None; TOTAL_SLOT_COUNT];
+        let mut protected_len = 0_usize;
+        let mut cursor = Some(parent);
+        while let Some(handle) = cursor {
+            protected[protected_len] = Some(handle);
+            protected_len += 1;
+            cursor = match self
+                .object(handle)
+                .map_err(RuntimeCreateError::BrokenTree)?
+                .parent
+            {
+                TreeParent::Root(_) => None,
+                TreeParent::Object(next) => Some(next),
+            };
+        }
+
+        let preorder = self
+            .preorder(TreeParent::Root(ZONE_OBJECT_ROOT))
+            .map_err(RuntimeCreateError::BrokenTree)?;
+        Ok(preorder.into_iter().find(|candidate| {
+            !protected[..protected_len].contains(&Some(*candidate))
+                && self
+                    .get(*candidate)
+                    .is_some_and(|object| object.state_flags & RECLAIMABLE_STATE_FLAG != 0)
+        }))
     }
 
     fn first_child_of(&self, parent: TreeParent) -> Result<Option<ObjectHandle>, TreeError> {
@@ -607,7 +781,9 @@ impl ObjectArena {
     fn release(&mut self, handle: ObjectHandle) -> Result<(), TreeError> {
         let slot_index = usize::from(handle.slot);
         let object = self.object(handle)?.clone();
-        self.spawn_table.clear_active(object.descriptor.id);
+        if let ObjectOrigin::Entity(descriptor) = object.origin {
+            self.spawn_table.clear_active(descriptor.id);
+        }
         let slot = &mut self.slots[slot_index];
         slot.object = None;
         slot.generation = slot.generation.wrapping_add(1).max(1);
@@ -684,7 +860,7 @@ mod tests {
     ) -> Vec<u16> {
         handles
             .into_iter()
-            .map(|handle| arena.get(handle).unwrap().descriptor().id)
+            .map(|handle| arena.get(handle).unwrap().entity_descriptor().unwrap().id)
             .collect()
     }
 
@@ -872,6 +1048,108 @@ mod tests {
         let main = arena.spawn_entity(ZONE_A, entity(201, 3, 0, 0)).unwrap();
         assert!(main.is_dedicated_main());
         assert_eq!(arena.len(), OBJECT_POOL_CAPACITY + 1);
+    }
+
+    #[test]
+    fn runtime_children_use_object_parent_without_touching_spawn_flags() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(60, 3, 1, 0)).unwrap();
+        let child = arena.create_child(parent, ZONE_A, 5, 2, false).unwrap();
+
+        assert_eq!(
+            arena.get(child).unwrap().origin(),
+            ObjectOrigin::Runtime {
+                executable: 5,
+                subtype: 2
+            }
+        );
+        assert_eq!(
+            arena.get(child).unwrap().parent(),
+            TreeParent::Object(parent)
+        );
+        assert_eq!(arena.spawn_table().flags(60), Some(1));
+        arena.despawn_subtree(child).unwrap();
+        assert_eq!(arena.spawn_table().flags(60), Some(1));
+    }
+
+    #[test]
+    fn runtime_reclaim_uses_first_flagged_preorder_candidate() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(100, 3, 1, 0)).unwrap();
+        let candidate = arena.spawn_entity(ZONE_A, entity(101, 3, 1, 0)).unwrap();
+        for id in 102..196 {
+            arena.spawn_entity(ZONE_A, entity(id, 3, 1, 0)).unwrap();
+        }
+        assert_eq!(arena.remaining_pool_capacity(), 0);
+        assert_eq!(
+            arena.create_child(parent, ZONE_A, 5, 0, false),
+            Err(RuntimeCreateError::ObjectPoolFull)
+        );
+
+        arena
+            .set_state_flags(candidate, RECLAIMABLE_STATE_FLAG)
+            .unwrap();
+        let child = arena.create_child(parent, ZONE_A, 5, 0, true).unwrap();
+        assert_eq!(child.slot(), candidate.slot());
+        assert!(arena.get(candidate).is_none());
+        assert_eq!(arena.spawn_table().flags(101), Some(0));
+        assert_eq!(
+            arena.get(child).unwrap().origin(),
+            ObjectOrigin::Runtime {
+                executable: 5,
+                subtype: 0
+            }
+        );
+    }
+
+    #[test]
+    fn runtime_crash_creation_reuses_dedicated_main_object() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(200, 3, 1, 0)).unwrap();
+        let main = arena.spawn_entity(ZONE_A, entity(201, 3, 0, 0)).unwrap();
+        arena.set_state_flags(main, u32::MAX).unwrap();
+        let free_before = arena.remaining_pool_capacity();
+
+        assert_eq!(arena.create_child(parent, ZONE_A, 0, 0, false), Ok(main));
+        assert_eq!(arena.remaining_pool_capacity(), free_before);
+        assert_eq!(
+            arena.get(main).unwrap().parent(),
+            TreeParent::Object(parent)
+        );
+        assert_eq!(
+            arena.get(main).unwrap().origin(),
+            ObjectOrigin::Runtime {
+                executable: 0,
+                subtype: 0
+            }
+        );
+        assert_eq!(arena.get(main).unwrap().state_flags(), 0);
+        assert_eq!(arena.spawn_table().flags(201), Some(1));
+        arena.despawn_subtree(main).unwrap();
+        assert_eq!(arena.spawn_table().flags(201), Some(1));
+    }
+
+    #[test]
+    fn runtime_crash_creation_activates_empty_dedicated_slot() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(202, 3, 1, 0)).unwrap();
+        let free_before = arena.remaining_pool_capacity();
+        let main = arena.create_child(parent, ZONE_A, 0, 0, false).unwrap();
+
+        assert!(main.is_dedicated_main());
+        assert_eq!(arena.main_object(), Some(main));
+        assert_eq!(arena.remaining_pool_capacity(), free_before);
+        assert_eq!(
+            arena.get(main).unwrap().origin(),
+            ObjectOrigin::Runtime {
+                executable: 0,
+                subtype: 0
+            }
+        );
+        assert_eq!(
+            arena.get(main).unwrap().parent(),
+            TreeParent::Object(parent)
+        );
     }
 
     #[test]

@@ -176,7 +176,7 @@ pub enum VmEffect {
         executable: u8,
         subtype: u8,
         count: u32,
-        alternate_parent: bool,
+        allow_reclaim: bool,
         arguments: Vec<u32>,
     },
     Transition(i32),
@@ -209,13 +209,15 @@ pub enum VmError {
     UnknownOpcode(u8),
     UnknownControl(u8),
     EffectQueueFull,
+    MissingHostEffect,
 }
 
-/// Why an interpreter invocation yielded.
+/// Why an interpreter invocation stopped.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HaltReason {
     Halted,
-    Yielded,
+    /// A synchronous host effect must be applied before interpretation resumes.
+    HostEffect,
     StateChanged(u16),
     BudgetExhausted,
 }
@@ -503,6 +505,48 @@ impl Machine {
         })
     }
 
+    /// Runs one interpreter invocation while applying spawn effects before the
+    /// following instruction, matching retail's synchronous host call.
+    ///
+    /// The callback may update the machine (for example by installing a child
+    /// object or link) and external host state. Returning an error aborts the
+    /// invocation without executing the next instruction.
+    pub fn run_with_host_effects<F>(
+        &mut self,
+        handle: ObjectHandle,
+        budget: usize,
+        mut host: F,
+    ) -> Result<Execution, VmError>
+    where
+        F: FnMut(&mut Self, &VmEffect) -> Result<(), VmError>,
+    {
+        let mut condition = false;
+        for steps in 0..budget {
+            if let Some(reason) = self.step(handle, &mut condition)? {
+                if reason == HaltReason::HostEffect {
+                    let effect = self
+                        .effects
+                        .last()
+                        .cloned()
+                        .ok_or(VmError::MissingHostEffect)?;
+                    if !matches!(effect, VmEffect::SpawnChildren { .. }) {
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    host(self, &effect)?;
+                    continue;
+                }
+                return Ok(Execution {
+                    reason,
+                    steps: steps + 1,
+                });
+            }
+        }
+        Ok(Execution {
+            reason: HaltReason::BudgetExhausted,
+            steps: budget,
+        })
+    }
+
     fn step(
         &mut self,
         handle: ObjectHandle,
@@ -709,8 +753,9 @@ impl Machine {
                 return Ok(Some(HaltReason::StateChanged(state)));
             }
             0x8a | 0x91 => {
-                self.spawn_children(handle, word, instruction.opcode == 0x91)?;
-                return Ok(Some(HaltReason::Yielded));
+                if self.spawn_children(handle, word, instruction.opcode == 0x91)? {
+                    return Ok(Some(HaltReason::HostEffect));
+                }
             }
             0x8b => {
                 let open = self.read_operand(handle, a)? != 0;
@@ -1037,8 +1082,8 @@ impl Machine {
         &mut self,
         handle: ObjectHandle,
         instruction: u32,
-        alternate_parent: bool,
-    ) -> Result<(), VmError> {
+        allow_reclaim: bool,
+    ) -> Result<bool, VmError> {
         let encoded_argument_count = ((instruction >> 20) & 0x0f) as usize;
         let executable = ((instruction >> 12) & 0xff) as u8;
         let subtype = ((instruction >> 6) & 0x3f) as u8;
@@ -1056,7 +1101,8 @@ impl Machine {
         } else {
             (encoded_count, encoded_argument_count)
         };
-        if count > MAX_OBJECTS as u32 {
+        let signed_count = count as i32;
+        if signed_count > MAX_OBJECTS as i32 {
             return Err(VmError::SpawnCountTooLarge(count));
         }
 
@@ -1064,17 +1110,18 @@ impl Machine {
         let argument_end = argument_start + argument_count;
         let arguments = self.object(handle)?.stack[argument_start..argument_end].to_vec();
         self.object_mut(handle)?.stack.truncate(argument_start);
-        if (count as i32) > 0 {
+        if signed_count > 0 {
             self.emit(VmEffect::SpawnChildren {
                 parent: handle,
                 executable,
                 subtype,
                 count,
-                alternate_parent,
+                allow_reclaim,
                 arguments,
             })?;
+            return Ok(true);
         }
-        Ok(())
+        Ok(false)
     }
 
     fn emit(&mut self, effect: VmEffect) -> Result<(), VmError> {
@@ -1345,23 +1392,34 @@ mod tests {
     }
 
     #[test]
-    fn exact_crash_child_spawn_yields_a_pointer_free_host_request() {
+    fn exact_crash_child_spawn_continues_after_pointer_free_host_request() {
         let h = handle(0);
-        let mut object =
-            VmObject::new(h, vec![Instruction::encode(0x00, REG0, REG1), 0x8a10_5001]).unwrap();
-        object.set_register(0, 0).unwrap();
-        object.set_register(1, 0).unwrap();
+        let make_object = || {
+            let mut object = VmObject::new(
+                h,
+                vec![
+                    Instruction::encode(0x00, REG0, REG1),
+                    0x8a10_5001,
+                    Instruction::encode(0x00, REG0, REG1),
+                ],
+            )
+            .unwrap();
+            object.set_register(0, 0).unwrap();
+            object.set_register(1, 0).unwrap();
+            object
+        };
         let mut machine = Machine::new(0);
-        machine.insert_object(object).unwrap();
+        machine.insert_object(make_object()).unwrap();
 
         assert_eq!(
-            machine.run(h, 2).unwrap(),
+            machine.run(h, 3).unwrap(),
             Execution {
-                reason: HaltReason::Yielded,
+                reason: HaltReason::HostEffect,
                 steps: 2,
             }
         );
         assert!(machine.object(h).unwrap().stack().is_empty());
+        assert_eq!(machine.object(h).unwrap().code_address().pc, 2);
         assert_eq!(
             machine.effects(),
             &[VmEffect::SpawnChildren {
@@ -1369,10 +1427,50 @@ mod tests {
                 executable: 5,
                 subtype: 0,
                 count: 1,
-                alternate_parent: false,
+                allow_reclaim: false,
                 arguments: vec![0],
             }]
         );
+
+        let mut hosted = Machine::new(0);
+        hosted.insert_object(make_object()).unwrap();
+        let mut callback_count = 0;
+        assert_eq!(
+            hosted
+                .run_with_host_effects(h, 3, |machine, effect| {
+                    assert!(matches!(effect, VmEffect::SpawnChildren { .. }));
+                    callback_count += 1;
+                    machine.object_mut(h)?.set_register(0, 7)?;
+                    Ok(())
+                })
+                .unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 3,
+            }
+        );
+        assert_eq!(callback_count, 1);
+        assert_eq!(hosted.object(h).unwrap().stack(), &[7]);
+    }
+
+    #[test]
+    fn negative_dynamic_child_count_pops_arguments_without_spawning() {
+        let h = handle(0);
+        let object = VmObject::new(h, vec![0x8a20_5000]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, 0x1234).unwrap();
+        machine.push(h, u32::MAX).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 1,
+            }
+        );
+        assert!(machine.object(h).unwrap().stack().is_empty());
+        assert!(machine.effects().is_empty());
     }
 
     #[test]

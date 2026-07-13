@@ -113,37 +113,15 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
     let mut boot_machine = Machine::new(256);
     boot_machine.insert_object(boot_object).unwrap();
     assert_eq!(
-        boot_machine.run(boot_handle, 256).unwrap(),
+        boot_machine
+            .run_with_host_effects(boot_handle, 67, |_machine, effect| {
+                assert!(matches!(effect, VmEffect::SpawnChildren { .. }));
+                Ok(())
+            })
+            .unwrap(),
         Execution {
-            reason: HaltReason::Yielded,
-            steps: 64,
-        }
-    );
-    assert_eq!(
-        boot_machine.object(boot_handle).unwrap().code_address(),
-        CodeAddress {
-            segment: CodeSegment::External,
-            pc: 96,
-        }
-    );
-    assert!(boot_machine.object(boot_handle).unwrap().stack().is_empty());
-    assert_eq!(
-        boot_machine.effects(),
-        &[VmEffect::SpawnChildren {
-            parent: boot_handle,
-            executable: 5,
-            subtype: 0,
-            count: 1,
-            alternate_parent: false,
-            arguments: vec![0],
-        }]
-    );
-    let _ = boot_machine.take_effects();
-    assert_eq!(
-        boot_machine.run(boot_handle, 256).unwrap(),
-        Execution {
-            reason: HaltReason::Yielded,
-            steps: 3,
+            reason: HaltReason::BudgetExhausted,
+            steps: 67,
         }
     );
     assert_eq!(
@@ -156,13 +134,23 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
     assert!(boot_machine.object(boot_handle).unwrap().stack().is_empty());
     assert_eq!(
         boot_machine.effects(),
-        &[VmEffect::SpawnChildren {
-            parent: boot_handle,
-            executable: 29,
-            subtype: 0,
-            count: 1,
-            alternate_parent: false,
-            arguments: vec![0, 4096, 0],
-        }]
+        &[
+            VmEffect::SpawnChildren {
+                parent: boot_handle,
+                executable: 5,
+                subtype: 0,
+                count: 1,
+                allow_reclaim: false,
+                arguments: vec![0],
+            },
+            VmEffect::SpawnChildren {
+                parent: boot_handle,
+                executable: 29,
+                subtype: 0,
+                count: 1,
+                allow_reclaim: false,
+                arguments: vec![0, 4096, 0],
+            },
+        ]
     );
 }

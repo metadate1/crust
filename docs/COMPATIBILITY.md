@@ -13,6 +13,11 @@ gameplay path.
   followed by the same validation and an atomic pair swap at each destination transition.
 - Retail 432×144 LDAT loading-image decode and GPU upload where the stream provides one; the live
   stage consumes `crust-renderer` ordering-table commands through the WebGL2 backend.
+- Retail image-backed publisher/Naughty Dog/main-menu title frames composed from validated
+  MDAT/IPAL/IMAG graphs and presented by the live WebGL2 stage.
+- Progress-zero retail world snapshots for 40 of 43 playable LDAT starts: ZDAT spawn-zone/path,
+  raw endpoint SLST visibility, WGEO packed vertices/polygons, TPAG/CLUT texture decode, fixed-point
+  camera projection and retail world ordering depth are connected to WebGL2.
 - Rust title/publisher sequencing, main menu, options, password, load, map, intro, ending,
   completion, bonus, boss, game-over, and direct-boot state models.
 - Cooperative 30 Hz loop, keyboard, standard-gamepad polling, complete touch pad, pause, mute,
@@ -24,22 +29,27 @@ gameplay path.
 ## Exact remaining parity gaps
 
 - The browser gameplay path does not instantiate retail entries into the complete object graph or
-  run the full retail GOOL instruction/host-call set. `crust-sim` implements a bounded,
-  characterization-oriented VM subset and tests its stack, branches, arithmetic and relocation.
+  run the full retail GOOL instruction/host-call set. `crust-formats` now validates GOOL global and
+  external code/state graphs, and `crust-sim` binds them to pointer-free VM objects and implements
+  the packed `0x82` branch form. Full process frames, state rebinding, global-code calls, events,
+  object hosts and many opcodes remain absent or partial.
 - Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
-  file handles and now validates, retains and swaps every requested destination pair, but it does
-  not page those entries into a retail-equivalent live scene.
+  file handles, validates and swaps every requested destination pair, and installs its static spawn
+  snapshot, but it does not yet page entries or update that scene at runtime.
 - `crust-renderer` implements texture decode, cache keys, projection, ordering and blend-command
   rules. Its WebGL2 command backend is connected to the live stage and presents decoded loading
-  images, but the persistent scene is still original low-poly diagnostic geometry—not decoded
-  retail meshes, scene textures, sprites, animation, camera draw lists or pixel-equivalent effects.
+  images, four image-backed retail title states and decoded progress-zero worlds. Title, Hog Wild
+  and Whole Hog begin in zero-world dummy zones whose SLST references are deliberately external to
+  their current stream, so they have no standalone spawn snapshot. The static scene is not the
+  exact first presented frame: retail runs entity spawning and `CamUpdate` first, and 22 starts use
+  fog/ripple/lightning/dark variants whose dynamic vertex/color effects remain incomplete.
 - `crust-audio` implements SPU ADPCM, loop semantics, caching, 24-voice mixing, sequence events and
   a software synth. The live WebAudio path currently plays an original generated sequence and
   generated SFX; it does not parse and reproduce the retail VAB/SEP/MIDI program/envelope set.
 - Collision, camera, player, demo, bonus/boss and completion rules are independently tested models,
-  but the browser's playable level is a diagnostic movement/horizon scenario. Goals use a fixed
-  distance trigger; bosses, boxes, checkpoints, enemies, bonus entrances and ending conditions are
-  not driven by retail entries.
+  but the browser still advances its high-level movement model independently of the static retail
+  world snapshot. Goals use a fixed distance trigger; Crash, bosses, boxes, checkpoints, enemies,
+  bonus entrances and ending conditions are not instantiated from retail entries.
 - The password UI applies a local deterministic progression rule, not the retail password codec.
   Browser card/resume storage is wired and restoration was exercised, but a full retail save/load
   handshake across all transitions has not been playthrough-certified. Diagnostic completion now
@@ -47,14 +57,17 @@ gameplay path.
   but there is no explicit retail save selection flow and damaged-card handling remains exercised
   at the Rust model/storage boundary.
 - One diagnostic level and its completion/title-map transition were completed in browser
-  verification. No retail-authored level, boss, bonus route, ending, death/checkpoint sequence,
-  long soak, mobile audio session, or multiple physical gamepad matrix was completed.
+  verification before the placeholder geometry was removed. No retail-authored level, boss, bonus
+  route, ending, death/checkpoint sequence, long soak, mobile audio session, or multiple physical
+  gamepad matrix was completed.
 
 ## Automated coverage
 
 The workspace includes native tests for malformed readers, ISO fields and extents, stream names and
-catalogs, NSD/NSF/page/entry bounds, tagged references, fixed math, scheduling, paging, GOOL
-execution, collision, camera, title transitions, bonus returns, demo frames, card operations,
+catalogs, NSD/NSF/page/entry bounds, tagged references, MDAT title composition, GOOL program/state
+graphs and binding, ZDAT/SLST/WGEO scene graphs, all SLST delta/swap forms, signed packed vertices,
+retail TPAG/CLUT/UV references, fixed math, scheduling, paging, GOOL execution, collision, camera,
+title transitions, bonus returns, demo frames, card operations,
 storage envelopes, input, texture formats/cache/projection/blends, ADPCM, sample mixing and software
 synthesis. Property tests exercise parser/state-machine invariants where arbitrary input is useful.
 

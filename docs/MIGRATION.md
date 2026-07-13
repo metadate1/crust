@@ -32,6 +32,13 @@ An external `git archive` copy produced these results:
 - The virtual card has 15 slots and an exact 128-byte little-endian payload. Its checksum starts at
   `0x12345678`, adds each byte with the checksum field zero, then rotates left three bits.
 - Existing storage keys and schema versions remain unchanged.
+- Image-backed title states resolve `5MapP`, `7MapP`, `8MapP`, and `aMapP` MDAT graphs; each IMAG
+  column contains 16×16 indexed tiles and selects a CLUT item through the MDAT IPAL table.
+- GOOL programs are retained as owned code/state/EID tables. Serialized PCs are validated within
+  the 14-bit code space and never converted to host pointers.
+- ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
+  SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
+  builder never writes host addresses back into source bytes.
 
 ## Deliberate corrections
 

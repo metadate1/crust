@@ -126,6 +126,31 @@ impl Nsd {
         matches!(self.kind, NsdKind::Playable(_))
     }
 
+    /// Returns the validated playable-level descriptor.
+    #[must_use]
+    pub fn ldat(&self) -> Option<&Ldat> {
+        match &self.kind {
+            NsdKind::Playable(ldat) => Some(ldat),
+            NsdKind::IndexOnlyCave => None,
+        }
+    }
+
+    /// Looks up an EID through the exact 256-bucket retail page table.
+    ///
+    /// The original runtime stored a relocated pointer at each bucket head and
+    /// scanned forward until the matching EID. Empty retail buckets can share
+    /// a head, so the safe equivalent scans from that validated head to the end
+    /// of the table and returns the still-unrelocated record.
+    #[must_use]
+    pub fn pte(&self, eid: Eid) -> Option<&NsdPte> {
+        let bucket = usize::from(((eid.raw() >> 15) & 0xff) as u8);
+        let start = usize::try_from(self.header.bucket_offsets[bucket]).ok()?;
+        self.page_table
+            .get(start..)?
+            .iter()
+            .find(|pte| pte.eid == eid)
+    }
+
     /// Validates the companion NSF's total length without reading its contents.
     pub fn validate_nsf_len(&self, nsf_len: usize) -> Result<(), FormatError> {
         let prefix = self.header.nsf_page_data_offset()?;

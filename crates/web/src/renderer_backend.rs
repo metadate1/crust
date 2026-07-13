@@ -279,6 +279,51 @@ impl RendererBackend {
         handle: TextureHandle,
         decoded: &DecodedTexture,
     ) -> Result<(), BackendError> {
+        let record = self.prepare_texture(decoded)?;
+        self.commit_texture(handle, record);
+        Ok(())
+    }
+
+    /// Prepare every texture before replacing any resident handle.
+    ///
+    /// This keeps the currently presented command set valid if allocation or
+    /// upload of any replacement fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for duplicate handles or any error documented by
+    /// [`Self::upload_texture`].
+    pub fn upload_textures_atomically<'a>(
+        &mut self,
+        textures: impl IntoIterator<Item = (TextureHandle, &'a DecodedTexture)>,
+    ) -> Result<(), BackendError> {
+        let textures = textures.into_iter().collect::<Vec<_>>();
+        let mut handles = BTreeSet::new();
+        for (handle, _) in &textures {
+            if !handles.insert(*handle) {
+                return Err(BackendError::DuplicateTextureHandle(*handle));
+            }
+        }
+
+        let mut prepared = Vec::with_capacity(textures.len());
+        for (handle, decoded) in textures {
+            match self.prepare_texture(decoded) {
+                Ok(record) => prepared.push((handle, record)),
+                Err(error) => {
+                    for (_, record) in prepared {
+                        self.gl.delete_texture(Some(&record.texture));
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        for (handle, record) in prepared {
+            self.commit_texture(handle, record);
+        }
+        Ok(())
+    }
+
+    fn prepare_texture(&mut self, decoded: &DecodedTexture) -> Result<TextureRecord, BackendError> {
         let width = decoded.width();
         let height = decoded.height();
         let width_i32 = i32::try_from(width)
@@ -357,16 +402,18 @@ impl RendererBackend {
             });
         }
 
-        let replacement = self.textures.insert(
-            handle,
-            TextureRecord {
-                texture,
-                width,
-                height,
-                bytes: expected,
-                last_used_frame: self.totals.frames,
-            },
-        );
+        Ok(TextureRecord {
+            texture,
+            width,
+            height,
+            bytes: expected,
+            last_used_frame: self.totals.frames,
+        })
+    }
+
+    fn commit_texture(&mut self, handle: TextureHandle, record: TextureRecord) {
+        let expected = record.bytes;
+        let replacement = self.textures.insert(handle, record);
         increment(&mut self.totals.texture_uploads);
         self.totals.resident_texture_bytes = self
             .totals
@@ -380,7 +427,6 @@ impl RendererBackend {
                 .resident_texture_bytes
                 .saturating_sub(u64::try_from(old.bytes).unwrap_or(u64::MAX));
         }
-        Ok(())
     }
 
     /// Upload a decoded texture directly from a cache lease.
@@ -946,6 +992,7 @@ pub enum BackendError {
         expected: usize,
         actual: usize,
     },
+    DuplicateTextureHandle(TextureHandle),
     VertexDataTooLarge,
     FrameInvariant(String),
     WebGlErrors {
@@ -986,6 +1033,12 @@ impl fmt::Display for BackendError {
                 formatter,
                 "texture contains {actual} RGBA bytes; expected {expected}"
             ),
+            Self::DuplicateTextureHandle(handle) => {
+                write!(
+                    formatter,
+                    "texture batch contains duplicate handle {handle:?}"
+                )
+            }
             Self::VertexDataTooLarge => {
                 formatter.write_str("frame vertex data exceeds WebGL2 limits")
             }

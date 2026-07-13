@@ -6,15 +6,19 @@
 
 use std::collections::BTreeMap;
 
+use crust_formats::stream::GoolProgram;
+
 use crate::math::{Angle12, seek};
 
 pub const MAX_OBJECTS: usize = 96;
-pub const REGISTER_COUNT: usize = 512;
+/// Exact `gool_object.regs[0x1FC]` word span from the retail 32-bit layout.
+pub const REGISTER_COUNT: usize = 0x1fc;
 pub const TABLE_WORD_COUNT: usize = 1024;
 pub const MAX_STACK_WORDS: usize = 256;
 pub const MAX_CALL_DEPTH: usize = 64;
 pub const MAX_EFFECTS: usize = 256;
-pub const MAX_CODE_WORDS: usize = 65_536;
+/// Fourteen-bit retail code/PC address space.
+pub const MAX_CODE_WORDS: usize = 1 << 14;
 pub const NULL_INPUT_VALUE: u32 = 3;
 
 /// Decoded instruction word.
@@ -162,6 +166,10 @@ pub enum VmError {
     DuplicateObject(ObjectHandle),
     UnknownObject(ObjectHandle),
     CodeTooLarge,
+    GlobalCodeTooLarge,
+    InternalTableTooLarge(usize),
+    ExternalTableTooLarge(usize),
+    InvalidInitialStackPointer(u32),
     ProgramCounterOutOfBounds { object: ObjectHandle, pc: usize },
     InvalidOperand(u16),
     InvalidRegister(usize),
@@ -176,7 +184,15 @@ pub enum VmError {
     InvalidShift(i32),
     UnknownOpcode(u8),
     UnknownControl(u8),
+    UnsupportedControlFlow(ControlFlowOperation),
     EffectQueueFull,
+}
+
+/// Packed retail control-flow operations that require a wider runtime slice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ControlFlowOperation {
+    StateChange(u16),
+    Return,
 }
 
 /// Why an interpreter invocation yielded.
@@ -198,8 +214,10 @@ pub struct Execution {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmObject {
     handle: ObjectHandle,
+    global_code: Vec<u32>,
     code: Vec<u32>,
     pc: usize,
+    initial_stack_pointer: u32,
     frame_base: usize,
     internal: Vec<u32>,
     external: Vec<u32>,
@@ -208,6 +226,10 @@ pub struct VmObject {
     call_stack: Vec<usize>,
     links: [Option<ObjectHandle>; 8],
     state: u16,
+    state_flags: u32,
+    status_c: u32,
+    event_pc: Option<usize>,
+    transition_pc: Option<usize>,
     halted: bool,
 }
 
@@ -218,8 +240,10 @@ impl VmObject {
         }
         Ok(Self {
             handle,
+            global_code: Vec::new(),
             code,
             pc: 0,
+            initial_stack_pointer: 0,
             frame_base: 0,
             internal: vec![0; TABLE_WORD_COUNT],
             external: vec![0; TABLE_WORD_COUNT],
@@ -228,8 +252,50 @@ impl VmObject {
             call_stack: Vec::with_capacity(MAX_CALL_DEPTH),
             links: [None; 8],
             state: 0,
+            state_flags: 0,
+            status_c: 0,
+            event_pc: None,
+            transition_pc: None,
             halted: false,
         })
+    }
+
+    /// Binds the state-specific code and data resolved from retail NSF entries.
+    pub fn from_gool_program(handle: ObjectHandle, program: &GoolProgram) -> Result<Self, VmError> {
+        if program.global_code().len() > MAX_CODE_WORDS {
+            return Err(VmError::GlobalCodeTooLarge);
+        }
+        if program.internal_words().len() > TABLE_WORD_COUNT {
+            return Err(VmError::InternalTableTooLarge(
+                program.internal_words().len(),
+            ));
+        }
+        if program.external_words().len() > TABLE_WORD_COUNT {
+            return Err(VmError::ExternalTableTooLarge(
+                program.external_words().len(),
+            ));
+        }
+        let initial_stack_pointer = program.header().initial_stack_pointer;
+        if usize::try_from(initial_stack_pointer).map_or(true, |value| value >= REGISTER_COUNT) {
+            return Err(VmError::InvalidInitialStackPointer(initial_stack_pointer));
+        }
+
+        let mut object = Self::new(handle, program.code().to_vec())?;
+        object.global_code = program.global_code().to_vec();
+        object.initial_stack_pointer = initial_stack_pointer;
+        object.internal[..program.internal_words().len()].copy_from_slice(program.internal_words());
+        object.external[..program.external_words().len()].copy_from_slice(program.external_words());
+        object.state = program.state_index();
+        object.state_flags = program.state().flags;
+        object.status_c = program.state().status_c;
+        object.event_pc = program.event_pc();
+        object.transition_pc = program.transition_pc();
+        if let Some(pc) = program.code_pc() {
+            object.pc = pc;
+        } else {
+            object.halted = true;
+        }
+        Ok(object)
     }
 
     #[must_use]
@@ -245,6 +311,36 @@ impl VmObject {
     #[must_use]
     pub const fn state(&self) -> u16 {
         self.state
+    }
+
+    #[must_use]
+    pub const fn initial_stack_pointer(&self) -> u32 {
+        self.initial_stack_pointer
+    }
+
+    #[must_use]
+    pub const fn state_flags(&self) -> u32 {
+        self.state_flags
+    }
+
+    #[must_use]
+    pub const fn status_c(&self) -> u32 {
+        self.status_c
+    }
+
+    #[must_use]
+    pub const fn event_pc(&self) -> Option<usize> {
+        self.event_pc
+    }
+
+    #[must_use]
+    pub const fn transition_pc(&self) -> Option<usize> {
+        self.transition_pc
+    }
+
+    #[must_use]
+    pub fn global_code(&self) -> &[u32] {
+        &self.global_code
     }
 
     #[must_use]
@@ -358,8 +454,9 @@ impl Machine {
     }
 
     pub fn run(&mut self, handle: ObjectHandle, budget: usize) -> Result<Execution, VmError> {
+        let mut condition = false;
         for steps in 0..budget {
-            if let Some(reason) = self.step(handle)? {
+            if let Some(reason) = self.step(handle, &mut condition)? {
                 return Ok(Execution {
                     reason,
                     steps: steps + 1,
@@ -372,7 +469,11 @@ impl Machine {
         })
     }
 
-    fn step(&mut self, handle: ObjectHandle) -> Result<Option<HaltReason>, VmError> {
+    fn step(
+        &mut self,
+        handle: ObjectHandle,
+        condition: &mut bool,
+    ) -> Result<Option<HaltReason>, VmError> {
         let word =
             {
                 let object = self.object_mut(handle)?;
@@ -518,7 +619,7 @@ impl Machine {
                 self.push(handle, u32::from(current.wrapping_add(delta).raw()))?;
             }
             0x82 => {
-                return self.control(handle, instruction.operand_a as u8, instruction.operand_b);
+                return self.control_flow(handle, word, condition);
             }
             0x86 => {
                 let link = self.read_operand(handle, a)?;
@@ -592,49 +693,72 @@ impl Machine {
         Ok(None)
     }
 
-    fn control(
+    fn control_flow(
         &mut self,
         handle: ObjectHandle,
-        control: u8,
-        raw_target: u16,
+        instruction: u32,
+        condition: &mut bool,
     ) -> Result<Option<HaltReason>, VmError> {
-        let offset = i64::from(sign_extend(u32::from(raw_target), 12));
-        match control {
+        let condition_type = (instruction >> 20) & 3;
+        let register = ((instruction >> 14) & 0x3f) as usize;
+        let pops_condition = matches!(condition_type, 1 | 2) && register == 0x1f;
+        let tested = match condition_type {
+            0 => true,
+            1 | 2 => {
+                let value = if pops_condition {
+                    self.object(handle)?
+                        .stack
+                        .last()
+                        .copied()
+                        .ok_or(VmError::StackUnderflow(handle))?
+                } else {
+                    self.object(handle)?.register(register)?
+                };
+                if condition_type == 1 {
+                    value != 0
+                } else {
+                    value == 0
+                }
+            }
+            3 => *condition,
+            _ => unreachable!(),
+        };
+        *condition = tested;
+
+        let operation = (instruction >> 22) & 3;
+        let argument_count = if tested && operation == 0 {
+            ((instruction >> 10) & 0xf) as usize
+        } else {
+            0
+        };
+        let required = argument_count + usize::from(pops_condition);
+        if self.object(handle)?.stack.len() < required {
+            return Err(VmError::StackUnderflow(handle));
+        }
+
+        if tested && operation == 0 {
+            let offset = i64::from(sign_extend(instruction & 0x03ff, 10));
+            self.jump_relative(handle, offset)?;
+        }
+        if pops_condition {
+            self.pop(handle)?;
+        }
+        if !tested || operation == 3 {
+            return Ok(None);
+        }
+        match operation {
             0 => {
-                self.object_mut(handle)?.halted = true;
-                Ok(Some(HaltReason::Halted))
-            }
-            1 => {
-                self.jump_relative(handle, offset)?;
+                let stack = &mut self.object_mut(handle)?.stack;
+                stack.truncate(stack.len() - argument_count);
                 Ok(None)
             }
-            2 => {
-                if self.pop(handle)? == 0 {
-                    self.jump_relative(handle, offset)?;
-                }
-                Ok(None)
-            }
-            3 => {
-                if self.pop(handle)? != 0 {
-                    self.jump_relative(handle, offset)?;
-                }
-                Ok(None)
-            }
-            4 => {
-                self.call_relative(handle, offset)?;
-                Ok(None)
-            }
-            5 => {
-                let target = self
-                    .object_mut(handle)?
-                    .call_stack
-                    .pop()
-                    .ok_or(VmError::CallStackUnderflow(handle))?;
-                self.object_mut(handle)?.pc = target;
-                Ok(None)
-            }
-            6 => Ok(Some(HaltReason::Yielded)),
-            _ => Err(VmError::UnknownControl(control)),
+            1 => Err(VmError::UnsupportedControlFlow(
+                ControlFlowOperation::StateChange((instruction & 0x3fff) as u16),
+            )),
+            2 => Err(VmError::UnsupportedControlFlow(
+                ControlFlowOperation::Return,
+            )),
+            _ => unreachable!(),
         }
     }
 
@@ -822,6 +946,21 @@ mod tests {
         ObjectHandle::new(index).unwrap()
     }
 
+    fn control_flow(
+        operation: u32,
+        condition: u32,
+        register: u32,
+        argument_count: u32,
+        target: u32,
+    ) -> u32 {
+        (0x82_u32 << 24)
+            | ((operation & 3) << 22)
+            | ((condition & 3) << 20)
+            | ((register & 0x3f) << 14)
+            | ((argument_count & 0xf) << 10)
+            | (target & 0x03ff)
+    }
+
     #[test]
     fn instruction_and_operand_decoding_preserve_words() {
         let word = Instruction::encode(0x8d, 0xabc, 0x123);
@@ -842,16 +981,16 @@ mod tests {
     #[test]
     fn arithmetic_wraps_and_division_errors_are_defined() {
         let h = handle(0);
-        let code = vec![
-            Instruction::encode(0x00, REG0, REG1),
-            Instruction::encode(0x82, 0, 0),
-        ];
+        let code = vec![Instruction::encode(0x00, REG0, REG1)];
         let mut object = VmObject::new(h, code).unwrap();
         object.set_register(0, 1).unwrap();
         object.set_register(1, u32::MAX).unwrap();
         let mut machine = Machine::new(16);
         machine.insert_object(object).unwrap();
-        assert_eq!(machine.run(h, 10).unwrap().reason, HaltReason::Halted);
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
         assert_eq!(machine.object(h).unwrap().stack(), &[0]);
 
         let h = handle(1);
@@ -863,22 +1002,93 @@ mod tests {
     }
 
     #[test]
-    fn branch_call_and_return_are_bounded() {
+    fn retail_branch_uses_post_fetch_pc_and_cleans_arguments() {
         let h = handle(0);
         let code = vec![
-            Instruction::encode(0x82, 4, 1), // call pc 2
-            Instruction::encode(0x82, 0, 0), // halt after return
             Instruction::encode(0x00, REG0, REG1),
-            Instruction::encode(0x82, 5, 0), // return
+            Instruction::encode(0x00, REG0, REG1),
+            control_flow(0, 0, 0, 1, 1),
+            Instruction::encode(0xff, 0, 0),
+            Instruction::encode(0x00, REG0, REG1),
         ];
         let mut object = VmObject::new(h, code).unwrap();
         object.set_register(0, 2).unwrap();
         object.set_register(1, 3).unwrap();
         let mut machine = Machine::new(1);
         machine.insert_object(object).unwrap();
-        let execution = machine.run(h, 10).unwrap();
-        assert_eq!(execution.reason, HaltReason::Halted);
+        let execution = machine.run(h, 4).unwrap();
+        assert_eq!(execution.reason, HaltReason::BudgetExhausted);
+        assert_eq!(machine.object(h).unwrap().pc(), 5);
+        assert_eq!(machine.object(h).unwrap().stack(), &[5, 5]);
+    }
+
+    #[test]
+    fn retail_condition_can_pop_and_reuse_within_one_invocation() {
+        let h = handle(0);
+        let code = vec![
+            Instruction::encode(0x00, REG0, REG1),
+            control_flow(3, 1, 0x1f, 0, 0),
+            control_flow(0, 3, 0, 0, 1),
+            Instruction::encode(0xff, 0, 0),
+            Instruction::encode(0x00, REG0, REG1),
+        ];
+        let mut object = VmObject::new(h, code).unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.run(h, 4).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
         assert_eq!(machine.object(h).unwrap().stack(), &[5]);
+    }
+
+    #[test]
+    fn reused_condition_does_not_leak_between_invocations() {
+        let h = handle(0);
+        let code = vec![
+            control_flow(3, 1, 0, 0, 0),
+            control_flow(0, 3, 0, 0, 1),
+            Instruction::encode(0x00, REG0, REG1),
+            Instruction::encode(0xff, 0, 0),
+        ];
+        let mut object = VmObject::new(h, code).unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+        machine.run(h, 2).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[5]);
+    }
+
+    #[test]
+    fn unsupported_retail_state_change_and_return_are_explicit() {
+        let state_object = handle(0);
+        let return_object = handle(1);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(state_object, vec![control_flow(1, 0, 0, 0, 7)]).unwrap())
+            .unwrap();
+        machine
+            .insert_object(VmObject::new(return_object, vec![control_flow(2, 0, 0, 0, 0)]).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            machine.run(state_object, 1),
+            Err(VmError::UnsupportedControlFlow(
+                ControlFlowOperation::StateChange(7)
+            ))
+        );
+        assert_eq!(
+            machine.run(return_object, 1),
+            Err(VmError::UnsupportedControlFlow(
+                ControlFlowOperation::Return
+            ))
+        );
     }
 
     #[test]
@@ -921,22 +1131,19 @@ mod tests {
     #[test]
     fn null_input_uses_documented_psx_compatibility_value() {
         let h = handle(0);
-        let code = vec![
-            Instruction::encode(0x00, 0xbe0, REG0),
-            Instruction::encode(0x82, 0, 0),
-        ];
+        let code = vec![Instruction::encode(0x00, 0xbe0, REG0)];
         let mut object = VmObject::new(h, code).unwrap();
         object.set_register(0, 4).unwrap();
         let mut machine = Machine::new(0);
         machine.insert_object(object).unwrap();
-        machine.run(h, 3).unwrap();
+        machine.run(h, 1).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[7]);
     }
 
     #[test]
     fn duplicate_insert_does_not_replace_the_live_object() {
         let h = handle(0);
-        let original = VmObject::new(h, vec![Instruction::encode(0x82, 0, 0)]).unwrap();
+        let original = VmObject::new(h, vec![control_flow(3, 0, 0, 0, 0)]).unwrap();
         let replacement = VmObject::new(h, vec![Instruction::encode(0xff, 0, 0)]).unwrap();
         let mut machine = Machine::new(0);
         machine.insert_object(original).unwrap();
@@ -944,7 +1151,10 @@ mod tests {
             machine.insert_object(replacement),
             Err(VmError::DuplicateObject(h))
         );
-        assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::Halted);
+        assert_eq!(
+            machine.run(h, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
     }
 
     proptest! {

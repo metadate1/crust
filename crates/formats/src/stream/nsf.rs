@@ -152,6 +152,14 @@ pub struct Nsf {
 }
 
 impl Nsf {
+    /// Iterates every normal entry in stream order, excluding texture pages.
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.pages.iter().flat_map(|page| match page {
+            NsfPage::Texture(_) => [].iter(),
+            NsfPage::Entries(page) => page.entries.iter(),
+        })
+    }
+
     /// Finds a normal entry through its stable logical handle.
     #[must_use]
     pub fn entry(&self, handle: EntryHandle) -> Option<&Entry> {
@@ -160,6 +168,37 @@ impl Nsf {
             return None;
         };
         page.entries.get(usize::from(handle.entry()))
+    }
+
+    /// Resolves a named NSD page-table record to the matching entry in its
+    /// validated NSF page.
+    ///
+    /// This is the safe equivalent of the original `NSProbe` + `NSResolve`
+    /// path: the serialized page id is never overwritten with a native
+    /// pointer, and a malformed page cannot redirect the lookup elsewhere.
+    pub fn resolve_entry<'a>(&'a self, metadata: &Nsd, eid: Eid) -> Result<&'a Entry, FormatError> {
+        let pte = metadata
+            .pte(eid)
+            .ok_or_else(|| FormatError::global(format!("EID {eid} is absent from the NSD")))?;
+        let page_index = usize::try_from(pte.page_index().get())
+            .map_err(|_| FormatError::global(format!("EID {eid} page index does not fit host")))?;
+        let page = self
+            .pages
+            .get(page_index)
+            .ok_or_else(|| FormatError::global(format!("EID {eid} page is absent from the NSF")))?;
+        let NsfPage::Entries(page) = page else {
+            return Err(FormatError::global(format!(
+                "EID {eid} resolves to a texture page, not an entry"
+            )));
+        };
+        page.entries
+            .iter()
+            .find(|entry| entry.eid == eid)
+            .ok_or_else(|| {
+                FormatError::global(format!(
+                    "EID {eid} page does not contain its declared entry"
+                ))
+            })
     }
 }
 
@@ -509,6 +548,16 @@ mod tests {
         assert_eq!(entry.page_relative_offset, Offset::new(24));
         assert_eq!(entry.items[0].relative_offset, Offset::new(24));
         assert_eq!(entry.items[0].bytes(&bytes).unwrap(), &[1, 2, 3, 4]);
+        assert_eq!(
+            nsf.resolve_entry(&metadata, Eid::from_name("entry").unwrap())
+                .unwrap()
+                .handle,
+            handle
+        );
+        assert!(
+            nsf.resolve_entry(&metadata, Eid::from_name("other").unwrap())
+                .is_err()
+        );
     }
 
     #[test]

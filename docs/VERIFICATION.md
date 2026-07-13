@@ -1,8 +1,8 @@
 # Verification record
 
 This file records observed checks for the initial private rewrite delivery on 2026-07-12 and the
-stream-transition/loading-image vertical slice on 2026-07-13. It does not turn subsystem tests into
-a claim of retail gameplay parity.
+stream, title, GOOL and spawn-scene vertical slices on 2026-07-13. It does not turn subsystem tests
+into a claim of retail gameplay parity.
 
 ## Reference characterization
 
@@ -17,6 +17,13 @@ forensics files, was unchanged after characterization.
 The opt-in local-data test and browser pass used the user's own NTSC-U image without copying it into
 this repository. Detection reported Mode 2/2352, 88 streams, 44 exact pairs, and 229,312,048 logical
 stream bytes. Every filename and declared extent was matched against the extracted S0–S3 set.
+
+Read-only scene characterization covered 1,223 ZDAT entries, 1,735 paths, 520 WGEO entries and
+1,726 SLST entries containing 138,038 items. All 43 playable LDAT spawn zones/paths resolved. The
+static scene builder produced world commands for 40 starts; Title, Hog Wild and Whole Hog use
+zero-world dummy starts with external SLST placeholders. N. Sanity Beach deterministically produced
+4 worlds, 681/681 submitted visible polygons and 52 unique decoded textures from both the extracted
+pair and directly from the raw BIN.
 
 ## Browser checks actually performed
 
@@ -65,6 +72,14 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
   simulation stopped as `BLOCKED`, retained `0x19`, and displayed the missing local filename rather
   than advancing or presenting the destination against stale assets.
 
+The later scene-enabled build was reloaded at `http://127.0.0.1:4174/` in the visible Codex in-app
+browser. Its DOM contained the complete loader, two local file inputs and one canvas; there was no
+framework error overlay and the captured warning/error console was empty. Browser automation in
+this environment could not populate the operating-system file chooser, so this specific build's
+raw-BIN import and WebGL scene presentation are not claimed as browser-exercised. The same raw BIN
+was exercised directly by the opt-in Rust disc-to-scene test described above. A user can select it
+through the visible local-file control without changing the no-upload architecture.
+
 Screenshots and game data remained outside Git. See `COMPATIBILITY.md` for features that were not
 exercised or are not yet connected to the live browser runtime.
 
@@ -72,14 +87,15 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 159 passed, zero failed, three legally local tests ignored by
+- locked native workspace suite: 198 passed, zero failed, 12 legally local tests ignored by
   default.
-- opt-in raw-disc, all-local-pairs and loading-image tests: three passed, zero failed; 39 retail
-  loading images decoded without copying them into the repository.
+- all 12 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+  all-pair parsing, GOOL graph/binding, scene formats, 40 standalone spawn snapshots, 39 loading
+  images, 1,427 representative texture references and all four image-backed title states.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 380,886 bytes (SHA-256
-  `0f77a1ec426e56d9912a8042f6b563967930d13b5b8ff755ee2a97b04f07f6cf`).
+- generated web release: passed; Wasm payload was 469,993 bytes (SHA-256
+  `100f7641fdbc666244778926dd27ab6aaa75a69cd2d26207ce7bcf800d867740`).
 
 ## Reproducible commands
 
@@ -91,6 +107,8 @@ C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-formats --test local_disc -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-renderer --test local_loading_images -- --ignored --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
+  cargo test --workspace --all-targets --locked -- --ignored --nocapture
 cargo build --workspace --release --locked
 cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
 npm run build

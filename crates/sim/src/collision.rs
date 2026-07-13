@@ -176,6 +176,12 @@ pub fn movement_steps(velocity: Vec3) -> Vec<Vec3> {
 }
 
 const fn clamp_step(remaining: i32, maximum: i32) -> i32 {
+    // Integer division can truncate a small component to zero when another
+    // axis determines the split count. Consume that component in one step so
+    // it is not silently discarded (or left behind by the zero-step guard).
+    if maximum == 0 {
+        return remaining;
+    }
     if remaining.unsigned_abs() >= maximum.unsigned_abs() {
         maximum
     } else {
@@ -319,6 +325,18 @@ mod tests {
             steps
                 .iter()
                 .all(|step| step.y.unsigned_abs() <= MAX_VERTICAL_STEP as u32)
+        );
+
+        let truncated_axis = Vec3 {
+            x: 0,
+            y: -1,
+            z: -MAX_HORIZONTAL_STEP,
+        };
+        assert_eq!(
+            movement_steps(truncated_axis)
+                .into_iter()
+                .fold(Vec3::ZERO, Vec3::wrapping_add),
+            truncated_axis
         );
     }
 

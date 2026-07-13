@@ -136,7 +136,7 @@ pub struct DecodedTexture {
 }
 
 impl DecodedTexture {
-    fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
+    pub(crate) fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Self {
         Self {
             width,
             height,

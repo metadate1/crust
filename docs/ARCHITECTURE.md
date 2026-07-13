@@ -48,7 +48,12 @@ keys include page generation, palette, region and blend mode. A bounded generati
 prevents stale textures after paging. The live browser stage now submits commands through the same
 backend, which uploads decoded RGBA to WebGL2 and maps the four PSX blend conventions to explicit
 adjacent passes. It also decodes and briefly presents the retained pair's retail LDAT loading image.
-Retail object/page traversal is not yet connected, so the persistent scene remains diagnostic.
+Image-backed title states are reconstructed from MDAT columns, IMAG indexed tiles and IPAL CLUTs
+through validated EID lookups. A pointer-free spawn-snapshot builder follows LDAT's spawn zone into
+ZDAT path/rectangle data, reconstructs the endpoint SLST list, parses each referenced WGEO, resolves
+TPAG/CLUT texture regions, applies the exact fixed-point world camera and depth ordering, and emits
+ordinary renderer commands. The live stage installs this snapshot on each pair transition. It does
+not yet advance visibility/camera state or integrate entities, GOOL objects, effects and animation.
 
 ## Audio
 

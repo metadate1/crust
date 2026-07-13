@@ -26,14 +26,18 @@
 /local-data/
 /streams/
 *.bin
+*.BIN
 *.iso
+*.ISO
 *.cue
+*.CUE
 *.ccd
 *.sub
 *.ecm
 *.chd
 *.cso
 *.img
+*.IMG
 *.mdf
 *.mds
 *.nrg
@@ -59,6 +63,7 @@
 /coverage/
 /fuzz/artifacts/
 /fuzz/corpus/
+**/proptest-regressions/
 /browser-profile/
 /playwright-report/
 /test-results/

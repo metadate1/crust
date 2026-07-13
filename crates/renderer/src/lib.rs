@@ -8,8 +8,10 @@
 pub mod cache;
 pub mod command;
 pub mod projection;
+pub mod retail_texture;
 pub mod texture;
 pub mod timing;
+pub mod title;
 
 pub use cache::{CachedTexture, TextureCache, TextureHandle, TextureRequest};
 pub use command::{GeneratedFrame, OrderingTable, PrimitiveCommand};

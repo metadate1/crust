@@ -18,6 +18,7 @@ use crust_platform::input::{
     PadState as PlatformPadState, keyboard_code, standard_gamepad,
 };
 use crust_renderer::texture::{DecodedTexture, decode_loading_image};
+use crust_renderer::title::decode_title_card;
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
 };
@@ -40,6 +41,7 @@ use web_sys::{
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
+use crate::retail_scene::build_retail_scene;
 use crate::storage::StorageState;
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
@@ -267,7 +269,7 @@ struct Runtime {
     menu_index: usize,
     password_digits: [u8; 8],
     password_cursor: usize,
-    seed: u32,
+    last_title_state: Option<u8>,
     pending_buttons: u16,
     pending_asset_level: Option<FormatLevelId>,
     loading_asset_level: Option<FormatLevelId>,
@@ -341,6 +343,26 @@ impl Runtime {
                 false,
             );
         }
+        install_retail_scene_for_pair(&pair, &mut stage, dom)?;
+        let mut last_title_state = None;
+        if boot_level == LevelId::TITLE {
+            let state = flow.title().screen() as u8;
+            if title_state_uses_image(flow.title().screen()) {
+                let card = decode_title_card(&pair.nsd, &pair.nsf, &pair.nsf_bytes, state)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!("retail title state {state}: {error}"))
+                    })?;
+                stage.install_title_image(&card.image)?;
+                dom.log(
+                    &format!(
+                        "Composed retail title state {state} from {}x{} MDAT tiles.",
+                        card.width_tiles, card.height_tiles
+                    ),
+                    false,
+                );
+            }
+            last_title_state = Some(state);
+        }
         dom.log(
             &format!(
                 "Validated {} pages and {} entries for {}.",
@@ -373,7 +395,7 @@ impl Runtime {
             menu_index: 0,
             password_digits: [0; 8],
             password_cursor: 0,
-            seed,
+            last_title_state,
             pending_buttons: 0,
             pending_asset_level: None,
             loading_asset_level: None,
@@ -400,7 +422,6 @@ impl Runtime {
                 "validated stream pair does not match the pending transition",
             ));
         }
-        let next_seed = hash_pair(&pair);
         if let Some(image) = decode_pair_loading_image(&pair)? {
             self.stage.install_loading_image(&image)?;
             dom.log(
@@ -412,11 +433,12 @@ impl Runtime {
                 false,
             );
         }
+        install_retail_scene_for_pair(&pair, &mut self.stage, dom)?;
         let pages = pair.nsf.pages.len();
         let entries = pair_entry_count(&pair);
         let level = pair.level;
         self.level_assets = pair;
-        self.seed = next_seed;
+        self.last_title_state = None;
         self.loading_asset_level = None;
         self.asset_load_error = None;
         self.scheduler.set_paused(false);
@@ -506,20 +528,50 @@ impl Runtime {
         if let Some(audio) = &mut self.audio {
             audio.schedule()?;
         }
+        self.sync_title_card(dom)?;
         let assets_stalled = self.assets_stalled();
+        let show_title_image = !assets_stalled
+            && matches!(self.flow.state(), FlowState::Title)
+            && title_state_uses_image(self.flow.title().screen());
         self.stage.render(VisualState {
-            time: timestamp_ms as f32 / 1_000.0,
-            seed: self.seed,
-            player_x: self.flow.player.translation.x as f32 / 4_000_000.0,
-            player_y: self.flow.player.translation.y as f32 / 4_000_000.0 - 0.42,
-            active: !assets_stalled
-                && matches!(
-                    self.flow.state(),
-                    FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
-                ),
+            show_title_image,
+            show_retail_scene: !assets_stalled && !show_title_image,
         })?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
+        Ok(())
+    }
+
+    fn sync_title_card(&mut self, dom: &Dom) -> Result<(), JsValue> {
+        if !matches!(self.flow.state(), FlowState::Title)
+            || self.level_assets.level.get() != u32::from(LevelId::TITLE.raw())
+        {
+            return Ok(());
+        }
+        let screen = self.flow.title().screen();
+        let state = screen as u8;
+        if self.last_title_state == Some(state) {
+            return Ok(());
+        }
+        self.last_title_state = Some(state);
+        if !title_state_uses_image(screen) {
+            return Ok(());
+        }
+        let card = decode_title_card(
+            &self.level_assets.nsd,
+            &self.level_assets.nsf,
+            &self.level_assets.nsf_bytes,
+            state,
+        )
+        .map_err(|error| JsValue::from_str(&format!("retail title state {state}: {error}")))?;
+        self.stage.install_title_image(&card.image)?;
+        dom.log(
+            &format!(
+                "Composed retail title state {state} from {}x{} MDAT tiles.",
+                card.width_tiles, card.height_tiles
+            ),
+            false,
+        );
         Ok(())
     }
 
@@ -1527,6 +1579,16 @@ fn level_name(level: LevelId) -> &'static str {
         .map_or("Unknown level", |known| known.name)
 }
 
+const fn title_state_uses_image(screen: TitleScreen) -> bool {
+    matches!(
+        screen,
+        TitleScreen::MainMenu
+            | TitleScreen::PublisherSecond
+            | TitleScreen::NaughtyDog
+            | TitleScreen::PublisherFirst
+    )
+}
+
 fn apply_save(flow: &mut GameFlow, save: SaveData) {
     flow.progress.level_count = save.level_count;
     flow.progress.levels_unlocked = save.level_count;
@@ -1572,6 +1634,47 @@ fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTextu
     )
     .map(Some)
     .map_err(|error| JsValue::from_str(&format!("{} loading image: {error}", pair.level)))
+}
+
+fn install_retail_scene_for_pair(
+    pair: &ValidatedPair,
+    stage: &mut GlStage,
+    dom: &Dom,
+) -> Result<(), JsValue> {
+    let scene = build_retail_scene(&pair.nsd, &pair.nsf, &pair.nsf_bytes).map_err(|error| {
+        JsValue::from_str(&format!(
+            "retail spawn snapshot for {} is invalid: {error}",
+            pair.level
+        ))
+    })?;
+    let stats = scene.stats;
+    stage.install_retail_scene(scene)?;
+    if stats.worlds == 0 {
+        dom.log(
+            "Mounted the retail zero-world transition/title spawn zone.",
+            false,
+        );
+    } else {
+        dom.log(
+            &format!(
+                "Built retail spawn snapshot: {} worlds, {}/{} polygons, {} decoded textures{}.",
+                stats.worlds,
+                stats.submitted_polygons,
+                stats.visible_polygons,
+                stats.unique_textures,
+                if stats.skipped_textured_polygons == 0 {
+                    String::new()
+                } else {
+                    format!(
+                        ", {} safely skipped texture references",
+                        stats.skipped_textured_polygons
+                    )
+                }
+            ),
+            false,
+        );
+    }
+    Ok(())
 }
 
 fn pair_entry_count(pair: &ValidatedPair) -> usize {

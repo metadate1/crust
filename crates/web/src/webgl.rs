@@ -1,14 +1,6 @@
-#![allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "diagnostic coordinates and colors are clamped before conversion"
-)]
-
 use crust_renderer::cache::TextureHandle;
 use crust_renderer::command::{
-    BlendMode, ColoredQuad, ColoredTriangle, ColoredVertex, OrderingTable, PrimitiveCommand,
-    PrimitiveStyle, ScreenPoint, ScreenRect, SpriteCommand, UvRect,
+    BlendMode, OrderingTable, PrimitiveCommand, ScreenRect, SpriteCommand, UvRect,
 };
 use crust_renderer::projection::Viewport;
 use crust_renderer::texture::{DecodedTexture, Rgba8};
@@ -16,10 +8,13 @@ use wasm_bindgen::JsValue;
 use web_sys::HtmlCanvasElement;
 
 use crate::renderer_backend::{RenderOptions, RendererBackend};
+use crate::retail_scene::{RetailScene, RetailSceneCommand};
 
 const LOADING_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX);
+const TITLE_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX - 1);
 const LOADING_IMAGE_FRAMES: u8 = 30;
 const LOADING_IMAGE_DEPTH: u16 = 2_047;
+const TITLE_IMAGE_DEPTH: u16 = 0;
 const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
     r: 128,
     g: 128,
@@ -29,11 +24,8 @@ const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
 
 #[derive(Clone, Copy, Debug)]
 pub struct VisualState {
-    pub time: f32,
-    pub seed: u32,
-    pub player_x: f32,
-    pub player_y: f32,
-    pub active: bool,
+    pub show_title_image: bool,
+    pub show_retail_scene: bool,
 }
 
 #[derive(Debug)]
@@ -42,6 +34,8 @@ pub struct GlStage {
     ordering: OrderingTable,
     loading_image_dimensions: Option<[i32; 2]>,
     loading_image_frames: u8,
+    title_image_dimensions: Option<[i32; 2]>,
+    retail_scene_commands: Vec<RetailSceneCommand>,
     last_error: u32,
 }
 
@@ -53,6 +47,8 @@ impl GlStage {
             ordering: OrderingTable::default(),
             loading_image_dimensions: None,
             loading_image_frames: 0,
+            title_image_dimensions: None,
+            retail_scene_commands: Vec::new(),
             last_error: 0,
         })
     }
@@ -74,33 +70,67 @@ impl GlStage {
         Ok(())
     }
 
+    /// Upload a title card composed directly from the retail MDAT/IPAL/IMAG
+    /// asset graph. It remains resident until another title state replaces it.
+    pub fn install_title_image(&mut self, image: &DecodedTexture) -> Result<(), JsValue> {
+        let dimensions = [
+            i32::try_from(image.width())
+                .map_err(|_| JsValue::from_str("title-image width exceeds WebGL limits"))?,
+            i32::try_from(image.height())
+                .map_err(|_| JsValue::from_str("title-image height exceeds WebGL limits"))?,
+        ];
+        self.backend
+            .upload_texture(TITLE_IMAGE_HANDLE, image)
+            .map_err(|error| backend_error(&error))?;
+        self.title_image_dimensions = Some(dimensions);
+        Ok(())
+    }
+
+    /// Replaces the resident progress-zero retail world snapshot.
+    pub fn install_retail_scene(&mut self, scene: RetailScene) -> Result<(), JsValue> {
+        let retained = [LOADING_IMAGE_HANDLE, TITLE_IMAGE_HANDLE]
+            .into_iter()
+            .chain(scene.textures.iter().map(|texture| texture.handle))
+            .collect::<Vec<_>>();
+        self.backend
+            .upload_textures_atomically(
+                scene
+                    .textures
+                    .iter()
+                    .map(|texture| (texture.handle, &texture.pixels)),
+            )
+            .map_err(|error| backend_error(&error))?;
+        self.retail_scene_commands = scene.commands;
+        self.backend.retain_textures(retained);
+        Ok(())
+    }
+
     pub fn render(&mut self, state: VisualState) -> Result<(), JsValue> {
         self.ordering.clear();
-        submit_diagnostic_scene(&mut self.ordering, state)
-            .map_err(|error| command_error(&error))?;
+
+        if state.show_retail_scene {
+            for command in &self.retail_scene_commands {
+                self.ordering
+                    .submit_world(
+                        command.depth,
+                        command.zone,
+                        command.polygon,
+                        command.primitive.clone(),
+                    )
+                    .map_err(|error| command_error(&error))?;
+            }
+        }
+
+        if state.show_title_image
+            && let Some([width, height]) = self.title_image_dimensions
+        {
+            self.submit_image(TITLE_IMAGE_HANDLE, TITLE_IMAGE_DEPTH, width, height)?;
+        }
 
         if self.loading_image_frames != 0
             && let Some([width, height]) = self.loading_image_dimensions
         {
-            let rect = ScreenRect {
-                x: -(width / 2),
-                y: -(height / 2),
-                width,
-                height,
-            };
-            self.ordering
-                .submit_overlay(
-                    LOADING_IMAGE_DEPTH,
-                    PrimitiveCommand::Sprite(SpriteCommand {
-                        rect,
-                        depth: i32::from(LOADING_IMAGE_DEPTH),
-                        color: NEUTRAL_TEXTURE_COLOR,
-                        texture: LOADING_IMAGE_HANDLE,
-                        uv: UvRect::default(),
-                        blend: BlendMode::Opaque,
-                    }),
-                )
-                .map_err(|error| command_error(&error))?;
+            self.submit_image(LOADING_IMAGE_HANDLE, LOADING_IMAGE_DEPTH, width, height)?;
         }
 
         let frame = self.ordering.generate(Viewport::PSX);
@@ -126,6 +156,33 @@ impl GlStage {
         Ok(())
     }
 
+    fn submit_image(
+        &mut self,
+        texture: TextureHandle,
+        depth: u16,
+        width: i32,
+        height: i32,
+    ) -> Result<(), JsValue> {
+        self.ordering
+            .submit_overlay(
+                depth,
+                PrimitiveCommand::Sprite(SpriteCommand {
+                    rect: ScreenRect {
+                        x: -(width / 2),
+                        y: -(height / 2),
+                        width,
+                        height,
+                    },
+                    depth: i32::from(depth),
+                    color: NEUTRAL_TEXTURE_COLOR,
+                    texture,
+                    uv: UvRect::default(),
+                    blend: BlendMode::Opaque,
+                }),
+            )
+            .map_err(|error| command_error(&error))
+    }
+
     #[must_use]
     pub fn error(&self) -> u32 {
         if self.last_error == 0 {
@@ -134,118 +191,6 @@ impl GlStage {
             self.last_error
         }
     }
-}
-
-fn submit_diagnostic_scene(
-    ordering: &mut OrderingTable,
-    state: VisualState,
-) -> Result<(), crust_renderer::command::CommandError> {
-    let hue = ((state.seed.rotate_left(7) & 0xff) as f32) / 255.0;
-    let pulse = (state.time * 0.45).sin() * 0.025;
-    let sky = color([0.025 + hue * 0.035, 0.07 + pulse, 0.085 + hue * 0.045]);
-    let horizon = color([0.07 + hue * 0.08, 0.13 + pulse, 0.14]);
-    let ground = color([0.025, 0.045, 0.04 + hue * 0.04]);
-    let amber = color([0.95, 0.48 + hue * 0.18, 0.13]);
-    let cyan = color([0.17, 0.72 + pulse, 0.63]);
-
-    ordering.submit_overlay(0, colored_quad(-1.0, -1.0, 1.0, 1.0, sky, horizon))?;
-    // Low-poly distant silhouette, intentionally original and data-independent.
-    ordering.submit_overlay(
-        1,
-        colored_triangle([[-1.0, -0.32], [-0.56, 0.18], [-0.16, -0.32]], ground),
-    )?;
-    ordering.submit_overlay(
-        1,
-        colored_triangle([[-0.34, -0.32], [0.08, 0.31], [0.52, -0.32]], ground),
-    )?;
-    ordering.submit_overlay(
-        1,
-        colored_triangle([[0.32, -0.32], [0.78, 0.12], [1.0, -0.32]], ground),
-    )?;
-    ordering.submit_overlay(2, colored_quad(-1.0, -1.0, 1.0, -0.31, ground, ground))?;
-
-    if state.active {
-        let x = finite_or_zero(state.player_x).clamp(-0.88, 0.88);
-        let y = finite_or_zero(state.player_y).clamp(-0.78, 0.56);
-        let bob = (finite_or_zero(state.time) * 5.0).sin() * 0.012;
-        ordering.submit_overlay(
-            3,
-            colored_triangle(
-                [
-                    [x - 0.055, y - 0.08 + bob],
-                    [x, y + 0.07 + bob],
-                    [x + 0.055, y - 0.08 + bob],
-                ],
-                amber,
-            ),
-        )?;
-        ordering.submit_overlay(
-            4,
-            colored_quad(x - 0.09, -0.83, x + 0.09, -0.80, cyan, cyan),
-        )?;
-    }
-    Ok(())
-}
-
-fn colored_triangle(points: [[f32; 2]; 3], color: Rgba8) -> PrimitiveCommand {
-    PrimitiveCommand::ColoredTriangle(ColoredTriangle {
-        vertices: points.map(|[x, y]| ColoredVertex {
-            position: screen_point(x, y),
-            color,
-        }),
-        blend: BlendMode::Opaque,
-        style: PrimitiveStyle::Fill,
-    })
-}
-
-fn colored_quad(
-    left: f32,
-    bottom: f32,
-    right: f32,
-    top: f32,
-    bottom_color: Rgba8,
-    top_color: Rgba8,
-) -> PrimitiveCommand {
-    PrimitiveCommand::ColoredQuad(ColoredQuad {
-        vertices: [
-            ColoredVertex {
-                position: screen_point(left, top),
-                color: top_color,
-            },
-            ColoredVertex {
-                position: screen_point(right, top),
-                color: top_color,
-            },
-            ColoredVertex {
-                position: screen_point(left, bottom),
-                color: bottom_color,
-            },
-            ColoredVertex {
-                position: screen_point(right, bottom),
-                color: bottom_color,
-            },
-        ],
-        blend: BlendMode::Opaque,
-        style: PrimitiveStyle::Fill,
-    })
-}
-
-fn screen_point(x: f32, y: f32) -> ScreenPoint {
-    ScreenPoint {
-        x: (finite_or_zero(x).clamp(-1.0, 1.0) * 256.0).round() as i32,
-        y: (-finite_or_zero(y).clamp(-1.0, 1.0) * 120.0).round() as i32,
-        z: 0,
-    }
-}
-
-fn color(rgb: [f32; 3]) -> Rgba8 {
-    let [r, g, b] =
-        rgb.map(|component| (finite_or_zero(component).clamp(0.0, 1.0) * 255.0).round() as u8);
-    Rgba8 { r, g, b, a: 255 }
-}
-
-fn finite_or_zero(value: f32) -> f32 {
-    if value.is_finite() { value } else { 0.0 }
 }
 
 fn backend_error(error: &impl core::fmt::Display) -> JsValue {

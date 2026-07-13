@@ -15,9 +15,12 @@ retail-equivalent game runtime**. Disc extraction, all 44 stream pairs, checked 
 the 30 Hz state machine, menu/options/password/load/map shells, direct boot, local persistence,
 input, WebGL2, WebAudio, and the native engine subsystems are implemented. The live browser host
 now retains and remounts each validated destination stream pair, decodes retail LDAT loading
-images, and drives the renderer command backend. Gameplay still presents original diagnostic
-geometry and synthesized audio; it does not yet drive the complete retail
-scene/object/animation/audio data through the renderer and GOOL host calls. See
+images, composes the image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
+renderer command backend. The former data-independent diagnostic landscape/player geometry has
+been removed. For 40 of 43 playable starts, gameplay now presents a bounds-checked progress-zero
+ZDAT/SLST/WGEO world snapshot with decoded TPAG textures and retail camera/depth math. This is not
+yet a moving retail world: entity-driven camera updates, objects, animation, effects and gameplay
+coupling remain incomplete, and audio remains synthesized. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -41,7 +44,9 @@ The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/a
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one
 complete pair are accepted. Each cross-level transition now validates and mounts its destination
 pair on demand; a missing destination pauses the simulation with an actionable error instead of
-continuing against stale data. Retail entries are not yet instantiated into the live object graph.
+continuing against stale data. Image-backed title entries are now materialized, and retail GOOL
+entry/state graphs can be validated and bound natively, but gameplay entries are not yet
+instantiated into the live object graph.
 
 ## Controls
 
@@ -76,12 +81,12 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
 
 ## Workspace
 
-- `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID and tagged-ref
-  validation.
-- `crust-sim` — deterministic 30 Hz clock, GOOL word machine, level/title flow, collision, camera,
-  paging, demos, and retail card payload/state handshakes.
-- `crust-renderer` — PSX texture decoding/cache, projection, ordering, clipping, blend passes and
-  WebGL2-ready commands.
+- `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program,
+  scene metadata and tagged-reference validation.
+- `crust-sim` — deterministic 30 Hz clock, checked GOOL program binding/word machine, level/title
+  flow, collision, camera, paging, demos, and retail card payload/state handshakes.
+- `crust-renderer` — PSX texture/TPAG/UV decoding and cache, projection, ordering, clipping, blend
+  passes, title composition and WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, sample cache/mixer, sequence events and a 44.1 kHz software synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
 - `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the

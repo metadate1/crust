@@ -211,6 +211,8 @@ pub struct ClutLine {
 pub struct MdatHeader {
     pub width_tiles: i32,
     pub height_tiles: i32,
+    /// Total CLUT count. Retail groups these into at most 46 IPAL entries with
+    /// up to 120 palette items in each entry.
     pub palette_count: i32,
     pub entity_count: i32,
     pub unknown_4: i32,
@@ -232,10 +234,10 @@ impl MdatHeader {
         let entity_count = reader.i32_le()?;
         let unknown_4 = reader.i32_le()?;
         let geometry_count = reader.i32_le()?;
-        if !(0..=46).contains(&palette_count) {
+        if !(0..=46 * 120).contains(&palette_count) {
             return Err(FormatError::at(
                 8,
-                "MDAT palette count exceeds its 46-entry table",
+                "MDAT CLUT count exceeds its 46 by 120-entry IPAL table",
             ));
         }
         if !(0..=32).contains(&geometry_count) {

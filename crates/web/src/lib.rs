@@ -14,6 +14,7 @@ mod disc_import;
 mod dom;
 #[cfg(target_arch = "wasm32")]
 pub mod renderer_backend;
+pub mod retail_scene;
 #[cfg(target_arch = "wasm32")]
 mod storage;
 #[cfg(target_arch = "wasm32")]

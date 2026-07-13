@@ -1,15 +1,26 @@
 //! C1 stream catalogs and bounds-checked NSD/NSF readers.
 
 mod catalog;
+mod gool;
 mod nsd;
 mod nsf;
+mod slst;
 pub mod structs;
+mod wgeo;
+mod zdat;
 
 pub use catalog::{KNOWN_LEVELS, KnownLevel, LevelId, StreamKind, StreamName, known_level};
+pub use gool::{GOOL_PC_NONE, GoolProgram, load_gool_program};
 pub use nsd::{LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, Nsd, NsdHeader, NsdKind, NsdPte, parse_nsd};
 pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,
     parse_nsf,
+};
+pub use slst::{PolygonId, SlstDelta, SlstDirection, SlstItem};
+pub use wgeo::{WorldGeometry, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry};
+pub use zdat::{
+    ZoneColors, ZoneGraphics, ZoneHeader, ZoneLoadList, ZoneNeighborPath, ZonePath, ZoneRect,
+    ZoneWorld,
 };
 
 #[cfg(test)]

@@ -1,27 +1,31 @@
-use js_sys::Float32Array;
-use wasm_bindgen::JsCast as _;
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "diagnostic coordinates and colors are clamped before conversion"
+)]
+
+use crust_renderer::cache::TextureHandle;
+use crust_renderer::command::{
+    BlendMode, ColoredQuad, ColoredTriangle, ColoredVertex, OrderingTable, PrimitiveCommand,
+    PrimitiveStyle, ScreenPoint, ScreenRect, SpriteCommand, UvRect,
+};
+use crust_renderer::projection::Viewport;
+use crust_renderer::texture::{DecodedTexture, Rgba8};
 use wasm_bindgen::JsValue;
-use web_sys::{HtmlCanvasElement, WebGl2RenderingContext, WebGlBuffer, WebGlProgram, WebGlShader};
+use web_sys::HtmlCanvasElement;
 
-const VERTEX_SHADER: &str = r#"#version 300 es
-precision highp float;
-in vec2 a_position;
-in vec3 a_color;
-out vec3 v_color;
-void main() {
-  v_color = a_color;
-  gl_Position = vec4(a_position, 0.0, 1.0);
-}
-"#;
+use crate::renderer_backend::{RenderOptions, RendererBackend};
 
-const FRAGMENT_SHADER: &str = r#"#version 300 es
-precision highp float;
-in vec3 v_color;
-out vec4 out_color;
-void main() {
-  out_color = vec4(v_color, 1.0);
-}
-"#;
+const LOADING_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX);
+const LOADING_IMAGE_FRAMES: u8 = 30;
+const LOADING_IMAGE_DEPTH: u16 = 2_047;
+const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
+    r: 128,
+    g: 128,
+    b: 128,
+    a: 255,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub struct VisualState {
@@ -34,213 +38,220 @@ pub struct VisualState {
 
 #[derive(Debug)]
 pub struct GlStage {
-    gl: WebGl2RenderingContext,
-    program: WebGlProgram,
-    buffer: WebGlBuffer,
-    position_location: u32,
-    color_location: u32,
+    backend: RendererBackend,
+    ordering: OrderingTable,
+    loading_image_dimensions: Option<[i32; 2]>,
+    loading_image_frames: u8,
+    last_error: u32,
 }
 
 impl GlStage {
     pub fn new(canvas: &HtmlCanvasElement) -> Result<Self, JsValue> {
-        let gl = canvas
-            .get_context("webgl2")?
-            .ok_or_else(|| JsValue::from_str("WebGL2 is unavailable"))?
-            .dyn_into::<WebGl2RenderingContext>()?;
-        let vertex = compile_shader(&gl, WebGl2RenderingContext::VERTEX_SHADER, VERTEX_SHADER)?;
-        let fragment = compile_shader(
-            &gl,
-            WebGl2RenderingContext::FRAGMENT_SHADER,
-            FRAGMENT_SHADER,
-        )?;
-        let program = link_program(&gl, &vertex, &fragment)?;
-        let buffer = gl
-            .create_buffer()
-            .ok_or_else(|| JsValue::from_str("WebGL2 could not allocate a vertex buffer"))?;
-        let position_location = gl.get_attrib_location(&program, "a_position");
-        let color_location = gl.get_attrib_location(&program, "a_color");
-        if position_location < 0 || color_location < 0 {
-            return Err(JsValue::from_str("WebGL2 shader attributes are missing"));
-        }
-        gl.use_program(Some(&program));
-        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&buffer));
-        gl.enable_vertex_attrib_array(position_location as u32);
-        gl.vertex_attrib_pointer_with_i32(
-            position_location as u32,
-            2,
-            WebGl2RenderingContext::FLOAT,
-            false,
-            5 * size_of::<f32>() as i32,
-            0,
-        );
-        gl.enable_vertex_attrib_array(color_location as u32);
-        gl.vertex_attrib_pointer_with_i32(
-            color_location as u32,
-            3,
-            WebGl2RenderingContext::FLOAT,
-            false,
-            5 * size_of::<f32>() as i32,
-            2 * size_of::<f32>() as i32,
-        );
+        let backend = RendererBackend::new(canvas).map_err(|error| backend_error(&error))?;
         Ok(Self {
-            gl,
-            program,
-            buffer,
-            position_location: position_location as u32,
-            color_location: color_location as u32,
+            backend,
+            ordering: OrderingTable::default(),
+            loading_image_dimensions: None,
+            loading_image_frames: 0,
+            last_error: 0,
         })
     }
 
-    pub fn render(&self, state: VisualState) {
-        let gl = &self.gl;
-        gl.viewport(0, 0, gl.drawing_buffer_width(), gl.drawing_buffer_height());
-        gl.use_program(Some(&self.program));
-        gl.bind_buffer(WebGl2RenderingContext::ARRAY_BUFFER, Some(&self.buffer));
-        gl.enable_vertex_attrib_array(self.position_location);
-        gl.enable_vertex_attrib_array(self.color_location);
-        let vertices = scene_vertices(state);
-        let array = Float32Array::from(vertices.as_slice());
-        gl.buffer_data_with_array_buffer_view(
-            WebGl2RenderingContext::ARRAY_BUFFER,
-            &array,
-            WebGl2RenderingContext::DYNAMIC_DRAW,
-        );
-        gl.draw_arrays(
-            WebGl2RenderingContext::TRIANGLES,
-            0,
-            i32::try_from(vertices.len() / 5).unwrap_or(i32::MAX),
-        );
+    /// Upload a decoded retail loading image and display it for the next 30
+    /// successful presentation frames.
+    pub fn install_loading_image(&mut self, image: &DecodedTexture) -> Result<(), JsValue> {
+        let dimensions = [
+            i32::try_from(image.width())
+                .map_err(|_| JsValue::from_str("loading-image width exceeds WebGL limits"))?,
+            i32::try_from(image.height())
+                .map_err(|_| JsValue::from_str("loading-image height exceeds WebGL limits"))?,
+        ];
+        self.backend
+            .upload_texture(LOADING_IMAGE_HANDLE, image)
+            .map_err(|error| backend_error(&error))?;
+        self.loading_image_dimensions = Some(dimensions);
+        self.loading_image_frames = LOADING_IMAGE_FRAMES;
+        Ok(())
+    }
+
+    pub fn render(&mut self, state: VisualState) -> Result<(), JsValue> {
+        self.ordering.clear();
+        submit_diagnostic_scene(&mut self.ordering, state)
+            .map_err(|error| command_error(&error))?;
+
+        if self.loading_image_frames != 0
+            && let Some([width, height]) = self.loading_image_dimensions
+        {
+            let rect = ScreenRect {
+                x: -(width / 2),
+                y: -(height / 2),
+                width,
+                height,
+            };
+            self.ordering
+                .submit_overlay(
+                    LOADING_IMAGE_DEPTH,
+                    PrimitiveCommand::Sprite(SpriteCommand {
+                        rect,
+                        depth: i32::from(LOADING_IMAGE_DEPTH),
+                        color: NEUTRAL_TEXTURE_COLOR,
+                        texture: LOADING_IMAGE_HANDLE,
+                        uv: UvRect::default(),
+                        blend: BlendMode::Opaque,
+                    }),
+                )
+                .map_err(|error| command_error(&error))?;
+        }
+
+        let frame = self.ordering.generate(Viewport::PSX);
+        let diagnostics = self
+            .backend
+            .render(
+                &frame,
+                RenderOptions {
+                    clear_color: Some([0.0, 0.0, 0.0, 1.0]),
+                    ..RenderOptions::default()
+                },
+            )
+            .map_err(|error| backend_error(&error))?;
+        self.last_error = diagnostics
+            .preexisting_gl_errors
+            .first()
+            .or_else(|| diagnostics.gl_errors.first())
+            .copied()
+            .unwrap_or(0);
+        if self.loading_image_frames != 0 {
+            self.loading_image_frames -= 1;
+        }
+        Ok(())
     }
 
     #[must_use]
     pub fn error(&self) -> u32 {
-        self.gl.get_error()
+        if self.last_error == 0 {
+            self.backend.next_gl_error()
+        } else {
+            self.last_error
+        }
     }
 }
 
-fn compile_shader(
-    gl: &WebGl2RenderingContext,
-    kind: u32,
-    source: &str,
-) -> Result<WebGlShader, JsValue> {
-    let shader = gl
-        .create_shader(kind)
-        .ok_or_else(|| JsValue::from_str("WebGL2 could not create a shader"))?;
-    gl.shader_source(&shader, source);
-    gl.compile_shader(&shader);
-    if gl
-        .get_shader_parameter(&shader, WebGl2RenderingContext::COMPILE_STATUS)
-        .as_bool()
-        .unwrap_or(false)
-    {
-        Ok(shader)
-    } else {
-        Err(JsValue::from_str(
-            &gl.get_shader_info_log(&shader)
-                .unwrap_or_else(|| "unknown shader compile error".to_owned()),
-        ))
-    }
-}
-
-fn link_program(
-    gl: &WebGl2RenderingContext,
-    vertex: &WebGlShader,
-    fragment: &WebGlShader,
-) -> Result<WebGlProgram, JsValue> {
-    let program = gl
-        .create_program()
-        .ok_or_else(|| JsValue::from_str("WebGL2 could not create a program"))?;
-    gl.attach_shader(&program, vertex);
-    gl.attach_shader(&program, fragment);
-    gl.link_program(&program);
-    if gl
-        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
-        .as_bool()
-        .unwrap_or(false)
-    {
-        Ok(program)
-    } else {
-        Err(JsValue::from_str(
-            &gl.get_program_info_log(&program)
-                .unwrap_or_else(|| "unknown program link error".to_owned()),
-        ))
-    }
-}
-
-fn scene_vertices(state: VisualState) -> Vec<f32> {
+fn submit_diagnostic_scene(
+    ordering: &mut OrderingTable,
+    state: VisualState,
+) -> Result<(), crust_renderer::command::CommandError> {
     let hue = ((state.seed.rotate_left(7) & 0xff) as f32) / 255.0;
     let pulse = (state.time * 0.45).sin() * 0.025;
-    let sky = [0.025 + hue * 0.035, 0.07 + pulse, 0.085 + hue * 0.045];
-    let horizon = [0.07 + hue * 0.08, 0.13 + pulse, 0.14];
-    let ground = [0.025, 0.045, 0.04 + hue * 0.04];
-    let amber = [0.95, 0.48 + hue * 0.18, 0.13];
-    let cyan = [0.17, 0.72 + pulse, 0.63];
-    let mut output = Vec::with_capacity(5 * 45);
+    let sky = color([0.025 + hue * 0.035, 0.07 + pulse, 0.085 + hue * 0.045]);
+    let horizon = color([0.07 + hue * 0.08, 0.13 + pulse, 0.14]);
+    let ground = color([0.025, 0.045, 0.04 + hue * 0.04]);
+    let amber = color([0.95, 0.48 + hue * 0.18, 0.13]);
+    let cyan = color([0.17, 0.72 + pulse, 0.63]);
 
-    quad(&mut output, -1.0, -1.0, 1.0, 1.0, sky, horizon);
+    ordering.submit_overlay(0, colored_quad(-1.0, -1.0, 1.0, 1.0, sky, horizon))?;
     // Low-poly distant silhouette, intentionally original and data-independent.
-    triangle(
-        &mut output,
-        [-1.0, -0.32],
-        [-0.56, 0.18],
-        [-0.16, -0.32],
-        ground,
-    );
-    triangle(
-        &mut output,
-        [-0.34, -0.32],
-        [0.08, 0.31],
-        [0.52, -0.32],
-        ground,
-    );
-    triangle(
-        &mut output,
-        [0.32, -0.32],
-        [0.78, 0.12],
-        [1.0, -0.32],
-        ground,
-    );
-    quad(&mut output, -1.0, -1.0, 1.0, -0.31, ground, ground);
+    ordering.submit_overlay(
+        1,
+        colored_triangle([[-1.0, -0.32], [-0.56, 0.18], [-0.16, -0.32]], ground),
+    )?;
+    ordering.submit_overlay(
+        1,
+        colored_triangle([[-0.34, -0.32], [0.08, 0.31], [0.52, -0.32]], ground),
+    )?;
+    ordering.submit_overlay(
+        1,
+        colored_triangle([[0.32, -0.32], [0.78, 0.12], [1.0, -0.32]], ground),
+    )?;
+    ordering.submit_overlay(2, colored_quad(-1.0, -1.0, 1.0, -0.31, ground, ground))?;
 
     if state.active {
-        let x = state.player_x.clamp(-0.88, 0.88);
-        let y = state.player_y.clamp(-0.78, 0.56);
-        let bob = (state.time * 5.0).sin() * 0.012;
-        triangle(
-            &mut output,
-            [x - 0.055, y - 0.08 + bob],
-            [x, y + 0.07 + bob],
-            [x + 0.055, y - 0.08 + bob],
-            amber,
-        );
-        quad(&mut output, x - 0.09, -0.83, x + 0.09, -0.80, cyan, cyan);
+        let x = finite_or_zero(state.player_x).clamp(-0.88, 0.88);
+        let y = finite_or_zero(state.player_y).clamp(-0.78, 0.56);
+        let bob = (finite_or_zero(state.time) * 5.0).sin() * 0.012;
+        ordering.submit_overlay(
+            3,
+            colored_triangle(
+                [
+                    [x - 0.055, y - 0.08 + bob],
+                    [x, y + 0.07 + bob],
+                    [x + 0.055, y - 0.08 + bob],
+                ],
+                amber,
+            ),
+        )?;
+        ordering.submit_overlay(
+            4,
+            colored_quad(x - 0.09, -0.83, x + 0.09, -0.80, cyan, cyan),
+        )?;
     }
-    output
+    Ok(())
 }
 
-fn push_vertex(output: &mut Vec<f32>, point: [f32; 2], color: [f32; 3]) {
-    output.extend([point[0], point[1], color[0], color[1], color[2]]);
+fn colored_triangle(points: [[f32; 2]; 3], color: Rgba8) -> PrimitiveCommand {
+    PrimitiveCommand::ColoredTriangle(ColoredTriangle {
+        vertices: points.map(|[x, y]| ColoredVertex {
+            position: screen_point(x, y),
+            color,
+        }),
+        blend: BlendMode::Opaque,
+        style: PrimitiveStyle::Fill,
+    })
 }
 
-fn triangle(output: &mut Vec<f32>, a: [f32; 2], b: [f32; 2], c: [f32; 2], color: [f32; 3]) {
-    push_vertex(output, a, color);
-    push_vertex(output, b, color);
-    push_vertex(output, c, color);
-}
-
-fn quad(
-    output: &mut Vec<f32>,
+fn colored_quad(
     left: f32,
     bottom: f32,
     right: f32,
     top: f32,
-    bottom_color: [f32; 3],
-    top_color: [f32; 3],
-) {
-    push_vertex(output, [left, bottom], bottom_color);
-    push_vertex(output, [right, bottom], bottom_color);
-    push_vertex(output, [left, top], top_color);
-    push_vertex(output, [left, top], top_color);
-    push_vertex(output, [right, bottom], bottom_color);
-    push_vertex(output, [right, top], top_color);
+    bottom_color: Rgba8,
+    top_color: Rgba8,
+) -> PrimitiveCommand {
+    PrimitiveCommand::ColoredQuad(ColoredQuad {
+        vertices: [
+            ColoredVertex {
+                position: screen_point(left, top),
+                color: top_color,
+            },
+            ColoredVertex {
+                position: screen_point(right, top),
+                color: top_color,
+            },
+            ColoredVertex {
+                position: screen_point(left, bottom),
+                color: bottom_color,
+            },
+            ColoredVertex {
+                position: screen_point(right, bottom),
+                color: bottom_color,
+            },
+        ],
+        blend: BlendMode::Opaque,
+        style: PrimitiveStyle::Fill,
+    })
+}
+
+fn screen_point(x: f32, y: f32) -> ScreenPoint {
+    ScreenPoint {
+        x: (finite_or_zero(x).clamp(-1.0, 1.0) * 256.0).round() as i32,
+        y: (-finite_or_zero(y).clamp(-1.0, 1.0) * 120.0).round() as i32,
+        z: 0,
+    }
+}
+
+fn color(rgb: [f32; 3]) -> Rgba8 {
+    let [r, g, b] =
+        rgb.map(|component| (finite_or_zero(component).clamp(0.0, 1.0) * 255.0).round() as u8);
+    Rgba8 { r, g, b, a: 255 }
+}
+
+fn finite_or_zero(value: f32) -> f32 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn backend_error(error: &impl core::fmt::Display) -> JsValue {
+    JsValue::from_str(&error.to_string())
+}
+
+fn command_error(error: &crust_renderer::command::CommandError) -> JsValue {
+    JsValue::from_str(&error.to_string())
 }

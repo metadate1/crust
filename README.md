@@ -14,8 +14,10 @@ This repository is a working, tested Rust/Wasm compatibility foundation, but it 
 retail-equivalent game runtime**. Disc extraction, all 44 stream pairs, checked NSD/NSF parsing,
 the 30 Hz state machine, menu/options/password/load/map shells, direct boot, local persistence,
 input, WebGL2, WebAudio, and the native engine subsystems are implemented. The live browser host
-currently presents original diagnostic geometry and synthesized audio; it does not yet drive the
-complete retail scene/object/animation/audio data through the renderer and GOOL host calls. See
+now retains and remounts each validated destination stream pair, decodes retail LDAT loading
+images, and drives the renderer command backend. Gameplay still presents original diagnostic
+geometry and synthesized audio; it does not yet drive the complete retail
+scene/object/animation/audio data through the renderer and GOOL host calls. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -37,8 +39,9 @@ security policy blocks cross-origin connections, and no runtime API uploads asse
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one
-complete pair are accepted, though the browser host currently validates only the selected boot
-pair and does not materialize subsequent retail transition data.
+complete pair are accepted. Each cross-level transition now validates and mounts its destination
+pair on demand; a missing destination pauses the simulation with an actionable error instead of
+continuing against stale data. Retail entries are not yet instantiated into the live object graph.
 
 ## Controls
 
@@ -95,7 +98,8 @@ or stream. `*.bin`, `*.iso`, `*.nsd`, `*.nsf`, local data directories, build out
 storage exports, caches, and captures are ignored. The two supported persistent records contain
 only the retail 128-byte progression/options payload:
 
-- `c1.virtual-memory-card.v1` — 15 manual slots.
+- `c1.virtual-memory-card.v1` — 15 retail-format slots; diagnostic completion updates the loaded
+  slot, falling back to slot zero.
 - `c1.browser-resume.v1` — one checksummed automatic resume record.
 
 Selected game files are not persisted and must be selected again after reload.

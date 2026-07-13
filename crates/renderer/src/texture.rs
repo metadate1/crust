@@ -14,6 +14,14 @@ pub const TEXTURE_PAGE_BYTES: usize = 0x1_0000;
 pub const TEXTURE_PAGE_WORD_WIDTH: u32 = 256;
 /// Height of a texture page in pixels.
 pub const TEXTURE_PAGE_HEIGHT: u32 = 128;
+/// Number of colors stored at the start of a retail NSD loading image.
+pub const LOADING_IMAGE_PALETTE_ENTRIES: usize = 256;
+/// Byte length of the little-endian BGR555/STP loading-image palette.
+pub const LOADING_IMAGE_PALETTE_BYTES: usize = LOADING_IMAGE_PALETTE_ENTRIES * 2;
+/// Largest loading-image width accepted by the retail metadata path.
+pub const LOADING_IMAGE_MAX_WIDTH: u32 = 512;
+/// Largest loading-image height accepted by the retail metadata path.
+pub const LOADING_IMAGE_MAX_HEIGHT: u32 = 240;
 
 /// PSX texture pixel encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -247,6 +255,18 @@ pub enum TextureError {
         location: ClutLocation,
         colors: usize,
     },
+    InvalidLoadingImageDimensions {
+        width: u32,
+        height: u32,
+    },
+    LoadingImagePaletteTooShort {
+        required: usize,
+        actual: usize,
+    },
+    LoadingImagePixelsTooShort {
+        required: usize,
+        actual: usize,
+    },
     DimensionsOverflow,
 }
 
@@ -276,6 +296,18 @@ impl fmt::Display for TextureError {
             Self::ClutOutOfBounds { location, colors } => write!(
                 formatter,
                 "CLUT {location:?} with {colors} colors exceeds texture page"
+            ),
+            Self::InvalidLoadingImageDimensions { width, height } => write!(
+                formatter,
+                "loading-image dimensions {width}x{height} are outside 1..={LOADING_IMAGE_MAX_WIDTH} by 1..={LOADING_IMAGE_MAX_HEIGHT}"
+            ),
+            Self::LoadingImagePaletteTooShort { required, actual } => write!(
+                formatter,
+                "loading-image palette is {actual} bytes; {required} bytes are required"
+            ),
+            Self::LoadingImagePixelsTooShort { required, actual } => write!(
+                formatter,
+                "loading image has {actual} pixel indices; {required} are required"
             ),
             Self::DimensionsOverflow => {
                 formatter.write_str("texture dimensions overflow address space")
@@ -420,6 +452,77 @@ pub fn decode_indexed8(
     Ok(DecodedTexture::from_rgba(width, height, rgba))
 }
 
+/// Decode the indexed loading-image payload embedded in a retail NSD LDAT.
+///
+/// The first 512 bytes are 256 little-endian BGR555/STP palette words. They
+/// are followed immediately by `width * height` eight-bit palette indices.
+/// Extra bytes belonging to the fixed-size retail LDAT field are ignored.
+/// The source image blit disables blending, so every decoded palette entry is
+/// fully opaque, including palette-zero black. This differs deliberately from
+/// ordinary texture primitives, where black can be transparent.
+///
+/// # Errors
+///
+/// Returns an error when either dimension is zero or exceeds 512x240, size
+/// arithmetic overflows, or the payload does not contain the complete palette
+/// and indexed-pixel region.
+pub fn decode_loading_image(
+    payload: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<DecodedTexture, TextureError> {
+    if width == 0
+        || height == 0
+        || width > LOADING_IMAGE_MAX_WIDTH
+        || height > LOADING_IMAGE_MAX_HEIGHT
+    {
+        return Err(TextureError::InvalidLoadingImageDimensions { width, height });
+    }
+
+    let pixels = pixel_count(width, height)?;
+    let rgba_capacity = rgba_len(width, height)?;
+    if payload.len() < LOADING_IMAGE_PALETTE_BYTES {
+        return Err(TextureError::LoadingImagePaletteTooShort {
+            required: LOADING_IMAGE_PALETTE_BYTES,
+            actual: payload.len(),
+        });
+    }
+
+    let pixel_end = LOADING_IMAGE_PALETTE_BYTES
+        .checked_add(pixels)
+        .ok_or(TextureError::DimensionsOverflow)?;
+    let available_pixels = payload.len() - LOADING_IMAGE_PALETTE_BYTES;
+    if payload.len() < pixel_end {
+        return Err(TextureError::LoadingImagePixelsTooShort {
+            required: pixels,
+            actual: available_pixels,
+        });
+    }
+
+    let mut palette = [0_u16; LOADING_IMAGE_PALETTE_ENTRIES];
+    for (color, bytes) in palette
+        .iter_mut()
+        .zip(payload[..LOADING_IMAGE_PALETTE_BYTES].chunks_exact(2))
+    {
+        *color = u16::from_le_bytes([bytes[0], bytes[1]]);
+    }
+    let indices = payload.get(LOADING_IMAGE_PALETTE_BYTES..pixel_end).ok_or(
+        TextureError::LoadingImagePixelsTooShort {
+            required: pixels,
+            actual: available_pixels,
+        },
+    )?;
+
+    let mut rgba = Vec::with_capacity(rgba_capacity);
+    for &index in indices {
+        let mut pixel = decode_bgr555_stp(palette[usize::from(index)], BlendMode::Opaque);
+        pixel.a = u8::MAX;
+        rgba.extend_from_slice(&[pixel.r, pixel.g, pixel.b, pixel.a]);
+    }
+    debug_assert_eq!(rgba.len(), rgba_capacity);
+    Ok(DecodedTexture::from_rgba(width, height, rgba))
+}
+
 fn validate_page_and_region(
     page: &[u8],
     mode: ColorMode,
@@ -516,6 +619,15 @@ mod tests {
 
     fn blank_page() -> Vec<u8> {
         vec![0; TEXTURE_PAGE_BYTES]
+    }
+
+    fn loading_payload(palette: &[u16; LOADING_IMAGE_PALETTE_ENTRIES], indices: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(LOADING_IMAGE_PALETTE_BYTES + indices.len());
+        for color in palette {
+            payload.extend_from_slice(&color.to_le_bytes());
+        }
+        payload.extend_from_slice(indices);
+        payload
     }
 
     #[test]
@@ -617,6 +729,123 @@ mod tests {
     }
 
     #[test]
+    fn decodes_retail_loading_image_layout_and_opaque_alpha() {
+        let mut payload = vec![0; LOADING_IMAGE_PALETTE_BYTES];
+        // Palette entry 1 is little-endian red; entry 2 is STP black.
+        payload[2..4].copy_from_slice(&[0x1f, 0x00]);
+        payload[4..6].copy_from_slice(&[0x00, 0x80]);
+        payload.extend_from_slice(&[0, 1, 2]);
+
+        let decoded = decode_loading_image(&payload, 3, 1).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (3, 1));
+        assert_eq!(
+            decoded.pixel(0, 0),
+            Some(Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+        assert_eq!(
+            decoded.pixel(1, 0),
+            Some(Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+        assert_eq!(
+            decoded.pixel(2, 0),
+            Some(Rgba8 {
+                r: 0,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+    }
+
+    #[test]
+    fn loading_image_ignores_unused_ldat_tail() {
+        let mut palette = [0; LOADING_IMAGE_PALETTE_ENTRIES];
+        palette[7] = 0x7c00;
+        let mut payload = loading_payload(&palette, &[7]);
+        payload.extend_from_slice(&[0xaa; 32]);
+
+        let decoded = decode_loading_image(&payload, 1, 1).unwrap();
+        assert_eq!(decoded.pixel(0, 0).unwrap().b, 255);
+        assert_eq!(decoded.byte_len(), 4);
+    }
+
+    #[test]
+    fn loading_image_rejects_zero_and_oversized_dimensions() {
+        let payload = vec![0; LOADING_IMAGE_PALETTE_BYTES];
+        for (width, height) in [
+            (0, 1),
+            (1, 0),
+            (LOADING_IMAGE_MAX_WIDTH + 1, 1),
+            (1, LOADING_IMAGE_MAX_HEIGHT + 1),
+        ] {
+            assert_eq!(
+                decode_loading_image(&payload, width, height),
+                Err(TextureError::InvalidLoadingImageDimensions { width, height })
+            );
+        }
+    }
+
+    #[test]
+    fn loading_image_distinguishes_palette_and_pixel_truncation() {
+        for actual in [0, 1, LOADING_IMAGE_PALETTE_BYTES - 1] {
+            assert_eq!(
+                decode_loading_image(&vec![0; actual], 1, 1),
+                Err(TextureError::LoadingImagePaletteTooShort {
+                    required: LOADING_IMAGE_PALETTE_BYTES,
+                    actual,
+                })
+            );
+        }
+
+        assert_eq!(
+            decode_loading_image(&vec![0; LOADING_IMAGE_PALETTE_BYTES], 1, 1),
+            Err(TextureError::LoadingImagePixelsTooShort {
+                required: 1,
+                actual: 0,
+            })
+        );
+        assert_eq!(
+            decode_loading_image(&vec![0; LOADING_IMAGE_PALETTE_BYTES + 3], 2, 2),
+            Err(TextureError::LoadingImagePixelsTooShort {
+                required: 4,
+                actual: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn loading_image_accepts_maximum_retail_dimensions() {
+        let pixels = usize::try_from(LOADING_IMAGE_MAX_WIDTH).unwrap()
+            * usize::try_from(LOADING_IMAGE_MAX_HEIGHT).unwrap();
+        let payload = vec![0; LOADING_IMAGE_PALETTE_BYTES + pixels];
+        let decoded =
+            decode_loading_image(&payload, LOADING_IMAGE_MAX_WIDTH, LOADING_IMAGE_MAX_HEIGHT)
+                .unwrap();
+        assert_eq!(decoded.byte_len(), pixels * 4);
+        let opaque_black = Some(Rgba8 {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: 255,
+        });
+        assert_eq!(decoded.pixel(0, 0), opaque_black);
+        assert_eq!(
+            decoded.pixel(LOADING_IMAGE_MAX_WIDTH - 1, LOADING_IMAGE_MAX_HEIGHT - 1),
+            opaque_black
+        );
+    }
+
+    #[test]
     fn edge_padding_duplicates_all_edges_and_corners() {
         let texture = DecodedTexture::from_rgba(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]);
         let padded = texture.with_edge_padding(1).unwrap();
@@ -656,6 +885,69 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn arbitrary_loading_image_payloads_are_bounds_checked(
+            payload in prop::collection::vec(any::<u8>(), 0..2_048),
+            width in 0_u16..515,
+            height in 0_u16..243,
+        ) {
+            let width = u32::from(width);
+            let height = u32::from(height);
+            let decoded = decode_loading_image(&payload, width, height);
+            if width == 0
+                || height == 0
+                || width > LOADING_IMAGE_MAX_WIDTH
+                || height > LOADING_IMAGE_MAX_HEIGHT
+            {
+                prop_assert_eq!(
+                    decoded,
+                    Err(TextureError::InvalidLoadingImageDimensions { width, height })
+                );
+            } else {
+                let pixels = usize::try_from(width).unwrap() * usize::try_from(height).unwrap();
+                if payload.len() < LOADING_IMAGE_PALETTE_BYTES {
+                    prop_assert_eq!(
+                        decoded,
+                        Err(TextureError::LoadingImagePaletteTooShort {
+                            required: LOADING_IMAGE_PALETTE_BYTES,
+                            actual: payload.len(),
+                        })
+                    );
+                } else if payload.len() < LOADING_IMAGE_PALETTE_BYTES + pixels {
+                    prop_assert_eq!(
+                        decoded,
+                        Err(TextureError::LoadingImagePixelsTooShort {
+                            required: pixels,
+                            actual: payload.len() - LOADING_IMAGE_PALETTE_BYTES,
+                        })
+                    );
+                } else {
+                    let decoded = decoded.unwrap();
+                    prop_assert_eq!(decoded.width(), width);
+                    prop_assert_eq!(decoded.height(), height);
+                    prop_assert_eq!(decoded.byte_len(), pixels * 4);
+                }
+            }
+        }
+
+        #[test]
+        fn every_one_byte_short_loading_image_is_rejected(
+            width in 1_u16..65,
+            height in 1_u16..65,
+        ) {
+            let width = u32::from(width);
+            let height = u32::from(height);
+            let pixels = usize::try_from(width).unwrap() * usize::try_from(height).unwrap();
+            let payload = vec![0; LOADING_IMAGE_PALETTE_BYTES + pixels - 1];
+            prop_assert_eq!(
+                decode_loading_image(&payload, width, height),
+                Err(TextureError::LoadingImagePixelsTooShort {
+                    required: pixels,
+                    actual: pixels - 1,
+                })
+            );
+        }
+
         #[test]
         fn arbitrary_regions_never_escape_the_page(
             mode in 0_u8..3,

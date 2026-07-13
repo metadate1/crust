@@ -6,7 +6,7 @@
 
 #![allow(
     dead_code,
-    reason = "the backend is staged behind wasm32 before runtime orchestration adopts it"
+    reason = "the live stage uses the backend core; cache lifecycle and detailed diagnostics remain available for later retail scene integration"
 )]
 
 use core::fmt;

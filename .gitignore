@@ -1,6 +1,12 @@
 /target/
 /dist/
 /pkg/
+/node_modules/
+/.cache/
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+**/__pycache__/
 /.idea/
 /.vscode/
 /.DS_Store
@@ -22,20 +28,34 @@
 *.bin
 *.iso
 *.cue
+*.ccd
+*.sub
+*.ecm
 *.chd
+*.cso
 *.img
 *.mdf
 *.mds
 *.nrg
+*.pbp
 *.NSD
 *.NSF
 *.nsd
 *.nsf
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
 
 # Local persistence exports and browser automation artifacts.
 *.memory-card.json
 *.resume.json
 /artifacts/
+/captures/
+/screenshots/
+/recordings/
 /coverage/
 /fuzz/artifacts/
 /fuzz/corpus/

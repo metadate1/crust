@@ -4,4 +4,5 @@
 
 pub mod adpcm;
 pub mod mixer;
+pub mod output;
 pub mod sequencer;

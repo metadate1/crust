@@ -76,6 +76,7 @@ dependencies = [
 name = "crust-renderer"
 version = "0.1.0"
 dependencies = [
+ "crust-formats",
  "proptest",
 ]
 

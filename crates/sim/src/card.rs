@@ -284,6 +284,12 @@ impl VirtualCard {
         self.published.part_count
     }
 
+    /// Physical slot selected by the most recent successful load or save.
+    #[must_use]
+    pub const fn current_slot(&self) -> Option<usize> {
+        self.current_slot
+    }
+
     #[must_use]
     pub const fn partinfos(&self) -> &[u32; CARD_SLOT_COUNT] {
         &self.published.partinfos
@@ -743,6 +749,66 @@ mod tests {
         card.control(CardOperation::Format, 0, None).unwrap();
         assert_eq!(card.part_count(), 0);
         assert_eq!(card.flags(), CardFlags::CHECK_NEEDED);
+    }
+
+    #[test]
+    fn rescanned_card_can_overwrite_selected_slot_without_a_current_handle() {
+        let original = sample_data();
+        let mut card = VirtualCard::new();
+        card.set_slot(0, Slot::Valid(CardPayload::encode(original)))
+            .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        card.update();
+        card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+        card.update();
+
+        assert_eq!(card.part_count(), 1);
+        assert_eq!(card.current_slot(), None);
+
+        let mut completed = original;
+        completed.level_count += 1;
+        card.control(CardOperation::SaveSelected, 0, Some(completed))
+            .unwrap();
+        assert_eq!(card.current_slot(), Some(0));
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 0, None),
+            Ok(CardOutcome::Loaded(completed))
+        );
+    }
+
+    #[test]
+    fn save_current_updates_the_loaded_physical_slot_in_a_multi_slot_card() {
+        let first = sample_data();
+        let mut second = first;
+        second.level_count = 12;
+        let mut card = VirtualCard::new();
+        card.set_slot(2, Slot::Valid(CardPayload::encode(first)))
+            .unwrap();
+        card.set_slot(7, Slot::Valid(CardPayload::encode(second)))
+            .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        card.update();
+        card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+        card.update();
+
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 1, None),
+            Ok(CardOutcome::Loaded(second))
+        );
+        assert_eq!(card.current_slot(), Some(7));
+
+        let mut completed = second;
+        completed.level_count = 13;
+        card.control(CardOperation::SaveCurrent, 0, Some(completed))
+            .unwrap();
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 0, None),
+            Ok(CardOutcome::Loaded(first))
+        );
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 1, None),
+            Ok(CardOutcome::Loaded(completed))
+        );
     }
 
     #[test]

@@ -510,7 +510,8 @@ impl GameFlow {
                 };
                 self.state_frames = 0;
                 self.paused = false;
-                self.emit(FlowEvent::Completed(source))
+                self.emit(FlowEvent::Completed(source))?;
+                self.emit(FlowEvent::LevelChanged(LevelId::LEVEL_COMPLETE))
             }
             FlowCommand::AcknowledgeCompletion => {
                 let FlowState::LevelComplete { source, .. } = self.state else {
@@ -520,7 +521,7 @@ impl GameFlow {
                 self.progress.levels_unlocked =
                     self.progress.levels_unlocked.max(self.progress.level_count);
                 self.progress.current_map_level = self.progress.level_count;
-                self.enter_title(TitleScreen::Map);
+                self.enter_title(TitleScreen::Map)?;
                 self.emit(FlowEvent::Completed(source))
             }
             FlowCommand::EnterBonus(level) => {
@@ -549,13 +550,10 @@ impl GameFlow {
                 self.progress.level_count = self.progress.level_count.saturating_add(1);
                 self.progress.levels_unlocked =
                     self.progress.levels_unlocked.max(self.progress.level_count);
-                self.enter_title(TitleScreen::Map);
+                self.enter_title(TitleScreen::Map)?;
                 self.emit(FlowEvent::Completed(level))
             }
-            FlowCommand::GameOver => {
-                self.enter_title(TitleScreen::GameOver);
-                Ok(())
-            }
+            FlowCommand::GameOver => self.enter_title(TitleScreen::GameOver),
             FlowCommand::Continue => {
                 let snapshot = self.saved_level.clone().ok_or(FlowError::InvalidState)?;
                 self.player = snapshot.player;
@@ -568,8 +566,7 @@ impl GameFlow {
                 if !matches!(self.state, FlowState::Ending) {
                     return Err(FlowError::InvalidState);
                 }
-                self.enter_title(TitleScreen::MainMenu);
-                Ok(())
+                self.enter_title(TitleScreen::MainMenu)
             }
         }
     }
@@ -591,7 +588,7 @@ impl GameFlow {
             FlowState::Title => self.tick_title(pad),
             FlowState::Intro => {
                 if pad.held & 0x09f0 != 0 || self.state_frames >= 60 * 30 {
-                    self.enter_title(TitleScreen::MainMenu);
+                    self.enter_title(TitleScreen::MainMenu)?;
                 }
                 Ok(())
             }
@@ -712,12 +709,13 @@ impl GameFlow {
         Ok(())
     }
 
-    fn enter_title(&mut self, screen: TitleScreen) {
+    fn enter_title(&mut self, screen: TitleScreen) -> Result<(), FlowError> {
         self.state = FlowState::Title;
         self.title = TitleMachine::resumed(screen);
         self.title_idle_frames = 0;
         self.state_frames = 0;
         self.paused = false;
+        self.emit(FlowEvent::LevelChanged(LevelId::TITLE))
     }
 
     fn enter_level(&mut self, level: LevelId) -> Result<(), FlowError> {
@@ -752,7 +750,8 @@ impl GameFlow {
         self.player = snapshot.player;
         self.state = FlowState::Gameplay(resolved.level);
         self.state_frames = 0;
-        self.emit(FlowEvent::BonusReturned(resolved.level))
+        self.emit(FlowEvent::BonusReturned(resolved.level))?;
+        self.emit(FlowEvent::LevelChanged(resolved.level))
     }
 
     fn apply_save(&mut self, save: SaveData) {
@@ -851,6 +850,22 @@ mod tests {
     }
 
     #[test]
+    fn map_selection_emits_destination_without_advancing_its_player() {
+        let beach = LevelId::new(0x09).unwrap();
+        let mut flow = GameFlow::new();
+        flow.state = FlowState::Title;
+        flow.title = TitleMachine::resumed(TitleScreen::Map);
+        tick_until_ready(&mut flow);
+        let player_before = flow.player.clone();
+
+        flow.command(FlowCommand::SelectMapLevel(beach)).unwrap();
+
+        assert_eq!(flow.state(), &FlowState::Gameplay(beach));
+        assert_eq!(flow.player, player_before);
+        assert_eq!(flow.take_events(), vec![FlowEvent::LevelChanged(beach)]);
+    }
+
+    #[test]
     fn idle_menu_enters_intro_and_input_returns_to_title() {
         let mut flow = GameFlow::new();
         flow.state = FlowState::Title;
@@ -891,6 +906,46 @@ mod tests {
                 source: beach,
                 missed_boxes: 3
             }
+        );
+    }
+
+    #[test]
+    fn every_cross_stream_flow_emits_the_destination_level() {
+        let beach = LevelId::new(0x09).unwrap();
+        let bonus = LevelId::new(0x26).unwrap();
+        let mut flow = GameFlow::new();
+        flow.command(FlowCommand::Boot(beach)).unwrap();
+        let _ = flow.take_events();
+
+        flow.command(FlowCommand::CompleteLevel { missed_boxes: 2 })
+            .unwrap();
+        assert_eq!(
+            flow.take_events(),
+            vec![
+                FlowEvent::Completed(beach),
+                FlowEvent::LevelChanged(LevelId::LEVEL_COMPLETE),
+            ]
+        );
+        flow.command(FlowCommand::AcknowledgeCompletion).unwrap();
+        assert_eq!(
+            flow.take_events(),
+            vec![
+                FlowEvent::LevelChanged(LevelId::TITLE),
+                FlowEvent::Completed(beach),
+            ]
+        );
+
+        flow.command(FlowCommand::Boot(beach)).unwrap();
+        let _ = flow.take_events();
+        flow.command(FlowCommand::EnterBonus(bonus)).unwrap();
+        let _ = flow.take_events();
+        flow.command(FlowCommand::ReturnFromBonus).unwrap();
+        assert_eq!(
+            flow.take_events(),
+            vec![
+                FlowEvent::BonusReturned(beach),
+                FlowEvent::LevelChanged(beach),
+            ]
         );
     }
 

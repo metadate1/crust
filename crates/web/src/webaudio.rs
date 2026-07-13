@@ -1,4 +1,5 @@
 use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE, Sample};
+use crust_audio::output::OutputOptions;
 use crust_audio::sequencer::{EventKind, Sequence, SequenceEvent, Sequencer};
 use wasm_bindgen::JsValue;
 use web_sys::{AudioContext, GainNode};
@@ -12,6 +13,7 @@ pub struct WebAudio {
     gain: GainNode,
     mixer: Mixer,
     sequencer: Sequencer,
+    output: OutputOptions,
     next_time: f64,
 }
 
@@ -29,6 +31,7 @@ impl WebAudio {
             gain,
             mixer: Mixer::new(),
             sequencer,
+            output: OutputOptions::new(u8::MAX, u8::MAX, false),
             next_time: 0.0,
         })
     }
@@ -39,6 +42,15 @@ impl WebAudio {
 
     pub fn set_muted(&self, muted: bool) {
         self.gain.gain().set_value(if muted { 0.0 } else { 0.78 });
+    }
+
+    pub const fn set_output_options(&mut self, options: OutputOptions) {
+        self.output = options;
+    }
+
+    #[must_use]
+    pub const fn output_options(&self) -> OutputOptions {
+        self.output
     }
 
     pub fn tick_30_hz(&mut self) {
@@ -72,10 +84,15 @@ impl WebAudio {
             let mut left = vec![0.0_f32; CHUNK_FRAMES];
             let mut right = vec![0.0_f32; CHUNK_FRAMES];
             for frame in 0..CHUNK_FRAMES {
-                left[frame] =
-                    (music[frame * 2] + f32::from(sfx[frame * 2]) / 32_768.0).clamp(-1.0, 1.0);
-                right[frame] = (music[frame * 2 + 1] + f32::from(sfx[frame * 2 + 1]) / 32_768.0)
-                    .clamp(-1.0, 1.0);
+                let mixed = self.output.mix_frame(
+                    [music[frame * 2], music[frame * 2 + 1]],
+                    [
+                        f32::from(sfx[frame * 2]) / 32_768.0,
+                        f32::from(sfx[frame * 2 + 1]) / 32_768.0,
+                    ],
+                );
+                left[frame] = mixed[0];
+                right[frame] = mixed[1];
             }
             let buffer = self.context.create_buffer(
                 2,

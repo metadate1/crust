@@ -11,11 +11,13 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
+use crust_audio::output::OutputOptions;
 use crust_formats::stream::{KNOWN_LEVELS, LevelId as FormatLevelId};
 use crust_platform::input::{
     PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP,
     PadState as PlatformPadState, keyboard_code, standard_gamepad,
 };
+use crust_renderer::texture::{DecodedTexture, decode_loading_image};
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
 };
@@ -93,11 +95,12 @@ impl App {
             .fold(0_u16, |value, bit| value | bit)
     }
 
-    fn frame(&mut self, timestamp_ms: f64) -> Result<(), JsValue> {
+    fn frame(&mut self, timestamp_ms: f64) -> Result<Option<FormatLevelId>, JsValue> {
         let held = self.keyboard_bits | self.touch_bits() | poll_gamepad()?;
         if let Some(runtime) = &mut self.runtime {
             runtime.frame(timestamp_ms, held, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
+            return Ok(runtime.take_asset_request());
         } else {
             Reflect::set(
                 &self.debug,
@@ -105,7 +108,7 @@ impl App {
                 &JsValue::from_f64(self.assets.pair_count() as f64),
             )?;
         }
-        Ok(())
+        Ok(None)
     }
 
     fn refresh_assets(&mut self) -> Result<(), JsValue> {
@@ -255,6 +258,7 @@ struct Runtime {
     scheduler: FrameScheduler,
     pad: PlatformPadState,
     stage: GlStage,
+    level_assets: ValidatedPair,
     audio: Option<WebAudio>,
     storage: Option<StorageState>,
     card: VirtualCard,
@@ -265,6 +269,9 @@ struct Runtime {
     password_cursor: usize,
     seed: u32,
     pending_buttons: u16,
+    pending_asset_level: Option<FormatLevelId>,
+    loading_asset_level: Option<FormatLevelId>,
+    asset_load_error: Option<String>,
     muted: bool,
     last_gl_error: u32,
 }
@@ -310,7 +317,10 @@ impl Runtime {
         }
 
         let audio = match WebAudio::new(seed) {
-            Ok(audio) => Some(audio),
+            Ok(mut audio) => {
+                audio.set_output_options(output_options(flow.options));
+                Some(audio)
+            }
             Err(error) => {
                 dom.log(
                     &format!("Audio initialization deferred: {}", js_message(&error)),
@@ -319,7 +329,18 @@ impl Runtime {
                 None
             }
         };
-        let stage = GlStage::new(&dom.canvas)?;
+        let mut stage = GlStage::new(&dom.canvas)?;
+        if let Some(image) = decode_pair_loading_image(&pair)? {
+            stage.install_loading_image(&image)?;
+            dom.log(
+                &format!(
+                    "Decoded and uploaded the {}x{} retail loading image.",
+                    image.width(),
+                    image.height()
+                ),
+                false,
+            );
+        }
         dom.log(
             &format!(
                 "Validated {} pages and {} entries for {}.",
@@ -343,6 +364,7 @@ impl Runtime {
             scheduler: FrameScheduler::new(),
             pad: PlatformPadState::default(),
             stage,
+            level_assets: pair,
             audio,
             storage: storage.take(),
             card,
@@ -353,14 +375,93 @@ impl Runtime {
             password_cursor: 0,
             seed,
             pending_buttons: 0,
+            pending_asset_level: None,
+            loading_asset_level: None,
+            asset_load_error: None,
             muted: false,
             last_gl_error: 0,
         })
     }
 
+    fn take_asset_request(&mut self) -> Option<FormatLevelId> {
+        let level = self.pending_asset_level.take()?;
+        if level == self.level_assets.level {
+            return None;
+        }
+        self.loading_asset_level = Some(level);
+        self.asset_load_error = None;
+        self.scheduler.set_paused(true);
+        Some(level)
+    }
+
+    fn install_level_assets(&mut self, pair: ValidatedPair, dom: &Dom) -> Result<(), JsValue> {
+        if self.loading_asset_level != Some(pair.level) {
+            return Err(JsValue::from_str(
+                "validated stream pair does not match the pending transition",
+            ));
+        }
+        let next_seed = hash_pair(&pair);
+        if let Some(image) = decode_pair_loading_image(&pair)? {
+            self.stage.install_loading_image(&image)?;
+            dom.log(
+                &format!(
+                    "Decoded and uploaded the {}x{} destination loading image.",
+                    image.width(),
+                    image.height()
+                ),
+                false,
+            );
+        }
+        let pages = pair.nsf.pages.len();
+        let entries = pair_entry_count(&pair);
+        let level = pair.level;
+        self.level_assets = pair;
+        self.seed = next_seed;
+        self.loading_asset_level = None;
+        self.asset_load_error = None;
+        self.scheduler.set_paused(false);
+        self.scheduler.reset_deadline();
+        dom.log(
+            &format!("Mounted destination {level}: validated {pages} pages and {entries} entries."),
+            false,
+        );
+        Ok(())
+    }
+
+    fn fail_level_assets(&mut self, level: FormatLevelId, message: &str) {
+        self.loading_asset_level = None;
+        self.asset_load_error = Some(format!("Could not mount {level}: {message}"));
+        self.scheduler.set_paused(true);
+    }
+
+    fn asset_transition_level(&self) -> Option<FormatLevelId> {
+        self.loading_asset_level.or(self.pending_asset_level)
+    }
+
+    fn assets_stalled(&self) -> bool {
+        self.asset_transition_level().is_some() || self.asset_load_error.is_some()
+    }
+
+    fn queue_asset_level(&mut self, level: LevelId) {
+        let Ok(level) = FormatLevelId::new(u32::from(level.raw())) else {
+            self.asset_load_error = Some(format!(
+                "flow requested an unknown stream id 0x{:02x}",
+                level.raw()
+            ));
+            self.scheduler.set_paused(true);
+            return;
+        };
+        if level != self.level_assets.level
+            && self.loading_asset_level != Some(level)
+            && self.pending_asset_level != Some(level)
+        {
+            self.pending_asset_level = Some(level);
+        }
+    }
+
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
-        if self.scheduler.sample(now_us) == FrameDecision::Step {
+        if !self.assets_stalled() && self.scheduler.sample(now_us) == FrameDecision::Step {
             self.pad.update(held | self.pending_buttons, 0, None);
             self.pending_buttons = 0;
             let snapshot = self.pad.snapshot();
@@ -369,19 +470,25 @@ impl Runtime {
                 tapped: u32::from(snapshot.tapped),
             };
             self.handle_menu_input(sim_pad, dom)?;
-            self.flow.tick(sim_pad).map_err(|error| {
-                JsValue::from_str(&format!("simulation flow failed: {error:?}"))
-            })?;
-            if self.flow.player.translation.y <= 0
-                && matches!(
-                    self.flow.state(),
-                    FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
-                )
-            {
-                self.flow.player.land(0);
-            }
-            self.handle_level_goal()?;
+            // Menu commands can synchronously enter a different level. Drain
+            // that event first so the confirming button cannot advance the
+            // destination simulation against the previous stream pair.
             self.handle_events(dom)?;
+            if self.pending_asset_level.is_none() {
+                self.flow.tick(sim_pad).map_err(|error| {
+                    JsValue::from_str(&format!("simulation flow failed: {error:?}"))
+                })?;
+                if self.flow.player.translation.y <= 0
+                    && matches!(
+                        self.flow.state(),
+                        FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
+                    )
+                {
+                    self.flow.player.land(0);
+                }
+                self.handle_level_goal()?;
+                self.handle_events(dom)?;
+            }
             if snapshot.tapped & (PAD_CROSS | PAD_SQUARE) != 0 {
                 if let Some(audio) = &mut self.audio {
                     audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
@@ -399,16 +506,18 @@ impl Runtime {
         if let Some(audio) = &mut self.audio {
             audio.schedule()?;
         }
+        let assets_stalled = self.assets_stalled();
         self.stage.render(VisualState {
             time: timestamp_ms as f32 / 1_000.0,
             seed: self.seed,
             player_x: self.flow.player.translation.x as f32 / 4_000_000.0,
             player_y: self.flow.player.translation.y as f32 / 4_000_000.0 - 0.42,
-            active: matches!(
-                self.flow.state(),
-                FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
-            ),
-        });
+            active: !assets_stalled
+                && matches!(
+                    self.flow.state(),
+                    FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
+                ),
+        })?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
         Ok(())
@@ -600,7 +709,27 @@ impl Runtime {
     fn handle_events(&mut self, dom: &Dom) -> Result<(), JsValue> {
         for event in self.flow.take_events() {
             dom.log(&format!("flow: {event:?}"), false);
-            if let FlowEvent::LevelChanged(level) | FlowEvent::Booted(level) = event {
+            match &event {
+                FlowEvent::OptionsChanged(options) => {
+                    if let Some(audio) = &mut self.audio {
+                        audio.set_output_options(output_options(*options));
+                    }
+                }
+                FlowEvent::ProgressLoaded => {
+                    if let Some(audio) = &mut self.audio {
+                        audio.set_output_options(output_options(self.flow.options));
+                    }
+                }
+                _ => {}
+            }
+            let asset_level = match &event {
+                FlowEvent::LevelChanged(level)
+                | FlowEvent::Booted(level)
+                | FlowEvent::BonusReturned(level) => Some(*level),
+                _ => None,
+            };
+            if let Some(level) = asset_level {
+                self.queue_asset_level(level);
                 if matches!(
                     level.kind(),
                     crust_sim::flow::LevelKind::Gameplay
@@ -612,12 +741,18 @@ impl Runtime {
                 }
             }
             if matches!(event, FlowEvent::Completed(_)) {
-                let operation = if self.card.part_count() == 0 {
-                    CardOperation::SaveSelected
-                } else {
+                let operation = if self.card.current_slot().is_some() {
                     CardOperation::SaveCurrent
+                } else {
+                    CardOperation::SaveSelected
                 };
-                let _ = self.card.control(operation, 0, Some(self.save_data()));
+                self.card
+                    .control(operation, 0, Some(self.save_data()))
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "could not update the virtual-card completion slot: {error:?}"
+                        ))
+                    })?;
                 if let Some(storage) = &mut self.storage {
                     storage.persist_card(&self.card)?;
                 }
@@ -627,11 +762,16 @@ impl Runtime {
     }
 
     fn render_ui(&self, dom: &Dom) -> Result<(), JsValue> {
-        dom.sim_state.set_text_content(Some(if self.flow.paused() {
+        let simulation_state = if self.asset_load_error.is_some() {
+            "BLOCKED"
+        } else if self.asset_transition_level().is_some() {
+            "LOADING"
+        } else if self.flow.paused() {
             "PAUSED"
         } else {
             "RUNNING"
-        }));
+        };
+        dom.sim_state.set_text_content(Some(simulation_state));
         dom.current_level
             .set_text_content(Some(&format!("0x{:02X}", current_level(&self.flow).raw())));
         dom.audio_state.set_text_content(Some(if self.muted {
@@ -647,6 +787,27 @@ impl Runtime {
             "aria-pressed",
             if self.flow.paused() { "true" } else { "false" },
         )?;
+
+        if let Some(message) = &self.asset_load_error {
+            dom.set_overlay(
+                true,
+                "LOCAL STREAM TRANSITION BLOCKED",
+                "Destination data unavailable",
+                message,
+            );
+            dom.set_menu(&[])?;
+            return Ok(());
+        }
+        if let Some(level) = self.asset_transition_level() {
+            dom.set_overlay(
+                true,
+                &format!("MOUNTING LID 0x{:02X}", level.get()),
+                "Reading local NSD/NSF pair",
+                "No game data is uploaded",
+            );
+            dom.set_menu(&[])?;
+            return Ok(());
+        }
 
         match self.flow.state() {
             FlowState::Boot => {
@@ -1178,8 +1339,11 @@ fn start_animation_loop(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
     let callback_slot_inner = Rc::clone(&callback_slot);
     let app_inner = Rc::clone(&app);
     *callback_slot.borrow_mut() = Some(Closure::new(move |timestamp| {
-        if let Err(error) = app_inner.borrow_mut().frame(timestamp) {
-            app_inner.borrow_mut().fail(&js_message(&error));
+        let frame_result = app_inner.borrow_mut().frame(timestamp);
+        match frame_result {
+            Ok(Some(level)) => load_level_pair(Rc::clone(&app_inner), level),
+            Ok(None) => {}
+            Err(error) => app_inner.borrow_mut().fail(&js_message(&error)),
         }
         if let Some(callback) = callback_slot_inner.borrow().as_ref() {
             let _ = window().and_then(|window| {
@@ -1195,6 +1359,51 @@ fn start_animation_loop(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
         .ok_or_else(|| JsValue::from_str("animation loop did not initialize"))?;
     window()?.request_animation_frame(callback.as_ref().unchecked_ref())?;
     Ok(())
+}
+
+fn load_level_pair(app: Rc<RefCell<App>>, level: FormatLevelId) {
+    let store = {
+        let mut app = app.borrow_mut();
+        app.busy = true;
+        let label = format!("Reading destination stream {level}");
+        let _ = app.dom.set_runtime_state("loading", &label);
+        let _ = app
+            .dom
+            .set_progress(true, 0.35, "Validating destination NSD/NSF");
+        app.assets.clone()
+    };
+    spawn_local(async move {
+        match store.validate_pair(level).await {
+            Ok(pair) => {
+                let mut app = app.borrow_mut();
+                let dom = app.dom.clone();
+                let result = app
+                    .runtime
+                    .as_mut()
+                    .ok_or_else(|| JsValue::from_str("runtime ended during a level transition"))
+                    .and_then(|runtime| runtime.install_level_assets(pair, &dom));
+                match result {
+                    Ok(()) => {
+                        app.busy = false;
+                        let _ = app.dom.set_progress(false, 1.0, "Destination mounted");
+                        let _ = app.dom.set_runtime_state("running", "Rust runtime active");
+                    }
+                    Err(error) => fail_level_pair(&mut app, level, &js_message(&error)),
+                }
+            }
+            Err(error) => {
+                let mut app = app.borrow_mut();
+                fail_level_pair(&mut app, level, &js_message(&error));
+            }
+        }
+    });
+}
+
+fn fail_level_pair(app: &mut App, level: FormatLevelId, message: &str) {
+    if let Some(runtime) = &mut app.runtime {
+        runtime.fail_level_assets(level, message);
+    }
+    app.fail(&format!("Could not mount destination {level}: {message}"));
 }
 
 fn poll_gamepad() -> Result<u16, JsValue> {
@@ -1246,6 +1455,21 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     )?;
     Reflect::set(
         debug,
+        &JsValue::from_str("mountedLid"),
+        &JsValue::from_f64(f64::from(runtime.level_assets.level.get())),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("mountedPages"),
+        &JsValue::from_f64(runtime.level_assets.nsf.pages.len() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("mountedEntries"),
+        &JsValue::from_f64(pair_entry_count(&runtime.level_assets) as f64),
+    )?;
+    Reflect::set(
+        debug,
         &JsValue::from_str("glError"),
         &JsValue::from_f64(f64::from(runtime.last_gl_error)),
     )?;
@@ -1256,6 +1480,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     )?;
     if let Some(audio) = &runtime.audio {
         let metrics = audio.metrics();
+        let output = audio.output_options();
         Reflect::set(
             debug,
             &JsValue::from_str("audioCallbacks"),
@@ -1265,6 +1490,21 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
             debug,
             &JsValue::from_str("audioPeak"),
             &JsValue::from_f64(f64::from(metrics.peak)),
+        )?;
+        Reflect::set(
+            debug,
+            &JsValue::from_str("sfxVolume"),
+            &JsValue::from_f64(f64::from(output.sfx_volume())),
+        )?;
+        Reflect::set(
+            debug,
+            &JsValue::from_str("musicVolume"),
+            &JsValue::from_f64(f64::from(output.music_volume())),
+        )?;
+        Reflect::set(
+            debug,
+            &JsValue::from_str("mono"),
+            &JsValue::from_bool(output.mono()),
         )?;
     }
     Ok(())
@@ -1311,6 +1551,38 @@ fn default_save() -> SaveData {
         music_volume: u32::from(u8::MAX),
         ..SaveData::default()
     }
+}
+
+const fn output_options(options: GameOptions) -> OutputOptions {
+    OutputOptions::new(options.sfx_volume, options.music_volume, options.mono)
+}
+
+fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTexture>, JsValue> {
+    let Some(payload) = pair
+        .nsd
+        .image_data(&pair.nsd_bytes)
+        .map_err(|error| JsValue::from_str(&format!("{} loading image: {error}", pair.level)))?
+    else {
+        return Ok(None);
+    };
+    decode_loading_image(
+        payload,
+        pair.nsd.header.loading_image_width,
+        pair.nsd.header.loading_image_height,
+    )
+    .map(Some)
+    .map_err(|error| JsValue::from_str(&format!("{} loading image: {error}", pair.level)))
+}
+
+fn pair_entry_count(pair: &ValidatedPair) -> usize {
+    pair.nsf
+        .pages
+        .iter()
+        .map(|page| match page {
+            crust_formats::stream::NsfPage::Texture(_) => 0,
+            crust_formats::stream::NsfPage::Entries(page) => page.entries.len(),
+        })
+        .sum()
 }
 
 fn hash_pair(pair: &ValidatedPair) -> u32 {

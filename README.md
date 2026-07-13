@@ -13,18 +13,31 @@ set, and runs without uploading or bundling game data.
 This repository is a working, tested Rust/Wasm compatibility foundation, but it is **not yet a
 retail-equivalent game runtime**. Disc extraction, all 44 stream pairs, checked NSD/NSF parsing,
 the 30 Hz state machine, menu/options/password/load/map shells, direct boot, local persistence,
-input, WebGL2, WebAudio, and the native engine subsystems are implemented. The live browser host
-now retains and remounts each validated destination stream pair, decodes retail LDAT loading
-images, composes the image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
+input, WebGL2, WebAudio, and substantial native engine subsystems are implemented. The live browser
+host retains and remounts each validated destination stream pair, decodes retail LDAT loading
+images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
 renderer command backend. The former data-independent diagnostic landscape/player geometry has
-been removed. For 40 of 43 playable starts, gameplay now presents a bounds-checked initial
+been removed. For 40 of 43 playable starts, gameplay presents a bounds-checked initial
 ZDAT/SLST/WGEO path-point snapshot with decoded TPAG textures and retail camera/depth math. The
 loading-image path follows the observed two-tick presentation gate and uses the first presented
 path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
-boundary. Safe ZDAT entity decoding, mutable forward/backward SLST visibility, a bounded retail
-object arena, and the first real GOOL global-call/return and child-spawn path are implemented and
-characterized natively. This is not yet a moving retail world: those pieces are not coupled into
-the browser frame loop, so the installed scene remains frozen and audio remains synthesized. See
+boundary.
+
+The browser now owns a checked retail object runtime for gameplay, bonus, boss and ending states.
+At the cooperative 30 Hz boundary it scans displayed current-zone neighbors, spawns group-three
+ZDAT entities into the bounded arena, binds their GOOL programs from the mounted NSF, applies hosted
+child-spawn effects, and preserves typed arena/VM links. Entity objects now receive their
+zone-relative path position, rotation/mode flags, scale, process defaults, player/object color
+matrix and typed parent/player links; runtime children inherit their parent's transform.
+State-change yields rebind the requested retail state before the next execution, including the
+characterized animation-select and animation-wait path. Initial/call frames share the bounded
+process word array at the parsed `init_sp`, state links apply target-state guards, and checked
+failures quarantine only the affected object instead of skipping an unsupported instruction on the
+next frame. The WebGL stage also has a transactional scene-update path that reuses exact-content
+textures and can replace commands without needless texture uploads. This is still not a moving
+retail world: GOOL mutations do not yet drive the installed scene, camera, collision, input globals,
+gameplay progression, retail audio, saves, or transitions. The displayed retail world remains a
+static spawn snapshot and the current audio remains synthesized. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -48,10 +61,11 @@ The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/a
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one
 complete pair are accepted. Each cross-level transition now validates and mounts its destination
 pair on demand; a missing destination pauses the simulation with an actionable error instead of
-continuing against stale data. Image-backed title entries are now materialized, and retail GOOL
+continuing against stale data. Image-backed title entries are materialized, and retail GOOL
 entry/state graphs can be validated and bound natively. Zone entities and their 304-slot spawn
-flags can also be instantiated into a checked 96-object arena, but that arena is not yet driven by
-the live browser runtime.
+flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
+execution slice is observable through the engineering log/debug counters, but it does not yet move
+the rendered world or constitute a playable retail level.
 
 ## Controls
 
@@ -89,8 +103,8 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
 - `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program,
   ZDAT entity/path, stateful SLST visibility, scene metadata and tagged-reference validation.
 - `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
-  binding/word machine, bounded object arena, level/title flow, collision, camera, paging, demos,
-  and retail card payload/state handshakes.
+  binding/word machine, hosted retail entity runtime with state rebinding, bounded object arena,
+  level/title flow, collision, camera, paging, demos, and retail card payload/state handshakes.
 - `crust-renderer` — PSX texture/TPAG/UV decoding and cache, projection, ordering, clipping, blend
   passes, title composition and WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, sample cache/mixer, sequence events and a 44.1 kHz software synth.
@@ -109,8 +123,7 @@ or stream. `*.bin`, `*.iso`, `*.nsd`, `*.nsf`, local data directories, build out
 storage exports, caches, and captures are ignored. The two supported persistent records contain
 only the retail 128-byte progression/options payload:
 
-- `c1.virtual-memory-card.v1` — 15 retail-format slots; diagnostic completion updates the loaded
-  slot, falling back to slot zero.
+- `c1.virtual-memory-card.v1` — 15 slots containing checksummed retail-format payloads.
 - `c1.browser-resume.v1` — one checksummed automatic resume record.
 
 Selected game files are not persisted and must be selected again after reload.

@@ -60,11 +60,12 @@ impl WebAudio {
     pub fn trigger_sfx(&mut self, pitch_seed: u8) {
         let frequency = 240.0 + f32::from(pitch_seed % 12) * 22.0;
         let mut samples = Vec::with_capacity(2_800);
-        for index in 0..2_800 {
-            let t = index as f32 / SAMPLE_RATE as f32;
-            let envelope = (1.0 - index as f32 / 2_800.0).powi(2);
+        for index in 0_u16..2_800 {
+            let index = f32::from(index);
+            let t = index / sample_rate_f32();
+            let envelope = (1.0 - index / 2_800.0).powi(2);
             let value = (t * frequency * std::f32::consts::TAU).sin() * envelope * 12_000.0;
-            samples.push(value as i16);
+            samples.push(sfx_sample(value));
         }
         let sample = Sample::new(samples, None);
         let voice = 1 + usize::from(pitch_seed) % 22;
@@ -97,7 +98,7 @@ impl WebAudio {
             let buffer = self.context.create_buffer(
                 2,
                 u32::try_from(CHUNK_FRAMES).expect("chunk size fits u32"),
-                SAMPLE_RATE as f32,
+                sample_rate_f32(),
             )?;
             buffer.copy_to_channel(&left, 0)?;
             buffer.copy_to_channel(&right, 1)?;
@@ -105,7 +106,9 @@ impl WebAudio {
             source.set_buffer(Some(&buffer));
             source.connect_with_audio_node(&self.gain)?;
             source.start_with_when(self.next_time)?;
-            self.next_time += CHUNK_FRAMES as f64 / f64::from(SAMPLE_RATE);
+            self.next_time +=
+                f64::from(u32::try_from(CHUNK_FRAMES).expect("audio chunk frame count fits u32"))
+                    / f64::from(SAMPLE_RATE);
         }
         Ok(())
     }
@@ -114,6 +117,17 @@ impl WebAudio {
     pub const fn metrics(&self) -> AudioMetrics {
         self.mixer.metrics()
     }
+}
+
+fn sample_rate_f32() -> f32 {
+    f32::from(u16::try_from(SAMPLE_RATE).expect("44.1 kHz sample rate fits u16 exactly"))
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn sfx_sample(value: f32) -> i16 {
+    // The oscillator and [0, 1] envelope bound this value to +/-12,000, inside `i16`; truncation
+    // matches the mixer sample quantization used by the existing implementation.
+    value as i16
 }
 
 fn original_sequence(seed: u32) -> Sequence {

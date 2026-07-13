@@ -32,5 +32,19 @@ Legally owned data may be placed under ignored `local-data/` or selected from an
 Never add fixtures cut from game streams. Synthetic pages and malformed byte arrays belong inline
 in tests. If local golden hashes or screenshots are generated, keep them in ignored `artifacts/`.
 
+The hosted retail-runtime and all-pair fractional camera checks can be run directly against a local
+raw image without extracting or copying it into the repository:
+
+```bash
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-web --lib --locked \
+  builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture
+```
+
+These tests are ignored by default because they require user-supplied copyrighted data. Do not
+commit their input, extracted streams, output captures, or locally derived golden payloads.
+
 Before every commit, inspect `git status --short` and `git ls-files` for `.bin`, `.iso`, `.nsd`,
 `.nsf`, `.wasm`, storage exports, secrets, browser profiles, screenshots, caches, and build output.

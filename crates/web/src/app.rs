@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 use crust_audio::output::OutputOptions;
-use crust_formats::stream::{KNOWN_LEVELS, LevelId as FormatLevelId};
+use crust_formats::binary::Eid;
+use crust_formats::stream::{KNOWN_LEVELS, LevelId as FormatLevelId, ZoneEntity, ZoneHeader};
 use crust_platform::input::{
     PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP,
     PadState as PlatformPadState, keyboard_code, standard_gamepad,
@@ -27,8 +28,10 @@ use crust_sim::flow::{
     FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, MenuChoice, TitlePhase,
     TitleScreen,
 };
-use crust_sim::player::{PadState as SimPadState, PlayerMode};
+use crust_sim::object_arena::NeighborZone;
+use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
+use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime, RuntimeFrame};
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use js_sys::{Object, Reflect};
 use wasm_bindgen::JsCast as _;
@@ -48,7 +51,9 @@ use crate::storage::StorageState;
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
 
-const COMPLETE_DISTANCE: i32 = 4_000_000;
+const ZDAT_ENTRY_TYPE: u32 = 7;
+const RETAIL_GLOBAL_WORDS: usize = 256;
+const RETAIL_INSTRUCTION_BUDGET: usize = 67;
 
 pub fn boot() -> Result<(), JsValue> {
     let dom = Dom::find()?;
@@ -74,7 +79,7 @@ pub fn boot() -> Result<(), JsValue> {
     }));
     bind_events(&app)?;
     app.borrow_mut().refresh_assets()?;
-    start_animation_loop(app)?;
+    start_animation_loop(&app)?;
     Ok(())
 }
 
@@ -105,13 +110,12 @@ impl App {
             runtime.frame(timestamp_ms, held, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
             return Ok(runtime.take_asset_request());
-        } else {
-            Reflect::set(
-                &self.debug,
-                &JsValue::from_str("pairs"),
-                &JsValue::from_f64(self.assets.pair_count() as f64),
-            )?;
         }
+        Reflect::set(
+            &self.debug,
+            &JsValue::from_str("pairs"),
+            &JsValue::from_f64(self.assets.pair_count() as f64),
+        )?;
         Ok(None)
     }
 
@@ -257,12 +261,63 @@ impl App {
     }
 }
 
+#[derive(Debug)]
+struct OwnedNeighborZone {
+    eid: Eid,
+    display_flags: u32,
+    entities: Vec<ZoneEntity>,
+}
+
+#[derive(Debug, Default)]
+struct RetailRuntimeMetrics {
+    spawn_attempts: u64,
+    successful_spawns: u64,
+    failed_spawns: u64,
+    executions: u64,
+    execution_errors: u64,
+    spawned_children: u64,
+    effects: u64,
+}
+
+impl RetailRuntimeMetrics {
+    fn record_frame<E>(&mut self, frame: &RuntimeFrame<E>) {
+        self.executions = self
+            .executions
+            .saturating_add(frame.executions.len() as u64);
+        self.execution_errors = self.execution_errors.saturating_add(
+            frame
+                .executions
+                .iter()
+                .filter(|execution| execution.result.is_err())
+                .count() as u64,
+        );
+        self.spawned_children = self
+            .spawned_children
+            .saturating_add(frame.spawned_children.len() as u64);
+        self.effects = self.effects.saturating_add(frame.effects.len() as u64);
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetailTickState {
+    NeedsSpawn,
+    PausedBeforeSpawn,
+    Running,
+    Paused,
+}
+
 struct Runtime {
     flow: GameFlow,
     scheduler: FrameScheduler,
     pad: PlatformPadState,
     stage: GlStage,
     retail_frame: RetailFrameState,
+    retail_objects: RetailRuntime,
+    retail_neighbors: Vec<OwnedNeighborZone>,
+    retail_tick_state: RetailTickState,
+    retail_metrics: RetailRuntimeMetrics,
+    retail_runtime_error: Option<String>,
+    retail_runtime_warning: Option<String>,
     show_loading_image: bool,
     level_assets: ValidatedPair,
     audio: Option<WebAudio>,
@@ -297,13 +352,15 @@ impl Runtime {
         let mut flow = GameFlow::new();
         flow.command(FlowCommand::Boot(boot_level))
             .map_err(|error| JsValue::from_str(&format!("could not boot level: {error:?}")))?;
-        if matches!(
-            flow.state(),
-            FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
-        ) {
-            flow.player.mode = PlayerMode::Grounded;
-            flow.player.grounded = true;
-        }
+        let retail_neighbors = parse_retail_neighbors(&pair)?;
+        dom.log(
+            &format!(
+                "Parsed {} current-zone neighbors with {} owned retail entity descriptors.",
+                retail_neighbors.len(),
+                retail_entity_count(&retail_neighbors),
+            ),
+            false,
+        );
 
         let mut save = default_save();
         let card = storage
@@ -400,6 +457,12 @@ impl Runtime {
             pad: PlatformPadState::default(),
             stage,
             retail_frame,
+            retail_objects: RetailRuntime::new(RETAIL_GLOBAL_WORDS),
+            retail_neighbors,
+            retail_tick_state: RetailTickState::NeedsSpawn,
+            retail_metrics: RetailRuntimeMetrics::default(),
+            retail_runtime_error: None,
+            retail_runtime_warning: None,
             show_loading_image: after_loading_image,
             level_assets: pair,
             audio,
@@ -437,6 +500,15 @@ impl Runtime {
                 "validated stream pair does not match the pending transition",
             ));
         }
+        let retail_neighbors = parse_retail_neighbors(&pair)?;
+        dom.log(
+            &format!(
+                "Parsed {} destination-zone neighbors with {} owned retail entity descriptors.",
+                retail_neighbors.len(),
+                retail_entity_count(&retail_neighbors),
+            ),
+            false,
+        );
         let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
             self.stage.install_loading_image(&image)?;
             dom.log(
@@ -463,6 +535,12 @@ impl Runtime {
         let entries = pair_entry_count(&pair);
         let level = pair.level;
         self.level_assets = pair;
+        self.retail_objects = RetailRuntime::new(RETAIL_GLOBAL_WORDS);
+        self.retail_neighbors = retail_neighbors;
+        self.retail_tick_state = RetailTickState::NeedsSpawn;
+        self.retail_metrics = RetailRuntimeMetrics::default();
+        self.retail_runtime_error = None;
+        self.retail_runtime_warning = None;
         self.last_title_state = None;
         self.loading_asset_level = None;
         self.asset_load_error = None;
@@ -526,24 +604,42 @@ impl Runtime {
             // destination simulation against the previous stream pair.
             self.handle_events(dom)?;
             if self.pending_asset_level.is_none() {
-                self.flow.tick(sim_pad).map_err(|error| {
-                    JsValue::from_str(&format!("simulation flow failed: {error:?}"))
-                })?;
-                if self.flow.player.translation.y <= 0
-                    && matches!(
-                        self.flow.state(),
-                        FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_)
-                    )
-                {
-                    self.flow.player.land(0);
+                if is_retail_runtime_state(self.flow.state()) {
+                    if snapshot.tapped & PAD_START != 0 {
+                        self.retail_tick_state = match self.retail_tick_state {
+                            RetailTickState::NeedsSpawn => RetailTickState::PausedBeforeSpawn,
+                            RetailTickState::PausedBeforeSpawn => RetailTickState::NeedsSpawn,
+                            RetailTickState::Running => RetailTickState::Paused,
+                            RetailTickState::Paused => RetailTickState::Running,
+                        };
+                        dom.log(
+                            if self.paused() {
+                                "Retail object simulation paused."
+                            } else {
+                                "Retail object simulation resumed."
+                            },
+                            false,
+                        );
+                    }
+                    if matches!(
+                        self.retail_tick_state,
+                        RetailTickState::NeedsSpawn | RetailTickState::Running
+                    ) && self.retail_runtime_error.is_none()
+                    {
+                        self.tick_retail_runtime(dom);
+                    }
+                } else {
+                    self.flow.tick(sim_pad).map_err(|error| {
+                        JsValue::from_str(&format!("simulation flow failed: {error:?}"))
+                    })?;
                 }
-                self.handle_level_goal()?;
                 self.handle_events(dom)?;
             }
-            if snapshot.tapped & (PAD_CROSS | PAD_SQUARE) != 0 {
-                if let Some(audio) = &mut self.audio {
-                    audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
-                }
+            if !is_retail_runtime_state(self.flow.state())
+                && snapshot.tapped & (PAD_CROSS | PAD_SQUARE) != 0
+                && let Some(audio) = &mut self.audio
+            {
+                audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
             }
             if let Some(audio) = &mut self.audio {
                 audio.tick_30_hz();
@@ -570,6 +666,135 @@ impl Runtime {
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
         Ok(())
+    }
+
+    fn tick_retail_runtime(&mut self, dom: &Dom) {
+        if self.retail_tick_state == RetailTickState::NeedsSpawn {
+            let result = {
+                let neighbors = self
+                    .retail_neighbors
+                    .iter()
+                    .map(|neighbor| NeighborZone {
+                        eid: neighbor.eid,
+                        display_flags: neighbor.display_flags,
+                        entities: neighbor.entities.as_slice(),
+                    })
+                    .collect::<Vec<_>>();
+                let mut host = NsfProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                );
+                self.retail_objects.spawn_and_run_frame(
+                    &neighbors,
+                    &mut host,
+                    RETAIL_INSTRUCTION_BUDGET,
+                )
+            };
+            match result {
+                Ok(report) => {
+                    let attempts = report.spawn_attempts.len() as u64;
+                    let successful = report
+                        .spawn_attempts
+                        .iter()
+                        .filter(|attempt| attempt.result.is_ok())
+                        .count() as u64;
+                    let failed = attempts.saturating_sub(successful);
+                    let frame_executions = report.frame.executions.len();
+                    let frame_execution_errors = report
+                        .frame
+                        .executions
+                        .iter()
+                        .filter(|execution| execution.result.is_err())
+                        .count();
+                    self.retail_metrics.spawn_attempts = attempts;
+                    self.retail_metrics.successful_spawns = successful;
+                    self.retail_metrics.failed_spawns = failed;
+                    self.retail_metrics.record_frame(&report.frame);
+                    self.retail_tick_state = RetailTickState::Running;
+                    if let Some(error) = report
+                        .frame
+                        .executions
+                        .iter()
+                        .find_map(|execution| execution.result.as_ref().err())
+                    {
+                        self.retail_runtime_warning = Some(format!(
+                            "Retail GOOL hit {frame_execution_errors} checked object execution error(s) on frame 0; first error: {error:?}"
+                        ));
+                    }
+                    dom.log(
+                        &format!(
+                            "Retail GOOL frame 0 scanned {} displayed neighbor zones: {successful}/{attempts} group-3 entities bound, {frame_executions} executions ({frame_execution_errors} errors), {} runtime children, {} effects.",
+                            self.retail_neighbors.len(),
+                            report.frame.spawned_children.len(),
+                            report.frame.effects.len(),
+                        ),
+                        failed != 0 || frame_execution_errors != 0,
+                    );
+                }
+                Err(error) => {
+                    let message = format!("retail GOOL startup failed: {error:?}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                }
+            }
+            return;
+        }
+
+        let result = {
+            let mut host = NsfProgramHost::new(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+            );
+            self.retail_objects
+                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+        };
+        match result {
+            Ok(frame) => {
+                let errors_before = self.retail_metrics.execution_errors;
+                let first_error = frame
+                    .executions
+                    .iter()
+                    .find_map(|execution| execution.result.as_ref().err())
+                    .map(|error| format!("{error:?}"));
+                self.retail_metrics.record_frame(&frame);
+                if errors_before == 0
+                    && self.retail_metrics.execution_errors != 0
+                    && let Some(error) = first_error
+                {
+                    let message = format!(
+                        "Retail GOOL reached a checked object execution boundary on frame {}; first error: {error}",
+                        frame.frame_index
+                    );
+                    dom.log(&message, true);
+                    self.retail_runtime_warning = Some(message);
+                }
+            }
+            Err(error) => {
+                let message = format!("retail GOOL frame failed: {error:?}");
+                dom.log(&message, true);
+                self.retail_runtime_error = Some(message);
+            }
+        }
+    }
+
+    fn paused(&self) -> bool {
+        if is_retail_runtime_state(self.flow.state()) {
+            matches!(
+                self.retail_tick_state,
+                RetailTickState::PausedBeforeSpawn | RetailTickState::Paused
+            )
+        } else {
+            self.flow.paused()
+        }
+    }
+
+    fn retail_runtime_message<'a>(&'a self, normal: &'static str) -> &'a str {
+        self.retail_runtime_error
+            .as_deref()
+            .or(self.retail_runtime_warning.as_deref())
+            .unwrap_or(normal)
     }
 
     fn sync_title_card(&mut self, dom: &Dom) -> Result<(), JsValue> {
@@ -614,12 +839,10 @@ impl Runtime {
         }
         let screen = self.flow.title().screen();
         let item_count = match screen {
-            TitleScreen::MainMenu => 4,
-            TitleScreen::Options => 4,
+            TitleScreen::MainMenu | TitleScreen::Options => 4,
             TitleScreen::Password => 9,
             TitleScreen::Load => self.card.part_count().saturating_add(1).max(1),
             TitleScreen::Map => self.available_levels.len().max(1),
-            TitleScreen::GameOver => 1,
             _ => 1,
         };
         if pad.tapped & u32::from(PAD_UP) != 0 {
@@ -726,8 +949,6 @@ impl Runtime {
                     self.flow
                         .command(FlowCommand::SelectMapLevel(level))
                         .map_err(flow_error)?;
-                    self.flow.player.mode = PlayerMode::Grounded;
-                    self.flow.player.grounded = true;
                 }
             }
             TitleScreen::GameOver => {
@@ -765,29 +986,6 @@ impl Runtime {
             .map_err(flow_error)
     }
 
-    fn handle_level_goal(&mut self) -> Result<(), JsValue> {
-        let distance = self.flow.player.translation.z.abs();
-        if distance < COMPLETE_DISTANCE {
-            return Ok(());
-        }
-        self.flow.player.translation.z = 0;
-        match self.flow.state() {
-            FlowState::Gameplay(_) => self
-                .flow
-                .command(FlowCommand::CompleteLevel { missed_boxes: 0 })
-                .map_err(flow_error),
-            FlowState::Bonus(_) => self
-                .flow
-                .command(FlowCommand::ReturnFromBonus)
-                .map_err(flow_error),
-            FlowState::Boss(_) => self
-                .flow
-                .command(FlowCommand::DefeatBoss)
-                .map_err(flow_error),
-            _ => Ok(()),
-        }
-    }
-
     fn handle_events(&mut self, dom: &Dom) -> Result<(), JsValue> {
         for event in self.flow.take_events() {
             dom.log(&format!("flow: {event:?}"), false);
@@ -812,15 +1010,6 @@ impl Runtime {
             };
             if let Some(level) = asset_level {
                 self.queue_asset_level(level);
-                if matches!(
-                    level.kind(),
-                    crust_sim::flow::LevelKind::Gameplay
-                        | crust_sim::flow::LevelKind::Bonus
-                        | crust_sim::flow::LevelKind::Boss
-                ) {
-                    self.flow.player.mode = PlayerMode::Grounded;
-                    self.flow.player.grounded = true;
-                }
             }
             if matches!(event, FlowEvent::Completed(_)) {
                 let operation = if self.card.current_slot().is_some() {
@@ -848,7 +1037,11 @@ impl Runtime {
             "BLOCKED"
         } else if self.asset_transition_level().is_some() {
             "LOADING"
-        } else if self.flow.paused() {
+        } else if self.retail_runtime_error.is_some() {
+            "RUNTIME ERROR"
+        } else if self.retail_runtime_warning.is_some() {
+            "RUNTIME WARN"
+        } else if self.paused() {
             "PAUSED"
         } else {
             "RUNNING"
@@ -865,10 +1058,8 @@ impl Runtime {
         }));
         dom.card_state
             .set_text_content(Some(&format!("{} / 15", self.card.part_count())));
-        dom.pause.set_attribute(
-            "aria-pressed",
-            if self.flow.paused() { "true" } else { "false" },
-        )?;
+        dom.pause
+            .set_attribute("aria-pressed", if self.paused() { "true" } else { "false" })?;
 
         if let Some(message) = &self.asset_load_error {
             dom.set_overlay(
@@ -893,7 +1084,7 @@ impl Runtime {
 
         match self.flow.state() {
             FlowState::Boot => {
-                dom.set_overlay(true, "RUST / WASM", "Booting", "Validating streams")
+                dom.set_overlay(true, "RUST / WASM", "Booting", "Validating streams");
             }
             FlowState::Title => self.render_title_ui(dom)?,
             FlowState::Gameplay(level) => {
@@ -901,7 +1092,9 @@ impl Runtime {
                     true,
                     &format!("LID 0x{:02X} / GAMEPLAY", level.raw()),
                     level_name(*level),
-                    "D-pad to move · Z jump · X spin · reach the horizon",
+                    self.retail_runtime_message(
+                        "Retail entities and GOOL are ticking · input globals are not yet bound",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -910,7 +1103,9 @@ impl Runtime {
                     true,
                     "BONUS PATH",
                     level_name(*level),
-                    "Reach the horizon to return",
+                    self.retail_runtime_message(
+                        "Retail bonus GOOL is ticking · transition effects are pending",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -919,7 +1114,9 @@ impl Runtime {
                     true,
                     "BOSS PATH",
                     level_name(*level),
-                    "Advance to finish the encounter",
+                    self.retail_runtime_message(
+                        "Retail boss GOOL is ticking · transition effects are pending",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -946,7 +1143,9 @@ impl Runtime {
                     true,
                     "COMPLETION FLOW",
                     "Ending",
-                    "Press Enter to pause · Z/X to continue",
+                    self.retail_runtime_message(
+                        "Retail ending GOOL is ticking · presentation effects are pending",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -1090,7 +1289,7 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
         let app = Rc::clone(app);
         let callback = Closure::<dyn FnMut(Event)>::new(move |_| {
             if let Some(files) = input.files() {
-                import_files(Rc::clone(&app), files);
+                import_files(Rc::clone(&app), &files);
             }
         });
         dom.game_files
@@ -1102,7 +1301,7 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
         let app = Rc::clone(app);
         let callback = Closure::<dyn FnMut(Event)>::new(move |_| {
             if let Some(files) = input.files() {
-                import_files(Rc::clone(&app), files);
+                import_files(Rc::clone(&app), &files);
             }
         });
         dom.game_folder
@@ -1134,7 +1333,7 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
         let callback = Closure::<dyn FnMut(DragEvent)>::new(move |event: DragEvent| {
             event.prevent_default();
             if let Some(files) = event.data_transfer().and_then(|transfer| transfer.files()) {
-                import_files(Rc::clone(&app), files);
+                import_files(Rc::clone(&app), &files);
             }
         });
         dom.dropzone
@@ -1298,15 +1497,14 @@ fn bind_click(
     Ok(())
 }
 
-fn import_files(app: Rc<RefCell<App>>, files: FileList) {
+fn import_files(app: Rc<RefCell<App>>, files: &FileList) {
     let mut disc = None;
     let mut extracted = Vec::new();
     for index in 0..files.length() {
         let Some(file) = files.get(index) else {
             continue;
         };
-        let lowercase = file.name().to_ascii_lowercase();
-        if disc.is_none() && (lowercase.ends_with(".bin") || lowercase.ends_with(".iso")) {
+        if disc.is_none() && is_disc_image_name(&file.name()) {
             disc = Some(file);
         } else {
             extracted.push(file);
@@ -1380,6 +1578,12 @@ fn import_files(app: Rc<RefCell<App>>, files: FileList) {
     });
 }
 
+fn is_disc_image_name(name: &str) -> bool {
+    name.rsplit_once('.').is_some_and(|(_, extension)| {
+        extension.eq_ignore_ascii_case("bin") || extension.eq_ignore_ascii_case("iso")
+    })
+}
+
 fn launch(app: Rc<RefCell<App>>) {
     let (store, level) = {
         let mut app_ref = app.borrow_mut();
@@ -1416,10 +1620,12 @@ fn launch(app: Rc<RefCell<App>>) {
     });
 }
 
-fn start_animation_loop(app: Rc<RefCell<App>>) -> Result<(), JsValue> {
-    let callback_slot: Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>> = Rc::new(RefCell::new(None));
+type AnimationFrameCallback = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
+
+fn start_animation_loop(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
+    let callback_slot: AnimationFrameCallback = Rc::new(RefCell::new(None));
     let callback_slot_inner = Rc::clone(&callback_slot);
-    let app_inner = Rc::clone(&app);
+    let app_inner = Rc::clone(app);
     *callback_slot.borrow_mut() = Some(Closure::new(move |timestamp| {
         let frame_result = app_inner.borrow_mut().frame(timestamp);
         match frame_result {
@@ -1558,7 +1764,83 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     Reflect::set(
         debug,
         &JsValue::from_str("paused"),
-        &JsValue::from_bool(runtime.flow.paused()),
+        &JsValue::from_bool(runtime.paused()),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailFrame"),
+        &JsValue::from_f64(runtime.retail_objects.frame_index() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailNeighborZones"),
+        &JsValue::from_f64(runtime.retail_neighbors.len() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailEntityDescriptors"),
+        &JsValue::from_f64(retail_entity_count(&runtime.retail_neighbors) as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailLiveObjects"),
+        &JsValue::from_f64(runtime.retail_objects.arena().len() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailFaultedObjects"),
+        &JsValue::from_f64(runtime.retail_objects.faulted_object_count() as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSpawnAttempts"),
+        &JsValue::from_f64(runtime.retail_metrics.spawn_attempts as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSuccessfulSpawns"),
+        &JsValue::from_f64(runtime.retail_metrics.successful_spawns as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailFailedSpawns"),
+        &JsValue::from_f64(runtime.retail_metrics.failed_spawns as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailExecutions"),
+        &JsValue::from_f64(runtime.retail_metrics.executions as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailExecutionErrors"),
+        &JsValue::from_f64(runtime.retail_metrics.execution_errors as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailSpawnedChildren"),
+        &JsValue::from_f64(runtime.retail_metrics.spawned_children as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailEffects"),
+        &JsValue::from_f64(runtime.retail_metrics.effects as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailRuntimeError"),
+        &runtime
+            .retail_runtime_error
+            .as_deref()
+            .map_or(JsValue::NULL, JsValue::from_str),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailRuntimeWarning"),
+        &runtime
+            .retail_runtime_warning
+            .as_deref()
+            .map_or(JsValue::NULL, JsValue::from_str),
     )?;
     if let Some(audio) = &runtime.audio {
         let metrics = audio.metrics();
@@ -1600,6 +1882,13 @@ fn current_level(flow: &GameFlow) -> LevelId {
         FlowState::Ending => LevelId::ENDING,
         FlowState::Boot | FlowState::Title => LevelId::TITLE,
     }
+}
+
+const fn is_retail_runtime_state(state: &FlowState) -> bool {
+    matches!(
+        state,
+        FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_) | FlowState::Ending
+    )
 }
 
 fn level_name(level: LevelId) -> &'static str {
@@ -1647,6 +1936,87 @@ fn default_save() -> SaveData {
 
 const fn output_options(options: GameOptions) -> OutputOptions {
     OutputOptions::new(options.sfx_volume, options.music_volume, options.mono)
+}
+
+fn retail_entity_count(neighbors: &[OwnedNeighborZone]) -> usize {
+    neighbors
+        .iter()
+        .map(|neighbor| neighbor.entities.len())
+        .sum()
+}
+
+fn parse_retail_neighbors(pair: &ValidatedPair) -> Result<Vec<OwnedNeighborZone>, JsValue> {
+    let ldat = pair
+        .nsd
+        .ldat()
+        .ok_or_else(|| JsValue::from_str("index-only NSD has no retail spawn zone"))?;
+    let (_, current_header) = parse_zone_entry(pair, ldat.spawn_zone, "current spawn ZDAT")?;
+    let mut neighbors = Vec::with_capacity(current_header.neighbors.len());
+    for eid in current_header.neighbors {
+        let (entry, header) = parse_zone_entry(pair, eid, "spawn-neighbor ZDAT")?;
+        let mut entities = Vec::with_capacity(header.entity_count as usize);
+        for entity_index in 0..header.entity_count {
+            let item_index = header.entity_item_index(entity_index).ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "spawn-neighbor ZDAT {eid} entity {entity_index} is outside its item range"
+                ))
+            })?;
+            let item_index = usize::try_from(item_index).map_err(|_| {
+                JsValue::from_str(&format!(
+                    "spawn-neighbor ZDAT {eid} entity item does not fit this host"
+                ))
+            })?;
+            let item = entry.item(item_index).ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "spawn-neighbor ZDAT {eid} entity item {item_index} is absent"
+                ))
+            })?;
+            let bytes = item.bytes(&pair.nsf_bytes).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "spawn-neighbor ZDAT {eid} entity item {item_index}: {error}"
+                ))
+            })?;
+            entities.push(ZoneEntity::parse(bytes).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "spawn-neighbor ZDAT {eid} entity item {item_index}: {error}"
+                ))
+            })?);
+        }
+        // The first retail LevelUpdate marks each current-zone neighbor
+        // loaded and displayed immediately before LevelSpawnObjects scans it.
+        neighbors.push(OwnedNeighborZone {
+            eid,
+            display_flags: header.display_flags | 3,
+            entities,
+        });
+    }
+    Ok(neighbors)
+}
+
+fn parse_zone_entry<'a>(
+    pair: &'a ValidatedPair,
+    eid: Eid,
+    context: &str,
+) -> Result<(&'a crust_formats::stream::Entry, ZoneHeader), JsValue> {
+    let entry = pair
+        .nsf
+        .resolve_entry(&pair.nsd, eid)
+        .map_err(|error| JsValue::from_str(&format!("{context} {eid}: {error}")))?;
+    if entry.entry_type != ZDAT_ENTRY_TYPE {
+        return Err(JsValue::from_str(&format!(
+            "{context} {eid} has type {}; expected {ZDAT_ENTRY_TYPE}",
+            entry.entry_type
+        )));
+    }
+    let header_item = entry
+        .item(0)
+        .ok_or_else(|| JsValue::from_str(&format!("{context} {eid} header item is absent")))?;
+    let header_bytes = header_item
+        .bytes(&pair.nsf_bytes)
+        .map_err(|error| JsValue::from_str(&format!("{context} {eid} header: {error}")))?;
+    let header = ZoneHeader::parse(header_bytes)
+        .map_err(|error| JsValue::from_str(&format!("{context} {eid} header: {error}")))?;
+    Ok((entry, header))
 }
 
 fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTexture>, JsValue> {

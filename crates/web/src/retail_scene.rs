@@ -4,6 +4,7 @@ use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crust_formats::binary::Eid;
+use crust_formats::stream::structs::ZonePathPoint;
 use crust_formats::stream::{
     Entry, Nsd, Nsf, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader, ZonePath,
     ZoneRect, parse_world_geometry,
@@ -37,6 +38,9 @@ pub struct RetailSceneCommand {
 /// One decoded texture required by the scene's commands.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RetailSceneTexture {
+    /// Builder-local reference used by this scene's commands. Independent
+    /// scene builds may reuse the number for different decoded pixels, so a
+    /// consumer must validate the complete texture manifest before reuse.
     pub handle: TextureHandle,
     pub pixels: DecodedTexture,
 }
@@ -58,8 +62,28 @@ pub struct RetailScene {
     pub commands: Vec<RetailSceneCommand>,
     pub textures: Vec<RetailSceneTexture>,
     pub stats: RetailSceneStats,
+    pub zone: Eid,
+    pub path_index: u32,
     pub path_point_count: u16,
     pub path_point_index: u16,
+    pub draw_count: u32,
+}
+
+/// Exact validated world/camera state selected by the retail level runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailSceneLocation {
+    pub zone: Eid,
+    pub path_index: u32,
+    pub path_point_index: usize,
+    pub draw_count: u32,
+}
+
+/// Exact signed 8.8 path progress selected by the retail camera runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailSceneProgressLocation {
+    pub zone: Eid,
+    pub path_index: u32,
+    pub path_progress: i32,
     pub draw_count: u32,
 }
 
@@ -99,8 +123,8 @@ pub fn build_retail_scene(
 ///
 /// # Errors
 ///
-/// Returns the same structural errors as [`build_retail_scene`]. Like retail
-/// path progress, a point beyond the path is clamped to its final point.
+/// Returns the same structural errors as [`build_retail_scene`], plus an error
+/// when the requested point is outside the active path.
 pub fn build_retail_scene_at_path_point(
     nsd: &Nsd,
     nsf: &Nsf,
@@ -111,17 +135,82 @@ pub fn build_retail_scene_at_path_point(
     let ldat = nsd
         .ldat()
         .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
-    let zone_entry = typed_entry(nsf, nsd, ldat.spawn_zone, ZDAT_ENTRY_TYPE, "spawn ZDAT")?;
-    let zone_header = ZoneHeader::parse(entry_item(zone_entry, nsf_bytes, 0, "ZDAT header")?)
-        .map_err(|error| scene_error(format!("spawn ZDAT header: {error}")))?;
-    let zone_rect = ZoneRect::parse(entry_item(zone_entry, nsf_bytes, 1, "ZDAT rectangle")?)
-        .map_err(|error| scene_error(format!("spawn ZDAT rectangle: {error}")))?;
-
     let path_index = u32::try_from(ldat.spawn_path_index)
         .map_err(|_| scene_error("LDAT spawn path index is negative"))?;
+    build_retail_scene_at_location(
+        nsd,
+        nsf,
+        nsf_bytes,
+        RetailSceneLocation {
+            zone: ldat.spawn_zone,
+            path_index,
+            path_point_index,
+            draw_count,
+        },
+    )
+}
+
+/// Builds the world snapshot for an arbitrary validated ZDAT path state.
+///
+/// This is the rendering boundary needed by `LevelUpdate`: callers may move
+/// between zones and paths without falling back to the LDAT spawn location.
+///
+/// # Errors
+///
+/// Returns an error when the active zone/path/SLST/WGEO graph is malformed or
+/// cannot be represented by the bounded renderer.
+pub fn build_retail_scene_at_location(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    location: RetailSceneLocation,
+) -> Result<RetailScene, RetailSceneError> {
+    let path_point_index = i32::try_from(location.path_point_index)
+        .map_err(|_| scene_error("active path point index does not fit signed progress"))?;
+    let path_progress = path_point_index
+        .checked_mul(0x100)
+        .ok_or_else(|| scene_error("active path point progress overflows signed 8.8 space"))?;
+    build_retail_scene_at_progress(
+        nsd,
+        nsf,
+        nsf_bytes,
+        RetailSceneProgressLocation {
+            zone: location.zone,
+            path_index: location.path_index,
+            path_progress,
+            draw_count: location.draw_count,
+        },
+    )
+}
+
+/// Builds the world snapshot at exact signed 8.8 retail camera progress.
+///
+/// The camera is interpolated exactly like `ZonePathProgressToLoc`, including
+/// its shortest-route yaw interpolation and its following-path endpoint at a
+/// fractional final point. Serialized references remain validated handles.
+///
+/// # Errors
+///
+/// Returns an error for out-of-range progress or any malformed active or
+/// following zone/path reference.
+pub fn build_retail_scene_at_progress(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    location: RetailSceneProgressLocation,
+) -> Result<RetailScene, RetailSceneError> {
+    let ldat = nsd
+        .ldat()
+        .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
+    let zone_entry = typed_entry(nsf, nsd, location.zone, ZDAT_ENTRY_TYPE, "active ZDAT")?;
+    let zone_header = ZoneHeader::parse(entry_item(zone_entry, nsf_bytes, 0, "ZDAT header")?)
+        .map_err(|error| scene_error(format!("active ZDAT header: {error}")))?;
+    let zone_rect = ZoneRect::parse(entry_item(zone_entry, nsf_bytes, 1, "ZDAT rectangle")?)
+        .map_err(|error| scene_error(format!("active ZDAT rectangle: {error}")))?;
+
     let path_item_index = zone_header
-        .path_item_index(path_index)
-        .ok_or_else(|| scene_error("LDAT spawn path index is outside its ZDAT"))?;
+        .path_item_index(location.path_index)
+        .ok_or_else(|| scene_error("active path index is outside its ZDAT"))?;
     let path_item_index = usize::try_from(path_item_index)
         .map_err(|_| scene_error("ZDAT spawn path index does not fit the host"))?;
     let path = ZonePath::parse(entry_item(
@@ -131,7 +220,16 @@ pub fn build_retail_scene_at_path_point(
         "ZDAT spawn path",
     )?)
     .map_err(|error| scene_error(format!("ZDAT spawn path: {error}")))?;
-    let path_point_index = path_point_index.min(path.points.len() - 1);
+    let path_progress = location
+        .path_progress
+        .checked_abs()
+        .ok_or_else(|| scene_error("signed path progress cannot be i32::MIN"))?;
+    let path_point_index = usize::try_from(path_progress >> 8)
+        .map_err(|_| scene_error("active path point index does not fit the host"))?;
+    if path_point_index >= path.points.len() {
+        return Err(scene_error("active path progress is outside its ZDAT path"));
+    }
+    let draw_count = location.draw_count;
     let path_point_count = u16::try_from(path.points.len())
         .map_err(|_| scene_error("spawn path point count does not fit u16"))?;
     let path_point_index_u16 = u16::try_from(path_point_index)
@@ -145,6 +243,8 @@ pub fn build_retail_scene_at_path_point(
             commands: Vec::new(),
             textures: Vec::new(),
             stats: RetailSceneStats::default(),
+            zone: location.zone,
+            path_index: location.path_index,
             path_point_count,
             path_point_index: path_point_index_u16,
             draw_count,
@@ -204,21 +304,18 @@ pub fn build_retail_scene_at_path_point(
     let visible_polygons = visibility.visibility().to_vec();
     validate_visibility(&visible_polygons, &worlds)?;
 
-    let camera_point = path
-        .points
-        .get(path_point_index)
-        .copied()
-        .ok_or_else(|| scene_error("requested camera point is outside the spawn path"))?;
-    let camera_translation = Vec3i {
-        x: path_coordinate(zone_rect.origin[0], camera_point.x)?,
-        y: path_coordinate(zone_rect.origin[1], camera_point.y)?,
-        z: path_coordinate(zone_rect.origin[2], camera_point.z)?,
-    };
-    let camera_matrix = world_camera_matrix(
-        camera_point.rotation_y,
-        camera_point.rotation_x,
-        camera_point.rotation_z,
-    );
+    let camera = sample_camera(
+        nsd,
+        nsf,
+        nsf_bytes,
+        &zone_header,
+        &zone_rect,
+        &path,
+        location.path_progress,
+    )?;
+    let camera_translation = camera.translation;
+    let camera_matrix =
+        world_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
     let projection_distance = projection_distance(ldat.field_of_view)?;
 
     let mut page_ids = BTreeSet::new();
@@ -377,7 +474,7 @@ pub fn build_retail_scene_at_path_point(
             .map_err(|_| scene_error("clamped ordering depth does not fit u16"))?;
         prepared[visible_index] = Some(RetailSceneCommand {
             depth,
-            zone: ldat.spawn_zone.raw(),
+            zone: location.zone.raw(),
             polygon: u32::from(polygon_id.raw()),
             primitive,
         });
@@ -399,6 +496,8 @@ pub fn build_retail_scene_at_path_point(
         },
         commands,
         textures,
+        zone: location.zone,
+        path_index: location.path_index,
         path_point_count,
         path_point_index: path_point_index_u16,
         draw_count,
@@ -452,10 +551,151 @@ fn validate_visibility(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CameraSample {
+    translation: Vec3i,
+    rotation_y: i32,
+    rotation_x: i32,
+    rotation_z: i32,
+}
+
+fn sample_camera(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    zone_header: &ZoneHeader,
+    zone_rect: &ZoneRect,
+    path: &ZonePath,
+    progress: i32,
+) -> Result<CameraSample, RetailSceneError> {
+    let magnitude = progress
+        .checked_abs()
+        .ok_or_else(|| scene_error("signed path progress cannot be i32::MIN"))?;
+    let point_index = usize::try_from(magnitude >> 8)
+        .map_err(|_| scene_error("camera path point index does not fit the host"))?;
+    let point = path
+        .points
+        .get(point_index)
+        .copied()
+        .ok_or_else(|| scene_error("camera progress is outside the active path"))?;
+    let fraction = magnitude & 0xff;
+
+    let mut next_point = path.points[point_index.saturating_add(1).min(path.points.len() - 1)];
+    let mut next_origin = zone_rect.origin;
+
+    if fraction != 0
+        && point_index == path.points.len() - 1
+        && let Some(neighbor_path) = path
+            .neighbors
+            .iter()
+            .find(|neighbor| neighbor.relation & 2 != 0)
+    {
+        let neighbor_zone = *zone_header
+            .neighbors
+            .get(usize::from(neighbor_path.neighbor_zone_index))
+            .ok_or_else(|| scene_error("following path references a missing neighbor zone"))?;
+        let neighbor_entry =
+            typed_entry(nsf, nsd, neighbor_zone, ZDAT_ENTRY_TYPE, "following ZDAT")?;
+        let neighbor_header = ZoneHeader::parse(entry_item(
+            neighbor_entry,
+            nsf_bytes,
+            0,
+            "following ZDAT header",
+        )?)
+        .map_err(|error| scene_error(format!("following ZDAT header: {error}")))?;
+        let neighbor_rect = ZoneRect::parse(entry_item(
+            neighbor_entry,
+            nsf_bytes,
+            1,
+            "following ZDAT rectangle",
+        )?)
+        .map_err(|error| scene_error(format!("following ZDAT rectangle: {error}")))?;
+        let neighbor_item_index = neighbor_header
+            .path_item_index(u32::from(neighbor_path.path_index))
+            .ok_or_else(|| scene_error("following path index is outside its ZDAT"))?;
+        let neighbor_item_index = usize::try_from(neighbor_item_index)
+            .map_err(|_| scene_error("following path item index does not fit the host"))?;
+        let neighbor = ZonePath::parse(entry_item(
+            neighbor_entry,
+            nsf_bytes,
+            neighbor_item_index,
+            "following ZDAT path",
+        )?)
+        .map_err(|error| scene_error(format!("following ZDAT path: {error}")))?;
+
+        // Retail deliberately refuses to interpolate into camera-mode-one
+        // paths, falling back to the current path's final point.
+        if neighbor.camera_mode != 1 {
+            let next_index = if neighbor_path.goal & 2 != 0 {
+                neighbor.points.len() - 1
+            } else {
+                0
+            };
+            next_point = neighbor.points[next_index];
+            next_origin = neighbor_rect.origin;
+        }
+    }
+
+    interpolate_camera(zone_rect.origin, point, next_origin, next_point, fraction)
+}
+
+fn interpolate_camera(
+    origin: [i32; 3],
+    point: ZonePathPoint,
+    next_origin: [i32; 3],
+    next: ZonePathPoint,
+    fraction: i32,
+) -> Result<CameraSample, RetailSceneError> {
+    let current_coordinates = [
+        path_coordinate(origin[0], point.x)?,
+        path_coordinate(origin[1], point.y)?,
+        path_coordinate(origin[2], point.z)?,
+    ];
+    let next_coordinates = [
+        path_coordinate(next_origin[0], next.x)?,
+        path_coordinate(next_origin[1], next.y)?,
+        path_coordinate(next_origin[2], next.z)?,
+    ];
+    let translation = Vec3i {
+        x: interpolate_coordinate(current_coordinates[0], next_coordinates[0], fraction)?,
+        y: interpolate_coordinate(current_coordinates[1], next_coordinates[1], fraction)?,
+        z: interpolate_coordinate(current_coordinates[2], next_coordinates[2], fraction)?,
+    };
+    let yaw_difference = i32::from(
+        Angle12::new(i32::from(point.rotation_y))
+            .difference_to(Angle12::new(i32::from(next.rotation_y))),
+    );
+    Ok(CameraSample {
+        translation,
+        rotation_y: i32::from(point.rotation_y) + ((yaw_difference * fraction) >> 8),
+        rotation_x: interpolate_rotation(point.rotation_x, next.rotation_x, fraction),
+        rotation_z: interpolate_rotation(point.rotation_z, next.rotation_z, fraction),
+    })
+}
+
 fn path_coordinate(origin: i32, point: i16) -> Result<i32, RetailSceneError> {
     origin
         .checked_add(i32::from(point))
         .ok_or_else(|| scene_error("camera path coordinate overflows signed world space"))
+}
+
+fn interpolate_coordinate(current: i32, next: i32, fraction: i32) -> Result<i32, RetailSceneError> {
+    debug_assert!((0..=0xff).contains(&fraction));
+    let fixed = i64::from(current)
+        .checked_shl(8)
+        .and_then(|base| {
+            i64::from(next)
+                .checked_sub(i64::from(current))
+                .and_then(|delta| delta.checked_mul(i64::from(fraction)))
+                .and_then(|delta| base.checked_add(delta))
+        })
+        .ok_or_else(|| scene_error("interpolated camera coordinate overflows fixed space"))?;
+    i32::try_from(fixed >> 8)
+        .map_err(|_| scene_error("interpolated camera coordinate exceeds signed world space"))
+}
+
+fn interpolate_rotation(current: i16, next: i16, fraction: i32) -> i32 {
+    i32::from(current) + (((i32::from(next) - i32::from(current)) * fraction) >> 8)
 }
 
 fn projection_distance(field_of_view: u32) -> Result<u32, RetailSceneError> {
@@ -478,8 +718,8 @@ fn blend_mode(raw: u8) -> BlendMode {
     }
 }
 
-fn world_camera_matrix(rotation_y: i16, rotation_x: i16, rotation_z: i16) -> Matrix3 {
-    let angle = |value: i16| Angle12::new(-i32::from(value));
+fn world_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Matrix3 {
+    let angle = |value: i32| Angle12::new(-value);
     let z = angle(rotation_z);
     let y_stored = angle(rotation_y);
     let x_stored = angle(rotation_x);
@@ -573,6 +813,42 @@ mod tests {
     }
 
     #[test]
+    fn fractional_camera_sample_matches_source_fixed_point_and_shortest_yaw() {
+        let point = ZonePathPoint {
+            x: -1,
+            y: 10,
+            z: -20,
+            rotation_y: 0x0ff0,
+            rotation_x: -100,
+            rotation_z: 40,
+        };
+        let next = ZonePathPoint {
+            x: 1,
+            y: 14,
+            z: -10,
+            rotation_y: 0x0010,
+            rotation_x: 100,
+            rotation_z: -40,
+        };
+        let sample = interpolate_camera([0, 100, -100], point, [0, 100, -100], next, 0x80).unwrap();
+        assert_eq!(
+            sample.translation,
+            Vec3i {
+                x: 0,
+                y: 112,
+                z: -115
+            }
+        );
+        assert_eq!(sample.rotation_y, 0x1000);
+        assert_eq!(sample.rotation_x, 0);
+        assert_eq!(sample.rotation_z, 0);
+
+        // The C implementation keeps 24.8 precision until the graphics-side
+        // arithmetic shift, so a negative fraction rounds toward -infinity.
+        assert_eq!(interpolate_coordinate(-1, 0, 1).unwrap(), -1);
+    }
+
+    #[test]
     #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
     fn builds_n_sanity_spawn_snapshot_from_local_retail_streams() {
         let root = PathBuf::from(
@@ -611,6 +887,54 @@ mod tests {
         assert_eq!(
             first_presented.stats.submitted_polygons,
             first_presented.commands.len()
+        );
+        let ldat = nsd.ldat().unwrap();
+        let explicit = build_retail_scene_at_location(
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailSceneLocation {
+                zone: ldat.spawn_zone,
+                path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+                path_point_index: 2,
+                draw_count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(explicit, first_presented);
+        let integral_progress = build_retail_scene_at_progress(
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailSceneProgressLocation {
+                zone: ldat.spawn_zone,
+                path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+                path_progress: 2 << 8,
+                draw_count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(integral_progress, first_presented);
+        let fractional_progress = build_retail_scene_at_progress(
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailSceneProgressLocation {
+                zone: ldat.spawn_zone,
+                path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+                path_progress: (2 << 8) | 0x80,
+                draw_count: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(fractional_progress.path_point_index, 2);
+        assert_eq!(
+            fractional_progress.stats.worlds,
+            first_presented.stats.worlds
+        );
+        assert_eq!(
+            fractional_progress.stats.visible_polygons,
+            first_presented.stats.visible_polygons
         );
     }
 
@@ -656,6 +980,51 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
+    fn builds_every_fractional_spawn_snapshot_directly_from_raw_disc() {
+        let path = PathBuf::from(
+            std::env::var_os("C1_DISC_IMAGE")
+                .expect("C1_DISC_IMAGE must name a legally local NTSC-U raw BIN"),
+        );
+        let disc_bytes =
+            std::fs::read(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+        let image = DiscImage::open(&disc_bytes).unwrap();
+        let streams = image.discover_streams().unwrap();
+        streams.validate_complete_retail().unwrap();
+
+        let mut built = 0_usize;
+        for known in KNOWN_LEVELS.iter().filter(|known| known.bootable) {
+            let nsd_stream = streams
+                .get(StreamName::new(known.id, StreamKind::Nsd))
+                .unwrap();
+            let nsf_stream = streams
+                .get(StreamName::new(known.id, StreamKind::Nsf))
+                .unwrap();
+            let nsd_bytes = image.read_stream(nsd_stream).unwrap();
+            let nsf_bytes = image.read_stream(nsf_stream).unwrap();
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let ldat = nsd.ldat().expect("bootable retail level has LDAT");
+            let scene = build_retail_scene_at_progress(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneProgressLocation {
+                    zone: ldat.spawn_zone,
+                    path_index: u32::try_from(ldat.spawn_path_index)
+                        .expect("retail spawn path is non-negative"),
+                    path_progress: 0x80,
+                    draw_count: 0,
+                },
+            )
+            .unwrap_or_else(|error| panic!("{} fractional spawn camera: {error}", known.name));
+            assert_eq!(scene.path_point_index, 0);
+            built += 1;
+        }
+        assert_eq!(built, 43);
+    }
+
+    #[test]
     #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
     fn characterizes_every_local_retail_spawn_snapshot() {
         let root = PathBuf::from(
@@ -680,6 +1049,23 @@ mod tests {
                         empty.push(known.name);
                     }
                     eprintln!("{}: {:?}", known.name, scene.stats);
+                    let ldat = nsd.ldat().expect("bootable retail level has LDAT");
+                    let fractional = build_retail_scene_at_progress(
+                        &nsd,
+                        &nsf,
+                        &nsf_bytes,
+                        RetailSceneProgressLocation {
+                            zone: ldat.spawn_zone,
+                            path_index: u32::try_from(ldat.spawn_path_index)
+                                .expect("retail spawn path is non-negative"),
+                            path_progress: 0x80,
+                            draw_count: 0,
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!("{} fractional spawn camera: {error}", known.name)
+                    });
+                    assert_eq!(fractional.path_point_index, 0);
                 }
                 Err(error) => panic!("{}: {error}", known.name),
             }

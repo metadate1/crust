@@ -35,8 +35,9 @@ generation, mixing, input mapping and storage schemas remain native-testable.
 4. Before execution, NSD metadata and NSF pages are independently validated. Page entries and item
    ranges become immutable handle-based views. Destination pairs pass the same validation before an
    atomic retained-pair swap; simulation is stalled while the asynchronous read is in flight.
-5. The 30 Hz simulation emits renderer/audio state. The browser schedules cooperatively and drops
-   excessive lag instead of replaying an unbounded catch-up burst.
+5. The browser schedules flow, retail-object execution and presentation cooperatively at 30 Hz and
+   drops excessive lag instead of replaying an unbounded catch-up burst. Retail-object effects are
+   retained and counted, but do not yet emit a new camera, collision, scene or audio state.
 6. User game bytes are released on reload and are never serialized. Only checksummed 128-byte
    progression/options records enter `localStorage`.
 
@@ -55,8 +56,14 @@ each referenced WGEO, resolves TPAG/CLUT texture regions, applies draw-count tex
 the exact fixed-point world camera and depth ordering, and emits ordinary renderer commands. The
 live stage installs the observed post-loading snapshot on each pair transition. A simulation-owned
 two-tick gate keeps the loading image visible until that first gameplay presentation; the loading
-overlay no longer uses a browser-frame timeout. The installed world does not yet advance after that
-boundary or integrate entities, GOOL objects, effects and animation.
+overlay no longer uses a browser-frame timeout.
+
+`GlStage` can transactionally update an installed retail scene. It validates command texture
+references, compares decoded texture content exactly, prepares all new/replacement GPU textures
+before committing, removes stale handles, and has a command-only fast path when texture content is
+unchanged. The retail object loop does not yet produce those per-frame commands, so the installed
+world still uses its initial camera and geometry snapshot. Entities, GOOL effects, object models,
+animation transforms and paging changes are not yet reflected in the canvas.
 
 ## Simulation and GOOL
 
@@ -68,13 +75,29 @@ shape without host pointers.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. It implements absolute global calls with typed frames and argument cleanup, returns,
-optional/null pointer input semantics, state-change yields and the child-spawn host effect needed by
-the characterized Crash boot sequence. The ordinary runner stops at that synchronous boundary;
-`run_with_host_effects` applies the callback before the following instruction while preserving the
-same interpreter invocation. The arena has a separate runtime-child path with bounded `0x91`
-reclaim selection, dedicated-player activation/reset and no runtime-child entity spawn ID. The
-arena's generational handle and the VM's current index handle remain separate, so effects are not
-yet coupled into the live browser object frame.
+optional/null pointer input semantics, scalar process operations, state-change yields and the
+child-spawn host effect needed by the characterized Crash boot sequence. Its bounded 32-bit process
+array is also the stack backing store: `init_sp`, frame-relative operands, object-register operands,
+initial frames and global-call frames therefore observe the retail overlap without native pointers.
+The complete validated state-descriptor table supplies target flags for guarded state links. The
+ordinary runner stops at a synchronous host boundary; `run_with_host_effects` applies the callback
+before the following instruction while preserving the same interpreter invocation. Retail
+animation data is retained separately from code. Checked tagged animation references, packed and
+operand-selected animation changes (`0x83`/`0x84`) use explicit frame/draw counters.
+
+`RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
+VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs
+from NSD/NSF entries, executes the mutation-aware spawn tree, and synchronously binds runtime
+children (including bounded `0x91` reclaim selection). A state-change halt is resolved through
+`NsfProgramHost`, rebound to the requested validated state, and resumed on a later object
+execution. The browser creates this runtime when a pair is mounted and runs it at 30 Hz in
+gameplay, bonus, boss and ending flow states. The host initializes the characterized ZDAT
+zone/path transform, rotation/mode flags, scale, colors and scalar process defaults without placing
+native entity pointers in the register file; children inherit typed parent state. Any checked
+execution failure quarantines that exact generational object identity, preventing a pre-incremented
+program counter from resuming past an unsupported operation while healthy siblings continue.
+Process input globals, MDAT/box special cases, the remaining register semantics, most events/host
+effects, collision/camera coupling and renderer command generation remain outside this bridge.
 
 ## Audio
 

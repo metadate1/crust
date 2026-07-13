@@ -18,7 +18,7 @@ published as a playable build until contributor permissions and the original-gam
 been reviewed by qualified counsel. Default copyright remains with the respective authors and
 rights holders.
 
-The rewrite's CSS shell and procedural low-poly diagnostic WebGL geometry are original to this
-repository and contain no copied game imagery. Retail loading images are decoded transiently from
-the user's selected local data and are never committed. Generated `wasm-bindgen` loader code is
-build output and is not committed.
+The rewrite's CSS/browser shell is original to this repository and contains no copied game imagery.
+The former procedural diagnostic geometry is no longer part of the runtime. Retail loading/title
+images, worlds and textures are decoded transiently from the user's selected local data and are
+never committed. Generated `wasm-bindgen` loader code is build output and is not committed.

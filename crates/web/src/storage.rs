@@ -135,6 +135,9 @@ impl StorageState {
 }
 
 #[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn now_timestamp() -> u64 {
+    // ECMAScript TimeClip constrains a valid Date value to +/-8.64e15 milliseconds, well within
+    // `u64`; clamping negatives and truncating the sub-millisecond fraction is intentional here.
     js_sys::Date::now().max(0.0) as u64
 }

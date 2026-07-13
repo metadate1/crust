@@ -40,6 +40,38 @@ and argument cleanup in one 67-instruction invocation, without treating any seri
 native pointer. A negative dynamic child count was also verified as a non-spawning argument-pop
 rather than an overflow error.
 
+## Hosted retail-runtime slice
+
+The 2026-07-13 opt-in tests used the same legally owned raw BIN in place and did not copy any disc
+or stream bytes into the repository:
+
+- The fractional camera/scene test discovered the complete retail catalog and successfully built a
+  signed-8.8 progress snapshot for all 43 bootable pairs directly from the raw image. The three
+  external-transition/dummy starts remained valid zero-world scenes rather than synthetic geometry.
+- The N. Sanity runtime bridge scanned the displayed current-zone neighbors, attempted seven
+  group-three entity spawns, bound all seven, and executed them through the shared typed arena/VM
+  runtime. Crash synchronously hosted the characterized executable `5` and ShadC executable `29`
+  children with their retail argument lists. Deterministic integration tests also verify
+  zone-relative entity path position, rotation/mode flags, `0x1000` scale, subtype/PID/path/process
+  defaults, player-vs-object color matrices and child transform inheritance.
+- The raw-program test followed ShadC's state change into a separately validated state program,
+  selected its checked tagged animation reference, and exercised animation frame/wait progression
+  against explicit frame stamps. State rebinding records the retail state stamp and first-frame /
+  keep-event-stack status bits.
+- Parsed programs retain the complete checked item-four state table. State links apply the retail
+  `status_c`/target-flags guard (including the `0x1002` invincibility augmentation), while initial
+  and global-call frames share the process/register word array at `init_sp`. Focused tests cover
+  argument addressing, packed frame words, frame-relative reads and writes, and guarded links.
+- The three-frame N. Sanity execution trace now performs the packed `0x83` animation change and
+  completes the rebound frame without errors. Its remaining stops are explicit checked boundaries:
+  four initial `0x8e` suboperation-six entity-node color seeks and one frame-three `0x26` tagged
+  input-reference operation. Neither boundary is treated as a successful no-op, and a faulted
+  object's exact generational identity is quarantined so its pre-incremented PC cannot resume past
+  the failed instruction on a later frame.
+
+These are native, ignored-by-default local-data tests. They characterize the mounted retail data
+and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
+
 ## Browser checks actually performed
 
 A generated release Wasm build was served on `127.0.0.1` and exercised with agent-browser 0.27.0
@@ -76,9 +108,10 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
 - Keyboard completed the diagnostic movement goal once. A second run held the on-screen touch Up
   control, reached completion in 2.24 seconds, cleared its held visual state, and mounted `0x2D`.
   Pause/resume and mute/unmute changed live runtime state and were restored before continuing.
-- A 390×844 viewport had zero horizontal overflow and displayed the complete touch controller. A
-  diagnostic completion created card slot zero. After reload, both versioned storage records
-  remained, while the file input was empty and mounted-pair count returned to zero.
+- A 390×844 viewport had zero horizontal overflow and displayed the complete touch controller. In
+  that historical diagnostic build, completion created card slot zero. After reload, both
+  versioned storage records remained, while the file input was empty and mounted-pair count returned
+  to zero.
 - WebGL reported error zero throughout. Console and page-error logs were empty. The network record
   contained only same-origin HTML, CSS, bootstrap JavaScript, generated wasm-bindgen JavaScript and
   Wasm; no game-data request or upload occurred.
@@ -87,14 +120,16 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
   simulation stopped as `BLOCKED`, retained `0x19`, and displayed the missing local filename rather
   than advancing or presenting the destination against stale assets.
 
-The later first-presentation build was reloaded at `http://127.0.0.1:4174/` in the visible Codex in-app
-browser. Its DOM contained the complete loader, two local file inputs and one canvas; there was no
-framework error overlay and the captured warning/error console was empty. The served canvas backing
-size was 1024×768 and the HTTP response used `Cache-Control: no-store`. Browser automation in
-this environment could not populate the operating-system file chooser, so this specific build's
+The later first-presentation build was reloaded at `http://127.0.0.1:4174/` in the visible Codex
+in-app browser. Its DOM contained the complete loader, two local file inputs and one canvas; there
+was no framework error overlay and the captured warning/error console was empty. The served canvas
+backing size was 1024×768 and the HTTP response used `Cache-Control: no-store`. Browser automation
+in this environment could not populate the operating-system file chooser, so this specific build's
 raw-BIN import and WebGL scene presentation are not claimed as browser-exercised. The same raw BIN
-was exercised directly by the opt-in Rust disc-to-scene test described above. A user can select it
-through the visible local-file control without changing the no-upload architecture.
+was exercised directly by the opt-in Rust disc-to-scene and hosted-runtime tests described above.
+A user can select it through the visible local-file control without changing the no-upload
+architecture. The newly connected 30 Hz retail object loop has not been claimed as a completed
+browser gameplay flow; its scene, input, audio and progression effects are not yet connected.
 
 Screenshots and game data remained outside Git. See `COMPATIBILITY.md` for features that were not
 exercised or are not yet connected to the live browser runtime.
@@ -103,17 +138,17 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 228 asset-free tests passed, zero failed; 14 legally local tests
+- locked native workspace suite: 248 asset-free tests passed, zero failed; 16 legally local tests
   remain ignored by default.
-- all 14 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+- all 16 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
-  scene formats, 40 standalone snapshots, 39 loading images, 1,427 representative texture
-  references and all four image-backed title states. The entity and scene-format tests also passed
-  using the raw BIN alone.
+  hosted N. Sanity execution, scene formats, all 43 fractional boot snapshots, 40 standalone
+  snapshots, 39 loading images, 1,427 representative texture references and all four image-backed
+  title states. The entity and scene-format tests also passed using the raw BIN alone.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 485,081 bytes (SHA-256
-  `51930742ab573f51774d6e0eb77abd6d547666bf9f97da38bc043b112c048333`).
+- generated web release: passed; Wasm payload was 613,599 bytes (SHA-256
+  `69ad65de8e2dbe9ae133a03cbdc80898fa7272e9e97fa03ba7b455614136ba4c`).
 
 ## Reproducible commands
 
@@ -127,6 +162,11 @@ C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-renderer --test local_loading_images -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test --workspace --all-targets --locked -- --ignored --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-web --lib --locked \
+  builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture
 cargo build --workspace --release --locked
 cargo build --release --locked --target wasm32-unknown-unknown -p crust-web
 npm run build

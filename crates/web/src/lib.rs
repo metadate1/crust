@@ -32,7 +32,7 @@ mod webgl;
 pub fn boot() -> Result<(), JsValue> {
     #[cfg(target_arch = "wasm32")]
     {
-        return app::boot();
+        app::boot()
     }
     #[cfg(not(target_arch = "wasm32"))]
     Ok(())

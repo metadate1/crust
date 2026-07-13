@@ -40,6 +40,10 @@ An external `git archive` copy produced these results:
   Child-spawn opcodes stop at a synchronous host boundary, then continue in the same hosted
   interpreter invocation before the next instruction. They pop arguments for every signed count
   and expose `0x91`'s bounded reclaim permission rather than an alternate parent.
+- Retail GOOL animation item five is retained as owned bytes, and tagged animation references are
+  validated against it before selection. State-change yields resolve the requested state through
+  NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping frame/draw
+  stamps; serialized state PCs and animation offsets never become native pointers.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.
@@ -51,6 +55,10 @@ An external `git archive` copy produced these results:
   point index and ordered visibility list.
 - Direct-loading presentation uses the observed two-step draw skip: tick one executes but is
   discarded, while tick two presents gameplay with path progress `0x200` and draw count one.
+- The live retail-object bridge scans displayed neighbor zones, uses separate typed generational
+  arena and VM handles, traverses the mutation-aware spawn tree, and applies synchronous runtime
+  child creation inside the same 30 Hz frame. Its effects remain data rather than unchecked host
+  pointers and do not yet imply camera, collision, renderer, audio or progression integration.
 
 ## Deliberate corrections
 

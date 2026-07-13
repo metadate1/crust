@@ -40,10 +40,11 @@ An external `git archive` copy produced these results:
   Child-spawn opcodes stop at a synchronous host boundary, then continue in the same hosted
   interpreter invocation before the next instruction. They pop arguments for every signed count
   and expose `0x91`'s bounded reclaim permission rather than an alternate parent.
-- Retail GOOL animation item five is retained as owned bytes, and tagged animation references are
-  validated against it before selection. State-change yields resolve the requested state through
-  NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping frame/draw
-  stamps; serialized state PCs and animation offsets never become native pointers.
+- Retail GOOL animation item five is retained as owned bytes. All five descriptor families are
+  bounds-checked at unaligned byte offsets, and vertex descriptors resolve TGEO plus exact
+  SVTX/CVTX frames through the mounted pair only. State-change yields resolve the requested state
+  through NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping
+  frame/draw stamps; serialized state PCs and animation offsets never become native pointers.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.
@@ -57,8 +58,10 @@ An external `git archive` copy produced these results:
   discarded, while tick two presents gameplay with path progress `0x200` and draw count one.
 - The live retail-object bridge scans displayed neighbor zones, uses separate typed generational
   arena and VM handles, traverses the mutation-aware spawn tree, and applies synchronous runtime
-  child creation inside the same 30 Hz frame. Its effects remain data rather than unchecked host
-  pointers and do not yet imply camera, collision, renderer, audio or progression integration.
+  child creation inside the same 30 Hz frame. Immutable post-GOOL snapshots now feed pair-scoped
+  3D vertex-object rendering, while pre-execution animation bounds feed the implemented solid-query
+  helpers. Effects remain data rather than unchecked host pointers; complete collision response,
+  non-vertex rendering, audio and progression are not implied.
 
 ## Deliberate corrections
 

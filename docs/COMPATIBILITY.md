@@ -36,6 +36,10 @@ gameplay path.
   paging cases one through six, path orientation and the characterized entity-color/solid query
   slices are active. Execution, checked-error and quarantined-object counts are exposed through the
   engineering log/debug surface.
+- Pair-scoped GOOL item-five descriptors and TGEO/SVTX/CVTX frames feed the live renderer. Current
+  3D vertex objects use retail fixed-point transforms, lighting, culling and ordering and share one
+  resident load-list-filtered TPAG cache/manifest with the world. Eligible collidable animations
+  also register exact-preorder transformed bounds in the 96-entry frame arena before execution.
 - The WebGL stage has a validated transactional scene-update path with shared immutable
   decoded-texture identity reuse, atomic replacement/removal and a command-only fast path. Distinct
   allocations are conservatively uploaded without cloning or scanning their pixel vectors. Pair
@@ -61,16 +65,16 @@ gameplay path.
   inherit the parent transform and receive zone colors. Entity-pointer words deliberately remain
   outside raw registers, and MDAT positioning, box stacking/stall adjustment, save-state spawn
   hooks, event-service returns, remaining process globals, dynamic object lifetime and many host
-  effects remain absent or partial. Intra-object once/transition dispatch is exact; checked paging
+  effects remain absent or partial. The browser currently scans the LDAT spawn-zone neighbor set;
+  later camera zone crossings do not yet spawn newly adjacent zones or terminate departed-zone
+  objects. Intra-object once/transition dispatch is exact; checked paging
   metadata is synchronous and does not claim retail asynchronous residency. Unsupported execution
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
-  The legally local 300-frame N. Sanity trace first faults on frame one at ShadC executable 29,
-  state one, external word 40 (`0x8e06de26`, post-fetch PC 41): an active object candidate requires
-  animation-derived bounds, while the source branch reads uninitialized C locals. Rust reports
-  `UnsupportedSolidObjectBounds` instead of reproducing that undefined behavior. Solid
-  suboperations one and three implement their source-defined branches up to this host boundary;
-  zero/two/four/five, `0x85` suboperations one through seven and lighting selectors 40 through 44
-  remain typed gaps.
+  The legally local 300-frame N. Sanity trace now crosses the former ShadC executable 29/state one
+  animation-bound boundary using validated frame bounds instead of the source branch's
+  uninitialized C locals. Solid suboperations one and three implement their characterized helper
+  paths; the late post-physics animation-stamp refresh, solid suboperations zero/two/four/five,
+  `0x85` suboperations one through seven and lighting selectors 40 through 44 remain typed gaps.
 - Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
   file handles, validates and swaps every requested destination pair, and updates the active scene;
   it does not yet reproduce the complete retail page residency/transition handshake.
@@ -80,21 +84,27 @@ gameplay path.
   and Whole Hog begin in zero-world dummy zones whose SLST references are deliberately external to
   their current stream, so they have no standalone snapshot. N. Sanity Beach now matches the
   observed first presented path point, draw count and 679-polygon visibility list. Automatic and
-  hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL object models,
-  animation transforms, dynamic zone-object termination and paging-driven texture changes are not
-  yet coupled to rendering.
+  hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
+  SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
+  manifest. Sprite, font, text, fragment and 2D CVTX commands, dynamic zone-object termination,
+  dynamic global display-mask changes and mid-frame paging-driven texture changes are not yet
+  coupled to rendering.
   Twenty-two starts use fog/ripple/lightning/dark variants whose dynamic vertex/color effects
-  remain incomplete. The current builder now avoids reparsing an unchanged active graph and records
-  decoded-texture cache hits, but the projection and command list are still regenerated every
-  presented gameplay frame. No low-end/mobile frame-time or long-soak parity is claimed without
-  measurement in those browsers.
+  remain incomplete. Object shader modes two through four, their far-object rejection and the
+  zone-graphics `0x1000` fixed-pitch camera substitution are also incomplete. Rendering snapshots
+  the complete arena after GOOL, while the source interleaves each object's simulation and drawing
+  during preorder traversal. The current builder avoids reparsing an unchanged active graph,
+  bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
+  the projection and command list are still regenerated every presented gameplay frame. No
+  low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.
 - `crust-audio` implements SPU ADPCM, loop semantics, caching, 24-voice mixing, sequence events and
   a software synth. The live WebAudio path currently plays an original generated sequence and
   generated SFX; it does not parse and reproduce the retail VAB/SEP/MIDI program/envelope set.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
-  validated ZDAT octrees/colors for the source-defined legal branches. The former diagnostic
-  movement and fixed-distance completion path is no longer used. Complete ordered object bounds,
-  player motion/collision response, event services and progression remain incomplete; Crash,
+  validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
+  legal branches. The former diagnostic movement and fixed-distance completion path is no longer
+  used. Late bound refresh, player motion/collision response, event services and progression remain
+  incomplete; Crash,
   bosses, boxes, checkpoints, enemies, bonus entrances and ending conditions therefore do not yet
   form a playable progression path.
 - The password UI applies a local deterministic progression rule, not the retail password codec.
@@ -111,10 +121,11 @@ gameplay path.
 
 The workspace includes native tests for malformed readers, ISO fields and extents, stream names and
 catalogs, NSD/NSF/page/entry bounds, tagged references, MDAT title composition, GOOL program/state
-graphs, state rebinding, animation references/waits and hosted entity/child execution, ZDAT
-entities, SLST endpoint/cursor/rollback behavior, WGEO scene graphs, all SLST delta/swap forms, the
-fixed object arena/spawn tree, signed packed vertices, retail
-TPAG/CLUT/UV references, fixed math, presentation order, scheduling, paging, GOOL execution,
+graphs, state rebinding, all five animation descriptor families, TGEO/SVTX/CVTX frame parsing,
+animation references/waits and hosted entity/child execution, ZDAT entities, SLST
+endpoint/cursor/rollback behavior, WGEO scene graphs, all SLST delta/swap forms, the fixed object
+arena/spawn tree and frame bounds, signed packed vertices, retail TPAG/CLUT/UV references, world and
+object fixed-point projection/lighting/culling, presentation order, scheduling, paging, GOOL execution,
 collision, camera, title transitions, bonus returns, demo frames, card operations,
 storage envelopes, input, texture formats/cache/projection/blends, ADPCM, sample mixing and software
 synthesis. Property tests exercise parser/state-machine invariants where arbitrary input is useful.

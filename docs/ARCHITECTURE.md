@@ -36,12 +36,13 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    ranges become immutable handle-based views. Destination pairs pass the same validation before an
    atomic retained-pair swap; simulation is stalled while the asynchronous read is in flight.
 5. The browser schedules flow, retail-object execution and presentation cooperatively at 30 Hz and
-   drops excessive lag instead of replaying an unbounded catch-up burst. Presented gameplay frames
-   rebuild camera/world commands from a pair-scoped parsed SLST/WGEO graph and the exact
-   `RetailCameraRuntime` zone/path/progress before GOOL runs. Automatic camera modes use pad taps;
-   follow modes consume the hosted main object's typed transform, zoom, held pad and prior frame
-   stamp. Other GOOL effects are retained and counted but do not yet drive object-model commands,
-   complete collision, progression or retail audio.
+   drops excessive lag instead of replaying an unbounded catch-up burst. A presented gameplay tick
+   selects the exact `RetailCameraRuntime` zone/path/progress, executes GOOL, snapshots the live
+   arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
+   Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
+   transform, zoom, held pad and prior frame stamp. The current union assumes that GOOL does not
+   replace page residency midway through the tick; complete paging, progression and retail audio
+   remain later host boundaries.
 6. User game bytes are released on reload and are never serialized. Only checksummed 128-byte
    progression/options records enter `localStorage`.
 
@@ -69,19 +70,30 @@ texture hits/misses, but are not a substitute for browser frame-time measurement
 two-tick gate keeps the loading image visible until the first gameplay presentation; the loading
 overlay no longer uses a browser-frame timeout.
 
+The same builder consumes immutable post-GOOL `RetailRenderObject` snapshots. It resolves unaligned
+animation references only through the mounted pair's GOOL item five, accepts the 3D SVTX/CVTX
+vertex path, loads the exact TGEO/frame variant, and applies retail object-local YXZ rotation,
+scale, lighting, face culling and depth. World and object texture requests are collected before a
+single cache freeze and filtered through the current ZDAT load list. Commands share one texture
+manifest, and reversed object insertion is placed ahead of the already compensated world stream to
+preserve the source's head-insert ordering-table behavior. Sprite, font, text, fragment and 2D CVTX
+paths are explicit counted skips rather than being projected with the wrong transform.
+
 `GlStage` can transactionally update an installed retail scene. It validates command texture
 references, compares immutable decoded-texture allocation identities, prepares all new/replacement
 GPU textures before committing, removes stale handles, and has a command-only fast path when the
 pair-scoped cache returns the same allocation. A distinct allocation is conservatively uploaded
 even if its bytes happen to match, avoiding per-frame pixel-vector clones and byte scans. Automatic
 `CamUpdate` and live main-object `CamFollow` path/zone changes select the canvas scene; pause freezes
-the last successfully installed snapshot. Object models, animation transforms, zone-object
-lifetime changes and paging-driven texture changes are not yet reflected in the canvas.
+the last successfully installed snapshot. Three-dimensional vertex object models and their current
+animation transforms are reflected in that snapshot; zone-object lifetime changes, dynamic global
+display masks and mid-frame paging-driven texture changes are not yet complete.
 
 ## Simulation and GOOL
 
-The retail-frame model records the 30 Hz order `spawn → camera → texture begin → world → GOOL →
-presentation` plus draw-skip and draw-count timing. `RetailCameraRuntime` owns the live path handle,
+The hosted presentation path records the 30 Hz order `spawn → camera → GOOL → combined
+world/object scene → presentation` plus draw-skip and draw-count timing. `RetailCameraRuntime` owns
+the live path handle,
 signed-8.8 progress and persistent follow offsets/zoom/speed. ZDAT entities decode into owned
 descriptors and signed path points. A fixed 96-slot object pool, dedicated main-object slot, eight
 logical roots, 304 spawn flags and generational handles reproduce the bounded spawn-tree shape
@@ -106,9 +118,12 @@ metadata without pretending that the browser has retail asynchronous paging. GOO
 reads the complete five-word pad history. State rebind executes captured once code before the state
 stamp and the target transition block after it, synchronously preserving nested calls, returns and
 host effects. The implemented data-backed math includes `0x85` path orientation, `0x8e` entity
-colors and the source-defined solid suboperation-one/three paths reached by N. Sanity. Active
-animation-derived object bounds remain a typed boundary rather than reproducing uninitialized C
-locals.
+colors and the source-defined solid suboperation-one/three paths reached by N. Sanity. The NSF host
+resolves a collidable object's current unaligned vertex animation/frame into a pair-scoped bound
+source. Before each eligible object executes, the runtime registers its transformed bound in exact
+preorder inside a 96-entry frame arena; solid helper queries consume typed `0xa300_0000` object
+references, live status/size, source padding, first-hit/highest/tie ordering and parent sizing. A
+second post-physics animation-stamp recomputation remains outside this slice.
 
 `RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
 VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs
@@ -122,9 +137,10 @@ zone/path transform, rotation/mode flags, scale, colors and scalar process defau
 native entity pointers in the register file; children inherit typed parent state. Any checked
 execution failure quarantines that exact generational object identity, preventing a pre-incremented
 program counter from resuming past an unsupported operation while healthy siblings continue.
-MDAT/box special cases, ordered animation-derived solid bounds, `0x85` suboperations one through
-seven, solid suboperations zero/two/four/five, event-service returns, most host effects, complete
-zone lifetime/collision and object-model renderer command generation remain outside this bridge.
+MDAT/box special cases, `0x85` suboperations one through seven, solid suboperations
+zero/two/four/five, event-service returns, most host effects, the late post-physics bound refresh,
+complete zone lifetime/collision response and non-vertex object rendering remain outside this
+bridge.
 
 ## Audio
 

@@ -216,12 +216,7 @@ impl GlStage {
         if state.show_retail_scene {
             for command in &self.retail_scene_commands {
                 self.ordering
-                    .submit_world(
-                        command.depth,
-                        command.zone,
-                        command.polygon,
-                        command.primitive.clone(),
-                    )
+                    .submit(command.depth, command.source, command.primitive.clone())
                     .map_err(|error| command_error(&error))?;
             }
         }
@@ -388,8 +383,10 @@ mod tests {
     fn textured_command(handle: u64) -> RetailSceneCommand {
         RetailSceneCommand {
             depth: 1,
-            zone: 2,
-            polygon: 3,
+            source: crust_renderer::command::CommandSource::World {
+                zone: 2,
+                polygon: 3,
+            },
             primitive: PrimitiveCommand::Sprite(SpriteCommand {
                 rect: ScreenRect {
                     x: 0,

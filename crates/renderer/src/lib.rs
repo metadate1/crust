@@ -7,6 +7,7 @@
 
 pub mod cache;
 pub mod command;
+pub mod object;
 pub mod projection;
 pub mod retail_texture;
 pub mod texture;
@@ -15,4 +16,9 @@ pub mod title;
 
 pub use cache::{CachedTexture, TextureCache, TextureHandle, TextureRequest};
 pub use command::{GeneratedFrame, OrderingTable, PrimitiveCommand};
+pub use object::{
+    GoolObjectLighting, ObjectProjectionError, ObjectProjectionParameters,
+    ObjectProjectionTransform, ProjectedObjectModel, ProjectedObjectPolygon, ProjectedObjectVertex,
+    object_model_matrix, project_object_model,
+};
 pub use projection::{Matrix3, Viewport};

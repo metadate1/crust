@@ -22,6 +22,15 @@ mod webaudio;
 #[cfg(target_arch = "wasm32")]
 mod webgl;
 
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn initial_presented_path_point(
+    point_count: core::num::NonZeroU16,
+    after_loading_image: bool,
+) -> usize {
+    let desired = if after_loading_image { 2 } else { 1 };
+    desired.min(usize::from(point_count.get() - 1))
+}
+
 #[wasm_bindgen]
 /// Starts the browser application after the generated Wasm module is initialized.
 ///
@@ -36,4 +45,24 @@ pub fn boot() -> Result<(), JsValue> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn initial_presentation_clamps_one_point_title_and_transition_paths() {
+        let one = core::num::NonZeroU16::new(1).unwrap();
+        assert_eq!(initial_presented_path_point(one, false), 0);
+        assert_eq!(initial_presented_path_point(one, true), 0);
+        assert_eq!(
+            initial_presented_path_point(core::num::NonZeroU16::new(3).unwrap(), false),
+            1
+        );
+        assert_eq!(
+            initial_presented_path_point(core::num::NonZeroU16::new(3).unwrap(), true),
+            2
+        );
+    }
 }

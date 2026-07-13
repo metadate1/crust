@@ -1,38 +1,49 @@
 //! Safe, pointer-free construction of a retail world path snapshot.
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
 
 use crust_formats::binary::Eid;
 use crust_formats::stream::structs::ZonePathPoint;
 use crust_formats::stream::{
-    Entry, Nsd, Nsf, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader, ZonePath,
-    ZoneRect, parse_world_geometry,
+    Entry, GoolAnimationDescriptor, Nsd, Nsf, NsfPage, ObjectMaterial, ObjectModelFrame,
+    ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader, ZonePath,
+    ZoneRect, load_object_model_frame, parse_gool_animation_descriptor, parse_object_frame,
+    parse_world_geometry,
 };
 use crust_renderer::cache::{TextureCache, TextureHandle};
 use crust_renderer::command::{
-    BlendMode, ColoredTriangle, ColoredVertex, PrimitiveCommand, PrimitiveStyle, TexturedTriangle,
-    TexturedVertex, Uv,
+    BlendMode, ColoredTriangle, ColoredVertex, CommandSource, PrimitiveCommand, PrimitiveStyle,
+    TexturedTriangle, TexturedVertex, Uv,
 };
 use crust_renderer::projection::{Matrix3, Vec3i, project, rotate};
 use crust_renderer::retail_texture::{
     RetailTextureReference, TextureInfo2, TpagReference, resolve_texture_page,
 };
 use crust_renderer::texture::{DecodedTexture, Rgba8};
+use crust_renderer::{
+    GoolObjectLighting, ObjectProjectionParameters, ObjectProjectionTransform,
+    ProjectedObjectPolygon, project_object_model,
+};
 use crust_sim::Angle12;
+use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const SLST_ENTRY_TYPE: u32 = 4;
 const WGEO_ENTRY_TYPE: u32 = 3;
 const RETAIL_TEXTURE_PAGE_SLOTS: usize = 8;
+const RETAIL_OBJECT_MODEL_CACHE_FRAMES: usize = 256;
+// `LdatInit` initializes the global current/next GOOL display masks to
+// DISPLAY_WORLDS | DISPANIM_OBJECTS | CAM_UPDATE. The ZDAT field with the
+// same C-era name is a separate neighbor-zone lifecycle mask.
+const RETAIL_INITIAL_DISPLAY_FLAGS: u32 = 0xffff;
 
-/// One world command with exact SLST provenance and ordering-table depth.
+/// One world/object command with exact provenance and ordering-table depth.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RetailSceneCommand {
     pub depth: u16,
-    pub zone: u32,
-    pub polygon: u32,
+    pub source: CommandSource,
     pub primitive: PrimitiveCommand,
 }
 
@@ -57,6 +68,12 @@ pub struct RetailSceneStats {
     pub unique_textures: usize,
     pub saturated_vertices: usize,
     pub skipped_textured_polygons: usize,
+    pub visible_objects: usize,
+    pub submitted_object_polygons: usize,
+    pub saturated_object_polygons: usize,
+    pub culled_object_polygons: usize,
+    pub skipped_object_animations: usize,
+    pub skipped_object_textured_polygons: usize,
 }
 
 /// Renderer-owned data derived only from a validated NSD/NSF pair.
@@ -141,6 +158,8 @@ pub struct RetailSceneCacheDiagnostics {
 #[derive(Debug)]
 pub struct RetailSceneBuilder {
     active_graph: Option<CachedSceneGraph>,
+    object_models: HashMap<(Eid, u16), Arc<ObjectModelFrame>>,
+    object_model_lru: VecDeque<(Eid, u16)>,
     texture_cache: TextureCache,
     texture_pages: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
     diagnostics: RetailSceneCacheDiagnostics,
@@ -150,6 +169,8 @@ impl Default for RetailSceneBuilder {
     fn default() -> Self {
         Self {
             active_graph: None,
+            object_models: HashMap::new(),
+            object_model_lru: VecDeque::new(),
             texture_cache: TextureCache::default(),
             texture_pages: [None; RETAIL_TEXTURE_PAGE_SLOTS],
             diagnostics: RetailSceneCacheDiagnostics::default(),
@@ -256,7 +277,32 @@ impl RetailSceneBuilder {
         nsf_bytes: &[u8],
         location: RetailSceneProgressLocation,
     ) -> Result<RetailScene, RetailSceneError> {
-        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location)
+        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location, &[], None)
+    }
+
+    /// Builds one world frame plus post-GOOL vertex objects against one
+    /// pair-scoped, frame-frozen texture cache.
+    ///
+    /// The object list must be the immutable preorder snapshot captured after
+    /// the cooperative GOOL update. Camera selection still precedes GOOL in
+    /// the application; NSF data is immutable, so collecting the complete
+    /// world/object TPAG union here does not change simulation ordering.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed pair-scoped animation/model data,
+    /// invalid scene references, or a texture union that cannot fit retail's
+    /// eight resident TPAG slots.
+    pub fn build_at_progress_with_objects(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(self, nsd, nsf, nsf_bytes, location, objects, main_object)
     }
 }
 
@@ -339,6 +385,8 @@ fn build_retail_scene_cached(
     nsf: &Nsf,
     nsf_bytes: &[u8],
     location: RetailSceneProgressLocation,
+    render_objects: &[RetailRenderObject],
+    main_object: Option<RuntimeObjectHandle>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -379,27 +427,19 @@ fn build_retail_scene_cached(
     // LevelUpdate deliberately does not open the SLST when the zone has no
     // worlds. Title, Hog Wild and Whole Hog use this as an external-transition
     // dummy start, and their placeholder SLST EID is absent from this stream.
-    if graph.zone_header.worlds.is_empty() {
-        return Ok(RetailScene {
-            commands: Vec::new(),
-            textures: Vec::new(),
-            stats: RetailSceneStats::default(),
-            zone: location.zone,
-            path_index: location.path_index,
-            path_point_count,
-            path_point_index: path_point_index_u16,
-            draw_count,
-        });
-    }
-
-    let visibility = graph
-        .visibility
-        .as_mut()
-        .expect("a world-bearing graph always owns an SLST cursor");
-    visibility
-        .seek(path_point_index)
-        .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
-    let visible_polygons = visibility.visibility().to_vec();
+    // GOOL objects may still be present, so only the world list becomes empty.
+    let visible_polygons = if graph.zone_header.worlds.is_empty() {
+        Vec::new()
+    } else {
+        let visibility = graph
+            .visibility
+            .as_mut()
+            .expect("a world-bearing graph always owns an SLST cursor");
+        visibility
+            .seek(path_point_index)
+            .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
+        visibility.visibility().to_vec()
+    };
     validate_visibility(&visible_polygons, &graph.worlds)?;
 
     let camera = sample_camera(
@@ -412,9 +452,24 @@ fn build_retail_scene_cached(
         location.path_progress,
     )?;
     let camera_translation = camera.translation;
-    let camera_matrix =
-        world_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
+    let raw_camera_matrix =
+        raw_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
+    let camera_matrix = adjusted_camera_matrix(raw_camera_matrix);
     let projection_distance = projection_distance(ldat.field_of_view)?;
+    let prepared_objects = prepare_vertex_objects(
+        nsd,
+        nsf,
+        nsf_bytes,
+        &mut builder.object_models,
+        &mut builder.object_model_lru,
+        &graph.zone_header,
+        render_objects,
+        main_object,
+        camera,
+        raw_camera_matrix,
+        camera_matrix,
+        projection_distance,
+    )?;
 
     let mut page_ids = BTreeSet::new();
     for polygon_id in &visible_polygons {
@@ -436,6 +491,15 @@ fn build_retail_scene_cached(
             }
         }
     }
+    for object in &prepared_objects.objects {
+        for polygon in &object.polygons {
+            if let ObjectMaterial::Texture { texture_page, .. } = polygon.material {
+                page_ids.insert(texture_page.raw());
+            }
+        }
+    }
+    let resident_texture_pages = resident_texture_pages(nsd, nsf, &graph.zone_header)?;
+    page_ids.retain(|page| resident_texture_pages.contains(page));
     if page_ids.len() > RETAIL_TEXTURE_PAGE_SLOTS {
         return Err(scene_error(format!(
             "spawn scene needs {} simultaneous TPAGs; retail has eight slots",
@@ -588,13 +652,102 @@ fn build_retail_scene_cached(
             .map_err(|_| scene_error("clamped ordering depth does not fit u16"))?;
         prepared[visible_index] = Some(RetailSceneCommand {
             depth,
-            zone: location.zone.raw(),
-            polygon: u32::from(polygon_id.raw()),
+            source: CommandSource::World {
+                zone: location.zone.raw(),
+                polygon: u32::from(polygon_id.raw()),
+            },
             primitive,
         });
     }
 
-    let commands = prepared.into_iter().flatten().collect::<Vec<_>>();
+    let world_commands = prepared.into_iter().flatten().collect::<Vec<_>>();
+    let submitted_polygons = world_commands.len();
+    let mut object_commands = Vec::new();
+    let mut skipped_object_textured_polygons = 0_usize;
+    for object in &prepared_objects.objects {
+        for polygon in &object.polygons {
+            let primitive = match polygon.material {
+                ObjectMaterial::Color(color) => {
+                    PrimitiveCommand::ColoredTriangle(ColoredTriangle {
+                        vertices: polygon.vertices.map(|vertex| ColoredVertex {
+                            position: vertex.position,
+                            color: vertex.color,
+                        }),
+                        blend: blend_mode(color.semi_transparency()),
+                        style: PrimitiveStyle::Fill,
+                    })
+                }
+                ObjectMaterial::Texture {
+                    color,
+                    texture_page,
+                    region,
+                } => {
+                    if !resident_texture_pages.contains(&texture_page.raw()) {
+                        skipped_object_textured_polygons =
+                            skipped_object_textured_polygons.saturating_add(1);
+                        continue;
+                    }
+                    let reference = RetailTextureReference::new(
+                        TpagReference::new(texture_page),
+                        TextureInfo2 { color, region },
+                    );
+                    let Ok(layout) = reference.layout() else {
+                        skipped_object_textured_polygons =
+                            skipped_object_textured_polygons.saturating_add(1);
+                        continue;
+                    };
+                    let Ok(cached) = builder.texture_cache.load(layout.request) else {
+                        skipped_object_textured_polygons =
+                            skipped_object_textured_polygons.saturating_add(1);
+                        continue;
+                    };
+                    let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
+                        *handle
+                    } else {
+                        let next = u64::try_from(texture_handles.len())
+                            .ok()
+                            .and_then(|value| value.checked_add(1))
+                            .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
+                        let handle = TextureHandle::new(next);
+                        texture_handles.insert(layout.request, handle);
+                        handle
+                    };
+                    textures
+                        .entry(output_handle)
+                        .or_insert_with(|| Arc::clone(&cached.pixels));
+                    let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+                    PrimitiveCommand::TexturedTriangle(TexturedTriangle {
+                        vertices: std::array::from_fn(|index| TexturedVertex {
+                            position: polygon.vertices[index].position,
+                            color: polygon.vertices[index].color,
+                            uv: Uv {
+                                u: uvs[index][0],
+                                v: uvs[index][1],
+                            },
+                        }),
+                        texture: output_handle,
+                        blend: layout.request.blend_mode,
+                    })
+                }
+            };
+            object_commands.push(RetailSceneCommand {
+                depth: polygon.ordering_depth,
+                source: CommandSource::Object {
+                    handle: object.handle,
+                    part: polygon.source_part,
+                },
+                primitive,
+            });
+        }
+    }
+    let submitted_object_polygons = object_commands.len();
+    // Source object primitives are head-inserted after all world primitives.
+    // The Rust ordering table is FIFO inside a depth bucket, so reverse the
+    // complete object insertion stream and place it before the compensated
+    // world stream.
+    object_commands.reverse();
+    object_commands.extend(world_commands);
+    let commands = object_commands;
     let textures = textures
         .into_iter()
         .map(|(handle, pixels)| RetailSceneTexture { handle, pixels })
@@ -616,10 +769,16 @@ fn build_retail_scene_cached(
         stats: RetailSceneStats {
             worlds: graph.worlds.len(),
             visible_polygons: visible_polygons.len(),
-            submitted_polygons: commands.len(),
+            submitted_polygons,
             unique_textures: textures.len(),
             saturated_vertices,
             skipped_textured_polygons,
+            visible_objects: prepared_objects.visible_objects,
+            submitted_object_polygons,
+            saturated_object_polygons: prepared_objects.saturated_polygons,
+            culled_object_polygons: prepared_objects.culled_polygons,
+            skipped_object_animations: prepared_objects.skipped_animations,
+            skipped_object_textured_polygons,
         },
         commands,
         textures,
@@ -629,6 +788,294 @@ fn build_retail_scene_cached(
         path_point_index: path_point_index_u16,
         draw_count,
     })
+}
+
+#[derive(Debug)]
+struct PreparedVertexObject {
+    handle: u32,
+    polygons: Vec<ProjectedObjectPolygon>,
+}
+
+#[derive(Debug, Default)]
+struct PreparedVertexObjects {
+    objects: Vec<PreparedVertexObject>,
+    visible_objects: usize,
+    saturated_polygons: usize,
+    culled_polygons: usize,
+    skipped_animations: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_vertex_objects(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    model_cache: &mut HashMap<(Eid, u16), Arc<ObjectModelFrame>>,
+    model_lru: &mut VecDeque<(Eid, u16)>,
+    zone_header: &ZoneHeader,
+    render_objects: &[RetailRenderObject],
+    main_object: Option<RuntimeObjectHandle>,
+    camera: CameraSample,
+    raw_camera_matrix: Matrix3,
+    adjusted_camera_matrix: Matrix3,
+    projection_distance: u32,
+) -> Result<PreparedVertexObjects, RetailSceneError> {
+    let mut prepared = PreparedVertexObjects::default();
+    let display_flags = RETAIL_INITIAL_DISPLAY_FLAGS;
+    for object in render_objects {
+        if !retail_object_is_displayed(object, display_flags) {
+            continue;
+        }
+        let Some(program) = object.program else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+        let Some(animation_reference) = object.animation_reference else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+        let global = typed_entry(nsf, nsd, program.global_eid(), 11, "GOOL object program")?;
+        let animations = entry_item(global, nsf_bytes, 5, "GOOL object animations")?;
+        let descriptor = parse_gool_animation_descriptor(
+            animations,
+            usize::try_from(animation_reference.offset())
+                .map_err(|_| scene_error("GOOL animation offset does not fit the host"))?,
+        )
+        .map_err(|error| scene_error(format!("GOOL object animation: {error}")))?;
+        let GoolAnimationDescriptor::Vertex(animation) = descriptor else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+        let Ok(frame_index) = u16::try_from(object.animation_frame >> 8) else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+
+        // Retail NSLookup simply declines a dormant frame whose model is not
+        // resident in the mounted pair. Never fall back to another pair with
+        // the same EID.
+        if nsd.pte(animation.model_eid).is_none() {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        }
+        let vertex_entry = nsf
+            .resolve_entry(nsd, animation.model_eid)
+            .map_err(|error| scene_error(format!("GOOL object frame entry: {error}")))?;
+        let vertex_kind = ObjectVertexKind::from_entry_type(vertex_entry.entry_type)
+            .map_err(|error| scene_error(format!("GOOL object frame type: {error}")))?;
+        let Some(frame_item) = vertex_entry.item(usize::from(frame_index)) else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+        let frame = parse_object_frame(
+            frame_item
+                .bytes(nsf_bytes)
+                .map_err(|error| scene_error(format!("GOOL object frame bytes: {error}")))?,
+            vertex_kind,
+        )
+        .map_err(|error| scene_error(format!("GOOL object frame: {error}")))?;
+        if nsd.pte(frame.header.geometry_eid).is_none() {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        }
+        let cache_key = (animation.model_eid, frame_index);
+        let model = if let Some(model) = model_cache.get(&cache_key) {
+            touch_object_model_lru(model_lru, cache_key);
+            Arc::clone(model)
+        } else {
+            let model = Arc::new(
+                load_object_model_frame(nsd, nsf, nsf_bytes, animation.model_eid, frame_index)
+                    .map_err(|error| scene_error(format!("GOOL object model: {error}")))?,
+            );
+            while model_cache.len() >= RETAIL_OBJECT_MODEL_CACHE_FRAMES {
+                let Some(evicted) = model_lru.pop_front() else {
+                    break;
+                };
+                model_cache.remove(&evicted);
+            }
+            model_cache.insert(cache_key, Arc::clone(&model));
+            model_lru.push_back(cache_key);
+            model
+        };
+
+        // The separate source path for 2D CVTX uses a ZXY sprite matrix. It
+        // remains an explicitly counted animation boundary in this vertex
+        // slice rather than being drawn with the wrong 3D transform.
+        if model.frame.kind == ObjectVertexKind::Colored && object.status_b & 0x200 != 0 {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        }
+
+        let relative = Vec3i {
+            x: object.transform.translation[0].wrapping_sub(camera.translation.x.wrapping_shl(8))
+                >> 8,
+            y: object.transform.translation[1].wrapping_sub(camera.translation.y.wrapping_shl(8))
+                >> 8,
+            z: object.transform.translation[2].wrapping_sub(camera.translation.z.wrapping_shl(8))
+                >> 8,
+        };
+        let camera_translation = rotate(relative, adjusted_camera_matrix).point;
+        if display_flags & 0x1_0000 == 0
+            && object.status_b & 0x4_0000 == 0
+            && i32::try_from(projection_distance).unwrap_or(i32::MAX) >= camera_translation.z
+        {
+            continue;
+        }
+        let transform = ObjectProjectionTransform::from_retail(
+            raw_camera_matrix,
+            object.transform.rotation_yxz,
+            Vec3i {
+                x: object.transform.scale[0],
+                y: object.transform.scale[1],
+                z: object.transform.scale[2],
+            },
+            model.geometry.header.scale,
+            camera_translation,
+        );
+        let is_main = main_object == Some(object.object);
+        let colored_shift = object_colored_shift(
+            nsd,
+            zone_header,
+            display_flags,
+            camera_translation.z,
+            object,
+            is_main,
+        );
+        let ordering_far = object
+            .size
+            .wrapping_add(0x800)
+            .wrapping_sub(i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
+            .cast_unsigned();
+        let projected = project_object_model(
+            &model,
+            transform,
+            ObjectProjectionParameters {
+                screen_offset: [0, 0],
+                projection_distance,
+                ordering_far,
+                cull_face: object.transform.scale[0],
+                colored_shift,
+            },
+            Some(GoolObjectLighting {
+                words: object.colors,
+                rotation_yxz: object.transform.rotation_yxz,
+                scale_x: object.transform.scale[0],
+            }),
+        )
+        .map_err(|error| scene_error(format!("GOOL object projection: {error}")))?;
+        prepared.visible_objects = prepared.visible_objects.saturating_add(1);
+        prepared.saturated_polygons = prepared
+            .saturated_polygons
+            .saturating_add(projected.skipped_saturated as usize);
+        prepared.culled_polygons = prepared
+            .culled_polygons
+            .saturating_add(projected.skipped_culled as usize);
+        prepared.objects.push(PreparedVertexObject {
+            handle: u32::from(object.object.vm().get()),
+            polygons: projected.polygons,
+        });
+    }
+    Ok(prepared)
+}
+
+fn touch_object_model_lru(lru: &mut VecDeque<(Eid, u16)>, key: (Eid, u16)) {
+    if let Some(index) = lru.iter().position(|candidate| *candidate == key) {
+        lru.remove(index);
+    }
+    lru.push_back(key);
+}
+
+fn retail_object_is_displayed(object: &RetailRenderObject, display_flags: u32) -> bool {
+    // Every object admitted by `RetailRuntime` is a GOOL handle, whose source
+    // `handle.subtype` is always three. `RetailRenderObject::subtype` is the
+    // distinct process/program subtype selected by the ZDAT entity and must
+    // not be used for that handle gate.
+    if object.status_b & 0x100 != 0 || display_flags & 0x4 == 0 {
+        return false;
+    }
+    if (object.status_b & 0x0200_0000 != 0 || object.state_flags & 0x0002_0000 != 0)
+        && display_flags & 0x4000 != 0
+    {
+        return true;
+    }
+    let Some(program) = object.program else {
+        return false;
+    };
+    let category_flag = match program.category() {
+        0x100 => 0x10,
+        0x300 | 0x500 | 0x600 => 0x40,
+        0x400 => 0x800,
+        0x200 => 0x200,
+        _ => return false,
+    };
+    display_flags & category_flag != 0
+}
+
+fn object_colored_shift(
+    nsd: &Nsd,
+    zone_header: &ZoneHeader,
+    display_flags: u32,
+    camera_z: i32,
+    object: &RetailRenderObject,
+    is_main: bool,
+) -> u8 {
+    if zone_header.graphics.unknown_a != 3
+        || is_main
+        || object.status_b & 0x400 != 0
+        || object.status_b & 0x200 != 0
+        || display_flags & 0x1_0000 != 0
+    {
+        return 0;
+    }
+    let visibility = i32::try_from(zone_header.graphics.visibility_depth >> 8).unwrap_or(i32::MAX);
+    let anchor = if matches!(nsd.level().get(), 0x14 | 0x16) {
+        // `fog_z` is zero in the current runtime, matching source LevelInit.
+        visibility.wrapping_add(400)
+    } else {
+        visibility.wrapping_sub(if zone_header.graphics.unknown_b_to_e[0] == 0 {
+            0
+        } else {
+            1200
+        })
+    };
+    u8::try_from(camera_z.wrapping_sub(anchor).max(0) / 200)
+        .unwrap_or(u8::MAX)
+        .min(8)
+}
+
+fn resident_texture_pages(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    zone_header: &ZoneHeader,
+) -> Result<BTreeSet<u32>, RetailSceneError> {
+    let mut resident = BTreeSet::new();
+    for page_index in &zone_header.load_list.pages {
+        let page = nsf
+            .pages
+            .get(
+                usize::try_from(page_index.get())
+                    .map_err(|_| scene_error("ZDAT load-list page index does not fit the host"))?,
+            )
+            .ok_or_else(|| scene_error("ZDAT load-list page is outside the NSF"))?;
+        if let NsfPage::Texture(texture) = page {
+            resident.insert(texture.eid.raw());
+        }
+    }
+    for eid in &zone_header.load_list.entries {
+        let Some(pte) = nsd.pte(*eid) else {
+            continue;
+        };
+        let Some(NsfPage::Texture(texture)) = nsf.pages.get(
+            usize::try_from(pte.page_index().get())
+                .map_err(|_| scene_error("ZDAT load-list EID page does not fit the host"))?,
+        ) else {
+            continue;
+        };
+        if texture.eid == *eid {
+            resident.insert(texture.eid.raw());
+        }
+    }
+    Ok(resident)
 }
 
 fn parse_scene_graph(
@@ -980,12 +1427,12 @@ fn blend_mode(raw: u8) -> BlendMode {
     }
 }
 
-fn world_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Matrix3 {
+fn raw_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Matrix3 {
     let angle = |value: i32| Angle12::new(-value);
     let z = angle(rotation_z);
     let y_stored = angle(rotation_y);
     let x_stored = angle(rotation_x);
-    let mut matrix = Matrix3 {
+    Matrix3 {
         values: [
             [z.cos_q12(), wrapping_i16(-i32::from(z.sin_q12())), 0],
             [z.sin_q12(), z.cos_q12(), 0],
@@ -1013,12 +1460,20 @@ fn world_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Mat
                 x_stored.cos_q12(),
             ],
         ],
-    });
+    })
+}
+
+fn adjusted_camera_matrix(mut matrix: Matrix3) -> Matrix3 {
     for column in 0..3 {
         matrix.values[1][column] = wrapping_i16((-5 * i32::from(matrix.values[1][column])) >> 3);
         matrix.values[2][column] = wrapping_i16(-i32::from(matrix.values[2][column]));
     }
     matrix
+}
+
+#[cfg(test)]
+fn world_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Matrix3 {
+    adjusted_camera_matrix(raw_camera_matrix(rotation_y, rotation_x, rotation_z))
 }
 
 fn wrapping_i16(value: i32) -> i16 {
@@ -1035,10 +1490,12 @@ mod tests {
     use super::*;
     use crust_formats::disc::DiscImage;
     use crust_formats::stream::{
-        KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, parse_nsd,
-        parse_nsf,
+        KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity,
+        parse_nsd, parse_nsf,
     };
     use crust_sim::camera::{RetailCameraInput, RetailCameraRuntime};
+    use crust_sim::object_arena::NeighborZone;
+    use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime};
     use std::path::PathBuf;
 
     #[test]
@@ -1153,6 +1610,7 @@ mod tests {
                 unique_textures: 52,
                 saturated_vertices: 0,
                 skipped_textured_polygons: 0,
+                ..RetailSceneStats::default()
             }
         );
         assert!(!scene.commands.is_empty());
@@ -1564,6 +2022,7 @@ mod tests {
                 unique_textures: 52,
                 saturated_vertices: 0,
                 skipped_textured_polygons: 0,
+                ..RetailSceneStats::default()
             }
         );
         let first_presented =
@@ -1666,5 +2125,152 @@ mod tests {
         eprintln!("empty external-transition spawn snapshots: {empty:#?}");
         assert_eq!(built, 43);
         assert_eq!(empty, ["Hog Wild", "Title / Island Map", "Whole Hog"]);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn n_sanity_gool_objects_project_through_the_pair_scoped_scene() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+        const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let level = LevelId::N_SANITY_BEACH;
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let ldat = nsd.ldat().unwrap();
+        let current_entry =
+            typed_entry(&nsf, &nsd, ldat.spawn_zone, ZDAT_ENTRY_TYPE, "spawn ZDAT").unwrap();
+        let current_header = ZoneHeader::parse(
+            entry_item(current_entry, &nsf_bytes, 0, "spawn ZDAT header").unwrap(),
+        )
+        .unwrap();
+        let mut owned_neighbors = Vec::new();
+        for eid in current_header.neighbors {
+            let entry = typed_entry(&nsf, &nsd, eid, ZDAT_ENTRY_TYPE, "neighbor ZDAT").unwrap();
+            let header = ZoneHeader::parse(
+                entry_item(entry, &nsf_bytes, 0, "neighbor ZDAT header").unwrap(),
+            )
+            .unwrap();
+            let mut entities = Vec::new();
+            for entity_index in 0..header.entity_count {
+                let item_index =
+                    usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+                entities.push(
+                    ZoneEntity::parse(
+                        entry_item(entry, &nsf_bytes, item_index, "neighbor ZDAT entity").unwrap(),
+                    )
+                    .unwrap(),
+                );
+            }
+            owned_neighbors.push((eid, header.display_flags | 3, entities));
+        }
+        let neighbors = owned_neighbors
+            .iter()
+            .map(|(eid, display_flags, entities)| NeighborZone {
+                eid: *eid,
+                display_flags: *display_flags,
+                entities: entities.as_slice(),
+            })
+            .collect::<Vec<_>>();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let mut runtime = RetailRuntime::new(RETAIL_GLOBAL_WORDS);
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        eprintln!(
+            "N. Sanity spawn attempts: {} total, {} successful",
+            attempts.len(),
+            attempts
+                .iter()
+                .filter(|attempt| attempt.result.is_ok())
+                .count()
+        );
+        assert!(attempts.iter().any(|attempt| attempt.result.is_ok()));
+        let mut builder = RetailSceneBuilder::new();
+        let mut peak = RetailSceneStats::default();
+        let mut peak_snapshot_objects = 0_usize;
+
+        for draw_count in 0..300 {
+            let camera_step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+            runtime
+                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                .unwrap();
+            let objects = runtime.render_objects().unwrap();
+            peak_snapshot_objects = peak_snapshot_objects.max(objects.len());
+            if draw_count < 2 {
+                eprintln!(
+                    "N. Sanity frame {draw_count}: {} render-object snapshots",
+                    objects.len()
+                );
+            }
+            let main_object = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena));
+            if draw_count == 0 {
+                let mut invalid_frames = objects.clone();
+                for object in &mut invalid_frames {
+                    if retail_object_is_displayed(object, RETAIL_INITIAL_DISPLAY_FLAGS)
+                        && object.animation_reference.is_some()
+                    {
+                        object.animation_frame = u32::MAX;
+                    }
+                }
+                let safely_omitted = RetailSceneBuilder::new()
+                    .build_at_progress_with_objects(
+                        &nsd,
+                        &nsf,
+                        &nsf_bytes,
+                        RetailSceneProgressLocation {
+                            zone: camera_step.after.path.zone,
+                            path_index: camera_step.after.path.index,
+                            path_progress: camera_step.after.progress.raw(),
+                            draw_count,
+                        },
+                        &invalid_frames,
+                        main_object,
+                    )
+                    .unwrap();
+                assert!(safely_omitted.stats.skipped_object_animations > 0);
+            }
+            let scene = builder
+                .build_at_progress_with_objects(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    RetailSceneProgressLocation {
+                        zone: camera_step.after.path.zone,
+                        path_index: camera_step.after.path.index,
+                        path_progress: camera_step.after.progress.raw(),
+                        draw_count,
+                    },
+                    &objects,
+                    main_object,
+                )
+                .unwrap_or_else(|error| panic!("frame {draw_count}: {error}"));
+            if scene.stats.visible_objects > peak.visible_objects
+                || scene.stats.submitted_object_polygons > peak.submitted_object_polygons
+                || scene.stats.skipped_object_animations > peak.skipped_object_animations
+            {
+                peak = scene.stats;
+            }
+        }
+
+        eprintln!(
+            "N. Sanity 300-frame GOOL/object scene peak: {peak:?}; snapshot objects {peak_snapshot_objects}"
+        );
+        assert!(peak.visible_objects > 0);
+        assert!(peak.submitted_object_polygons > 0);
+        assert!(builder.object_models.len() <= RETAIL_OBJECT_MODEL_CACHE_FRAMES);
+        assert_eq!(builder.object_models.len(), builder.object_model_lru.len());
     }
 }

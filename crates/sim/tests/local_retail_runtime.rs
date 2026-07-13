@@ -4,14 +4,11 @@ use std::path::PathBuf;
 
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
-    LevelId, StreamKind, StreamName, ZoneEntity, ZoneHeader, load_gool_state_program, parse_nsd,
-    parse_nsf,
+    LevelId, StreamKind, StreamName, ZoneEntity, ZoneHeader, parse_nsd, parse_nsf,
 };
-use crust_sim::gool::{
-    CodeAddress, CodeSegment, ObjectHandle as VmObjectHandle, VmEffect, VmError,
-};
+use crust_sim::gool::VmEffect;
 use crust_sim::object_arena::{NeighborZone, ObjectOrigin};
-use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime, RuntimeError};
+use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime};
 
 #[test]
 #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
@@ -108,7 +105,7 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
         .collect::<Vec<_>>();
     assert_eq!(crash_spawns, [(5, 0, vec![0]), (29, 0, vec![0, 4096, 0])]);
 
-    let _shadow = first
+    let shadow = first
         .frame
         .spawned_children
         .iter()
@@ -160,162 +157,34 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
     assert_eq!(path_vm.register(47), Ok(1_076_736));
     assert_eq!(path_vm.register(13), Ok(0x400));
     assert_eq!(path_vm.register(21), Ok(0x400));
-    let mut first_fault = None;
+    let shadow_execution = first
+        .frame
+        .executions
+        .iter()
+        .find(|execution| execution.object == shadow)
+        .expect("Crash's shadow child must execute in frame one");
+    assert!(
+        shadow_execution.result.is_ok(),
+        "solid suboperation one must use only registered frame snapshots: {:?}",
+        shadow_execution.result
+    );
     for execution in &first.frame.executions {
-        if let Err(error) = &execution.result {
-            let origin = runtime
-                .arena()
-                .get(execution.object.arena())
-                .expect("faulted object remains in the arena")
-                .origin();
-            let address = runtime
-                .machine()
-                .object(execution.object.vm())
-                .expect("faulted object remains in the VM")
-                .code_address();
-            let state = runtime
-                .machine()
-                .object(execution.object.vm())
-                .expect("faulted object remains in the VM")
-                .state();
-            let expected = matches!(
-                error,
-                RuntimeError::Vm(VmError::UnsupportedSolidObjectBounds(candidate))
-                    if candidate.get() == 6
-            );
-            first_fault = Some((
-                1_u32,
-                execution.object,
-                origin,
-                address,
-                state,
-                format!("{error:?}"),
-                expected,
-            ));
-            break;
-        }
+        assert!(
+            execution.result.is_ok(),
+            "unexpected frame-one fault for {:?}: {:?}",
+            execution.object,
+            execution.result
+        );
     }
     for frame in 2_u32..=300 {
         let report = runtime.run_frame(&mut host, 256).unwrap();
         for execution in &report.executions {
-            if let Err(error) = &execution.result
-                && first_fault.is_none()
-            {
-                let origin = runtime
-                    .arena()
-                    .get(execution.object.arena())
-                    .expect("faulted object remains in the arena")
-                    .origin();
-                let address = runtime
-                    .machine()
-                    .object(execution.object.vm())
-                    .expect("faulted object remains in the VM")
-                    .code_address();
-                let state = runtime
-                    .machine()
-                    .object(execution.object.vm())
-                    .expect("faulted object remains in the VM")
-                    .state();
-                let expected = matches!(
-                    error,
-                    RuntimeError::Vm(VmError::UnsupportedSolidObjectBounds(candidate))
-                        if candidate.get() == 6
-                );
-                first_fault = Some((
-                    frame,
-                    execution.object,
-                    origin,
-                    address,
-                    state,
-                    format!("{error:?}"),
-                    expected,
-                ));
-            }
+            assert!(
+                execution.result.is_ok(),
+                "unexpected frame-{frame} fault for {:?}: {:?}",
+                execution.object,
+                execution.result
+            );
         }
     }
-    eprintln!("first source-derived fault through 300 frames: {first_fault:?}");
-    let Some((frame, object, origin, address, state, error, expected)) = first_fault else {
-        panic!("the legal trace unexpectedly crossed every typed VM boundary");
-    };
-    assert_eq!(frame, 1);
-    assert_eq!(
-        origin,
-        ObjectOrigin::Runtime {
-            executable: 29,
-            subtype: 0,
-        }
-    );
-    assert_eq!(
-        address,
-        CodeAddress {
-            segment: CodeSegment::External,
-            // Fetch is post-incremented: after exact suboperation three,
-            // ShadC's next typed collision boundary is external word 40.
-            pc: 41,
-        }
-    );
-    assert_eq!(state, 1);
-    let solid_vm = runtime.machine().object(object.vm()).unwrap();
-    assert_eq!(
-        [
-            solid_vm.register(38).unwrap(),
-            solid_vm.register(39).unwrap(),
-            solid_vm.register(40).unwrap(),
-        ],
-        [0; 3],
-        "static trans4 must clear B's three process words"
-    );
-    assert_eq!(
-        [
-            solid_vm.register(23).unwrap(),
-            solid_vm.register(24).unwrap(),
-            solid_vm.register(25).unwrap(),
-        ],
-        [
-            solid_vm.register(8).unwrap(),
-            solid_vm.register(9).unwrap(),
-            solid_vm.register(10).unwrap(),
-        ],
-        "ZoneFindNearestObjectNode3 never writes back its local query vector"
-    );
-    let executable = nsd.ldat().unwrap().executable_map[29];
-    let state_program = load_gool_state_program(&nsd, &nsf, &nsf_bytes, executable, state).unwrap();
-    let instruction = state_program.code()[address.pc - 1];
-    assert_eq!(instruction, 0x8e06_de26);
-    let bound_candidate = VmObjectHandle::new(6).unwrap();
-    let candidate_execution = first
-        .frame
-        .executions
-        .iter()
-        .find(|execution| execution.object.vm() == bound_candidate)
-        .unwrap();
-    assert!(matches!(
-        runtime
-            .arena()
-            .get(candidate_execution.object.arena())
-            .unwrap()
-            .origin(),
-        ObjectOrigin::Entity(descriptor)
-            if descriptor.id == 14
-                && descriptor.group == 3
-                && descriptor.executable == 31
-                && descriptor.subtype == 0
-    ));
-    assert_eq!(
-        runtime
-            .machine()
-            .object(bound_candidate)
-            .unwrap()
-            .register(27),
-        Ok(0x0003_2814),
-        "the legal candidate is collidable and passes the source shadow-bound mask"
-    );
-    eprintln!(
-        "active object-bound boundary within solid suboperation one is state {state} external word {} = {instruction:#010x}",
-        address.pc - 1
-    );
-    assert!(
-        expected,
-        "unexpected first fault for object {object:?}: {error}"
-    );
 }

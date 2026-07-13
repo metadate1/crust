@@ -33,6 +33,13 @@ and seven bindings that the retail program loader also rejects, with fingerprint
 polygons. The observed first-presented state at path point two/draw count one produced 679 visible
 polygons from both the extracted pair and directly from the raw BIN.
 
+The object-format sweep parsed 6,738 candidate GOOL animation payload offsets across 441 globals:
+4,397 vertex, 1,813 sprite, 221 font, 62 text and 245 fragment descriptors. It found 1,391 TGEO
+occurrences (281 EIDs, 328 exact variants and 55,950 polygons), 30,011 SVTX/CVTX frames and
+validated all 29,611 pair-resident frames containing 42,983,073 vertex references. Four hundred
+dormant frames consistently named one cross-pair EID and were retained as controlled unavailable
+assets rather than resolved through another mounted pair.
+
 The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
 verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
 optional-pointer word `0x16be0e1f`, and both initial child-spawn requests with synchronous callbacks
@@ -68,16 +75,21 @@ or stream bytes into the repository:
   the browser. The legal trace also crossed `0x85` suboperation zero path orientation, `0x8e`
   suboperation six entity colors, and the source-defined suboperation-three and suboperation-one
   solid query branches using validated ZDAT octrees and colors.
-- The 300-frame N. Sanity run is intentionally not error-free. Its first source-derived fault is
-  frame one: ShadC executable 29/state one, external word 40 `0x8e06de26` (post-fetch PC 41), where
-  an active executable-31 object needs animation-derived bounds. The equivalent C branch reads
-  uninitialized local vectors, so Rust returns `UnsupportedSolidObjectBounds(ObjectHandle(6))` and
-  quarantines that exact object instead of reproducing undefined behavior or skipping the opcode.
+- The NSF host now resolves a collidable object's current unaligned vertex animation/frame into a
+  pair-scoped bound source. Exact-preorder registration, per-frame clearing, dedicated-main Crash
+  adjustment, the 96-bound capacity and the solid helper's source padding/first-hit/highest/tie
+  behavior have focused tests. The 300-frame N. Sanity trace crosses the former ShadC executable
+  29/state-one animation-bound boundary without reproducing the C branch's uninitialized locals.
 - All 43 playable pairs built owned pointer-free camera graphs. Every non-title boot pair then ran
   300 automatic-camera ticks through one pair-scoped scene builder: 42 pairs and 12,600 exact
   camera-to-scene zone/path/point/draw identities passed with zero failures. N. Sanity's opening
   automatic chain crossed four paths in 192 ticks; a separate legal `CamFollow` golden projected
   its 43-point mode-five path and crossed to path five from a supplied retail player transform.
+- A combined N. Sanity camera/GOOL/object-scene trace ran 300 frames from seven successful initial
+  entity spawns and 14 live render-object snapshots. Its peak presented scene contained four
+  worlds, five visible 3D objects, 621 world polygons and 568 submitted object polygons, with 63
+  shared decoded textures, zero undeclared or skipped object texture references, 84 saturated
+  object polygons and 444 face-culled polygons.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
@@ -141,6 +153,18 @@ user can select it through the visible local-file control without changing the n
 The object/camera/scene path is connected in code and compiled to Wasm, but no completed retail
 gameplay flow is claimed.
 
+The 2026-07-13 object/bounds release was also loaded in a foreground Google Chrome session through
+macOS computer control. The native chooser selected the user's exact 632,083,536-byte BIN; the page
+recognized 88 files, all 44 pairs, 43 boot targets and 219 MiB of logical local stream data. That
+real default-title launch exposed a one-point dummy-path bug: initial presentation requested path
+point one and rejected the pair. A focused regression now clamps only the requested initial
+presentation point to the validated final point. After rebuilding, reloading and reselecting the
+same BIN, the Rust runtime started at title state 10, reached main menu state 5, accepted keyboard
+Cross, entered island-map state 15 and reported active synthesized audio. The game data stayed in
+the browser tab and no repository file or browser storage record received disc bytes. This session
+did not inspect DevTools network/console panes and is not described as a retail gameplay
+playthrough.
+
 Screenshots and game data remained outside Git. See `COMPATIBILITY.md` for features that were not
 exercised or are not yet connected to the live browser runtime.
 
@@ -148,18 +172,19 @@ exercised or are not yet connected to the live browser runtime.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 304 asset-free tests passed, zero failed; 21 legally local tests
+- locked native workspace suite: 345 asset-free tests passed, zero failed; 24 legally local tests
   remain ignored by default.
-- all 21 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
+- all 24 opt-in local tests passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`: raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
-  hosted N. Sanity execution, three camera goldens, scene formats, 12,600 camera-driven scenes,
-  all 43 fractional boot snapshots, 40 standalone snapshots, 39 loading images, 1,427
-  representative texture references and all four image-backed title states. The entity and
-  scene-format tests also passed using the raw BIN alone.
+  animation descriptors, object-model formats, hosted N. Sanity execution and object projection,
+  three camera goldens, scene formats, 12,600 camera-driven scenes, all 43 fractional boot
+  snapshots, 40 standalone snapshots, 39 loading images, 1,427 representative texture references
+  and all four image-backed title states. The entity and scene-format tests also passed using the
+  raw BIN alone.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 708,708 bytes (SHA-256
-  `29fe55bf04ff702982292ceaed6454612767c67a81c8b30d15c182354283ec08`).
+- generated web release: passed; Wasm payload was 759,696 bytes (SHA-256
+  `3c308fc671636e436020139c72695956e3f1d87b9be21acca0e37e9038c76203`).
 
 ## Reproducible commands
 
@@ -180,6 +205,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   every_non_title_camera_drives_300_pair_scoped_scene_builds -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  n_sanity_gool_objects_project_through_the_pair_scoped_scene -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture

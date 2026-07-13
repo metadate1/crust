@@ -41,10 +41,15 @@ quarantine only the affected object. Checked aligned code/storage/entry tags, pa
 five-word pad history, entity-path orientation, color seeking and the source-defined solid-surface
 paths exercised by the legal trace are implemented without native pointers or C undefined
 behavior. The WebGL stage transactionally replaces the camera/path scene while reusing shared
-immutable texture allocations. This is not yet a playable retail world: GOOL transforms do not yet
-drive rendered object models or complete player physics/collision/progression, zone-object
-termination remains incomplete, event services and save handshakes are partial, and retail
-VAB/SEP/MIDI audio is not connected. The current browser audio remains synthesized. See
+immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
+TGEO plus 3D SVTX/CVTX frames; post-GOOL object snapshots drive fixed-point projection, lighting,
+culling, ordering and the same resident TPAG cache as the world. Eligible animation frames also
+register an ordered, bounded collision snapshot before execution, allowing the checked solid query
+to cross the former N. Sanity animation-bound boundary without emulating undefined C locals. This
+is not yet a playable retail world: sprite/font/text/fragment and 2D-CVTX presentation, complete
+player physics/collision/progression, zone-object termination, dynamic display/paging state, event
+services and save handshakes remain incomplete, and retail VAB/SEP/MIDI audio is not connected.
+The current browser audio remains synthesized. See
 [compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
 for checks actually performed.
 
@@ -72,7 +77,8 @@ continuing against stale data. Image-backed title entries are materialized, and 
 entry/state graphs can be validated and bound natively. Zone entities and their 304-slot spawn
 flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
-through the engineering log/debug counters, but it is not yet a complete playable retail level.
+through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
+camera-selected world, but it is not yet a complete playable retail level.
 
 ## Controls
 
@@ -107,13 +113,15 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
 
 ## Workspace
 
-- `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program,
-  ZDAT entity/path, stateful SLST visibility, scene metadata and tagged-reference validation.
+- `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program and
+  animation descriptors, TGEO/SVTX/CVTX object models, ZDAT entity/path, stateful SLST visibility,
+  scene metadata and tagged-reference validation.
 - `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
   binding/word machine, hosted retail entity runtime with state rebinding, bounded object arena,
   level/title flow, collision, camera, paging, demos, and retail card payload/state handshakes.
-- `crust-renderer` — PSX texture/TPAG/UV decoding and cache, projection, ordering, clipping, blend
-  passes, title composition and WebGL2-ready commands.
+- `crust-renderer` — PSX texture/TPAG/UV decoding and cache, world and object fixed-point
+  projection/lighting/culling, ordering, clipping, blend passes, title composition and
+  WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, sample cache/mixer, sequence events and a 44.1 kHz software synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
 - `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the

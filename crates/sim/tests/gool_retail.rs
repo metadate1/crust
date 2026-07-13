@@ -118,6 +118,9 @@ fn parsed_retail_entry_executes_state_code_and_packed_branch() {
     let handle = ObjectHandle::new(0).unwrap();
     let object = VmObject::from_gool_program(handle, &program).unwrap();
 
+    let identity = object.program_identity().unwrap();
+    assert_eq!(identity.global_eid(), global_eid);
+    assert_eq!(identity.category(), 0x100);
     assert_eq!(object.initial_stack_pointer(), 32);
     assert_eq!(object.state_flags(), 0x1122_3344);
     assert_eq!(object.status_c(), 0x5566_7788);

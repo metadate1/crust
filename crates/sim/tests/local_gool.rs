@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use crust_formats::binary::Eid;
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
-    LevelId, NsdKind, StreamKind, StreamName, load_gool_program, parse_nsd, parse_nsf,
+    GoolAnimationDescriptor, LevelId, NsdKind, StreamKind, StreamName, load_gool_program,
+    load_object_model_frame, parse_gool_animation_descriptor, parse_nsd, parse_nsf,
     structs::GoolState,
 };
 use crust_sim::gool::{
@@ -240,6 +241,37 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
         .unwrap();
     let animation = AnimationReference::from_word(animation_word).unwrap();
     assert_eq!(animation.offset(), 0);
+    let descriptor = parse_gool_animation_descriptor(
+        animation_data,
+        usize::try_from(animation.offset()).unwrap(),
+    )
+    .unwrap();
+    let GoolAnimationDescriptor::Vertex(vertex_animation) = descriptor else {
+        panic!("ShadC must select a vertex animation");
+    };
+    let shadow_model = load_object_model_frame(
+        &metadata,
+        &nsf,
+        &nsf_bytes,
+        vertex_animation.model_eid,
+        u16::try_from(
+            boot_machine
+                .object(shadow_handle)
+                .unwrap()
+                .animation_frame()
+                >> 8,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        usize::from(vertex_animation.header.length),
+        nsf.resolve_entry(&metadata, vertex_animation.model_eid)
+            .unwrap()
+            .items
+            .len()
+    );
+    assert!(!shadow_model.geometry.polygons.is_empty());
     assert_eq!(
         boot_machine
             .object(shadow_handle)

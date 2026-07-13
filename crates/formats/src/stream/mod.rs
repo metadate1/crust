@@ -2,8 +2,10 @@
 
 mod catalog;
 mod gool;
+mod gool_animation;
 mod nsd;
 mod nsf;
+mod object;
 mod slst;
 pub mod structs;
 mod wgeo;
@@ -12,10 +14,24 @@ mod zone_graph;
 
 pub use catalog::{KNOWN_LEVELS, KnownLevel, LevelId, StreamKind, StreamName, known_level};
 pub use gool::{GOOL_PC_NONE, GoolProgram, load_gool_program, load_gool_state_program};
+pub use gool_animation::{
+    GOOL_ANIMATION_HEADER_LEN, GOOL_FONT_GLYPH_COUNT, GOOL_FRAGMENT_LEN, GOOL_GLYPH_LEN,
+    GOOL_MAX_FONT_ANIMATION_LEN, GOOL_TEXTURE_INFO_LEN, GOOL_VERTEX_ANIMATION_LEN,
+    GoolAnimationDescriptor, GoolAnimationHeader, GoolAnimationKind, GoolFontAnimation,
+    GoolFragment, GoolFragmentAnimation, GoolGlyph, GoolSpriteAnimation, GoolTextAnimation,
+    GoolTextureInfo, GoolVertexAnimation, parse_gool_animation_descriptor,
+    parse_gool_animation_header,
+};
 pub use nsd::{LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, Nsd, NsdHeader, NsdKind, NsdPte, parse_nsd};
 pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,
     parse_nsf,
+};
+pub use object::{
+    CVTX_ENTRY_TYPE, ColoredObjectVertex, LitObjectVertex, ObjectFrame, ObjectFrameHeader,
+    ObjectGeometry, ObjectGeometryHeader, ObjectMaterial, ObjectModelFrame, ObjectPolygon,
+    ObjectVertex, ObjectVertexKind, SVTX_ENTRY_TYPE, TGEO_ENTRY_TYPE, load_object_model_frame,
+    parse_object_frame, parse_object_geometry,
 };
 pub use slst::{PolygonId, SlstCursor, SlstDelta, SlstDirection, SlstItem};
 pub use wgeo::{WorldGeometry, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry};

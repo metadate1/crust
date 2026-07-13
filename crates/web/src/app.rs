@@ -432,6 +432,7 @@ impl Runtime {
                 pair.level
             ))
         })?;
+        let retail_point_count = retail_spawn_point_count(&retail_zone_graph)?;
         dom.log(
             &format!(
                 "Validated a pointer-free camera graph with {} zones and {} paths.",
@@ -441,12 +442,13 @@ impl Runtime {
             false,
         );
         let mut retail_scene_builder = RetailSceneBuilder::new();
-        let retail_point_count = install_retail_scene_for_pair(
+        install_retail_scene_for_pair(
             &pair,
             &mut retail_scene_builder,
             &mut stage,
             dom,
             after_loading_image,
+            retail_point_count,
         )?;
         let retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image(retail_point_count, 0)
@@ -564,6 +566,7 @@ impl Runtime {
                 pair.level
             ))
         })?;
+        let retail_point_count = retail_spawn_point_count(&retail_zone_graph)?;
         let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
             self.stage.install_loading_image(&image)?;
             dom.log(
@@ -581,12 +584,13 @@ impl Runtime {
         // A validated pair transition gets a fresh owner so parsed graph data,
         // TPAG mappings, and decoded pixels cannot cross the mount boundary.
         let mut retail_scene_builder = RetailSceneBuilder::new();
-        let retail_point_count = install_retail_scene_for_pair(
+        install_retail_scene_for_pair(
             &pair,
             &mut retail_scene_builder,
             &mut self.stage,
             dom,
             after_loading_image,
+            retail_point_count,
         )?;
         self.retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image(retail_point_count, 0)
@@ -698,6 +702,7 @@ impl Runtime {
                 if self.retail_tick_state == RetailTickState::NeedsSpawn {
                     self.spawn_retail_objects(dom);
                 }
+                let mut scene_location = None;
                 let camera_location = match self.update_retail_camera(snapshot) {
                     Ok(step) => Some(step.after),
                     Err(error) => {
@@ -714,25 +719,29 @@ impl Runtime {
                         matches!(trace.presented(), PresentedFrame::LoadingImage);
                     if let PresentedFrame::Gameplay { draw_count, .. } = trace.presented()
                         && is_retail_runtime_state(self.flow.state())
-                        && let Err(error) = self.update_retail_scene(camera_location, draw_count)
                     {
-                        let message = format!("retail scene update failed: {}", js_message(&error));
-                        dom.log(&message, true);
-                        self.retail_runtime_error = Some(message);
-                        self.retail_tick_state = match self.retail_tick_state {
-                            RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn => {
-                                RetailTickState::PausedBeforeSpawn
-                            }
-                            RetailTickState::Running | RetailTickState::Paused => {
-                                RetailTickState::Paused
-                            }
-                        };
+                        scene_location = Some((camera_location, draw_count));
                     }
                 }
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
                     self.tick_retail_runtime(dom);
+                }
+                if let Some((camera_location, draw_count)) = scene_location
+                    && let Err(error) = self.update_retail_scene(camera_location, draw_count, dom)
+                {
+                    let message = format!("retail scene update failed: {}", js_message(&error));
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = match self.retail_tick_state {
+                        RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn => {
+                            RetailTickState::PausedBeforeSpawn
+                        }
+                        RetailTickState::Running | RetailTickState::Paused => {
+                            RetailTickState::Paused
+                        }
+                    };
                 }
             } else if !retail_state {
                 let trace = self.retail_frame.tick();
@@ -890,11 +899,30 @@ impl Runtime {
         &mut self,
         location: RetailCameraLocation,
         draw_count: u32,
+        dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
+        let objects = match self.retail_objects.render_objects() {
+            Ok(objects) => objects,
+            Err(error) => {
+                let warning = format!(
+                    "retail render-object snapshot was rejected; presenting world only: {error:?}"
+                );
+                if self.retail_runtime_warning.as_deref() != Some(&warning) {
+                    dom.log(&warning, true);
+                    self.retail_runtime_warning = Some(warning);
+                }
+                Vec::new()
+            }
+        };
+        let main_object = self
+            .retail_objects
+            .arena()
+            .main_object()
+            .and_then(|arena| self.retail_objects.object_for_arena(arena));
         let scene = self
             .retail_scene_builder
-            .build_at_progress(
+            .build_at_progress_with_objects(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -904,6 +932,8 @@ impl Runtime {
                     path_progress,
                     draw_count,
                 },
+                &objects,
+                main_object,
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
@@ -2344,8 +2374,13 @@ fn install_retail_scene_for_pair(
     stage: &mut GlStage,
     dom: &Dom,
     after_loading_image: bool,
+    point_count: NonZeroU16,
 ) -> Result<NonZeroU16, JsValue> {
-    let (path_point, draw_count) = if after_loading_image { (2, 1) } else { (1, 0) };
+    let draw_count = u32::from(after_loading_image);
+    // Title and external-transition dummy zones legally have one-point paths.
+    // The gameplay loading contract asks for point one/two, so clamp only that
+    // presentation selection to the validated final point.
+    let path_point = crate::initial_presented_path_point(point_count, after_loading_image);
     let scene = builder
         .build_at_path_point(
             &pair.nsd,
@@ -2361,8 +2396,7 @@ fn install_retail_scene_for_pair(
             ))
         })?;
     let stats = scene.stats;
-    let point_count = NonZeroU16::new(scene.path_point_count)
-        .ok_or_else(|| JsValue::from_str("retail spawn path unexpectedly has no points"))?;
+    debug_assert_eq!(scene.path_point_count, point_count.get());
     stage.install_retail_scene(scene)?;
     if stats.worlds == 0 {
         dom.log(
@@ -2389,6 +2423,28 @@ fn install_retail_scene_for_pair(
             false,
         );
     }
+    Ok(point_count)
+}
+
+fn retail_spawn_point_count(graph: &RetailZoneGraph) -> Result<NonZeroU16, JsValue> {
+    let spawn = graph.spawn_path();
+    let path = graph.path(spawn).ok_or_else(|| {
+        JsValue::from_str(&format!(
+            "retail camera graph has no spawn path {}:{}",
+            spawn.zone, spawn.index
+        ))
+    })?;
+    let point_count = u16::try_from(path.points.len())
+        .ok()
+        .and_then(NonZeroU16::new)
+        .ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "retail spawn path {}:{} has invalid point count {}",
+                spawn.zone,
+                spawn.index,
+                path.points.len()
+            ))
+        })?;
     Ok(point_count)
 }
 

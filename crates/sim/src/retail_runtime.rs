@@ -11,20 +11,27 @@ use std::collections::{BTreeMap, BTreeSet};
 use crust_formats::{
     binary::{Eid, FormatError},
     stream::{
-        Nsd, Nsf, ZoneEntity, ZoneHeader, ZoneRect, load_gool_program, load_gool_state_program,
+        GoolAnimationDescriptor, Nsd, Nsf, ObjectVertexKind, ZoneEntity, ZoneHeader, ZoneRect,
+        load_gool_program, load_gool_state_program, parse_gool_animation_descriptor,
+        parse_object_frame,
     },
 };
 
 use crate::{
     gool::{
-        COLOR_COUNT, Execution, HaltReason, MAX_OBJECTS, Machine, ObjectHandle as VmObjectHandle,
-        RetailPadSnapshot, RetailSolidEnvironment, RetailSolidZone, VmEffect, VmError, VmObject,
-        VmStateProgram,
+        AnimationReference, COLOR_COUNT, Execution, GoolProgramIdentity, HaltReason, MAX_OBJECTS,
+        Machine, ObjectHandle as VmObjectHandle, RetailPadSnapshot, RetailSolidEnvironment,
+        RetailSolidZone, RetailTransform, VmEffect, VmError, VmObject, VmStateProgram,
+        process_register,
     },
+    math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
         EntitySpawnDescriptor, NeighborZone, ObjectArena, ObjectHandle as ArenaObjectHandle,
         ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError, SpawnError, SpawnedObject, TreeError,
         TreeParent,
+    },
+    object_bounds::{
+        AnimationBoundSource, BoundTransform, calculate_local_bound, calculate_world_bound,
     },
 };
 
@@ -32,6 +39,7 @@ use crate::{
 /// cooperative frame. Retail follows state links synchronously; this bound
 /// preserves that ordering while reporting cycles as a typed VM failure.
 const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
+const COLLIDABLE_STATUS_B: u32 = 0x10;
 
 /// One live object identity at the arena/VM boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -52,6 +60,43 @@ impl RuntimeObjectHandle {
     pub const fn vm(self) -> VmObjectHandle {
         self.vm
     }
+}
+
+/// Immutable, pointer-free render state captured from one live arena/VM pair.
+///
+/// `program` is present for objects materialized from a parsed retail
+/// [`crust_formats::stream::GoolProgram`]. Authored objects created directly
+/// with [`VmObject::new`] retain `None`; their process state is still exposed
+/// for deterministic tests and non-retail hosts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailRenderObject {
+    pub object: RuntimeObjectHandle,
+    pub zone: Eid,
+    pub executable: u8,
+    pub subtype: u8,
+    pub program: Option<GoolProgramIdentity>,
+    pub animation_reference: Option<AnimationReference>,
+    pub animation_frame: u32,
+    pub transform: RetailTransform,
+    pub status_a: u32,
+    pub status_b: u32,
+    pub status_c: u32,
+    pub state_flags: u32,
+    pub size: i32,
+    pub colors: [u16; COLOR_COUNT],
+}
+
+/// Checked failures while taking an immutable render-object snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderObjectsError {
+    InvalidRootIndex(usize),
+    Tree(TreeError),
+    /// A live tree node has no arena-to-VM binding.
+    UnboundArenaObject(ArenaObjectHandle),
+    /// Either direction of the arena/VM map, the arena generation, or the VM
+    /// object no longer agrees with this identity pair.
+    StaleObjectPair(RuntimeObjectHandle),
+    Vm(VmError),
 }
 
 /// Why a program is being materialized for one arena object.
@@ -80,6 +125,17 @@ pub struct StateProgramBinding {
     pub zone: Eid,
     pub executable: u8,
     pub state: u16,
+}
+
+/// Typed request for one live object's current animation-derived bound source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AnimationBoundBinding {
+    pub object: RuntimeObjectHandle,
+    pub zone: Eid,
+    pub executable: u8,
+    pub reference: AnimationReference,
+    /// Integer frame selected by the process's 24.8 animation counter.
+    pub frame_index: u32,
 }
 
 /// Immutable zone inputs needed to reproduce `GoolObjectSpawn` without
@@ -124,6 +180,19 @@ pub trait ProgramHost {
         &mut self,
         _zone: Eid,
     ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Optionally resolves the current item-five animation and frame to the
+    /// fields needed by retail local/world AABB calculation.
+    ///
+    /// The runtime calls this only for a live object whose `status_b & 0x10`
+    /// collidable gate is armed and whose animation reference is non-null.
+    /// Authored hosts may omit the callback; no synthetic bound is invented.
+    fn animation_bound_source(
+        &mut self,
+        _binding: AnimationBoundBinding,
+    ) -> Result<Option<AnimationBoundSource>, Self::Error> {
         Ok(None)
     }
 }
@@ -315,6 +384,89 @@ impl ProgramHost for NsfProgramHost<'_> {
             header.graphics.player_colors.words,
             neighbors,
         )))
+    }
+
+    fn animation_bound_source(
+        &mut self,
+        binding: AnimationBoundBinding,
+    ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+        let global_eid = self.global_eid(binding.executable)?;
+        let global = self
+            .nsf
+            .resolve_entry(self.metadata, global_eid)
+            .map_err(NsfProgramError::Format)?;
+        let animation_item = global.item(5).ok_or_else(|| {
+            NsfProgramError::Format(FormatError::global(format!(
+                "global GOOL {global_eid} has no animation item five"
+            )))
+        })?;
+        let animation_bytes = animation_item
+            .bytes(self.nsf_bytes)
+            .map_err(NsfProgramError::Format)?;
+        let descriptor = parse_gool_animation_descriptor(
+            animation_bytes,
+            usize::try_from(binding.reference.offset()).map_err(|_| {
+                NsfProgramError::Format(FormatError::global(
+                    "GOOL animation offset does not fit the host",
+                ))
+            })?,
+        )
+        .map_err(NsfProgramError::Format)?;
+
+        let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
+            return Ok(Some(AnimationBoundSource::NonVertex));
+        };
+        let Ok(frame_index) = u16::try_from(binding.frame_index) else {
+            return Ok(None);
+        };
+
+        // Retail assets occasionally name a model held by another stream pair.
+        // A single-pair host cannot page that dormant reference, so absence
+        // from this NSD is controlled `None`; a present but malformed
+        // declaration remains a format error.
+        if self.metadata.pte(vertex.model_eid).is_none() {
+            return Ok(None);
+        }
+        let vertex_entry = self
+            .nsf
+            .resolve_entry(self.metadata, vertex.model_eid)
+            .map_err(NsfProgramError::Format)?;
+        let vertex_kind = ObjectVertexKind::from_entry_type(vertex_entry.entry_type)
+            .map_err(NsfProgramError::Format)?;
+        let Some(frame_item) = vertex_entry.item(usize::from(frame_index)) else {
+            return Ok(None);
+        };
+        let frame = parse_object_frame(
+            frame_item
+                .bytes(self.nsf_bytes)
+                .map_err(NsfProgramError::Format)?,
+            vertex_kind,
+        )
+        .map_err(NsfProgramError::Format)?;
+        // Collision uses only the SVTX/CVTX frame header. TGEO supplies
+        // polygons and materials to rendering, but retail's local/world bound
+        // calculations never resolve it. Keeping that boundary separate also
+        // avoids reparsing full geometry for every collidable object/frame.
+        let header = frame.header;
+        Ok(Some(AnimationBoundSource::Vertex {
+            serialized_bound: Bounds3 {
+                min: Vec3 {
+                    x: header.local_bound_min[0],
+                    y: header.local_bound_min[1],
+                    z: header.local_bound_min[2],
+                },
+                max: Vec3 {
+                    x: header.local_bound_max[0],
+                    y: header.local_bound_max[1],
+                    z: header.local_bound_max[2],
+                },
+            },
+            collision_center: Vec3 {
+                x: header.collision_center[0],
+                y: header.collision_center[1],
+                z: header.collision_center[2],
+            },
+        }))
     }
 }
 
@@ -564,6 +716,106 @@ impl RetailRuntime {
         self.faulted_objects.iter().copied()
     }
 
+    /// Captures every live object in the source runtime's eight-root preorder.
+    ///
+    /// The returned values own all scalar render state; no arena, VM, entry,
+    /// or animation-data references escape this call. Both directions of the
+    /// arena/VM handle map and every VM object are validated before collection,
+    /// so a stale arena generation cannot silently render a recycled VM slot.
+    pub fn render_objects(&self) -> Result<Vec<RetailRenderObject>, RenderObjectsError> {
+        self.validate_render_object_pairs()?;
+        let mut objects = Vec::with_capacity(self.arena.len());
+
+        for root_index in 0..ROOT_HANDLE_COUNT {
+            let root_index_u8 = u8::try_from(root_index)
+                .map_err(|_| RenderObjectsError::InvalidRootIndex(root_index))?;
+            let root = RootHandle::new(root_index_u8)
+                .ok_or(RenderObjectsError::InvalidRootIndex(root_index))?;
+            let preorder = self
+                .arena
+                .preorder(TreeParent::Root(root))
+                .map_err(RenderObjectsError::Tree)?;
+            for arena_handle in preorder {
+                let spawned = self
+                    .arena
+                    .get(arena_handle)
+                    .ok_or(RenderObjectsError::UnboundArenaObject(arena_handle))?;
+                let object = self
+                    .handles
+                    .for_arena(arena_handle)
+                    .ok_or(RenderObjectsError::UnboundArenaObject(arena_handle))?;
+                if !self.handles.is_live_pair(object) {
+                    return Err(RenderObjectsError::StaleObjectPair(object));
+                }
+                let vm_object = self
+                    .machine
+                    .object(object.vm)
+                    .map_err(RenderObjectsError::Vm)?;
+                if vm_object.handle() != object.vm {
+                    return Err(RenderObjectsError::StaleObjectPair(object));
+                }
+                let origin = spawned.origin();
+                objects.push(RetailRenderObject {
+                    object,
+                    zone: spawned.zone(),
+                    executable: origin.executable(),
+                    subtype: origin.subtype(),
+                    program: vm_object.program_identity(),
+                    animation_reference: vm_object
+                        .animation_reference()
+                        .map_err(RenderObjectsError::Vm)?,
+                    animation_frame: vm_object.animation_frame(),
+                    transform: vm_object
+                        .retail_transform()
+                        .map_err(RenderObjectsError::Vm)?,
+                    status_a: vm_object
+                        .register(process_register::STATUS_A)
+                        .map_err(RenderObjectsError::Vm)?,
+                    status_b: vm_object
+                        .register(process_register::STATUS_B)
+                        .map_err(RenderObjectsError::Vm)?,
+                    status_c: vm_object.status_c(),
+                    state_flags: vm_object.state_flags(),
+                    size: vm_object
+                        .register(process_register::SIZE)
+                        .map_err(RenderObjectsError::Vm)? as i32,
+                    colors: *vm_object.retail_colors(),
+                });
+            }
+        }
+
+        Ok(objects)
+    }
+
+    fn validate_render_object_pairs(&self) -> Result<(), RenderObjectsError> {
+        for (&arena, &vm) in &self.handles.vm_by_arena {
+            let object = RuntimeObjectHandle { arena, vm };
+            if self.arena.get(arena).is_none()
+                || self.handles.for_vm(vm) != Some(object)
+                || self.machine.object(vm).is_err()
+            {
+                return Err(RenderObjectsError::StaleObjectPair(object));
+            }
+        }
+        for (index, arena) in self.handles.arena_by_vm.iter().copied().enumerate() {
+            let Some(arena) = arena else {
+                continue;
+            };
+            let vm = VmObjectHandle::new(
+                u16::try_from(index).expect("VM handle map capacity fits in u16"),
+            )
+            .expect("index came from the VM handle map");
+            let object = RuntimeObjectHandle { arena, vm };
+            if self.arena.get(arena).is_none()
+                || self.handles.for_arena(arena) != Some(object)
+                || self.machine.object(vm).is_err()
+            {
+                return Err(RenderObjectsError::StaleObjectPair(object));
+            }
+        }
+        Ok(())
+    }
+
     /// Applies the exact displayed-neighbor/group-three scan and binds every
     /// successful ZDAT entity. A program failure rolls back that one arena
     /// object so no live tree node exists without executable state.
@@ -629,11 +881,18 @@ impl RetailRuntime {
     /// arena/VM-bound before the parent resumes. As in the source's mutation-
     /// aware preorder walk, children added by a parent are visited later in
     /// this same frame.
+    ///
+    /// Animation bounds are currently captured immediately before each
+    /// collidable object's interpreter invocation. The source can instead
+    /// defer a second bound calculation until after physics when its private
+    /// animation stamp differs from the render stamp; those display/stamp and
+    /// late-physics branches are not yet represented by this host boundary.
     pub fn run_frame<H: ProgramHost>(
         &mut self,
         host: &mut H,
         instruction_budget_per_object: usize,
     ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>> {
+        self.machine.clear_frame_bounds();
         let _discarded_effects = self.machine.take_effects();
         let frame_stamp = wrapping_frame_stamp(self.frame_index);
         self.machine.set_frames_elapsed(frame_stamp);
@@ -687,12 +946,14 @@ impl RetailRuntime {
             && !self.faulted_objects.contains(&object)
         {
             let result = if self.handles.is_live_pair(object) {
-                self.run_object(
-                    object,
-                    host,
-                    instruction_budget_per_object,
-                    &mut work.spawned_children,
-                )
+                self.register_animation_bound(object, host).and_then(|()| {
+                    self.run_object(
+                        object,
+                        host,
+                        instruction_budget_per_object,
+                        &mut work.spawned_children,
+                    )
+                })
             } else {
                 Err(RuntimeError::UnknownArenaObject(arena_handle))
             };
@@ -727,6 +988,73 @@ impl RetailRuntime {
             child = sibling;
         }
         Ok(())
+    }
+
+    fn register_animation_bound<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        host: &mut H,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let (zone, executable) = {
+            let spawned = self
+                .arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+            (spawned.zone(), spawned.origin().executable())
+        };
+        let (reference, frame_index, transform) = {
+            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+            let status_b = vm_object
+                .register(process_register::STATUS_B)
+                .map_err(RuntimeError::Vm)?;
+            if status_b & COLLIDABLE_STATUS_B == 0 {
+                return Ok(());
+            }
+            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+                return Ok(());
+            };
+            (
+                reference,
+                vm_object.animation_frame() >> 8,
+                vm_object.retail_transform().map_err(RuntimeError::Vm)?,
+            )
+        };
+        let Some(source) = host
+            .animation_bound_source(AnimationBoundBinding {
+                object,
+                zone,
+                executable,
+                reference,
+                frame_index,
+            })
+            .map_err(RuntimeError::Program)?
+        else {
+            return Ok(());
+        };
+
+        let scale = Vec3 {
+            x: transform.scale[0],
+            y: transform.scale[1],
+            z: transform.scale[2],
+        };
+        let bound_transform = BoundTransform {
+            translation: Vec3 {
+                x: transform.translation[0],
+                y: transform.translation[1],
+                z: transform.translation[2],
+            },
+            rotation: Angles {
+                y: Angle12::new(transform.rotation_yxz[0]),
+                x: Angle12::new(transform.rotation_yxz[1]),
+                z: Angle12::new(transform.rotation_yxz[2]),
+            },
+            scale,
+        };
+        let local_bound = calculate_local_bound(source, scale, object.arena.is_dedicated_main());
+        let world_bound = calculate_world_bound(local_bound, source, bound_transform);
+        self.machine
+            .register_frame_bound(object.vm, world_bound)
+            .map_err(RuntimeError::Vm)
     }
 
     fn bind_new_entity<H: ProgramHost>(
@@ -1230,4 +1558,697 @@ impl RetailRuntime {
 fn wrapping_frame_stamp(frame_index: u64) -> u32 {
     let bytes = frame_index.to_le_bytes();
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+#[cfg(test)]
+mod tests {
+    use crust_formats::{
+        binary::EntryRef,
+        stream::{ENTRY_MAGIC, LevelId, NSF_PAGE_SIZE, ZoneEntityPathPoint, parse_nsd, parse_nsf},
+    };
+
+    use super::*;
+    use crate::object_bounds::MAX_FRAME_BOUNDS;
+
+    const ZONE: Eid = Eid::from_raw(0x1234_5679);
+    const RETURN: u32 = 0x8289_4000;
+    const MODERN_NSD_HEADER_SIZE: usize = 0x520;
+
+    struct SnapshotHost;
+
+    impl ProgramHost for SnapshotHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    struct BoundHost {
+        calls: Vec<AnimationBoundBinding>,
+        source: AnimationBoundSource,
+    }
+
+    impl BoundHost {
+        fn new(source: AnimationBoundSource) -> Self {
+            Self {
+                calls: Vec::new(),
+                source,
+            }
+        }
+    }
+
+    impl ProgramHost for BoundHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn animation_bound_source(
+            &mut self,
+            binding: AnimationBoundBinding,
+        ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+            self.calls.push(binding);
+            Ok(Some(self.source))
+        }
+    }
+
+    fn entity(id: u16, executable: u8, subtype: u8) -> ZoneEntity {
+        ZoneEntity {
+            serialized_parent: EntryRef::from_raw(0),
+            spawn_flags: 0,
+            group: 3,
+            id,
+            initializer: [0; 3],
+            executable,
+            subtype,
+            path_points: vec![ZoneEntityPathPoint { x: 0, y: 0, z: 0 }],
+        }
+    }
+
+    fn configure_render_state(runtime: &mut RetailRuntime, object: RuntimeObjectHandle, seed: u8) {
+        let vm_object = runtime.machine.object_mut(object.vm()).unwrap();
+        vm_object.bind_animation_data(&[0; 16]);
+        vm_object
+            .set_register(
+                process_register::ANIMATION_SEQUENCE,
+                0xa700_0000 | u32::from(seed),
+            )
+            .unwrap();
+        vm_object
+            .set_register(process_register::ANIMATION_FRAME, u32::from(seed) << 8)
+            .unwrap();
+        vm_object
+            .set_retail_transform(RetailTransform {
+                translation: [i32::from(seed), -i32::from(seed), 0x1000 + i32::from(seed)],
+                rotation_yxz: [0x100 + i32::from(seed), 0x200, 0x300],
+                scale: [0x1000, -0x1000, 0x0800],
+            })
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_A, 0x1000_0000 | u32::from(seed))
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, 0x2000_0000 | u32::from(seed))
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_C, 0x3000_0000 | u32::from(seed))
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATE_FLAGS, 0x4000_0000 | u32::from(seed))
+            .unwrap();
+        vm_object
+            .set_register(process_register::SIZE, (-i32::from(seed)) as u32)
+            .unwrap();
+        vm_object.set_retail_colors([u16::from(seed); COLOR_COUNT]);
+    }
+
+    fn arm_animation_bound(
+        runtime: &mut RetailRuntime,
+        object: RuntimeObjectHandle,
+        frame_index: u32,
+        transform: RetailTransform,
+    ) {
+        let vm_object = runtime.machine.object_mut(object.vm()).unwrap();
+        vm_object.bind_animation_data(&[0; 16]);
+        vm_object
+            .set_register(process_register::ANIMATION_SEQUENCE, 0xa700_0001)
+            .unwrap();
+        vm_object
+            .set_register(
+                process_register::ANIMATION_FRAME,
+                frame_index.wrapping_shl(8),
+            )
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B)
+            .unwrap();
+        vm_object.set_retail_transform(transform).unwrap();
+    }
+
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn put_i32(bytes: &mut [u8], offset: usize, value: i32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn fixture_entry(eid: Eid, entry_type: u32, items: &[Vec<u8>]) -> Vec<u8> {
+        let table_end = 16 + (items.len() + 1) * 4;
+        let total = table_end + items.iter().map(Vec::len).sum::<usize>();
+        assert!(total.is_multiple_of(4));
+        let mut bytes = vec![0; table_end];
+        put_u32(&mut bytes, 0, ENTRY_MAGIC);
+        put_u32(&mut bytes, 4, eid.raw());
+        put_u32(&mut bytes, 8, entry_type);
+        put_u32(&mut bytes, 12, u32::try_from(items.len()).unwrap());
+        let mut cursor = table_end;
+        for (index, item) in items.iter().enumerate() {
+            put_u32(&mut bytes, 16 + index * 4, u32::try_from(cursor).unwrap());
+            bytes.extend_from_slice(item);
+            cursor += item.len();
+        }
+        put_u32(
+            &mut bytes,
+            16 + items.len() * 4,
+            u32::try_from(cursor).unwrap(),
+        );
+        bytes
+    }
+
+    fn object_bound_stream_fixture(
+        include_model_pte: bool,
+        include_geometry_pte: bool,
+    ) -> (Vec<u8>, Vec<u8>) {
+        let global_eid = Eid::from_name("glob1").unwrap();
+        let model_eid = Eid::from_name("model").unwrap();
+        let geometry_eid = Eid::from_name("geo01").unwrap();
+        let mut ptes = vec![global_eid];
+        if include_geometry_pte {
+            ptes.push(geometry_eid);
+        }
+        if include_model_pte {
+            ptes.push(model_eid);
+        }
+        let ldat_offset = MODERN_NSD_HEADER_SIZE + ptes.len() * 8;
+        let mut nsd_bytes = vec![0; ldat_offset + crust_formats::stream::LDAT_PREFIX_SIZE];
+        put_u32(&mut nsd_bytes, 0x400, 1);
+        put_u32(&mut nsd_bytes, 0x404, u32::try_from(ptes.len()).unwrap());
+        for (index, eid) in ptes.into_iter().enumerate() {
+            put_u32(&mut nsd_bytes, MODERN_NSD_HEADER_SIZE + index * 8, 1);
+            put_u32(
+                &mut nsd_bytes,
+                MODERN_NSD_HEADER_SIZE + index * 8 + 4,
+                eid.raw(),
+            );
+        }
+        put_u32(&mut nsd_bytes, ldat_offset, 1);
+        put_u32(&mut nsd_bytes, ldat_offset + 4, LevelId::TITLE.get());
+        put_u32(&mut nsd_bytes, ldat_offset + 20 + 2 * 4, global_eid.raw());
+
+        // Item five deliberately begins the type-one descriptor at byte one:
+        // retail references are byte offsets and need not be word-aligned.
+        let mut animation = vec![0xee, 1, 0, 1, 0];
+        animation.extend_from_slice(&model_eid.raw().to_le_bytes());
+        animation.extend_from_slice(&[0; 3]);
+        let global = fixture_entry(
+            global_eid,
+            2,
+            &[
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                animation,
+            ],
+        );
+
+        let mut frame = vec![0; 76];
+        put_u32(&mut frame, 0, 3);
+        put_u32(&mut frame, 4, geometry_eid.raw());
+        for (offset, value) in [
+            (20, -0x1000),
+            (24, -0x2000),
+            (28, -0x3000),
+            (32, 0x4000),
+            (36, 0x5000),
+            (40, 0x6000),
+            (44, 0x0700),
+            (48, -0x0800),
+            (52, 0x0900),
+        ] {
+            put_i32(&mut frame, offset, value);
+        }
+        frame[56..74].copy_from_slice(&[
+            128, 128, 128, 0, 0, 127, 129, 128, 128, 0, 0, 127, 128, 129, 128, 0, 0, 127,
+        ]);
+        let model = fixture_entry(model_eid, 1, &[frame]);
+
+        let mut geometry_header = vec![0; 24];
+        put_u32(&mut geometry_header, 0, 1);
+        put_i32(&mut geometry_header, 4, 0x1000);
+        put_i32(&mut geometry_header, 8, 0x1000);
+        put_i32(&mut geometry_header, 12, 0x1000);
+        put_u32(&mut geometry_header, 16, 1);
+        let mut polygon = vec![0; 8];
+        put_u16(&mut polygon, 0, 0);
+        put_u16(&mut polygon, 2, 6);
+        put_u16(&mut polygon, 4, 12);
+        let geometry = fixture_entry(geometry_eid, 2, &[geometry_header, polygon]);
+
+        let entries = [global, model, geometry];
+        let table_end = 16 + (entries.len() + 1) * 4;
+        let mut nsf_bytes = vec![0; NSF_PAGE_SIZE];
+        put_u16(&mut nsf_bytes, 0, 0x1234);
+        put_u32(&mut nsf_bytes, 4, 1);
+        put_u32(&mut nsf_bytes, 8, u32::try_from(entries.len()).unwrap());
+        let mut cursor = table_end;
+        for (index, entry) in entries.iter().enumerate() {
+            put_u32(
+                &mut nsf_bytes,
+                16 + index * 4,
+                u32::try_from(cursor).unwrap(),
+            );
+            let end = cursor + entry.len();
+            nsf_bytes[cursor..end].copy_from_slice(entry);
+            cursor = end;
+        }
+        put_u32(
+            &mut nsf_bytes,
+            16 + entries.len() * 4,
+            u32::try_from(cursor).unwrap(),
+        );
+        (nsd_bytes, nsf_bytes)
+    }
+
+    #[test]
+    fn render_snapshot_is_eight_root_preorder_and_copies_exact_process_state() {
+        let entities = [entity(10, 2, 1), entity(11, 3, 2), entity(12, 0, 7)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        let first = *attempts[0].result.as_ref().unwrap();
+        let second = *attempts[1].result.as_ref().unwrap();
+        let main = *attempts[2].result.as_ref().unwrap();
+
+        let child_arena = runtime
+            .arena
+            .create_child(second.arena(), ZONE, 7, 9, false)
+            .unwrap();
+        let child = runtime.handles.reserve::<()>(child_arena).unwrap();
+        runtime
+            .machine
+            .upsert_object(VmObject::new(child.vm(), vec![RETURN]).unwrap())
+            .unwrap();
+
+        for (object, seed) in [(first, 1), (second, 2), (child, 3), (main, 4)] {
+            configure_render_state(&mut runtime, object, seed);
+        }
+
+        let snapshots = runtime.render_objects().unwrap();
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.object)
+                .collect::<Vec<_>>(),
+            [second, child, first, main]
+        );
+
+        let snapshot = snapshots
+            .iter()
+            .find(|value| value.object == child)
+            .unwrap();
+        assert_eq!(snapshot.zone, ZONE);
+        assert_eq!((snapshot.executable, snapshot.subtype), (7, 9));
+        assert_eq!(snapshot.program, None);
+        assert_eq!(snapshot.animation_reference.unwrap().offset(), 3);
+        assert_eq!(snapshot.animation_frame, 3 << 8);
+        assert_eq!(
+            snapshot.transform,
+            RetailTransform {
+                translation: [3, -3, 0x1003],
+                rotation_yxz: [0x103, 0x200, 0x300],
+                scale: [0x1000, -0x1000, 0x0800],
+            }
+        );
+        assert_eq!(snapshot.status_a, 0x1000_0003);
+        assert_eq!(snapshot.status_b, 0x2000_0003);
+        assert_eq!(snapshot.status_c, 0x3000_0003);
+        assert_eq!(snapshot.state_flags, 0x4000_0003);
+        assert_eq!(snapshot.size, -3);
+        assert_eq!(snapshot.colors, [3; COLOR_COUNT]);
+    }
+
+    #[test]
+    fn render_snapshot_rejects_a_stale_reverse_handle_binding() {
+        let entities = [entity(10, 2, 1)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        let object = *attempts[0].result.as_ref().unwrap();
+        runtime.handles.arena_by_vm[usize::from(object.vm().get())] = None;
+
+        assert_eq!(
+            runtime.render_objects(),
+            Err(RenderObjectsError::StaleObjectPair(object))
+        );
+    }
+
+    #[test]
+    fn render_snapshot_rejects_an_invalid_animation_register() {
+        let entities = [entity(10, 2, 1)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        let object = *attempts[0].result.as_ref().unwrap();
+        runtime
+            .machine
+            .object_mut(object.vm())
+            .unwrap()
+            .set_register(process_register::ANIMATION_SEQUENCE, 0x1234_5678)
+            .unwrap();
+
+        assert_eq!(
+            runtime.render_objects(),
+            Err(RenderObjectsError::Vm(VmError::InvalidAnimationReference(
+                0x1234_5678
+            )))
+        );
+    }
+
+    #[test]
+    fn frame_bounds_follow_preorder_and_are_cleared_before_the_next_frame() {
+        let entities = [entity(10, 2, 1), entity(11, 2, 1)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        let first = *attempts[0].result.as_ref().unwrap();
+        let second = *attempts[1].result.as_ref().unwrap();
+        arm_animation_bound(
+            &mut runtime,
+            first,
+            7,
+            RetailTransform {
+                translation: [10, 20, 30],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        arm_animation_bound(
+            &mut runtime,
+            second,
+            9,
+            RetailTransform {
+                translation: [-10, -20, -30],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(
+            host.calls
+                .iter()
+                .map(|call| call.object)
+                .collect::<Vec<_>>(),
+            [second, first]
+        );
+        assert_eq!(
+            host.calls
+                .iter()
+                .map(|call| (
+                    call.zone,
+                    call.executable,
+                    call.reference.offset(),
+                    call.frame_index
+                ))
+                .collect::<Vec<_>>(),
+            [(ZONE, 2, 1, 9), (ZONE, 2, 1, 7)]
+        );
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [
+                crate::object_bounds::FrameBound {
+                    object: second.vm(),
+                    bound: Bounds3 {
+                        min: Vec3 {
+                            x: -51_210,
+                            y: -51_220,
+                            z: -51_230,
+                        },
+                        max: Vec3 {
+                            x: 51_190,
+                            y: 51_180,
+                            z: 51_170,
+                        },
+                    },
+                },
+                crate::object_bounds::FrameBound {
+                    object: first.vm(),
+                    bound: Bounds3 {
+                        min: Vec3 {
+                            x: -51_190,
+                            y: -51_180,
+                            z: -51_170,
+                        },
+                        max: Vec3 {
+                            x: 51_210,
+                            y: 51_220,
+                            z: 51_230,
+                        },
+                    },
+                },
+            ]
+        );
+
+        for object in [first, second] {
+            runtime
+                .machine
+                .object_mut(object.vm())
+                .unwrap()
+                .set_register(process_register::STATUS_B, 0)
+                .unwrap();
+        }
+        runtime.run_frame(&mut host, 1).unwrap();
+        assert!(runtime.machine.frame_bounds().is_empty());
+        assert_eq!(host.calls.len(), 2);
+    }
+
+    #[test]
+    fn dedicated_main_uses_the_crash_collision_center_adjustment() {
+        let entities = [entity(10, 2, 1), entity(20, 0, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let source = AnimationBoundSource::Vertex {
+            serialized_bound: Bounds3 {
+                min: Vec3 {
+                    x: -256,
+                    y: -256,
+                    z: -256,
+                },
+                max: Vec3 {
+                    x: 256,
+                    y: 256,
+                    z: 256,
+                },
+            },
+            collision_center: Vec3 {
+                x: 256,
+                y: 512,
+                z: 768,
+            },
+        };
+        let mut host = BoundHost::new(source);
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        let ordinary = *attempts[0].result.as_ref().unwrap();
+        let main = *attempts[1].result.as_ref().unwrap();
+        assert!(!ordinary.arena().is_dedicated_main());
+        assert!(main.arena().is_dedicated_main());
+        for object in [ordinary, main] {
+            arm_animation_bound(
+                &mut runtime,
+                object,
+                0,
+                RetailTransform {
+                    translation: [0; 3],
+                    rotation_yxz: [0; 3],
+                    scale: [0x1000; 3],
+                },
+            );
+        }
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [
+                crate::object_bounds::FrameBound {
+                    object: ordinary.vm(),
+                    bound: Bounds3 {
+                        min: Vec3 {
+                            x: 0,
+                            y: 256,
+                            z: 512,
+                        },
+                        max: Vec3 {
+                            x: 512,
+                            y: 768,
+                            z: 1_024,
+                        },
+                    },
+                },
+                crate::object_bounds::FrameBound {
+                    object: main.vm(),
+                    bound: Bounds3 {
+                        min: Vec3 {
+                            x: 256,
+                            y: 768,
+                            z: 1_280,
+                        },
+                        max: Vec3 {
+                            x: 768,
+                            y: 1_280,
+                            z: 1_792,
+                        },
+                    },
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn full_object_pool_fills_the_exact_frame_bound_capacity() {
+        let entities = (0..MAX_FRAME_BOUNDS)
+            .map(|index| entity(u16::try_from(index + 10).unwrap(), 2, 1))
+            .collect::<Vec<_>>();
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        assert_eq!(attempts.len(), MAX_FRAME_BOUNDS);
+        let objects = attempts
+            .iter()
+            .map(|attempt| *attempt.result.as_ref().unwrap())
+            .collect::<Vec<_>>();
+        for object in objects {
+            arm_animation_bound(
+                &mut runtime,
+                object,
+                0,
+                RetailTransform {
+                    translation: [0; 3],
+                    rotation_yxz: [0; 3],
+                    scale: [0x1000; 3],
+                },
+            );
+        }
+
+        let frame = runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(frame.executions.len(), MAX_FRAME_BOUNDS);
+        assert!(
+            frame
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok())
+        );
+        assert_eq!(host.calls.len(), MAX_FRAME_BOUNDS);
+        assert_eq!(runtime.machine.frame_bounds().len(), MAX_FRAME_BOUNDS);
+    }
+
+    #[test]
+    fn nsf_host_resolves_frame_only_bounds_and_skips_unavailable_frames() {
+        let entities = [entity(10, 2, 1)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        let object = *attempts[0].result.as_ref().unwrap();
+        let binding = AnimationBoundBinding {
+            object,
+            zone: ZONE,
+            executable: 2,
+            reference: AnimationReference::from_word(0xa700_0001).unwrap(),
+            frame_index: 0,
+        };
+
+        let (nsd_bytes, nsf_bytes) = object_bound_stream_fixture(true, false);
+        let metadata = parse_nsd(&nsd_bytes, LevelId::TITLE).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        let mut host = NsfProgramHost::new(&metadata, &nsf, &nsf_bytes);
+        assert_eq!(
+            host.animation_bound_source(binding).unwrap(),
+            Some(AnimationBoundSource::Vertex {
+                serialized_bound: Bounds3 {
+                    min: Vec3 {
+                        x: -0x1000,
+                        y: -0x2000,
+                        z: -0x3000,
+                    },
+                    max: Vec3 {
+                        x: 0x4000,
+                        y: 0x5000,
+                        z: 0x6000,
+                    },
+                },
+                collision_center: Vec3 {
+                    x: 0x0700,
+                    y: -0x0800,
+                    z: 0x0900,
+                },
+            })
+        );
+        assert_eq!(
+            host.animation_bound_source(AnimationBoundBinding {
+                frame_index: 1,
+                ..binding
+            }),
+            Ok(None),
+            "an absent frame is a controlled unavailable animation"
+        );
+        assert_eq!(
+            host.animation_bound_source(AnimationBoundBinding {
+                frame_index: u32::MAX,
+                ..binding
+            }),
+            Ok(None),
+            "a frame outside the 16-bit handle is also controlled"
+        );
+
+        let (nsd_bytes, nsf_bytes) = object_bound_stream_fixture(false, true);
+        let metadata = parse_nsd(&nsd_bytes, LevelId::TITLE).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        let mut host = NsfProgramHost::new(&metadata, &nsf, &nsf_bytes);
+        assert_eq!(host.animation_bound_source(binding), Ok(None));
+    }
 }

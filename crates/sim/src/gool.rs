@@ -11,7 +11,8 @@ use crust_formats::stream::{
     GOOL_PC_NONE, GoolProgram, ZoneEntity, ZoneEntityPathPoint, structs::GoolState,
 };
 
-use crate::math::{Angle12, integer_sqrt, seek};
+use crate::math::{Angle12, Bounds3, integer_sqrt, seek};
+use crate::object_bounds::{FrameBound, FrameBounds, FrameBoundsError};
 
 pub const MAX_OBJECTS: usize = 96;
 /// Exact `gool_object.regs[0x1FC]` word span from the retail 32-bit layout.
@@ -59,6 +60,11 @@ const ENTRY_REFERENCE_TAG: u32 = 0xa400_0000;
 const ENTRY_REFERENCE_SLOT_BITS: u32 = 0x003f_ffff;
 const ENTRY_REFERENCE_SLOT_SHIFT: u32 = 2;
 const ENTRY_REFERENCE_PAYLOAD_MASK: u32 = ENTRY_REFERENCE_SLOT_BITS << ENTRY_REFERENCE_SLOT_SHIFT;
+const COLLISION_OBJECT_REFERENCE_TAG: u32 = 0xa300_0000;
+const COLLISION_OBJECT_REFERENCE_BITS: u32 = 0x7f;
+const COLLISION_OBJECT_REFERENCE_SHIFT: u32 = 2;
+const COLLISION_OBJECT_REFERENCE_MASK: u32 =
+    COLLISION_OBJECT_REFERENCE_BITS << COLLISION_OBJECT_REFERENCE_SHIFT;
 const INITIAL_FRAME_FLAGS: u32 = 0xffff;
 const STATE_FRAME_WORDS: usize = 3;
 const INITIAL_FRAME_WORDS: usize = 4;
@@ -262,6 +268,31 @@ impl AnimationReference {
     }
 }
 
+/// Immutable identity of the global GOOL program that owns an object's
+/// animation item and retail display category.
+///
+/// Keeping both fields on the VM object prevents hosts from reconstructing
+/// render metadata through an arena slot or executable number after either
+/// handle has been recycled. Objects authored directly with [`VmObject::new`]
+/// intentionally have no parsed-program identity.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct GoolProgramIdentity {
+    global_eid: Eid,
+    category: u32,
+}
+
+impl GoolProgramIdentity {
+    #[must_use]
+    pub const fn global_eid(self) -> Eid {
+        self.global_eid
+    }
+
+    #[must_use]
+    pub const fn category(self) -> u32 {
+        self.category
+    }
+}
+
 /// One bounded storage region addressable by opcode `0x26`.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[repr(u8)]
@@ -375,6 +406,48 @@ impl EntryReference {
     }
 }
 
+/// Checked 32-bit replacement for an object pointer returned by a solid query.
+///
+/// Retail stores either a 16-bit octree node or an aligned `gool_object *` in
+/// the same process word. Rust uses a tag dedicated to collision results and
+/// shifts the validated 96-slot handle above two zero alignment bits. Reserved
+/// payload bits and out-of-range handles are rejected during decoding.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct CollisionObjectReference {
+    object: ObjectHandle,
+}
+
+impl CollisionObjectReference {
+    #[must_use]
+    pub const fn new(object: ObjectHandle) -> Self {
+        Self { object }
+    }
+
+    #[must_use]
+    pub const fn object(self) -> ObjectHandle {
+        self.object
+    }
+
+    #[must_use]
+    pub const fn to_word(self) -> u32 {
+        COLLISION_OBJECT_REFERENCE_TAG
+            | ((self.object.get() as u32) << COLLISION_OBJECT_REFERENCE_SHIFT)
+    }
+
+    #[must_use]
+    pub const fn from_word(word: u32) -> Option<Self> {
+        if word & !COLLISION_OBJECT_REFERENCE_MASK != COLLISION_OBJECT_REFERENCE_TAG {
+            return None;
+        }
+        let Some(object) = ObjectHandle::new(
+            ((word & COLLISION_OBJECT_REFERENCE_MASK) >> COLLISION_OBJECT_REFERENCE_SHIFT) as u16,
+        ) else {
+            return None;
+        };
+        Some(Self { object })
+    }
+}
+
 /// Pointer-free view of the three retail transform vectors.
 ///
 /// Rotation preserves the serialized/runtime `ang` component order (Y, X,
@@ -460,6 +533,24 @@ const MAX_SOLID_QUERY_STEPS: usize = 128;
 const RETAIL_SIZE_MAP: [i32; 16] = [
     0, -256, -128, -64, -48, -40, -32, -26, -20, -14, -8, 8, 16, 24, 32, 64,
 ];
+const RETAIL_SOLID_INITIAL_Y_MAX: i32 = -999_999_999;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetailSolidHit {
+    None,
+    Node(u16),
+    Object(ObjectHandle),
+}
+
+impl RetailSolidHit {
+    const fn to_word(self) -> u32 {
+        match self {
+            Self::None => 0,
+            Self::Node(node) => node as u32,
+            Self::Object(object) => CollisionObjectReference::new(object).to_word(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RetailSolidRect {
@@ -1336,8 +1427,11 @@ pub enum VmError {
         operand: u16,
     },
     MissingSolidEnvironment(ObjectHandle),
-    /// An active source `object_bounds` candidate requires animation-derived
-    /// local bounds and frame-order registration that are not yet hosted.
+    /// More than the retail object-pool maximum of 96 ordered AABB snapshots
+    /// were registered for one frame.
+    FrameBoundsCapacityExceeded,
+    /// Suboperation three still requires its separate transformed-bound and
+    /// color-selection path; suboperation one's ordered queries are hosted.
     UnsupportedSolidObjectBounds(ObjectHandle),
     /// Transform-vector suboperations whose required camera, animation, or
     /// matrix host state has not yet been made pointer-free remain explicit.
@@ -1439,6 +1533,7 @@ struct AnimationWait {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VmObject {
     handle: ObjectHandle,
+    program_identity: Option<GoolProgramIdentity>,
     global_code: Vec<u32>,
     code: Vec<u32>,
     code_segment: CodeSegment,
@@ -1481,6 +1576,7 @@ impl VmObject {
         }
         Ok(Self {
             handle,
+            program_identity: None,
             global_code: Vec::new(),
             code,
             code_segment: CodeSegment::External,
@@ -1542,6 +1638,10 @@ impl VmObject {
         }
 
         let mut object = Self::new(handle, program.code().to_vec())?;
+        object.program_identity = Some(GoolProgramIdentity {
+            global_eid: program.global_eid(),
+            category: program.header().category,
+        });
         object.global_code = program.global_code().to_vec();
         object.initial_stack_pointer = initial_stack_pointer;
         object.internal[..program.internal_words().len()].copy_from_slice(program.internal_words());
@@ -1568,6 +1668,16 @@ impl VmObject {
     #[must_use]
     pub const fn handle(&self) -> ObjectHandle {
         self.handle
+    }
+
+    /// Parsed global-program identity paired with this VM object.
+    ///
+    /// Synthetic objects built with [`VmObject::new`] return `None`; objects
+    /// built from a validated [`GoolProgram`] always return both the global
+    /// EID and its retail category together.
+    #[must_use]
+    pub const fn program_identity(&self) -> Option<GoolProgramIdentity> {
+        self.program_identity
     }
 
     #[must_use]
@@ -2077,9 +2187,24 @@ impl VmObject {
 
     /// Resolves a tagged animation reference back into bounded local data.
     pub fn animation_data(&self, reference: AnimationReference) -> Result<&[u8], VmError> {
-        self.animation_data
-            .get(reference.offset as usize..)
-            .ok_or(VmError::InvalidAnimationReference(reference.to_word()))
+        let offset = reference.offset as usize;
+        if offset >= self.animation_data.len() {
+            return Err(VmError::InvalidAnimationReference(reference.to_word()));
+        }
+        Ok(&self.animation_data[offset..])
+    }
+
+    /// Current checked byte reference into the owning global GOOL animation
+    /// item. Zero is retail's null animation pointer.
+    pub fn animation_reference(&self) -> Result<Option<AnimationReference>, VmError> {
+        let word = self.register(process_register::ANIMATION_SEQUENCE)?;
+        if word == 0 {
+            return Ok(None);
+        }
+        let reference =
+            AnimationReference::from_word(word).ok_or(VmError::InvalidAnimationReference(word))?;
+        let _validated_data = self.animation_data(reference)?;
+        Ok(Some(reference))
     }
 
     #[must_use]
@@ -2226,6 +2351,8 @@ pub struct Machine {
     // deterministic machine state rather than hidden Rust statics.
     solid_trans3: [i32; 3],
     solid_trans4: [i32; 3],
+    solid_frame_bounds: FrameBounds<ObjectHandle>,
+    camera_translation: [i32; 3],
     paging_page_capacity: u32,
     entry_pages: BTreeMap<Eid, PageIndex>,
     paging_page_references: BTreeMap<PageIndex, u32>,
@@ -2252,6 +2379,8 @@ impl Machine {
             output_constant_index: 0,
             solid_trans3: [0; 3],
             solid_trans4: [0; 3],
+            solid_frame_bounds: FrameBounds::new(),
+            camera_translation: [0; 3],
             paging_page_capacity: 0,
             entry_pages: BTreeMap::new(),
             paging_page_references: BTreeMap::new(),
@@ -2285,6 +2414,40 @@ impl Machine {
     #[must_use]
     pub const fn frames_elapsed(&self) -> u32 {
         self.frames_elapsed
+    }
+
+    /// Clears the animation-derived AABB snapshots at the start of a frame.
+    /// The retail-sized backing allocation is retained for the next traversal.
+    pub fn clear_frame_bounds(&mut self) {
+        self.solid_frame_bounds.clear();
+    }
+
+    /// Appends one world-space object AABB in host traversal order.
+    ///
+    /// The AABB is a per-frame snapshot. Solid-query eligibility and object
+    /// size remain live VM fields and are read only when the query executes.
+    pub fn register_frame_bound(
+        &mut self,
+        object: ObjectHandle,
+        bound: Bounds3,
+    ) -> Result<(), VmError> {
+        self.object(object)?;
+        self.solid_frame_bounds
+            .push(FrameBound { bound, object })
+            .map_err(|error| match error {
+                FrameBoundsError::CapacityExceeded => VmError::FrameBoundsCapacityExceeded,
+            })
+    }
+
+    /// Returns this frame's AABB snapshots in their exact registration order.
+    #[must_use]
+    pub fn frame_bounds(&self) -> &[FrameBound<ObjectHandle>] {
+        self.solid_frame_bounds.as_slice()
+    }
+
+    /// Supplies the current retail camera translation used by shadow sizing.
+    pub fn set_camera_translation(&mut self, translation: [i32; 3]) {
+        self.camera_translation = translation;
     }
 
     /// Replaces one complete retail pad history snapshot.
@@ -3247,19 +3410,90 @@ impl Machine {
         Ok(None)
     }
 
-    fn potential_solid_bound_candidate<F>(
+    fn find_retail_solid_object_node<F>(
         &self,
+        environment: &RetailSolidEnvironment,
+        translation: [i32; 3],
+        flags: u8,
+        padding: i32,
         predicate: F,
-    ) -> Result<Option<ObjectHandle>, VmError>
+    ) -> Result<(RetailSolidHit, [i32; 3]), VmError>
     where
         F: Fn(u32) -> bool,
     {
-        for (candidate, object) in &self.objects {
-            if predicate(object.register(process_register::STATUS_B)?) {
-                return Ok(Some(*candidate));
+        let original = translation;
+        let (node, mut nearest) = find_retail_solid_node(environment, translation, flags, 0)?;
+        let mut highest_object = None;
+        let mut highest_y = RETAIL_SOLID_INITIAL_Y_MAX;
+
+        for snapshot in &self.solid_frame_bounds {
+            let candidate = self.object(snapshot.object)?;
+            if !predicate(candidate.register(process_register::STATUS_B)?) {
+                continue;
+            }
+            let bound = snapshot.bound;
+            let within_padded_xz = original[0] >= bound.min.x.wrapping_sub(padding)
+                && original[0] <= bound.max.x.wrapping_add(padding)
+                && original[2] >= bound.min.z.wrapping_sub(padding)
+                && original[2] <= bound.max.z.wrapping_add(padding);
+            if !within_padded_xz {
+                continue;
+            }
+            if original[1] >= bound.min.y && original[1] <= bound.max.y {
+                nearest[1] = bound.max.y;
+                return Ok((RetailSolidHit::Object(snapshot.object), nearest));
+            }
+            if bound.max.y > highest_y && original[1] >= bound.max.y {
+                highest_object = Some(snapshot.object);
+                highest_y = bound.max.y;
             }
         }
-        Ok(None)
+
+        if let Some(object) = highest_object
+            && (node.is_none() || highest_y >= nearest[1])
+        {
+            nearest[1] = highest_y;
+            return Ok((RetailSolidHit::Object(object), nearest));
+        }
+        Ok((
+            node.map_or(RetailSolidHit::None, RetailSolidHit::Node),
+            nearest,
+        ))
+    }
+
+    fn apply_retail_shadow_parent_size(
+        &mut self,
+        query: ObjectHandle,
+        parent: ObjectHandle,
+        hit: RetailSolidHit,
+    ) -> Result<(), VmError> {
+        let increment = if self.object(parent)?.state_flags & 0x10 != 0 {
+            0
+        } else {
+            0x18_u32
+        };
+        let size = match hit {
+            RetailSolidHit::None => increment,
+            RetailSolidHit::Node(node) => {
+                let index = usize::from((node & 0x3c00) >> 10);
+                increment.wrapping_add(RETAIL_SIZE_MAP[index] as u32)
+            }
+            RetailSolidHit::Object(candidate) => {
+                let mut candidate_size =
+                    self.object(candidate)?.register(process_register::SIZE)?;
+                let query_y =
+                    self.object(query)?
+                        .register(process_register::TRANSLATION_Y)? as i32;
+                let camera_y = self.camera_translation[1];
+                if query_y > camera_y {
+                    candidate_size =
+                        candidate_size.wrapping_sub((query_y.wrapping_sub(camera_y) >> 12) as u32);
+                }
+                increment.wrapping_add(candidate_size)
+            }
+        };
+        self.object_mut(parent)?
+            .set_register(process_register::SIZE, size)
     }
 
     fn react_solid_surface_suboperation_one(
@@ -3287,51 +3521,36 @@ impl Machine {
             false
         };
 
-        // Crash and its children first run `ZoneFindNearestObjectNode2` on a
-        // throwaway transform. Its status gate is source-certain. The C body
-        // then reads uninitialized `va`/`vb` if any matching frame bound is
-        // active; never recreate that undefined behavior from arbitrary live
-        // object transforms. With no potential candidate, only the octree and
-        // deterministic parent-size side effect remain.
+        // Crash and its direct children first run the alternate retail query
+        // on a throwaway transform. Its ordered AABB scan updates only the
+        // parent's shadow size; suboperation one discards the hit and vector.
         if player_related
             && self.object(handle)?.register(process_register::STATUS_B)? & 0x0400_0000 != 0
         {
-            let (node, _) = find_retail_solid_node(&environment, translation, 1, 0)?;
-            if let Some(candidate) =
-                self.potential_solid_bound_candidate(|status| status & 0x4002_0000 == 0x0002_0000)?
-            {
-                return Err(VmError::UnsupportedSolidObjectBounds(candidate));
-            }
+            let (hit, _) = self.find_retail_solid_object_node(
+                &environment,
+                translation,
+                1,
+                35_000,
+                |status| status & 0x4002_0000 == 0x0002_0000,
+            )?;
             let parent = parent.ok_or(VmError::MissingLink {
                 object: handle,
                 link: 1,
             })?;
-            let increment: u32 = if self.object(parent)?.state_flags & 0x18 != 0 {
-                0
-            } else {
-                0x18
-            };
-            let size = node.map_or(increment, |node| {
-                let index = usize::from((node & 0x3c00) >> 10);
-                increment.wrapping_add(RETAIL_SIZE_MAP[index] as u32)
-            });
-            self.object_mut(parent)?
-                .set_register(process_register::SIZE, size)?;
+            self.apply_retail_shadow_parent_size(handle, parent, hit)?;
         }
 
         // The second query is unconditional, writes its selected Y back into
         // `trans`, and excludes type-three leaves through flag 8. Its result is
         // stored in the overlapping `misc_node` word before either vector
-        // output. Animation-derived object hits still require the ordered
-        // source frame-bound host and remain typed.
-        let (node, nearest) = find_retail_solid_node(&environment, translation, 9, 0)?;
-        if let Some(candidate) =
-            self.potential_solid_bound_candidate(|status| status & 0x0002_0000 != 0)?
-        {
-            return Err(VmError::UnsupportedSolidObjectBounds(candidate));
-        }
+        // output. Object hits use a collision-only checked handle tag.
+        let (hit, nearest) =
+            self.find_retail_solid_object_node(&environment, translation, 9, 20_000, |status| {
+                status & 0x0002_0000 != 0
+            })?;
         self.object_mut(handle)?
-            .set_register(process_register::MISC_VALUE, node.map_or(0, u32::from))?;
+            .set_register(process_register::MISC_VALUE, hit.to_word())?;
         if let Some(reference) = output_reference {
             self.write_storage_span3(reference, self.solid_trans3.map(|value| value as u32))?;
         }
@@ -4248,6 +4467,7 @@ impl Machine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::Vec3;
     use proptest::prelude::*;
 
     const REG0: u16 = 0x0e00;
@@ -4381,6 +4601,34 @@ mod tests {
     }
 
     #[test]
+    fn collision_object_references_validate_alignment_reserved_bits_and_pool_range() {
+        let object = handle((MAX_OBJECTS - 1) as u16);
+        let reference = CollisionObjectReference::new(object);
+        let word = reference.to_word();
+        assert_eq!(
+            word,
+            COLLISION_OBJECT_REFERENCE_TAG
+                | (((MAX_OBJECTS - 1) as u32) << COLLISION_OBJECT_REFERENCE_SHIFT)
+        );
+        assert_eq!(CollisionObjectReference::from_word(word), Some(reference));
+        assert_eq!(reference.object(), object);
+
+        for low_bits in 1..=3 {
+            assert_eq!(CollisionObjectReference::from_word(word | low_bits), None);
+        }
+        assert_eq!(
+            CollisionObjectReference::from_word(COLLISION_OBJECT_REFERENCE_TAG | (96 << 2)),
+            None,
+            "slot 96 is outside the retail object pool"
+        );
+        assert_eq!(
+            CollisionObjectReference::from_word(COLLISION_OBJECT_REFERENCE_TAG | (1 << 9)),
+            None,
+            "bits outside the seven-bit shifted handle are reserved"
+        );
+    }
+
+    #[test]
     fn animation_references_preserve_unaligned_byte_offsets() {
         // Opcode 0x27 forms a `uint8_t *` into animation item five. Unlike
         // code, storage and entry pointers, that source address has no
@@ -4392,6 +4640,38 @@ mod tests {
             Some(reference)
         );
         assert_eq!(reference.offset(), 1);
+    }
+
+    #[test]
+    fn current_animation_reference_is_exact_null_aware_and_bounds_checked() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+        object.bind_animation_data(&[0; 7]);
+        assert_eq!(object.animation_reference(), Ok(None));
+
+        let unaligned = AnimationReference::checked(3, 7).unwrap();
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, unaligned.to_word())
+            .unwrap();
+        assert_eq!(object.animation_reference(), Ok(Some(unaligned)));
+        assert_eq!(object.animation_data(unaligned), Ok(&[0; 4][..]));
+
+        let at_end = AnimationReference::from_word(ANIMATION_REFERENCE_TAG | 7).unwrap();
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, at_end.to_word())
+            .unwrap();
+        assert_eq!(
+            object.animation_reference(),
+            Err(VmError::InvalidAnimationReference(at_end.to_word()))
+        );
+
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, 0x1234_5678)
+            .unwrap();
+        assert_eq!(
+            object.animation_reference(),
+            Err(VmError::InvalidAnimationReference(0x1234_5678))
+        );
     }
 
     #[test]
@@ -5240,6 +5520,233 @@ mod tests {
     }
 
     #[test]
+    fn machine_frame_bound_api_preserves_order_capacity_and_clear_reuse() {
+        let candidate = handle(0);
+        let missing = handle(1);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(candidate, vec![0]).unwrap())
+            .unwrap();
+        let bound = Bounds3 {
+            min: Vec3 { x: 1, y: 2, z: 3 },
+            max: Vec3 { x: 4, y: 5, z: 6 },
+        };
+
+        assert_eq!(
+            machine.register_frame_bound(missing, bound),
+            Err(VmError::UnknownObject(missing))
+        );
+        for _ in 0..crate::object_bounds::MAX_FRAME_BOUNDS {
+            machine.register_frame_bound(candidate, bound).unwrap();
+        }
+        assert_eq!(
+            machine.register_frame_bound(candidate, bound),
+            Err(VmError::FrameBoundsCapacityExceeded)
+        );
+        assert_eq!(
+            machine.frame_bounds().first(),
+            Some(&FrameBound {
+                bound,
+                object: candidate,
+            })
+        );
+
+        machine.clear_frame_bounds();
+        assert!(machine.frame_bounds().is_empty());
+        machine.register_frame_bound(candidate, bound).unwrap();
+        assert_eq!(machine.frame_bounds().len(), 1);
+    }
+
+    #[test]
+    fn ordered_solid_bounds_use_live_status_first_hit_and_inclusive_padding() {
+        let first = handle(1);
+        let second = handle(2);
+        let mut machine = Machine::new(0);
+        for candidate in [first, second] {
+            let mut object = VmObject::new(candidate, vec![0]).unwrap();
+            object
+                .set_register(process_register::STATUS_B, 0x0002_0000)
+                .unwrap();
+            machine.insert_object(object).unwrap();
+        }
+        let first_bound = Bounds3 {
+            min: Vec3 {
+                x: 100_000,
+                y: -10,
+                z: 0,
+            },
+            max: Vec3 {
+                x: 110_000,
+                y: 20,
+                z: 10,
+            },
+        };
+        let second_bound = Bounds3 {
+            min: Vec3 {
+                x: 100_000,
+                y: -10,
+                z: 0,
+            },
+            max: Vec3 {
+                x: 110_000,
+                y: 30,
+                z: 10,
+            },
+        };
+        machine.register_frame_bound(first, first_bound).unwrap();
+        machine.register_frame_bound(second, second_bound).unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], Vec::new());
+        let translation = [80_000, 0, -20_000];
+
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(
+                    &environment,
+                    translation,
+                    9,
+                    20_000,
+                    |status| status & 0x0002_0000 != 0,
+                )
+                .unwrap(),
+            (RetailSolidHit::Object(first), [80_000, 20, -20_000])
+        );
+
+        machine
+            .object_mut(first)
+            .unwrap()
+            .set_register(process_register::STATUS_B, 0)
+            .unwrap();
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(
+                    &environment,
+                    translation,
+                    9,
+                    20_000,
+                    |status| status & 0x0002_0000 != 0,
+                )
+                .unwrap(),
+            (RetailSolidHit::Object(second), [80_000, 30, -20_000]),
+            "the AABB is snapshotted but candidate status remains live"
+        );
+    }
+
+    #[test]
+    fn ordered_solid_bounds_keep_first_highest_tie_and_node_priority() {
+        let low = handle(1);
+        let first_high = handle(2);
+        let tied_high = handle(3);
+        let mut machine = Machine::new(0);
+        for candidate in [low, first_high, tied_high] {
+            let mut object = VmObject::new(candidate, vec![0]).unwrap();
+            object
+                .set_register(process_register::STATUS_B, 0x0002_0000)
+                .unwrap();
+            machine.insert_object(object).unwrap();
+        }
+        for (candidate, maximum_y) in [(low, 100), (first_high, 200), (tied_high, 200)] {
+            machine
+                .register_frame_bound(
+                    candidate,
+                    Bounds3 {
+                        min: Vec3 {
+                            x: -10,
+                            y: 0,
+                            z: -10,
+                        },
+                        max: Vec3 {
+                            x: 10,
+                            y: maximum_y,
+                            z: 10,
+                        },
+                    },
+                )
+                .unwrap();
+        }
+        let empty = RetailSolidEnvironment::new(0, [0; 24], [0; 24], Vec::new());
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(&empty, [0, 300, 0], 9, 20_000, |status| {
+                    status & 0x0002_0000 != 0
+                })
+                .unwrap(),
+            (RetailSolidHit::Object(first_high), [0, 200, 0]),
+            "strictly-greater replacement keeps the first equal-height bound"
+        );
+
+        machine.clear_frame_bounds();
+        machine
+            .register_frame_bound(
+                low,
+                Bounds3 {
+                    min: Vec3 { x: 0, y: 0, z: 0 },
+                    max: Vec3 {
+                        x: 100_000,
+                        y: 100_000,
+                        z: 100_000,
+                    },
+                },
+            )
+            .unwrap();
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [1_000; 3],
+            0x0301,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone]);
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(
+                    &environment,
+                    [25_600, 200_000, 25_600],
+                    9,
+                    20_000,
+                    |status| status & 0x0002_0000 != 0,
+                )
+                .unwrap(),
+            (RetailSolidHit::Node(0x0301), [25_600, 256_000, 25_600]),
+            "a lower object does not override a nearer octree surface"
+        );
+
+        machine.clear_frame_bounds();
+        machine
+            .register_frame_bound(
+                low,
+                Bounds3 {
+                    // Inverted Y can result from retail's signed scale path.
+                    // It avoids the direct-overlap branch while exercising
+                    // the exact `highest >= node_y` override tie.
+                    min: Vec3 {
+                        x: 0,
+                        y: 300_000,
+                        z: 0,
+                    },
+                    max: Vec3 {
+                        x: 100_000,
+                        y: 256_000,
+                        z: 100_000,
+                    },
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(
+                    &environment,
+                    [25_600, 256_000, 25_600],
+                    9,
+                    20_000,
+                    |status| status & 0x0002_0000 != 0,
+                )
+                .unwrap(),
+            (RetailSolidHit::Object(low), [25_600, 256_000, 25_600])
+        );
+    }
+
+    #[test]
     fn solid_suboperation_one_reuses_static_trans3_and_writes_nearest_node() {
         let child = handle(0);
         let parent = handle(1);
@@ -5327,7 +5834,8 @@ mod tests {
                 .object(parent)
                 .unwrap()
                 .register(process_register::SIZE),
-            Ok((-40_i32) as u32)
+            Ok((-40_i32) as u32),
+            "size-map selector three is -64 plus the default 0x18 increment"
         );
         assert_eq!(
             machine
@@ -5339,7 +5847,7 @@ mod tests {
     }
 
     #[test]
-    fn solid_suboperation_one_rejects_active_undefined_shadow_bounds() {
+    fn solid_suboperation_one_ignores_live_objects_without_frame_snapshots() {
         let child = handle(0);
         let parent = handle(1);
         let candidate = handle(2);
@@ -5372,16 +5880,171 @@ mod tests {
         machine.insert_object(parent_object).unwrap();
         machine.insert_object(candidate_object).unwrap();
         machine.insert_object(child_object).unwrap();
-        assert_eq!(
-            machine.run(child, 1),
-            Err(VmError::UnsupportedSolidObjectBounds(candidate))
-        );
+        machine.run(child, 1).unwrap();
         assert_eq!(
             machine
                 .object(parent)
                 .unwrap()
                 .register(process_register::SIZE),
-            Ok(0)
+            Ok(0x18),
+            "a live status bit alone does not fabricate a frame AABB"
+        );
+        assert_eq!(
+            machine
+                .object(child)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0x0301)
+        );
+    }
+
+    #[test]
+    fn solid_suboperation_one_uses_both_retail_paddings_and_live_shadow_size() {
+        let child = handle(0);
+        let parent = handle(1);
+        let shadow_candidate = handle(2);
+        let floor_candidate = handle(3);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], Vec::new());
+        let translation = [65_000, 100_000, 0];
+
+        let mut child_object = VmObject::new(child, vec![0x8e06_de26]).unwrap();
+        child_object
+            .set_register(process_register::STATUS_B, 0x0400_0000)
+            .unwrap();
+        child_object.set_process_vector(0, translation).unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.bind_retail_solid_environment(environment);
+
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object.set_main_player_identity(true);
+        parent_object
+            .set_register(process_register::STATE_FLAGS, 0x08)
+            .unwrap();
+
+        let mut shadow_object = VmObject::new(shadow_candidate, vec![0]).unwrap();
+        shadow_object
+            .set_register(process_register::STATUS_B, 0x0002_0000)
+            .unwrap();
+        shadow_object
+            .set_register(process_register::SIZE, 1)
+            .unwrap();
+        let mut floor_object = VmObject::new(floor_candidate, vec![0]).unwrap();
+        floor_object
+            .set_register(process_register::STATUS_B, 0x0002_0000)
+            .unwrap();
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(shadow_object).unwrap();
+        machine.insert_object(floor_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        machine
+            .register_frame_bound(
+                shadow_candidate,
+                Bounds3 {
+                    min: Vec3 {
+                        x: 100_000,
+                        y: 90_000,
+                        z: -1,
+                    },
+                    max: Vec3 {
+                        x: 110_000,
+                        y: 110_000,
+                        z: 1,
+                    },
+                },
+            )
+            .unwrap();
+        machine
+            .register_frame_bound(
+                floor_candidate,
+                Bounds3 {
+                    min: Vec3 {
+                        x: 80_000,
+                        y: 80_000,
+                        z: -1,
+                    },
+                    max: Vec3 {
+                        x: 90_000,
+                        y: 120_000,
+                        z: 1,
+                    },
+                },
+            )
+            .unwrap();
+        // Size is intentionally changed after the AABB snapshot: helper two
+        // must read this process field at query time.
+        machine
+            .object_mut(shadow_candidate)
+            .unwrap()
+            .set_register(process_register::SIZE, 100)
+            .unwrap();
+        machine.set_camera_translation([0, 59_040, 0]);
+        machine.run(child, 1).unwrap();
+
+        assert_eq!(
+            machine
+                .object(parent)
+                .unwrap()
+                .register(process_register::SIZE),
+            Ok(114),
+            "35k padding selects size 100, subtracts 10 camera units, and adds 0x18"
+        );
+        let misc = machine
+            .object(child)
+            .unwrap()
+            .register(process_register::MISC_VALUE)
+            .unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(misc),
+            Some(CollisionObjectReference::new(floor_candidate)),
+            "20k padding skips the first AABB and selects the second"
+        );
+        assert_eq!(
+            machine.object(child).unwrap().process_vector(5),
+            Ok([65_000, 120_000, 0])
+        );
+
+        machine.object_mut(child).unwrap().restart(0).unwrap();
+        machine
+            .object_mut(parent)
+            .unwrap()
+            .set_register(process_register::STATE_FLAGS, 0x10)
+            .unwrap();
+        machine.run(child, 1).unwrap();
+        assert_eq!(
+            machine
+                .object(parent)
+                .unwrap()
+                .register(process_register::SIZE),
+            Ok(90),
+            "state flag 0x10 alone suppresses the 0x18 parent increment"
+        );
+
+        machine.object_mut(child).unwrap().restart(0).unwrap();
+        machine
+            .object_mut(parent)
+            .unwrap()
+            .set_register(process_register::STATE_FLAGS, 0x08)
+            .unwrap();
+        machine
+            .object_mut(shadow_candidate)
+            .unwrap()
+            .set_register(process_register::STATUS_B, 0x4002_0000)
+            .unwrap();
+        machine
+            .object_mut(floor_candidate)
+            .unwrap()
+            .set_register(process_register::STATUS_B, 0)
+            .unwrap();
+        machine.run(child, 1).unwrap();
+        assert_eq!(
+            machine
+                .object(parent)
+                .unwrap()
+                .register(process_register::SIZE),
+            Ok(0x18),
+            "helper two excludes candidates carrying status bit 0x40000000"
         );
     }
 

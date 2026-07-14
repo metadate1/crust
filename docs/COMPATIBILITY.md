@@ -33,10 +33,13 @@ gameplay path.
   level complete, intro, and ending—create none.
 - The NSF program host binds initial and requested GOOL states, synchronously applies characterized
   child-spawn effects, maintains typed arena/VM links, and advances the implemented state-change
-  and animation-select/wait path using frame/draw counters. Initial and global-call frames share the
-  bounded process/register array at the parsed `init_sp`, and state links consult the validated
-  target descriptor flags. Rebind runs captured once and target transition blocks synchronously,
-  including nested calls/returns and hosted spawns. Checked aligned code/storage/entry references,
+  and animation-select/wait path using frame/draw counters. Animation host effects `0x83` and `0x84`
+  synchronously refresh the object's persistent local bound before execution continues; `0x83`
+  applies the status-B `0x18` gate and native range/force test, while `0x84` is unconditional.
+  Initial and global-call frames share the bounded process/register array at the parsed `init_sp`,
+  and state links consult the validated target descriptor flags. Rebind runs captured once and
+  target transition blocks synchronously, including nested calls/returns and hosted spawns. Checked
+  aligned code/storage/entry references,
   paging cases one through six, every `0x85` transform-vector selector and every `0x8e` solid/color
   selector are active, including their source-defined no-op cases. `SZON` performs the exact reverse
   current-header neighbor scan with inclusive wrapped Q24.8 rectangles and updates the linked
@@ -63,9 +66,9 @@ gameplay path.
   animate bits (`0x22_3ffc`). Each screen swap tears down old objects and performs the source
   flag-two `LevelUpdate` before spawning the next image-backed MDAT entities. The MDAT EID remains
   descriptor provenance, while each spawned object's zone, origin and colors come from the current
-  ZDAT exactly like the source's type-17 rewrite, keeping it in current-neighbor TERM scope. Once an
-  authored arena is presenting without a runtime error, diagnostic DOM overlays and fallback menus
-  are hidden from the 4:3 canvas while status remains in the external monitor panel.
+  ZDAT exactly like the source's type-17 rewrite, keeping it in current-neighbor TERM scope. An
+  authored arena owns the 4:3 canvas. Before it is available the browser presents only loading/error
+  diagnostics and external status; it does not advance a synthetic title, menu or gameplay flow.
 - Camera `LevelUpdate` effects drive a source-ordered zone lifecycle. Departed active zones receive
   TERM in postorder, migrated objects survive, released subtrees clear typed VM/link/audio state,
   old load lists close before new lists open, newly adjacent zones activate, and their objects scan
@@ -80,8 +83,12 @@ gameplay path.
   tree.
 - Pair-scoped GOOL item-five descriptors and TGEO/SVTX/CVTX frames feed the live renderer. Current
   3D vertex objects use retail fixed-point transforms, lighting, culling and ordering and share one
-  resident load-list-filtered TPAG cache/manifest with the world. Eligible collidable animations
-  also register exact-preorder transformed bounds in the 96-entry frame arena before execution.
+  resident load-list-filtered TPAG cache/manifest with the world. Collidable animations populate
+  the 96-entry frame arena on the native Crash-stamp schedule: matching-stamp objects register before
+  GOOL/physics, while objects visited before Crash register after physics only inside the inclusive
+  `±0x7d000` X/Z and `±0xaf000` Y window; rejected late objects set status-A invalid bit `0x8000`.
+  The same-stamp tail also applies Crash's asymmetric accepted/priority collider links, hotspot
+  `0x1000`, and target-collider clearing on a miss.
   Type-two sprites, type-five fragments and status-B 2D CVTX use the source ZXY sprite transform.
   Their signed half-size calculation preserves the source MIPS `SLLV`/`SRAV` low-five-bit shift
   semantics and wrapping 32-bit intermediate before checked GTE range rejection. The legal
@@ -104,8 +111,9 @@ gameplay path.
   CPU builder also reuses the
   active zone/path's parsed ZDAT/SLST/WGEO graph, resident TPAG pages and decoded texture regions;
   zone/path changes rebuild that graph and destination-pair mounts create a fresh cache owner.
-- Rust title/publisher sequencing, main menu, options, password, load, map, intro, ending,
-  completion, bonus, boss, game-over, and direct-boot state models.
+- Mounted retail GOOL owns publisher/title, menu, options, password/load, map, intro, ending,
+  completion, bonus, boss and game-over progression. The Rust browser flow state mirrors mounted
+  presentation and supports direct boot; it does not independently simulate those authored flows.
 - Cooperative 30 Hz loop, keyboard, standard-gamepad polling, complete touch pad, pause, mute,
   fullscreen, responsive presentation, WebGL2 output, and WebAudio scheduling. Each simulation
   tick installs the complete retail `tapped`/`held` history consumed by GOOL opcode `0x1a`.
@@ -138,7 +146,7 @@ gameplay path.
   samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
   WebAudio. ZDAT MIDI references resolve mounted type-13 MIDI and type-14 INST entries; decoded VAB
   programs and SEP tracks use the software synth, thirty-tick zone fades and GOOL's secondary-track
-  toggle without retaining proprietary bytes.
+  toggle without retaining proprietary bytes. No procedural oscillator fallback is present.
 - Retail `next_lid` writes are consumed at the following 30 Hz boundary before spawn/camera/GOOL.
   The runtime broadcasts `LEVEL_END` to all eight roots in child-before-parent order, retains the
   requested destination unless a final `-2` selects the saved level, carries process-lifetime
@@ -171,11 +179,12 @@ gameplay path.
   checked paging metadata is synchronous and does not claim retail asynchronous I/O timing.
   Unsupported execution
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
-  The legally local 300-frame N. Sanity trace now crosses the former ShadC executable 29/state one
-  animation-bound boundary using validated frame bounds instead of the source branch's
-  uninitialized C locals. All `0x85` and `0x8e` selectors now have checked source-defined behavior;
-  this does not imply that the late post-physics animation-stamp refresh, broader object behavior,
-  dynamic lighting or full level progression is complete.
+  The previously recorded legally local 300-frame N. Sanity trace crossed the former ShadC
+  executable 29/state-one animation-bound boundary using validated frame bounds instead of the
+  source branch's uninitialized C locals. The current Crash-stamp pre/post-physics schedule and
+  same-stamp collision tail require a fresh corpus run before that result is claimed for this change
+  set. All `0x85` and `0x8e` selectors have checked source-defined behavior; broader object behavior,
+  collision response, dynamic lighting and full level progression remain incomplete.
 - Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
   monotonic object incarnation. If a TERM handler kills the active requester and synchronously
   reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or
@@ -223,15 +232,17 @@ gameplay path.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
-  used. A strict legally-local 18,000-frame authored-input trace moves the camera and Crash through
-  the complete N. Sanity `a1_9Z` through `b7_9Z` chain and emits the authored Level Complete
-  destination `0x2d` at frame 1,995 with no VM errors, faults, restart or terminal fall. This is one
-  certified deterministic authored level completion, not a full-playthrough claim: late bound
-  refresh, broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending
-  behavior remain open. Hog Wild's checked 360-frame idle trace
-  now delivers the
-  authored fall-kill event to state 22, advances `fade_counter` through the native `-2`/`-1`
-  sentinels, emits `LoadState`, and completes two same-level restarts with no VM error, faulted
+  used. A previously recorded strict legally-local 18,000-frame authored-input trace moved the
+  camera and Crash through the complete N. Sanity `a1_9Z` through `b7_9Z` chain and emitted the
+  authored Level Complete destination `0x2d` at frame 1,995 with no VM errors, faults, restart or
+  terminal fall. The revised schedule has now been rerun: it clears the newly exposed static and
+  object hazards through `4b_9Z`, reaches camera `b5_9Z` path four with Crash already in `b6_9Z`,
+  and remains there without a restart, fall, VM error or fault. It does not emit Level Complete;
+  straight/left jump variants remain in b5 and the right variant falls. Broader collision and later
+  Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain open. Hog Wild's previously
+  recorded checked 360-frame idle trace delivered the authored fall-kill event to state 22,
+  advanced `fade_counter` through the native `-2`/`-1` sentinels, emitted `LoadState`, and completed
+  two same-level restarts with no VM error, faulted
   object, checked issue or retained terminal fall. This characterizes the idle death/restart loop;
   it does not establish steering, enemy, bonus or level-completion parity. Collision-generated
   ceiling, outside-zone, water and final-surface events now dispatch synchronously at their native
@@ -240,9 +251,9 @@ gameplay path.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
 - With a complete retail title stream, password input and validation belong to the mounted
-  `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. The
-  data-independent fallback UI still uses a local deterministic progression rule when that authored
-  graph cannot be spawned, and is not presented as retail password parity. Browser card/resume
+  `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
+  authored graph cannot be spawned, the browser remains on its loading/error presentation rather
+  than applying a data-independent password rule. Browser card/resume
   storage and signed misc-15 operations are wired to the exact 15-slot,
   128-byte virtual-card model, including rescan/format/save/load handshakes and synchronous GOOL
   result globals. These paths and damaged-card behavior are heavily model-tested, but a complete

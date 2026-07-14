@@ -21,14 +21,15 @@ use crate::{
     camera::RetailCameraLocation,
     card::{CardPublishedState, SaveData},
     gool::{
-        AnimationReference, AudioHostRequest, AudioHostResponse, COLOR_COUNT,
-        CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL, CardHostRequest, CollisionObjectReference,
-        EventDispatchOutcome, EventStateChange, Execution, GoolProgramIdentity, HaltReason,
-        INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine, ModelVertexSource, NEXT_DISPLAY_GLOBAL,
-        NearestObjectCandidate, ObjectHandle as VmObjectHandle, RETAIL_LEVEL_SPAWN_CAPACITY,
-        RetailPadSnapshot, RetailSolidEnvironment, RetailSolidZone, RetailTransform,
-        RetailTransformVectorsCamera, SendEventRequest, SendEventTarget, VmEffect, VmError,
-        VmHostRequest, VmObject, VmStateProgram, process_register,
+        AnimationLocalBoundRefresh, AnimationReference, AudioHostRequest, AudioHostResponse,
+        COLOR_COUNT, CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL, CardHostRequest,
+        CollisionObjectReference, EventDispatchOutcome, EventStateChange, Execution,
+        GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
+        ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
+        ObjectHandle as VmObjectHandle, RETAIL_LEVEL_SPAWN_CAPACITY, RetailPadSnapshot,
+        RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
+        SendEventRequest, SendEventTarget, VmEffect, VmError, VmHostRequest, VmObject,
+        VmStateProgram, process_register,
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
@@ -37,7 +38,8 @@ use crate::{
         SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent, ZONE_OBJECT_ROOT,
     },
     object_bounds::{
-        AnimationBoundSource, BoundTransform, calculate_local_bound, calculate_world_bound,
+        AnimationBoundSource, BoundTransform, bounds_intersect_asymmetric, calculate_local_bound,
+        calculate_world_bound,
     },
     retail_solid_motion::{
         HOG_LAND_OFFSET, STANDARD_LAND_OFFSET, SolidEffect, SolidEventReason, SolidEventTarget,
@@ -51,6 +53,14 @@ use crate::{
 const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
 const COLLIDABLE_STATUS_B: u32 = 0x10;
 const FIRST_FRAME_STATUS_A: u32 = 0x20;
+const LOCAL_BOUND_INVALID_STATUS_A: u32 = 0x8000;
+const LOCAL_BOUND_REFRESH_STATUS_B: u32 = 0x18;
+const FORCE_LOCAL_BOUND_REFRESH_STATUS_B: u32 = 0x8000_0000;
+const LATE_BOUND_RANGE: Vec3 = Vec3 {
+    x: 0x7d000,
+    y: 0xaf000,
+    z: 0x7d000,
+};
 const STALL_STATUS_B: u32 = 0x1000_0000;
 const FORCE_UPDATE_STATUS_B: u32 = 0x0200_0000;
 const MENU_TEXT_STATE_FLAG: u32 = 0x0002_0000;
@@ -445,12 +455,12 @@ pub trait ProgramHost {
         Ok(Vec::new())
     }
 
-    /// Optionally resolves the current item-five animation and frame to the
-    /// fields needed by retail local/world AABB calculation.
-    ///
-    /// The runtime calls this only for a live object whose `status_b & 0x10`
-    /// collidable gate is armed and whose animation reference is non-null.
-    /// Authored hosts may omit the callback; no synthetic bound is invented.
+    /// Resolves the current item-five animation/frame for persistent local-
+    /// bound refresh or frame-bound registration. Frame registration uses the
+    /// collidable gate. Opcode `0x83` requests a local refresh when
+    /// `status_b & 0x18` passes its range/force rules; `0x84` requests one
+    /// unconditionally when an animation reference exists. Authored hosts may
+    /// omit the callback; no synthetic bound is invented.
     fn animation_bound_source(
         &mut self,
         _binding: AnimationBoundBinding,
@@ -3360,11 +3370,10 @@ impl RetailRuntime {
     /// aware preorder walk, children added by a parent are visited later in
     /// this same frame.
     ///
-    /// Animation bounds are currently captured immediately before each
-    /// collidable object's interpreter invocation. The source can instead
-    /// defer a second bound calculation until after physics when its private
-    /// animation stamp differs from the render stamp; those display/stamp and
-    /// late-physics branches are not yet represented by this host boundary.
+    /// Collidable animation bounds follow the source's Crash-stamp ordering.
+    /// Objects whose animation stamp matches Crash publish before GOOL and
+    /// physics; an object visited before Crash instead publishes after physics
+    /// when it remains inside the exact retail proximity box.
     pub fn run_frame<H: ProgramHost>(
         &mut self,
         host: &mut H,
@@ -3517,7 +3526,11 @@ impl RetailRuntime {
                     if let Some(execution) = stalled {
                         Ok(execution)
                     } else {
-                        self.register_animation_bound(object, host).and_then(|()| {
+                        let pre_bound = self.animation_stamp_matches_main(object)?;
+                        if pre_bound {
+                            self.register_animation_bound(object, host)?;
+                        }
+                        (|| {
                             let execution = self.run_object(
                                 object,
                                 host,
@@ -3534,7 +3547,7 @@ impl RetailRuntime {
                                 )?;
                             }
                             Ok(execution)
-                        })
+                        })()
                     }
                 })
             } else {
@@ -3687,7 +3700,7 @@ impl RetailRuntime {
         let mut hook_error = None;
         let mut candidate_generations = BTreeMap::new();
         let mut candidate_generations_captured = false;
-        {
+        let register_collision_bound = {
             let Self {
                 arena,
                 machine,
@@ -3702,7 +3715,7 @@ impl RetailRuntime {
                 transition_zone_context,
                 ..
             } = self;
-            let _physics = machine
+            let physics = machine
                 .run_retail_object_physics_with_solid_event_handler(
                     object.vm,
                     |machine, _moving_vm, candidates, effect| {
@@ -3843,11 +3856,23 @@ impl RetailRuntime {
                     },
                 )
                 .map_err(RuntimeError::Vm)?;
-        }
+            physics.register_collision_bound
+        };
         if let Some(error) = hook_error {
             return Err(error);
         }
-        if !self.handles.is_live_pair(object) || self.machine.level_restart_requested() {
+        if !self.handles.is_live_pair(object) {
+            return Ok(());
+        }
+        if self.machine.level_restart_requested() {
+            // `GoolObjectPhysics` finishes its collidable stamp/range tail
+            // before the outer update observes a synchronous LoadState.
+            // The destination mount does not begin until the frame returns,
+            // so the still-live object must append/invalidate its late bound
+            // first even though the remaining update phases are skipped.
+            if register_collision_bound {
+                self.register_late_animation_bound(object, host)?;
+            }
             return Ok(());
         }
         if let Some(zone) = self
@@ -3875,6 +3900,9 @@ impl RetailRuntime {
                     .map_err(RuntimeError::Vm)?
                     .refresh_retail_object_zone_environment(environment);
             }
+        }
+        if register_collision_bound {
+            self.register_late_animation_bound(object, host)?;
         }
         let vm_object = self
             .machine
@@ -3993,11 +4021,100 @@ impl RetailRuntime {
         Ok(zone)
     }
 
-    fn register_animation_bound<H: ProgramHost>(
+    fn live_main_object<E>(&self) -> Result<Option<RuntimeObjectHandle>, RuntimeError<E>> {
+        let Some(arena) = self.arena.main_object() else {
+            return Ok(None);
+        };
+        let object = self
+            .handles
+            .for_arena(arena)
+            .filter(|object| self.handles.is_live_pair(*object))
+            .ok_or(RuntimeError::UnknownArenaObject(arena))?;
+        self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+        Ok(Some(object))
+    }
+
+    fn animation_stamp_matches_main<E>(
+        &self,
+        object: RuntimeObjectHandle,
+    ) -> Result<bool, RuntimeError<E>> {
+        let Some(main) = self.live_main_object()? else {
+            return Ok(false);
+        };
+        let object_stamp = self
+            .machine
+            .object(object.vm)
+            .map_err(RuntimeError::Vm)?
+            .register(process_register::ANIMATION_STAMP)
+            .map_err(RuntimeError::Vm)?;
+        let main_stamp = self
+            .machine
+            .object(main.vm)
+            .map_err(RuntimeError::Vm)?
+            .register(process_register::ANIMATION_STAMP)
+            .map_err(RuntimeError::Vm)?;
+        Ok(object_stamp == main_stamp)
+    }
+
+    fn register_late_animation_bound<H: ProgramHost>(
         &mut self,
         object: RuntimeObjectHandle,
         host: &mut H,
     ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(main) = self.live_main_object()? else {
+            return Ok(());
+        };
+        let (object_stamp, object_translation) = {
+            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+            (
+                vm_object
+                    .register(process_register::ANIMATION_STAMP)
+                    .map_err(RuntimeError::Vm)?,
+                vm_object
+                    .retail_transform()
+                    .map_err(RuntimeError::Vm)?
+                    .translation,
+            )
+        };
+        let (main_stamp, main_translation) = {
+            let vm_object = self.machine.object(main.vm).map_err(RuntimeError::Vm)?;
+            (
+                vm_object
+                    .register(process_register::ANIMATION_STAMP)
+                    .map_err(RuntimeError::Vm)?,
+                vm_object
+                    .retail_transform()
+                    .map_err(RuntimeError::Vm)?
+                    .translation,
+            )
+        };
+        if object_stamp == main_stamp {
+            return Ok(());
+        }
+        if translation_outside_bound_range(object_translation, main_translation, LATE_BOUND_RANGE) {
+            let vm_object = self
+                .machine
+                .object_mut(object.vm)
+                .map_err(RuntimeError::Vm)?;
+            let status_a = vm_object
+                .register(process_register::STATUS_A)
+                .map_err(RuntimeError::Vm)?;
+            vm_object
+                .set_register(
+                    process_register::STATUS_A,
+                    status_a | LOCAL_BOUND_INVALID_STATUS_A,
+                )
+                .map_err(RuntimeError::Vm)?;
+            return Ok(());
+        }
+        self.register_animation_bound(object, host).map(|_| ())
+    }
+
+    fn register_animation_bound<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        host: &mut H,
+    ) -> Result<bool, RuntimeError<H::Error>> {
         let (zone, executable) = {
             let spawned = self
                 .arena
@@ -4005,21 +4122,25 @@ impl RetailRuntime {
                 .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
             (spawned.zone(), spawned.origin().executable())
         };
-        let (reference, frame_index, transform) = {
+        let (reference, frame_index, transform, status_a, cached_local_bound) = {
             let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
             let status_b = vm_object
                 .register(process_register::STATUS_B)
                 .map_err(RuntimeError::Vm)?;
             if status_b & COLLIDABLE_STATUS_B == 0 {
-                return Ok(());
+                return Ok(false);
             }
             let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
-                return Ok(());
+                return Ok(false);
             };
             (
                 reference,
                 vm_object.animation_frame() >> 8,
                 vm_object.retail_transform().map_err(RuntimeError::Vm)?,
+                vm_object
+                    .register(process_register::STATUS_A)
+                    .map_err(RuntimeError::Vm)?,
+                vm_object.retail_local_bound(),
             )
         };
         let Some(source) = host
@@ -4032,7 +4153,7 @@ impl RetailRuntime {
             })
             .map_err(RuntimeError::Program)?
         else {
-            return Ok(());
+            return Ok(false);
         };
 
         let scale = Vec3 {
@@ -4053,15 +4174,71 @@ impl RetailRuntime {
             },
             scale,
         };
-        let local_bound = calculate_local_bound(source, scale, object.arena.is_dedicated_main());
+        let local_bound = if status_a & LOCAL_BOUND_INVALID_STATUS_A != 0 {
+            calculate_local_bound(source, scale, object.arena.is_dedicated_main())
+        } else {
+            cached_local_bound
+        };
         let world_bound = calculate_world_bound(local_bound, source, bound_transform);
-        self.machine
-            .object_mut(object.vm)
-            .map_err(RuntimeError::Vm)?
-            .set_retail_local_bound(local_bound);
+        if status_a & LOCAL_BOUND_INVALID_STATUS_A != 0 {
+            self.machine
+                .object_mut(object.vm)
+                .map_err(RuntimeError::Vm)?
+                .set_retail_local_bound(local_bound);
+        }
         self.machine
             .register_frame_bound(object.vm, world_bound)
-            .map_err(RuntimeError::Vm)
+            .map_err(RuntimeError::Vm)?;
+        let vm_object = self
+            .machine
+            .object_mut(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        let status_a = vm_object
+            .register(process_register::STATUS_A)
+            .map_err(RuntimeError::Vm)?;
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a & !LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .map_err(RuntimeError::Vm)?;
+        if let Some(main) = self.live_main_object()? {
+            let (object_stamp, main_stamp, crash_bound) = {
+                let object_vm = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+                let main_vm = self.machine.object(main.vm).map_err(RuntimeError::Vm)?;
+                let main_translation = main_vm
+                    .retail_transform()
+                    .map_err(RuntimeError::Vm)?
+                    .translation;
+                (
+                    object_vm
+                        .register(process_register::ANIMATION_STAMP)
+                        .map_err(RuntimeError::Vm)?,
+                    main_vm
+                        .register(process_register::ANIMATION_STAMP)
+                        .map_err(RuntimeError::Vm)?,
+                    main_vm.retail_local_bound().translated(Vec3 {
+                        x: main_translation[0],
+                        y: main_translation[1],
+                        z: main_translation[2],
+                    }),
+                )
+            };
+            if object_stamp == main_stamp {
+                if bounds_intersect_asymmetric(crash_bound, world_bound) {
+                    self.machine
+                        .collide_retail_objects(object.vm, world_bound, main.vm, crash_bound)
+                        .map_err(RuntimeError::Vm)?;
+                } else {
+                    self.machine
+                        .object_mut(object.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .set_link(6, None)
+                        .map_err(RuntimeError::Vm)?;
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn bind_entity_with_native_reclaim<H: ProgramHost>(
@@ -5622,6 +5799,107 @@ impl RetailRuntime {
         }
     }
 
+    fn refresh_animation_local_bound_parts<H: ProgramHost>(
+        arena: &ObjectArena,
+        handles: &HandleMap,
+        machine: &mut Machine,
+        host: &mut H,
+        vm: VmObjectHandle,
+        refresh: AnimationLocalBoundRefresh,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let object = handles
+            .for_vm(vm)
+            .ok_or(RuntimeError::UnknownVmObject(vm))?;
+        Self::validate_runtime_object(arena, handles, machine, object)?;
+        let spawned = arena
+            .get(object.arena)
+            .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+        let status_b = machine
+            .object(vm)
+            .map_err(RuntimeError::Vm)?
+            .register(process_register::STATUS_B)
+            .map_err(RuntimeError::Vm)?;
+
+        if refresh == AnimationLocalBoundRefresh::Conditional {
+            if status_b & LOCAL_BOUND_REFRESH_STATUS_B == 0 {
+                return Ok(());
+            }
+            let Some(main_arena) = arena.main_object() else {
+                return Ok(());
+            };
+            let main = handles
+                .for_arena(main_arena)
+                .filter(|main| handles.is_live_pair(*main))
+                .ok_or(RuntimeError::UnknownArenaObject(main_arena))?;
+            let object_translation = machine
+                .object(vm)
+                .map_err(RuntimeError::Vm)?
+                .retail_transform()
+                .map_err(RuntimeError::Vm)?
+                .translation;
+            let main_translation = machine
+                .object(main.vm)
+                .map_err(RuntimeError::Vm)?
+                .retail_transform()
+                .map_err(RuntimeError::Vm)?
+                .translation;
+            if translation_outside_bound_range(
+                object_translation,
+                main_translation,
+                LATE_BOUND_RANGE,
+            ) {
+                let vm_object = machine.object_mut(vm).map_err(RuntimeError::Vm)?;
+                let status_a = vm_object
+                    .register(process_register::STATUS_A)
+                    .map_err(RuntimeError::Vm)?;
+                vm_object
+                    .set_register(
+                        process_register::STATUS_A,
+                        status_a | LOCAL_BOUND_INVALID_STATUS_A,
+                    )
+                    .map_err(RuntimeError::Vm)?;
+                if status_b & FORCE_LOCAL_BOUND_REFRESH_STATUS_B == 0 {
+                    return Ok(());
+                }
+            }
+        }
+
+        let (reference, frame_index, transform) = {
+            let vm_object = machine.object(vm).map_err(RuntimeError::Vm)?;
+            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+                return Ok(());
+            };
+            (
+                reference,
+                vm_object.animation_frame() >> 8,
+                vm_object.retail_transform().map_err(RuntimeError::Vm)?,
+            )
+        };
+        let Some(source) = host
+            .animation_bound_source(AnimationBoundBinding {
+                object,
+                zone: spawned.zone(),
+                executable: spawned.origin().executable(),
+                reference,
+                frame_index,
+            })
+            .map_err(RuntimeError::Program)?
+        else {
+            return Ok(());
+        };
+        let scale = Vec3 {
+            x: transform.scale[0],
+            y: transform.scale[1],
+            z: transform.scale[2],
+        };
+        let local_bound = calculate_local_bound(source, scale, object.arena.is_dedicated_main());
+        machine
+            .object_mut(vm)
+            .map_err(RuntimeError::Vm)?
+            .set_retail_local_bound(local_bound);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn apply_host_effect<H: ProgramHost>(
         arena: &mut ObjectArena,
@@ -5638,6 +5916,22 @@ impl RetailRuntime {
         effect: &VmEffect,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
+        if let VmEffect::AnimationFrameChanged {
+            object,
+            local_bound_refresh,
+            ..
+        } = effect
+        {
+            return Self::refresh_animation_local_bound_parts(
+                arena,
+                handles,
+                machine,
+                host,
+                *object,
+                *local_bound_refresh,
+            );
+        }
+
         if let VmEffect::ResetLevelGlobals { object } = effect {
             let object = handles
                 .for_vm(*object)
@@ -6434,6 +6728,16 @@ impl RetailRuntime {
 fn wrapping_frame_stamp(frame_index: u64) -> u32 {
     let bytes = frame_index.to_le_bytes();
     u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+}
+
+fn translation_outside_bound_range(first: [i32; 3], second: [i32; 3], range: Vec3) -> bool {
+    [range.x, range.y, range.z]
+        .into_iter()
+        .enumerate()
+        .any(|(axis, limit)| {
+            let delta = i64::from(first[axis]) - i64::from(second[axis]);
+            delta > i64::from(limit) || delta < -i64::from(limit)
+        })
 }
 
 #[cfg(test)]
@@ -9910,6 +10214,13 @@ mod tests {
         vm_object
             .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B)
             .unwrap();
+        let status_a = vm_object.register(process_register::STATUS_A).unwrap();
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a | LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .unwrap();
         vm_object.set_retail_transform(transform).unwrap();
     }
 
@@ -10388,6 +10699,705 @@ mod tests {
     }
 
     #[test]
+    fn late_bound_range_is_inclusive_and_uses_non_overflowing_deltas() {
+        assert!(!translation_outside_bound_range(
+            [0x7d000, -0xaf000, 0x7d000],
+            [0; 3],
+            LATE_BOUND_RANGE,
+        ));
+        assert!(translation_outside_bound_range(
+            [0x7d001, 0, 0],
+            [0; 3],
+            LATE_BOUND_RANGE,
+        ));
+        assert!(translation_outside_bound_range(
+            [0, -0xaf001, 0],
+            [0; 3],
+            LATE_BOUND_RANGE,
+        ));
+        assert!(translation_outside_bound_range(
+            [i32::MAX, 0, 0],
+            [i32::MIN, 0, 0],
+            LATE_BOUND_RANGE,
+        ));
+    }
+
+    #[test]
+    fn animation_frame_opcode_refreshes_only_the_persistent_local_bound() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let _main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        let change_frame = (0x84_u32 << 24) | (1 << 22) | (3 << 16) | (0x0e00_u32 + 70);
+        let mut vm_object = VmObject::new(object.vm, vec![change_frame]).unwrap();
+        vm_object.bind_animation_data(&[0; 16]);
+        vm_object
+            .set_register(process_register::ANIMATION_SEQUENCE, 0xa700_0001)
+            .unwrap();
+        vm_object.set_register(70, 5 << 8).unwrap();
+        vm_object
+            .set_retail_transform(RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        runtime.machine.upsert_object(vm_object).unwrap();
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        let frame = runtime.run_frame(&mut host, 1).unwrap();
+
+        assert!(frame.executions[0].result.is_ok());
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(host.calls[0].object, object);
+        assert_eq!(host.calls[0].frame_index, 5);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_local_bound(),
+            Bounds3 {
+                min: Vec3 {
+                    x: -51_200,
+                    y: -51_200,
+                    z: -51_200,
+                },
+                max: Vec3 {
+                    x: 51_200,
+                    y: 51_200,
+                    z: 51_200,
+                },
+            }
+        );
+        assert!(
+            runtime.machine.frame_bounds().is_empty(),
+            "opcode 0x84 updates obj->bound but does not allocate object_bounds"
+        );
+    }
+
+    #[test]
+    fn packed_animation_opcode_uses_range_and_force_local_bound_gates() {
+        let stale = Bounds3 {
+            min: Vec3 { x: 1, y: 2, z: 3 },
+            max: Vec3 { x: 4, y: 5, z: 6 },
+        };
+        let refreshed = Bounds3 {
+            min: Vec3 {
+                x: -51_200,
+                y: -51_200,
+                z: -51_200,
+            },
+            max: Vec3 {
+                x: 51_200,
+                y: 51_200,
+                z: 51_200,
+            },
+        };
+        for (force, expected_calls, expected_local) in [(false, 0, stale), (true, 1, refreshed)] {
+            let mut runtime = RetailRuntime::new(0);
+            let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+            let _main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+            let change_animation = (0x83_u32 << 24) | (1 << 22) | (1 << 16) | (2 << 7) | 5;
+            let mut vm_object = VmObject::new(object.vm, vec![change_animation]).unwrap();
+            vm_object.bind_animation_data(&[0; 16]);
+            vm_object.set_retail_local_bound(stale);
+            vm_object
+                .set_retail_transform(RetailTransform {
+                    translation: [0x7d001, 0, 0],
+                    rotation_yxz: [0; 3],
+                    scale: [0x1000; 3],
+                })
+                .unwrap();
+            vm_object
+                .set_register(
+                    process_register::STATUS_B,
+                    COLLIDABLE_STATUS_B
+                        | if force {
+                            FORCE_LOCAL_BOUND_REFRESH_STATUS_B
+                        } else {
+                            0
+                        },
+                )
+                .unwrap();
+            runtime.machine.upsert_object(vm_object).unwrap();
+            runtime.frame_index = 7;
+            let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+            runtime.run_frame(&mut host, 1).unwrap();
+
+            assert_eq!(host.calls.len(), expected_calls);
+            assert!(runtime.machine.frame_bounds().is_empty());
+            let vm_object = runtime.machine.object(object.vm).unwrap();
+            assert_eq!(vm_object.retail_local_bound(), expected_local);
+            assert_ne!(
+                vm_object.register(process_register::STATUS_A).unwrap()
+                    & LOCAL_BOUND_INVALID_STATUS_A,
+                0,
+                "OutOfRange sets the invalid bit even when status B forces a local refresh"
+            );
+        }
+    }
+
+    #[test]
+    fn world_bound_reuses_cached_local_volume_until_invalidated() {
+        let cached = Bounds3 {
+            min: Vec3 {
+                x: -10,
+                y: -20,
+                z: -30,
+            },
+            max: Vec3 {
+                x: 40,
+                y: 50,
+                z: 60,
+            },
+        };
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object.set_retail_local_bound(cached);
+        let status_a = vm_object.register(process_register::STATUS_A).unwrap();
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a & !LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .unwrap();
+        runtime.frame_index = 7;
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(process_register::ANIMATION_STAMP),
+            Ok(7)
+        );
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [crate::object_bounds::FrameBound {
+                object: object.vm,
+                bound: Bounds3 {
+                    min: Vec3 {
+                        x: 90,
+                        y: 180,
+                        z: 270,
+                    },
+                    max: Vec3 {
+                        x: 140,
+                        y: 250,
+                        z: 360,
+                    },
+                },
+            }]
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_local_bound(),
+            cached
+        );
+    }
+
+    #[test]
+    fn object_before_main_registers_its_bound_after_physics() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let _main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B | 0x40)
+            .unwrap();
+        vm_object
+            .set_register(process_register::MISC_A_X, 30_720)
+            .unwrap();
+        runtime.frame_index = 7;
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(host.calls[0].object, object);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_transform()
+                .unwrap()
+                .translation,
+            [1_120, 200, 300],
+        );
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [crate::object_bounds::FrameBound {
+                object: object.vm,
+                bound: Bounds3 {
+                    min: Vec3 {
+                        x: -50_080,
+                        y: -51_000,
+                        z: -50_900,
+                    },
+                    max: Vec3 {
+                        x: 52_320,
+                        y: 51_400,
+                        z: 51_500,
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn restart_requested_during_physics_still_runs_the_late_bound_tail() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_register(process_register::ANIMATION_STAMP, 7)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_register(process_register::ANIMATION_STAMP, 6)
+            .unwrap();
+        runtime.machine.request_level_restart();
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+        let mut spawned_children = Vec::new();
+
+        runtime
+            .finish_native_object_update(object, &mut host, &mut spawned_children)
+            .unwrap();
+
+        assert!(runtime.machine.level_restart_requested());
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(host.calls[0].object, object);
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [crate::object_bounds::FrameBound {
+                object: object.vm,
+                bound: Bounds3 {
+                    min: Vec3 {
+                        x: -51_100,
+                        y: -51_000,
+                        z: -50_900,
+                    },
+                    max: Vec3 {
+                        x: 51_300,
+                        y: 51_400,
+                        z: 51_500,
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn object_after_main_registers_its_bound_before_physics() {
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        runtime
+            .arena
+            .reparent_to_root(object.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [100, 200, 300],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B | 0x40)
+            .unwrap();
+        vm_object
+            .set_register(process_register::MISC_A_X, 30_720)
+            .unwrap();
+        runtime.frame_index = 7;
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(process_register::ANIMATION_STAMP),
+            Ok(7),
+        );
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(host.calls[0].object, object);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_transform()
+                .unwrap()
+                .translation,
+            [1_120, 200, 300],
+        );
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [crate::object_bounds::FrameBound {
+                object: object.vm,
+                bound: Bounds3 {
+                    min: Vec3 {
+                        x: -51_100,
+                        y: -51_000,
+                        z: -50_900,
+                    },
+                    max: Vec3 {
+                        x: 51_300,
+                        y: 51_400,
+                        z: 51_500,
+                    },
+                },
+            }]
+        );
+    }
+
+    #[test]
+    fn out_of_range_late_bound_sets_invalid_until_a_bound_succeeds() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let _main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [0x7d001, 0, 0],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        let status_a = vm_object.register(process_register::STATUS_A).unwrap();
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a & !LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .unwrap();
+        runtime.frame_index = 7;
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert!(host.calls.is_empty());
+        assert!(runtime.machine.frame_bounds().is_empty());
+        assert_ne!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .register(process_register::STATUS_A)
+                .unwrap()
+                & LOCAL_BOUND_INVALID_STATUS_A,
+            0,
+        );
+
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_register(process_register::TRANSLATION_X, 0x7d000)
+            .unwrap();
+        runtime.run_frame(&mut host, 1).unwrap();
+
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(host.calls[0].object, object);
+        assert_eq!(runtime.machine.frame_bounds().len(), 1);
+        assert_eq!(runtime.machine.frame_bounds()[0].object, object.vm);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .register(process_register::STATUS_A)
+                .unwrap()
+                & LOCAL_BOUND_INVALID_STATUS_A,
+            0,
+        );
+    }
+
+    #[test]
+    fn same_stamp_bound_tail_clears_only_target_collider_on_miss() {
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        runtime
+            .arena
+            .reparent_to_root(object.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_retail_local_bound(Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: -100,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            });
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [1_000_000, 0, 0],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_link(6, Some(main.vm))
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_link(6, Some(object.vm))
+            .unwrap();
+        for vm in [object.vm, main.vm] {
+            runtime
+                .machine
+                .object_mut(vm)
+                .unwrap()
+                .set_register(process_register::ANIMATION_STAMP, 7)
+                .unwrap();
+        }
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        assert!(runtime.register_animation_bound(object, &mut host).unwrap());
+
+        assert_eq!(runtime.machine.frame_bounds().len(), 1);
+        assert_eq!(runtime.machine.frame_bounds()[0].object, object.vm);
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(object.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            ),
+            None
+        );
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(main.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(object.vm),
+            "a GoolObjectBound miss clears only the target's collider slot"
+        );
+    }
+
+    #[test]
+    fn same_stamp_bound_tail_links_crash_after_appending_the_object_bound() {
+        let mut runtime = RetailRuntime::new(0);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_retail_local_bound(Bounds3 {
+                min: Vec3 {
+                    x: -1_000,
+                    y: -1_000,
+                    z: -1_000,
+                },
+                max: Vec3 {
+                    x: 1_000,
+                    y: 1_000,
+                    z: 1_000,
+                },
+            });
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [0; 3],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        for vm in [object.vm, main.vm] {
+            runtime
+                .machine
+                .object_mut(vm)
+                .unwrap()
+                .set_register(process_register::ANIMATION_STAMP, 7)
+                .unwrap();
+        }
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        assert!(runtime.register_animation_bound(object, &mut host).unwrap());
+
+        assert_eq!(runtime.machine.frame_bounds().len(), 1);
+        assert_eq!(runtime.machine.frame_bounds()[0].object, object.vm);
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(object.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(main.vm)
+        );
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(main.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(object.vm)
+        );
+    }
+
+    #[test]
+    fn late_mismatched_stamp_bound_does_not_run_the_crash_collision_tail() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
+        arm_animation_bound(
+            &mut runtime,
+            object,
+            3,
+            RetailTransform {
+                translation: [1_000_000, 0, 0],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            },
+        );
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_link(6, Some(main.vm))
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_link(6, Some(object.vm))
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_register(process_register::ANIMATION_STAMP, 7)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_register(process_register::ANIMATION_STAMP, 6)
+            .unwrap();
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        assert!(runtime.register_animation_bound(object, &mut host).unwrap());
+
+        assert_eq!(runtime.machine.frame_bounds().len(), 1);
+        assert_eq!(runtime.machine.frame_bounds()[0].object, object.vm);
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(object.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(main.vm)
+        );
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                runtime
+                    .machine
+                    .object(main.vm)
+                    .unwrap()
+                    .register(6)
+                    .unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(object.vm)
+        );
+    }
+
+    #[test]
     fn frame_bounds_follow_preorder_and_are_cleared_before_the_next_frame() {
         let entities = [entity(10, 2, 1), entity(11, 2, 1)];
         let neighbors = [NeighborZone {
@@ -10400,6 +11410,7 @@ mod tests {
         let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
         let first = *attempts[0].result.as_ref().unwrap();
         let second = *attempts[1].result.as_ref().unwrap();
+        let _main = spawn_test_object(&mut runtime, ZONE, 20, 0, 0);
         arm_animation_bound(
             &mut runtime,
             first,
@@ -10591,6 +11602,7 @@ mod tests {
         let mut runtime = RetailRuntime::new(0);
         let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
         assert_eq!(attempts.len(), MAX_FRAME_BOUNDS);
+        let _main = spawn_test_object(&mut runtime, ZONE, 200, 0, 0);
         let objects = attempts
             .iter()
             .map(|attempt| *attempt.result.as_ref().unwrap())
@@ -10610,7 +11622,7 @@ mod tests {
 
         let frame = runtime.run_frame(&mut host, 1).unwrap();
 
-        assert_eq!(frame.executions.len(), MAX_FRAME_BOUNDS);
+        assert_eq!(frame.executions.len(), MAX_FRAME_BOUNDS + 1);
         assert!(
             frame
                 .executions

@@ -87,11 +87,15 @@ copy any disc or stream bytes into the repository:
   the browser. The legal trace also crossed `0x85` suboperation zero path orientation, `0x8e`
   suboperation six entity colors, and the source-defined suboperation-three and suboperation-one
   solid query branches using validated ZDAT octrees and colors.
-- The NSF host now resolves a collidable object's current unaligned vertex animation/frame into a
-  pair-scoped bound source. Exact-preorder registration, per-frame clearing, dedicated-main Crash
-  adjustment, the 96-bound capacity and the solid helper's source padding/first-hit/highest/tie
-  behavior have focused tests. The 300-frame N. Sanity trace crosses the former ShadC executable
-  29/state-one animation-bound boundary without reproducing the C branch's uninitialized locals.
+- The NSF host resolves a collidable object's current unaligned vertex animation/frame into a
+  pair-scoped bound source. Focused cases cover per-frame clearing, 96-bound capacity, Crash-stamp
+  pre-GOOL registration, range-gated post-physics registration for objects visited before Crash,
+  status-A invalidation on a late-range miss, and synchronous local-bound refresh through `0x83`
+  and `0x84`. The same-stamp tail has focused coverage for Crash's asymmetric accepted/priority
+  collider links, hotspot `0x1000`, and target-collider clearing on a miss. The previously recorded
+  300-frame N. Sanity trace crossed the former ShadC executable 29/state-one boundary without
+  reproducing the C branch's uninitialized locals. The current legally local scene/runtime goldens
+  pass under the revised schedule.
 - All 43 playable pairs built owned pointer-free camera graphs. Every non-title boot pair then ran
   300 automatic-camera ticks through one pair-scoped scene builder: 42 pairs and 12,600 exact
   camera-to-scene zone/path/point/draw identities passed with zero failures. N. Sanity's opening
@@ -114,14 +118,16 @@ copy any disc or stream bytes into the repository:
   display masks `0x22_3ff0` at load and `0x22_3ffc` when active. Focused tests cover the complete
   nonlinear overlay-alpha sequence, including opaque blank/swap phases and the pre-quantization
   counter step used by the WebGL pass.
-- The strict goal-directed N. Sanity survey now exits at frame 1,995 through the authored
-  `Transition(0x2d)` Level Complete warp. It recorded 74 successful spawns, 40,480 GOOL executions,
+- The previously recorded strict goal-directed N. Sanity survey exited at frame 1,995 through the
+  authored `Transition(0x2d)` Level Complete warp. It recorded 74 successful spawns, 40,480 GOOL
+  executions,
   18 zone transitions, four save handshakes, zero unexpected spawn failures, zero VM errors, zero
   faulted objects and no death restart, below-zero player position or terminal-fall velocity.
   State-aware forward/jump/spin/steering input carried Crash through
   `e0_9Z → a0_9Z → a1_9Z → … → b7_9Z`. The survey includes the three native root-one HUD
-  controllers, so the completed route exercises the same process-lifetime object infrastructure as
-  the browser mount.
+  controllers, so that completed route exercised the same process-lifetime object infrastructure as
+  the browser mount. These counts remain a prior-artifact baseline: the revised legal run is recorded
+  in Current change-set verification below and stops cleanly at the b5/b6 camera boundary.
 - The mount-time core-object corpus test materialized executable-four subtypes 0, 1, and 5 from
   `DispC` in all 39 eligible legal pairs, verified native creation/preorder, null lifecycle-zone
   identity and exact tagged globals 7/6/14, and verified that title `0x19`, level complete `0x2d`,
@@ -163,6 +169,10 @@ and runtime boundary; they are not evidence of a browser playthrough or full GOO
 
 ## Browser checks actually performed
 
+The checks below are dated evidence for the artifacts named in each paragraph. Earlier diagnostic
+flows and oscillator-backed SFX are not evidence for the current authored-only browser flow or its
+mounted-data-only audio path.
+
 A generated release Wasm build was served on `127.0.0.1` and exercised with agent-browser 0.27.0
 using its Chrome engine:
 
@@ -193,7 +203,8 @@ The 2026-07-13 release build was then exercised in a fresh agent-browser 0.27.0 
 - The host decoded and uploaded 432×144 retail loading images for `0x19` and `0x03`. The opt-in
   local renderer characterization decoded all 39 loading images present among bootable streams.
 - Title cards, main menu, Options and Map were navigated with keyboard input. Live options changed
-  SFX and music from 255 to 239 and toggled mono; a triggered SFX produced measured mixer peak 767.
+  SFX and music from 255 to 239 and toggled mono; the then-present diagnostic SFX path produced
+  measured mixer peak 767. That path has since been removed and is not ADIO audition evidence.
 - Keyboard completed the diagnostic movement goal once. A second run held the on-screen touch Up
   control, reached completion in 2.24 seconds, cleared its held visual state, and mounted `0x2D`.
   Pause/resume and mute/unmute changed live runtime state and were restored before continuing.
@@ -227,7 +238,7 @@ real default-title launch exposed a one-point dummy-path bug: initial presentati
 point one and rejected the pair. A focused regression now clamps only the requested initial
 presentation point to the validated final point. After rebuilding, reloading and reselecting the
 same BIN, the Rust runtime started at title state 10, reached main menu state 5, accepted keyboard
-Cross, entered island-map state 15 and reported active synthesized audio. The game data stayed in
+Cross, entered island-map state 15 and reported the then-active synthesized-audio path. The game data stayed in
 the browser tab and no repository file or browser storage record received disc bytes. This session
 did not inspect DevTools network/console panes and is not described as a retail gameplay
 playthrough.
@@ -264,13 +275,23 @@ regressions. At retail frame 1,601, the live debug surface reported zero executi
 faulted objects, no warning, no runtime error and WebGL error zero. The visible tab was left running
 the real local-data scene with synthesized audio enabled.
 
-After the current core-object/dark-shader build, the release files were rebuilt behind the existing
+After the pre-animation-bound core-object/dark-shader build, the release files were rebuilt behind the existing
 `127.0.0.1:4174` local server and reloaded in the visible Codex in-app browser. The mount UI reached
 `Awaiting local media` with the expected 43-target selector and no captured browser warning or
 error. The BIN was not reselected in this final reload, so the foreground Chrome run above remains
 the latest claimed end-to-end local-disc browser exercise.
 
-## Final automated results
+The authored-only browser-flow and mounted-data-only audio changes, together with the revised
+Crash-stamp bound/collision schedule, were rebuilt and reloaded in the visible in-app browser on
+2026-07-14. The fresh release reached `Awaiting local media`, exposed the 43-target disabled selector
+with zero mounted pairs, and produced no captured console warnings or errors. The operating-system
+file chooser still cannot be populated by this automation surface, so the BIN was not reselected;
+no current browser-audio or end-to-end gameplay result is claimed for this artifact.
+
+## Recorded pre-animation-bound automated baseline
+
+The results below belong to the dated artifact described above. They are retained as prior evidence,
+not as current-change-set counts or hashes.
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
@@ -296,6 +317,36 @@ the latest claimed end-to-end local-disc browser exercise.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
 - generated web release: passed; Wasm payload was 1,216,158 bytes (SHA-256
   `4c45cd45e9af827fa4d252d67fffbcfb9db7713e88e2b0492414db45cfbaa6ea`).
+
+## Current change-set verification
+
+The final checks below were run against this change set on 2026-07-14:
+
+- `cargo fmt --all -- --check` passed.
+- locked workspace Clippy across all targets passed with warnings denied.
+- the locked asset-free workspace suite passed all 708 default tests. Another 50 legally local
+  tests remain ignored by default, for 758 listed tests across all targets.
+- the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
+  streams in place. Forty-nine tests passed. The sole failure is the strict N. Sanity
+  goal-directed progression survey; every raw-disc/catalog, all-pair parser, camera, title,
+  audio, PBAK, renderer and runtime golden in that same sweep passed.
+- the revised 18,000-frame N. Sanity survey now reaches `b5_9Z` path four at progress 10,685 with
+  Crash already assigned to `b6_9Z`. It records 16 zone transitions, 38 observed paths, zero
+  restarts, zero below-zero or terminal-fall boundaries, zero VM errors and zero faulted objects.
+  It remains at the static b5/b6 camera boundary rather than reaching the authored Level Complete
+  request. Straight and left jump variants remain in b5; the right variant falls and was not
+  retained. This is the exact current progression gap, not a completed-level claim.
+- the legal Jungle Rollers PBAK scene test passed after pinning the first source-correct `FruiC`
+  incarnation: synchronous `0x83`/`0x84` local-bound refresh moves its first shrink-four frame to
+  wall frame 190/pad boundary 191, followed by the exact raw/effective shift checkpoints through
+  frame 217.
+- locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
+  web release. The Wasm payload is 1,215,812 bytes with SHA-256
+  `494a272b4ce3afeeb2233e27f5b2a8cf298d0b6e13c1b884a5cc469673a40858`.
+- the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. The generated release was
+  reloaded in the visible in-app browser, its complete local loader and touch controls were present,
+  and captured console warnings/errors were empty. The BIN was not selected in this final browser
+  reload, so current mounted-media browser play is not claimed.
 
 ## Reproducible commands
 

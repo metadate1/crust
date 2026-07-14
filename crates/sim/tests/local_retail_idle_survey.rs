@@ -168,8 +168,9 @@ impl NSanityRouteController {
         let a9 = Eid::from_name("a9_9Z").expect("fixed N. Sanity route EID is valid");
         let b0 = Eid::from_name("b0_9Z").expect("fixed N. Sanity route EID is valid");
         let b1 = Eid::from_name("b1_9Z").expect("fixed N. Sanity route EID is valid");
-        let b2 = Eid::from_name("b2_9Z").expect("fixed N. Sanity route EID is valid");
-        let b3 = Eid::from_name("b3_9Z").expect("fixed N. Sanity route EID is valid");
+        let zone_2b = Eid::from_name("2b_9Z").expect("fixed N. Sanity route EID is valid");
+        let zone_3b = Eid::from_name("3b_9Z").expect("fixed N. Sanity route EID is valid");
+        let zone_4b = Eid::from_name("4b_9Z").expect("fixed N. Sanity route EID is valid");
         let b6 = Eid::from_name("b6_9Z").expect("fixed N. Sanity route EID is valid");
         let b7 = Eid::from_name("b7_9Z").expect("fixed N. Sanity route EID is valid");
         let progress = camera.progress.raw();
@@ -256,7 +257,10 @@ impl NSanityRouteController {
             }
             8 if camera.path.zone == a3
                 && camera.path.index == 0
-                && progress >= 7_000
+                // Native local-bound refresh exposes the crate face before
+                // the camera reaches 7,000; jump at the last stable 6,400
+                // sample instead of relying on the former stale bound.
+                && progress >= 6_000
                 && grounded =>
             {
                 RouteAction {
@@ -305,17 +309,20 @@ impl NSanityRouteController {
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            15 if camera.path.zone == a4 && progress >= 33_000 => RouteAction {
+            // The native same-stamp collision tail exposes the next face at
+            // 31,941 and closes the lateral route. Start this spin/jump/left
+            // sequence early enough to establish the sidestep before contact.
+            15 if camera.path.zone == a4 && progress >= 25_000 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            16 if camera.path.zone == a4 && progress >= 33_900 && grounded => RouteAction {
+            16 if camera.path.zone == a4 && progress >= 26_000 && grounded => RouteAction {
                 button: PAD_CROSS,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            17 if camera.path.zone == a4 && progress >= 34_300 => RouteAction {
+            17 if camera.path.zone == a4 && progress >= 27_000 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 11,
                 ..RouteAction::default()
@@ -325,11 +332,17 @@ impl NSanityRouteController {
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            19 if camera.path.zone == a4 && player.zone == a5 && grounded => RouteAction {
-                button: PAD_CROSS,
-                button_frames: 1,
-                ..RouteAction::default()
-            },
+            19 if camera.path.zone == a4 && player.zone == a5 && progress >= 33_500 && grounded => {
+                // Delay the lateral jump until the a5 octree step is in
+                // range; an immediate forward jump lands before its face.
+                RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 11,
+                    button: PAD_CROSS,
+                    button_frames: 11,
+                    ..RouteAction::default()
+                }
+            }
             20 if camera.path.zone == a5 && progress >= 1_000 && grounded => RouteAction {
                 direction: PAD_RIGHT,
                 direction_frames: 11,
@@ -337,48 +350,58 @@ impl NSanityRouteController {
                 button_frames: 11,
                 ..RouteAction::default()
             },
-            21 if camera.path.zone == a5 && progress >= 8_000 => RouteAction {
+            // The corrected a5 collision path presents the same authored
+            // obstacles earlier: the first terrain face is stable at 3,205.
+            21 if camera.path.zone == a5 && progress >= 3_200 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            22 if camera.path.zone == a5 && progress >= 8_000 && grounded => RouteAction {
+            22 if camera.path.zone == a5 && progress >= 3_200 && grounded => RouteAction {
                 button: PAD_CROSS,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            23 if camera.path.zone == a5 && progress >= 9_800 => RouteAction {
+            23 if camera.path.zone == a5 && progress >= 3_200 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 16,
                 button: PAD_CROSS,
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            24 if camera.path.zone == a5 && progress >= 11_000 => RouteAction {
+            // This lands on entity 32 at 8,064; jump before forward input
+            // remains pinned to the crate top.
+            24 if camera.path.zone == a5 && progress >= 8_000 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            25 if camera.path.zone == a5 && progress >= 11_000 && grounded => RouteAction {
+            25 if camera.path.zone == a5 && progress >= 8_000 && grounded => RouteAction {
                 button: PAD_CROSS,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            26 if camera.path.zone == a5 && progress >= 16_000 && grounded => RouteAction {
-                direction: PAD_LEFT,
+            // At the next stable terrain face (11,036), the right-hand lane
+            // is open; the former left jump lands back against the face.
+            26 if camera.path.zone == a5 && progress >= 11_000 && grounded => RouteAction {
+                direction: PAD_RIGHT,
                 direction_frames: 11,
                 button: PAD_CROSS,
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            27 if camera.path.zone == a5 && progress >= 20_000 => RouteAction {
+            27 if camera.path.zone == a5 && progress >= 16_000 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 1,
                 ..RouteAction::default()
             },
-            28 if camera.path.zone == a5 && progress >= 20_000 && grounded => RouteAction {
+            28 if camera.path.zone == a5 && progress >= 16_000 && grounded => RouteAction {
+                // Move onto the subtype-10 bounce crate and keep Cross held
+                // through its delayed rebound so Crash carries into a6.
+                direction: PAD_LEFT,
+                direction_frames: 16,
                 button: PAD_CROSS,
-                button_frames: 16,
+                button_frames: 32,
                 ..RouteAction::default()
             },
             29 if camera.path.zone == a6 && progress >= 2_000 && grounded => RouteAction {
@@ -455,8 +478,11 @@ impl NSanityRouteController {
                 }
             }
             38 if camera.path.zone == a8
-                && camera.path.index == 1
-                && progress >= 16_500
+                && camera.path.index == 0
+                // The preceding jump lands into entity 39 at 10,407; its
+                // accepted solid contact sends Crash's death event. Jump
+                // again from the stable 6,400 sample to clear that contact.
+                && progress >= 6_000
                 && grounded =>
             {
                 RouteAction {
@@ -465,7 +491,20 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            39 if camera.path.zone == a9
+            39 if camera.path.zone == a8
+                && camera.path.index == 1
+                // This path loses its grounded status after 13,056, so the
+                // former 16,500 guard could never start the required jump.
+                && progress >= 13_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            40 if camera.path.zone == a9
                 && camera.path.index == 0
                 && progress >= 11_000
                 && grounded =>
@@ -476,9 +515,11 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            40 if camera.path.zone == a9
+            41 if camera.path.zone == a9
                 && camera.path.index == 2
-                && progress >= 9_000
+                // The last grounded sample is 8,355; at 8,874 Crash has
+                // already left the face, making the former 9,000 guard late.
+                && progress >= 8_000
                 && grounded =>
             {
                 RouteAction {
@@ -487,7 +528,7 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            41 if camera.path.zone == a9
+            42 if camera.path.zone == a9
                 && camera.path.index == 1
                 && progress >= 6_000
                 && grounded =>
@@ -498,7 +539,7 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            42 if camera.path.zone == b0
+            43 if camera.path.zone == b0
                 && camera.path.index == 0
                 && progress >= 2_000
                 && grounded =>
@@ -509,9 +550,11 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            43 if camera.path.zone == b0
+            44 if camera.path.zone == b0
                 && camera.path.index == 0
-                && progress >= 17_000
+                // The camera parks at 16,384 on this grounded face, so the
+                // former 17,000 guard could never advance the route.
+                && progress >= 16_000
                 && grounded =>
             {
                 RouteAction {
@@ -520,14 +563,23 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            44 if camera.path.zone == b1 && camera.path.index == 0 && grounded => RouteAction {
+            // b0 path 1 ends against stacked static cells (no dynamic link).
+            // A straight jump returns to the same face; left clears into b1.
+            45 if camera.path.zone == b0 && camera.path.index == 1 && grounded => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            46 if camera.path.zone == b1 && camera.path.index == 0 && grounded => RouteAction {
                 direction: PAD_RIGHT,
                 direction_frames: 8,
                 button: PAD_CROSS,
                 button_start: 0,
                 button_frames: 16,
             },
-            45 if camera.path.zone == b2
+            47 if camera.path.zone == zone_2b
                 && camera.path.index == 1
                 && progress >= 10_000
                 && grounded =>
@@ -540,7 +592,7 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            46 if camera.path.zone == b3
+            48 if camera.path.zone == zone_3b
                 && camera.path.index == 0
                 && progress >= 9_000
                 && grounded =>
@@ -553,24 +605,33 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            47 if camera.path.zone == b3 && grounded => RouteAction {
+            49 if camera.path.zone == zone_3b && grounded => RouteAction {
                 direction: PAD_DOWN,
                 direction_frames: 80,
                 ..RouteAction::default()
             },
-            48 if camera.path.zone == b3 && grounded => RouteAction {
+            50 if camera.path.zone == zone_3b && grounded => RouteAction {
                 direction: PAD_RIGHT,
                 direction_frames: 18,
                 button: PAD_CROSS,
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            49 if camera.path.zone == b6 && camera.path.index == 0 && grounded => RouteAction {
+            // 4b path 0 parks against static cells with no dynamic link.
+            // Jump from its grounded entry sample to clear into retail b5.
+            51 if camera.path.zone == zone_4b && camera.path.index == 0 && grounded => {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            52 if camera.path.zone == b6 && camera.path.index == 0 && grounded => RouteAction {
                 button: PAD_CROSS,
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            50 if camera.path.zone == b7 && camera.path.index == 0 && grounded => RouteAction {
+            53 if camera.path.zone == b7 && camera.path.index == 0 && grounded => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 14,
                 button: PAD_CROSS,
@@ -1796,7 +1857,7 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         }
     }
     if frames >= 1_700 {
-        for zone_name in ["b2_9Z", "b3_9Z", "b4_9Z"] {
+        for zone_name in ["2b_9Z", "3b_9Z", "4b_9Z"] {
             let zone = Eid::from_name(zone_name).unwrap();
             assert!(
                 survey.camera_ranges.keys().any(|path| path.zone == zone),

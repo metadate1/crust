@@ -8,7 +8,7 @@ use crust_formats::stream::{
     LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
     parse_nsf,
 };
-use crust_sim::gool::{RetailPadSnapshot, VmEffect};
+use crust_sim::gool::{RetailPadSnapshot, VmEffect, process_register};
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
@@ -718,5 +718,149 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
         final_translation,
         [2_396_928, 1_374_720, 34_188_544],
         "the source wall clamp and solid floor response must remain deterministic"
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jungle_rollers_second_frame_matches_late_bound_range_golden() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::new_const(0x0c);
+    let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+    let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+    let nsd_bytes = std::fs::read(&nsd_path).unwrap();
+    let nsf_bytes = std::fs::read(&nsf_path).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let ldat = nsd.ldat().unwrap();
+    assert_eq!(ldat.executable_map[22].name().as_deref(), Some("JunOC"));
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let spawn_zone = graph.spawn_path().zone;
+    let current_entry = nsf.resolve_entry(&nsd, spawn_zone).unwrap();
+    let current_header =
+        ZoneHeader::parse(current_entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let mut owned_neighbors = Vec::new();
+    for eid in current_header.neighbors {
+        let entry = nsf.resolve_entry(&nsd, eid).unwrap();
+        let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+        let mut entities = Vec::new();
+        for entity_index in 0..header.entity_count {
+            let item_index =
+                usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+            entities.push(
+                ZoneEntity::parse(entry.item(item_index).unwrap().bytes(&nsf_bytes).unwrap())
+                    .unwrap(),
+            );
+        }
+        owned_neighbors.push((eid, header.display_flags | 3, entities));
+    }
+    let neighbors = owned_neighbors
+        .iter()
+        .map(|(eid, display_flags, entities)| NeighborZone {
+            eid: *eid,
+            display_flags: *display_flags,
+            entities,
+        })
+        .collect::<Vec<_>>();
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let mut runtime = RetailRuntime::new_for_level(256, level);
+    let first = runtime
+        .spawn_and_run_frame(&neighbors, &mut host, 256)
+        .unwrap();
+    let junoc = *first
+        .spawn_attempts
+        .iter()
+        .find(|attempt| attempt.descriptor.executable == 22)
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    let box_14 = *first
+        .spawn_attempts
+        .iter()
+        .find(|attempt| attempt.descriptor.id == 14)
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    let bound_entity_ids = |runtime: &RetailRuntime| {
+        runtime
+            .machine()
+            .frame_bounds()
+            .iter()
+            .map(|bound| {
+                let object = runtime.object_for_vm(bound.object).unwrap();
+                match runtime.arena().get(object.arena()).unwrap().origin() {
+                    ObjectOrigin::Entity(descriptor) => descriptor.id,
+                    ObjectOrigin::Runtime { .. } => panic!("unexpected runtime-child bound"),
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(bound_entity_ids(&runtime), [9, 12, 13, 14]);
+    assert_eq!(
+        runtime
+            .machine()
+            .object(box_14.vm())
+            .unwrap()
+            .register(process_register::STATUS_A)
+            .unwrap()
+            & 0x8000,
+        0,
+        "frame zero stamps match, so entity 14 takes the pre-physics bound path"
+    );
+
+    let second = runtime.run_frame(&mut host, 256).unwrap();
+
+    assert!(
+        second
+            .executions
+            .iter()
+            .all(|execution| execution.result.is_ok()),
+        "Jungle Rollers frame two must stay inside checked VM boundaries: {:?}",
+        second
+            .executions
+            .iter()
+            .filter(|execution| execution.result.is_err())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(bound_entity_ids(&runtime), [9, 12, 13]);
+    let main = runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| runtime.object_for_arena(arena))
+        .unwrap();
+    let main_vm = runtime.machine().object(main.vm()).unwrap();
+    assert_eq!(
+        (
+            main_vm.register(process_register::ANIMATION_STAMP).unwrap(),
+            main_vm.retail_transform().unwrap().translation,
+        ),
+        (1, [2_201_344, 1_041_870, 32_101_632])
+    );
+    let junoc_vm = runtime.machine().object(junoc.vm()).unwrap();
+    assert_eq!(
+        (
+            junoc_vm
+                .register(process_register::ANIMATION_STAMP)
+                .unwrap(),
+            junoc_vm.retail_transform().unwrap().translation,
+            junoc_vm.register(process_register::STATUS_B).unwrap(),
+        ),
+        (1, [2_068_894, 1_252_821, 31_769_096], 0x7),
+        "the named JunOC controller must retain its legal frame-two trace"
+    );
+    let box_vm = runtime.machine().object(box_14.vm()).unwrap();
+    assert_eq!(
+        (
+            box_vm.register(process_register::ANIMATION_STAMP).unwrap(),
+            box_vm.retail_transform().unwrap().translation,
+            box_vm.register(process_register::STATUS_A).unwrap(),
+        ),
+        (1, [2_405_888, 947_456, 31_180_800], 0x000a_8001),
+        "entity 14 is 920,832 units behind Crash on Z, beyond the 0x7d000 late-bound range"
     );
 }

@@ -36,10 +36,13 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    atomic retained-pair swap; simulation is stalled while the asynchronous read is in flight. A
    mounted type-19 PBAK entry is separately validated as one of the two observed pointer-free
    layouts before its snapshot or pad frames can reach simulation.
-5. The browser schedules flow, retail-object execution and presentation cooperatively at 30 Hz and
-   drops excessive lag instead of replaying an unbounded catch-up burst. Each tick publishes card
-   and pad state, consumes any prior-frame level request, then performs spawn, camera and GOOL in
-   source order. A presented gameplay tick selects the exact `RetailCameraRuntime`
+5. The browser schedules mounted retail-object execution and presentation cooperatively at 30 Hz
+   and drops excessive lag instead of replaying an unbounded catch-up burst. Its high-level flow
+   value is a mount/presentation mirror: only an active authored title runtime advances the title
+   presentation mirror, while gameplay, completion, bonus, boss, intro and ending progression remain
+   owned by mounted retail GOOL. Each tick publishes card and pad state, consumes any prior-frame
+   level request, then performs spawn, camera and GOOL in source order. A presented gameplay tick
+   selects the exact `RetailCameraRuntime`
    zone/path/progress, executes GOOL, snapshots the live
    arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
    Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
@@ -114,9 +117,10 @@ the last successfully installed snapshot. Three-dimensional vertex object models
 animation transforms, screen-aligned sprites/fragments, text/font quads and 2D CVTX objects are
 reflected in that snapshot. Ordered zone teardown and dynamic display masks affect post-GOOL
 snapshots; mid-frame paging-driven texture replacement remains incomplete. The final title pass
-applies the native 16-band nonlinear black-overlay alpha after the source counter step. When a
-healthy authored arena is presenting, the browser host hides fallback menus and diagnostic overlays
-from the 4:3 canvas while keeping state/warning text in the external monitor panel.
+applies the native 16-band nonlinear black-overlay alpha after the source counter step. A healthy
+authored arena owns the 4:3 canvas. Until one is available, the browser shows only loading/error
+diagnostics and keeps state/warning text in the external monitor panel; it does not substitute a
+synthetic title, menu or gameplay scene.
 
 ## Simulation and GOOL
 
@@ -143,7 +147,9 @@ The complete validated state-descriptor table supplies target flags for guarded 
 ordinary runner stops at a synchronous host boundary; `run_with_host_effects` applies the callback
 before the following instruction while preserving the same interpreter invocation. Retail
 animation data is retained separately from code. Checked tagged animation references, packed and
-operand-selected animation changes (`0x83`/`0x84`) use explicit frame/draw counters.
+operand-selected animation changes use explicit frame/draw counters. Host effects `0x83` and
+`0x84` synchronously refresh the persistent local animation bound before the interpreter proceeds;
+`0x83` honors the status-B `0x18` gate plus its range/force condition, while `0x84` is unconditional.
 Checked tagged storage and global-code references replace pointer-producing opcodes `0x26` and
 `0x18`. Paging opcode `0x8b` cases one through six use checked page/entry residency and reference
 metadata without pretending that the browser has retail asynchronous paging. GOOL opcode `0x1a`
@@ -163,12 +169,15 @@ state, which carries either a transition target or hard-restart sentinel. Object
 tree/link ownership are cleaned synchronously with teardown. Arena spawn flags are authoritative
 until their VM mirror is refreshed at the next frame boundary. A null current zone is a no-op;
 duplicate EIDs remain in the walk, and each later EID rescans the tree after earlier handler
-mutations. The NSF host resolves a collidable object's current unaligned
-vertex animation/frame into a pair-scoped bound
-source. Before each eligible object executes, the runtime registers its transformed bound in exact
-preorder inside a 96-entry frame arena; solid helper queries consume typed `0xa300_0000` object
-references, live status/size, source padding, first-hit/highest/tie ordering and parent sizing. A
-second post-physics animation-stamp recomputation remains outside this slice.
+mutations. The NSF host resolves a collidable object's current unaligned vertex animation/frame
+into a pair-scoped bound source. The 96-entry frame arena follows the native Crash-stamp schedule:
+objects already carrying Crash's register-frame stamp bind before GOOL and physics, while objects
+visited before Crash receive a late post-physics registration only within the inclusive
+`±0x7d000` X/Z and `±0xaf000` Y window. Rejected late objects set status-A invalid bit `0x8000`.
+The same-stamp `GoolObjectBound` tail then applies Crash's asymmetric object-collision bookkeeping,
+including accepted/priority collider links, hotspot `0x1000`, and target-collider clearing on a
+miss. Solid helper queries consume typed `0xa300_0000` references, live status/size, source padding,
+first-hit/highest/tie ordering and parent sizing.
 
 Solid execution deliberately owns two environments. The current-camera/native `cur_zone`
 environment supplies only its current-neighbor octrees to geometry queries and refreshes at each
@@ -224,8 +233,8 @@ provenance, while native `cur_zone` supplies the arena object zone, origin and c
 inherit typed parent state. Any checked
 execution failure quarantines that exact generational object identity, preventing a pre-incremented
 program counter from resuming past an unsupported operation while healthy siblings continue.
-Box special cases, some host effects, the late post-physics bound refresh, full progression and
-several dynamic object-rendering modes remain outside this bridge.
+Box special cases, some host effects, full progression and several dynamic object-rendering modes
+remain outside this bridge.
 
 `LevelResetGlobals(1)` is a preflighted synchronous transaction over the source's documented
 scalar words and the encountered-object registry. It deliberately preserves live objects, the
@@ -256,7 +265,8 @@ VAB waves become owned PCM sample banks and SEP events drive two independent seq
 browser-independent owner applies source-timed thirty-tick zone fades, defers transitions while
 GOOL selects the second track, and drops both banks at a level boundary. The WebAudio master gain
 also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Exact SPU ADSR,
-vibrato/portamento, generic controllers and reverb remain future work.
+vibrato/portamento, generic controllers and reverb remain future work. There is no procedural sine
+fallback: browser sound comes only from mounted ADIO SFX and the mounted retail music synthesizer.
 
 ## Persistence
 

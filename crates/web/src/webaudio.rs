@@ -1,4 +1,4 @@
-use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE, Sample};
+use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE};
 use crust_audio::output::OutputOptions;
 use crust_audio::retail::RetailAudioEngine;
 use crust_audio::retail_music::RetailMusic;
@@ -104,21 +104,6 @@ impl WebAudio {
         self.music.state()
     }
 
-    pub fn trigger_sfx(&mut self, pitch_seed: u8) {
-        let frequency = 240.0 + f32::from(pitch_seed % 12) * 22.0;
-        let mut samples = Vec::with_capacity(2_800);
-        for index in 0_u16..2_800 {
-            let index = f32::from(index);
-            let t = index / sample_rate_f32();
-            let envelope = (1.0 - index / 2_800.0).powi(2);
-            let value = (t * frequency * std::f32::consts::TAU).sin() * envelope * 12_000.0;
-            samples.push(sfx_sample(value));
-        }
-        let sample = Sample::new(samples, None);
-        let voice = 1 + usize::from(pitch_seed) % 22;
-        self.mixer.play(voice, sample, 13_000, 13_000, 4_096, 0, 1);
-    }
-
     pub fn schedule(&mut self, retail_audio: &mut RetailAudioEngine) -> Result<(), JsValue> {
         let now = self.context.current_time();
         if self.next_time < now {
@@ -188,11 +173,4 @@ impl WebAudio {
 
 fn sample_rate_f32() -> f32 {
     f32::from(u16::try_from(SAMPLE_RATE).expect("44.1 kHz sample rate fits u16 exactly"))
-}
-
-#[allow(clippy::cast_possible_truncation)]
-fn sfx_sample(value: f32) -> i16 {
-    // The oscillator and [0, 1] envelope bound this value to +/-12,000, inside `i16`; truncation
-    // matches the mixer sample quantization used by the existing implementation.
-    value as i16
 }

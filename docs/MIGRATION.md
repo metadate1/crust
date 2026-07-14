@@ -66,7 +66,9 @@ An external `git archive` copy produced these results:
 - Type-17 title MDAT remains the owned source of each entity descriptor, but it is not an object
   zone. After the title `LevelUpdate`, the browser mirrors `GoolObjectSpawn` by assigning native
   `cur_zone` as the arena/VM zone and resolving origin and colors from that ZDAT. This also makes
-  those objects visible to current-header neighbor TERM traversal.
+  those objects visible to current-header neighbor TERM traversal. The mounted retail object graph
+  owns title/menu/gameplay progression; when it cannot present an authored screen, the browser shows
+  loading/error diagnostics and does not run a data-independent fallback flow.
 - Misc 12/7 retains the source's distinct forward current-header walk with no display filter,
   sorting or deduplication. Each listed EID drives a live roots-zero-through-seven postorder TERM
   traversal, so handler mutations, immunity flags, migrations and non-title Crash survival remain
@@ -108,11 +110,15 @@ An external `git archive` copy produced these results:
 - The live retail-object bridge scans displayed neighbor zones, uses separate typed generational
   arena and VM handles, traverses the mutation-aware spawn tree, and applies synchronous runtime
   child creation inside the same 30 Hz frame. Immutable post-GOOL snapshots now feed pair-scoped
-  3D vertex-object, sprite, fragment, type-four text/font and status-B 2D-CVTX rendering, while
-  pre-execution animation bounds feed the implemented solid-query helpers. Camera crossings apply
-  checked zone teardown/paging/activation, and typed ADIO requests feed the retail SFX voice
-  engine. Zone MIDI/INST/VAB/SEP assets decode to owned PCM/sequencer data, with source-timed fades
-  and typed GOOL track toggles. Effects remain data rather than unchecked host pointers; exact SPU
+  3D vertex-object, sprite, fragment, type-four text/font and status-B 2D-CVTX rendering. Animation
+  bounds follow the Crash register-frame stamp: matching objects bind before GOOL/physics, earlier
+  preorder objects bind after physics only inside the native inclusive range, and rejected late
+  objects set the bounds-invalid status bit. Host effects `0x83`/`0x84` synchronously refresh the
+  persistent local bound, and the same-stamp tail applies Crash's asymmetric collider links and
+  hotspot bookkeeping. Camera crossings apply checked zone teardown/paging/activation, and typed
+  ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
+  PCM/sequencer data, with source-timed fades and typed GOOL track toggles. The browser has no
+  procedural sine fallback. Effects remain data rather than unchecked host pointers; exact SPU
   synthesis, complete collision response, dynamic rendering effects and full progression are not
   implied.
 

@@ -12,15 +12,17 @@ set, and runs without uploading or bundling game data.
 
 This repository is a working, tested Rust/Wasm compatibility foundation, but it is **not yet a
 retail-equivalent game runtime**. Disc extraction, all 44 stream pairs, checked NSD/NSF parsing,
-the 30 Hz state machine, menu/options/password/load/map shells, direct boot, local persistence,
-input, WebGL2, WebAudio, and substantial native engine subsystems are implemented. The live browser
-host retains and remounts each validated destination stream pair, decodes retail LDAT loading
+the cooperative 30 Hz scheduler, mounted retail title/menu/options/password/load/map object flows,
+direct boot, local persistence, input, WebGL2, WebAudio, and substantial native engine subsystems
+are implemented. The browser does not advance synthetic title or gameplay flow when authored
+retail objects are unavailable. The live browser host retains and remounts each validated
+destination stream pair, decodes retail LDAT loading
 images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
 renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
 latches display/animate at the authored boundary and draws the native 16-level nonlinear black
-overlay; once an authored object scene is active, the browser removes its diagnostic DOM overlay
-from the 4:3 output. The former data-independent diagnostic landscape/player geometry has been
-removed. For the 40 world-bearing playable starts, gameplay presents bounds-checked
+overlay. The 4:3 output is authored-scene only: until mounted retail objects produce a scene, it
+shows a loading/error diagnostic with no synthetic menu, password/options UI, or gameplay geometry.
+For the 40 world-bearing playable starts, gameplay presents bounds-checked
 ZDAT/SLST/WGEO path snapshots with decoded TPAG textures and retail camera/depth math. The
 loading-image path follows the observed two-tick presentation gate and uses the first presented
 path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
@@ -60,29 +62,37 @@ the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragm
 uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
 GTE validity gate. The legal `pb0cB` trace therefore carries the authored `FruiC` scale through raw
 shifts 24–297 without turning a saturating/cullable sprite into a runtime failure. Eligible
-animation frames also
-register an ordered, bounded collision snapshot before execution, allowing the checked solid query
-to cross the former N. Sanity animation-bound boundary without emulating undefined C locals.
+animation bounds follow the native Crash-stamp schedule. Same-stamp objects register their
+transformed frame bound before GOOL and physics and execute the same-stamp Crash
+collision-link/hotspot tail; objects visited before Crash register after physics when they remain
+inside the exact `±0x7d000/±0xaf000/±0x7d000` box. Opcodes `0x83` and `0x84` synchronously refresh
+only the persistent local bound at their source call site.
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
-rectangle/graphics/water fallback, never extra geometry candidates. A strict 18,000-frame
-state-aware input trace now carries the camera and Crash from `e0_9Z` through the complete
-`a0_9Z`–`b7_9Z` authored chain and requests Level Complete `0x2d` at frame 1,995 with no VM error,
-faulted object, death restart, below-zero position, or terminal fall.
-The strict 360-frame Hog Wild idle characterization now delivers the authored `0x900` fall-kill
-event, advances the native signed display fade through `-2`/`-1`, performs two same-level
-load-state restarts, and retains no terminal fall or checked runtime issue.
-These are real data-backed runtime paths, including one deterministic authored level completion,
-but they do not certify a full retail playthrough. Broader progression, several GOOL host operations,
-dynamic rendering effects and later
+rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
+18,000-frame state-aware input trace carried the camera and Crash from `e0_9Z` through the complete
+`a0_9Z`–`b7_9Z` authored chain and requested Level Complete `0x2d` at frame 1,995 with no VM error,
+faulted object, death restart, below-zero position, or terminal fall. Under the native
+animation-bound/collision schedule, the rerun now clears the newly exposed hazards through
+`4b_9Z` and reaches `b5_9Z` path four with Crash already in `b6_9Z`, but the camera does not cross
+that static boundary. The 18,000-frame run has zero restart, fall, VM error or fault and does not
+emit Level Complete; `docs/VERIFICATION.md` records the exact counters.
+The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
+`0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
+same-level load-state restarts, and retained no terminal fall or checked runtime issue.
+The prior artifact includes one deterministic authored level completion; the current native
+schedule does not yet reproduce it and is not a full retail playthrough. Broader progression,
+several GOOL host operations, dynamic rendering effects and later
 same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
 connected. Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
 fades, the native all-bus master fade and GOOL-controlled alternate tracks. Authored `next_lid`
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
-fresh destination runtime, and restore bonus returns from the saved zone/path/progress. The native
-3,592-halfword encountered-object registry is retained separately from each mount's fresh 304-word
+fresh destination runtime, and restore bonus returns from the saved zone/path/progress. WebAudio
+receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
+fallback has been removed. The native 3,592-halfword encountered-object registry is retained
+separately from each mount's fresh 304-word
 active spawn table. Exact `LevelResetGlobals(1)` and `CardRestorePayload` ordering preserves the
 active table and savestate while resetting the documented scalar globals and encounter registry.
 Retail object shader modes two and three, including their source depth rejection/ramp behavior,

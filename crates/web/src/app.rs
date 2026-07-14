@@ -23,8 +23,7 @@ use crust_formats::stream::{
     title_mdat_eid,
 };
 use crust_platform::input::{
-    PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP,
-    PadSnapshot as PlatformPadSnapshot, PadState as PlatformPadState, keyboard_code,
+    PAD_START, PadSnapshot as PlatformPadSnapshot, PadState as PlatformPadState, keyboard_code,
     standard_gamepad,
 };
 use crust_renderer::texture::{DecodedTexture, decode_loading_image};
@@ -39,8 +38,7 @@ use crust_sim::card::{
 };
 use crust_sim::demo::DemoEnd;
 use crust_sim::flow::{
-    FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, MenuChoice, TitlePhase,
-    TitleScreen,
+    FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, TitlePhase, TitleScreen,
 };
 use crust_sim::gool::{
     AudioHostRequest, AudioHostResponse, CURRENT_DISPLAY_GLOBAL, CURRENT_MAP_LEVEL_GLOBAL,
@@ -53,7 +51,6 @@ use crust_sim::gool::{
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::paging::Pager;
-use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
@@ -92,6 +89,7 @@ use crate::title_runtime::{
 };
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
+use crate::{BrowserFlowMirrorAdvance, browser_flow_mirror_advance};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
@@ -318,14 +316,8 @@ impl App {
     }
 
     fn start_runtime(&mut self, pair: ValidatedPair) -> Result<(), JsValue> {
-        let available = self
-            .assets
-            .playable_levels()
-            .into_iter()
-            .filter_map(|(level, _)| u8::try_from(level.get()).ok().and_then(LevelId::new))
-            .collect();
         let storage = self.storage.take().or_else(|| StorageState::open().ok());
-        let mut runtime = Runtime::new(pair, available, storage, &self.dom)?;
+        let mut runtime = Runtime::new(pair, storage, &self.dom)?;
         runtime.set_muted(self.muted);
         self.runtime = Some(runtime);
         self.busy = false;
@@ -683,10 +675,6 @@ struct Runtime {
     storage: Option<StorageState>,
     card: VirtualCard,
     resume: ResumeManager,
-    available_levels: Vec<LevelId>,
-    menu_index: usize,
-    password_digits: [u8; 8],
-    password_cursor: usize,
     last_title_state: Option<u8>,
     pending_buttons: u16,
     pending_mount: Option<RetailPairMount>,
@@ -701,7 +689,6 @@ struct Runtime {
 impl Runtime {
     fn new(
         pair: ValidatedPair,
-        available_levels: Vec<LevelId>,
         mut storage: Option<StorageState>,
         dom: &Dom,
     ) -> Result<Self, JsValue> {
@@ -881,10 +868,6 @@ impl Runtime {
             storage: storage.take(),
             card,
             resume,
-            available_levels,
-            menu_index: 0,
-            password_digits: [0; 8],
-            password_cursor: 0,
             // Even the first authored title screen enters through
             // TitleLoadScreen's flag-two LevelUpdate. `sync_title_card` below
             // applies that transaction before the runtime is returned.
@@ -1323,7 +1306,6 @@ impl Runtime {
         if changed {
             dom.log(&format!("Retail GOOL requested title state {raw}."), false);
         }
-        self.menu_index = 0;
         Ok(true)
     }
 
@@ -1569,11 +1551,6 @@ impl Runtime {
                         JsValue::from_str(&format!("could not bind retail pad state: {error:?}"))
                     })?;
             }
-            let mut sim_pad = SimPadState {
-                held: u32::from(snapshot.held),
-                tapped: u32::from(snapshot.tapped),
-            };
-
             let retail_state = is_retail_runtime_state(self.flow.state());
             if matches!(
                 self.flow.state(),
@@ -1688,61 +1665,29 @@ impl Runtime {
                 self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
             }
 
-            if pbak_boundary.is_some() {
-                snapshot = self.pad.snapshot();
-                sim_pad = SimPadState {
-                    held: u32::from(snapshot.held),
-                    tapped: u32::from(snapshot.tapped),
-                };
-            }
-
             if !transition_queued {
-                // A live title object owns navigation; the Rust menu/timer
-                // path is a malformed-stream fallback. Native TitleUpdate
-                // advances its fade branch before comparing the authored
-                // title-state word, so defer that comparison until after the
-                // presentation tick below.
                 let authored_title = self.authored_title_runtime_active();
-                if !authored_title {
-                    self.handle_menu_input(sim_pad, dom)?;
-                }
-                // Menu commands can synchronously enter a different level.
-                // Drain that event before advancing the destination flow.
+                let mirror_advance = browser_flow_mirror_advance(self.flow.state(), authored_title);
                 self.handle_events(dom)?;
                 if self.pending_mount.is_none() {
-                    let previous_title_phase = matches!(self.flow.state(), FlowState::Title)
-                        .then(|| self.flow.title().phase());
-                    if !is_retail_runtime_state(self.flow.state())
-                        || matches!(self.flow.state(), FlowState::Title)
-                    {
-                        if authored_title && matches!(self.flow.state(), FlowState::Title) {
-                            self.flow.tick_authored_title().map_err(|error| {
-                                JsValue::from_str(&format!(
-                                    "authored title presentation failed: {error:?}"
-                                ))
-                            })?;
-                        } else {
-                            self.flow.tick(sim_pad).map_err(|error| {
-                                JsValue::from_str(&format!("simulation flow failed: {error:?}"))
-                            })?;
-                        }
+                    let previous_title_phase =
+                        matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle)
+                            .then(|| self.flow.title().phase());
+                    if matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle) {
+                        self.flow.tick_authored_title().map_err(|error| {
+                            JsValue::from_str(&format!(
+                                "authored title presentation failed: {error:?}"
+                            ))
+                        })?;
                     }
                     if let Some(previous_title_phase) = previous_title_phase {
                         self.apply_retail_title_display_update(previous_title_phase)?;
                     }
-                    if authored_title && matches!(self.flow.state(), FlowState::Title) {
+                    if matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle) {
                         self.consume_authored_title_state(dom)?;
                     }
                     self.handle_events(dom)?;
                     self.publish_title_state_global()?;
-                }
-                if (!is_retail_runtime_state(self.flow.state())
-                    || matches!(self.flow.state(), FlowState::Title))
-                    && !authored_title
-                    && snapshot.tapped & u32::from(PAD_CROSS | PAD_SQUARE) != 0
-                    && let Some(audio) = &mut self.audio
-                {
-                    audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
                 }
                 if let Some(audio) = &mut self.audio {
                     audio.tick_30_hz();
@@ -3141,165 +3086,6 @@ impl Runtime {
         Ok(())
     }
 
-    fn handle_menu_input(&mut self, pad: SimPadState, dom: &Dom) -> Result<(), JsValue> {
-        if !matches!(self.flow.state(), FlowState::Title)
-            || self.flow.title().phase() != TitlePhase::Ready
-        {
-            self.menu_index = 0;
-            return Ok(());
-        }
-        let screen = self.flow.title().screen();
-        let item_count = match screen {
-            TitleScreen::MainMenu | TitleScreen::Options => 4,
-            TitleScreen::Password => 9,
-            TitleScreen::Load => self.card.part_count().saturating_add(1).max(1),
-            TitleScreen::Map => self.available_levels.len().max(1),
-            _ => 1,
-        };
-        if pad.tapped & u32::from(PAD_UP) != 0 {
-            self.menu_index = self.menu_index.checked_sub(1).unwrap_or(item_count - 1);
-        }
-        if pad.tapped & u32::from(PAD_DOWN) != 0 {
-            self.menu_index = (self.menu_index + 1) % item_count;
-        }
-        if screen == TitleScreen::Password {
-            if pad.tapped & u32::from(PAD_LEFT) != 0 {
-                self.password_cursor = self.password_cursor.checked_sub(1).unwrap_or(7);
-            }
-            if pad.tapped & u32::from(PAD_RIGHT) != 0 {
-                self.password_cursor = (self.password_cursor + 1) % 8;
-            }
-            if pad.tapped & u32::from(PAD_UP) != 0 {
-                self.password_digits[self.password_cursor] =
-                    (self.password_digits[self.password_cursor] + 1) % 10;
-            }
-            if pad.tapped & u32::from(PAD_DOWN) != 0 {
-                self.password_digits[self.password_cursor] =
-                    (self.password_digits[self.password_cursor] + 9) % 10;
-            }
-            if pad.tapped & u32::from(PAD_START) != 0 {
-                let level_count = self
-                    .password_digits
-                    .iter()
-                    .fold(0_u32, |sum, digit| sum + u32::from(*digit))
-                    .clamp(1, 32);
-                self.flow.progress.level_count = level_count;
-                self.flow.progress.levels_unlocked = level_count;
-                self.flow
-                    .command(FlowCommand::Menu(MenuChoice::Back))
-                    .map_err(flow_error)?;
-                dom.log(
-                    "Applied local password progression and returned to the menu.",
-                    false,
-                );
-                return Ok(());
-            }
-        }
-
-        if pad.tapped & u32::from(PAD_CIRCLE) != 0 {
-            if matches!(
-                screen,
-                TitleScreen::Options | TitleScreen::Password | TitleScreen::Load
-            ) {
-                self.flow
-                    .command(FlowCommand::Menu(MenuChoice::Back))
-                    .map_err(flow_error)?;
-            }
-            return Ok(());
-        }
-        if pad.tapped & u32::from(PAD_CROSS) == 0 {
-            if screen == TitleScreen::Options && pad.tapped & u32::from(PAD_LEFT | PAD_RIGHT) != 0 {
-                self.adjust_option(pad.tapped & u32::from(PAD_RIGHT) != 0)?;
-            }
-            return Ok(());
-        }
-
-        match screen {
-            TitleScreen::MainMenu => {
-                let choice = [
-                    MenuChoice::Start,
-                    MenuChoice::Password,
-                    MenuChoice::Load,
-                    MenuChoice::Options,
-                ][self.menu_index];
-                self.flow
-                    .command(FlowCommand::Menu(choice))
-                    .map_err(flow_error)?;
-            }
-            TitleScreen::Options => {
-                if self.menu_index == 3 {
-                    self.flow
-                        .command(FlowCommand::Menu(MenuChoice::Back))
-                        .map_err(flow_error)?;
-                } else {
-                    self.adjust_option(true)?;
-                }
-            }
-            TitleScreen::Password => {
-                self.password_cursor = self.menu_index.min(7);
-                self.password_digits[self.password_cursor] =
-                    (self.password_digits[self.password_cursor] + 1) % 10;
-            }
-            TitleScreen::Load => {
-                if self.menu_index >= self.card.part_count() {
-                    self.flow
-                        .command(FlowCommand::Menu(MenuChoice::Back))
-                        .map_err(flow_error)?;
-                } else if !self.retail_objects.arena().is_empty() {
-                    // The mounted title GOOL consumes this same pad edge and
-                    // owns misc-15 load/result sequencing.
-                } else if let Ok(CardOutcome::Loaded(save)) =
-                    self.card
-                        .control(CardOperation::LoadSelected, self.menu_index, None)
-                {
-                    self.flow
-                        .command(FlowCommand::LoadProgress(save))
-                        .map_err(flow_error)?;
-                    dom.log("Loaded a checksummed virtual-card slot.", false);
-                }
-            }
-            TitleScreen::Map => {
-                if let Some(level) = self.available_levels.get(self.menu_index).copied() {
-                    self.flow
-                        .command(FlowCommand::SelectMapLevel(level))
-                        .map_err(flow_error)?;
-                }
-            }
-            TitleScreen::GameOver => {
-                self.flow
-                    .command(FlowCommand::Menu(MenuChoice::Back))
-                    .map_err(flow_error)?;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn adjust_option(&mut self, increase: bool) -> Result<(), JsValue> {
-        let mut options = self.flow.options;
-        match self.menu_index {
-            0 => {
-                options.sfx_volume = if increase {
-                    options.sfx_volume.saturating_add(16)
-                } else {
-                    options.sfx_volume.saturating_sub(16)
-                };
-            }
-            1 => {
-                options.music_volume = if increase {
-                    options.music_volume.saturating_add(16)
-                } else {
-                    options.music_volume.saturating_sub(16)
-                };
-            }
-            2 => options.mono = !options.mono,
-            _ => return Ok(()),
-        }
-        self.flow
-            .command(FlowCommand::SetOptions(options))
-            .map_err(flow_error)
-    }
-
     fn handle_events(&mut self, dom: &Dom) -> Result<(), JsValue> {
         for event in self.flow.take_events() {
             dom.log(&format!("flow: {event:?}"), false);
@@ -3426,7 +3212,22 @@ impl Runtime {
             FlowState::Boot => {
                 dom.set_overlay(true, "RUST / WASM", "Booting", "Validating streams");
             }
-            FlowState::Title => self.render_title_ui(dom)?,
+            FlowState::Title => {
+                let (overline, title) = if self.retail_runtime_error.is_some() {
+                    ("AUTHORED TITLE ERROR", "Retail title runtime stopped")
+                } else {
+                    ("AUTHORED TITLE LOADING", "Waiting for retail title objects")
+                };
+                dom.set_overlay(
+                    true,
+                    overline,
+                    title,
+                    self.retail_runtime_message(
+                        "Mounted title data has not produced an authored scene yet",
+                    ),
+                );
+                dom.set_menu(&[])?;
+            }
             FlowState::Gameplay(level) => {
                 dom.set_overlay(
                     true,
@@ -3464,8 +3265,10 @@ impl Runtime {
                 dom.set_overlay(
                     true,
                     "LEVEL TRANSITION",
-                    "Level complete",
-                    &format!("Missed boxes: {missed_boxes} · press Z"),
+                    &format!("Level complete · missed boxes: {missed_boxes}"),
+                    self.retail_runtime_message(
+                        "Waiting for authored level-complete objects to present",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -3474,7 +3277,9 @@ impl Runtime {
                     true,
                     "ATTRACT SEQUENCE",
                     "Intro",
-                    "Press a face button to return",
+                    self.retail_runtime_message(
+                        "Retail intro GOOL is ticking · face buttons feed the authored pad state",
+                    ),
                 );
                 dom.set_menu(&[])?;
             }
@@ -3491,89 +3296,6 @@ impl Runtime {
             }
         }
         Ok(())
-    }
-
-    fn render_title_ui(&self, dom: &Dom) -> Result<(), JsValue> {
-        let screen = self.flow.title().screen();
-        let subtitle = match self.flow.title().phase() {
-            TitlePhase::Ready => "Ready",
-            TitlePhase::FadingIn => "Fading in",
-            TitlePhase::FadingOut | TitlePhase::FinishedFadingOut => "Transitioning",
-            TitlePhase::Start | TitlePhase::Blank => "Loading title state",
-        };
-        let title = match screen {
-            TitleScreen::PublisherFirst => "Publisher",
-            TitleScreen::PublisherSecond => "Production",
-            TitleScreen::NaughtyDog => "Developer",
-            TitleScreen::MainMenu => "Main menu",
-            TitleScreen::Options => "Options",
-            TitleScreen::GameOver => "Game over",
-            TitleScreen::Password => "Password",
-            TitleScreen::Load => "Load game",
-            TitleScreen::Map => "Island map",
-        };
-        dom.set_overlay(
-            true,
-            &format!("TITLE STATE {}", screen as u8),
-            title,
-            subtitle,
-        );
-        let entries: Vec<(String, bool)> = match screen {
-            TitleScreen::MainMenu => ["Start", "Password", "Load", "Options"]
-                .into_iter()
-                .enumerate()
-                .map(|(index, label)| (label.to_owned(), index == self.menu_index))
-                .collect(),
-            TitleScreen::Options => [
-                format!("SFX volume {:03}", self.flow.options.sfx_volume),
-                format!("Music volume {:03}", self.flow.options.music_volume),
-                if self.flow.options.mono {
-                    "Mono".to_owned()
-                } else {
-                    "Stereo".to_owned()
-                },
-                "Exit".to_owned(),
-            ]
-            .into_iter()
-            .enumerate()
-            .map(|(index, label)| (label, index == self.menu_index))
-            .collect(),
-            TitleScreen::Password => self
-                .password_digits
-                .iter()
-                .enumerate()
-                .map(|(index, digit)| {
-                    (
-                        format!("Digit {}: {digit}", index + 1),
-                        index == self.password_cursor,
-                    )
-                })
-                .chain(std::iter::once((
-                    "Start: apply · C: back".to_owned(),
-                    false,
-                )))
-                .collect(),
-            TitleScreen::Load => {
-                let mut values: Vec<_> = (0..self.card.part_count())
-                    .map(|index| (format!("Card save {}", index + 1), index == self.menu_index))
-                    .collect();
-                values.push(("Back".to_owned(), self.menu_index >= self.card.part_count()));
-                values
-            }
-            TitleScreen::Map => self
-                .available_levels
-                .iter()
-                .enumerate()
-                .map(|(index, level)| (level_name(*level).to_owned(), index == self.menu_index))
-                .collect(),
-            TitleScreen::GameOver => vec![("Return to menu".to_owned(), true)],
-            _ => vec![("Press Z, X, C, V, Enter, or Space".to_owned(), true)],
-        };
-        let borrowed: Vec<_> = entries
-            .iter()
-            .map(|(label, selected)| (label.as_str(), *selected))
-            .collect();
-        dom.set_menu(&borrowed)
     }
 
     fn request_pause(&mut self) {
@@ -4994,10 +4716,6 @@ fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{value:.1} {}", UNITS[unit])
     }
-}
-
-fn flow_error(error: crust_sim::flow::FlowError) -> JsValue {
-    JsValue::from_str(&format!("flow command failed: {error:?}"))
 }
 
 fn js_message(error: &JsValue) -> String {

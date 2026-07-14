@@ -3382,10 +3382,16 @@ mod tests {
                     })
                 })
                 .flatten();
-            if let Some(offender) = offender {
+            // The synchronous 0x83/0x84 local-bound refresh lets successive
+            // authored burst children reach this same scale. Pin the first
+            // matching incarnation so the later checks follow one lifecycle.
+            if observed_offender.is_none()
+                && let Some(offender) = offender
+            {
                 observed_offender = Some(offender.object);
-                assert_eq!(pbak_frame, 179);
-                assert_eq!(camera_step.after.progress.raw(), 0x5ec);
+                assert_eq!(pbak_frame, 190);
+                assert_eq!(pad_boundaries, 191);
+                assert_eq!(camera_step.after.progress.raw(), 0x600);
                 assert_eq!(
                     runtime.object_for_arena(offender.object.arena()),
                     Some(offender.object)
@@ -3398,14 +3404,15 @@ mod tests {
                 assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(4));
                 let vm = runtime.machine().object(offender.object.vm()).unwrap();
                 assert_eq!(vm.state(), 12);
+                assert_eq!(vm.register(process_register::ANIMATION_STAMP).unwrap(), 191);
             }
             if let Some((raw_shrink, effective_shrink)) = (level == LevelId::new_const(0x0c))
                 .then_some(match pbak_frame {
-                    180 | 181 => Some((4_u32, 4_u8)),
-                    182 | 183 => Some((5, 5)),
-                    204 => Some((41, 9)),
-                    205 => Some((45, 13)),
-                    206 => Some((49, 17)),
+                    191 | 192 => Some((4_u32, 4_u8)),
+                    193 | 194 => Some((5, 5)),
+                    215 => Some((41, 9)),
+                    216 => Some((45, 13)),
+                    217 => Some((49, 17)),
                     _ => None,
                 })
                 .flatten()

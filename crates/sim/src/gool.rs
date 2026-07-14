@@ -28,9 +28,10 @@ use crate::retail_physics::{
     finalize_retail_physics, path_orientation_requested, rotate_toward,
 };
 use crate::retail_solid_motion::{
-    SmoothStopMemory, SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError,
-    SolidMotionState, SolidObjectCandidate, SolidObjectZone, SolidQuery, SolidZoneBoundary,
-    SolidZoneView, solve_retail_solid_motion_with_event_handler,
+    ObjectCollisionLinks, ObjectCollisionState, STATUS_HOTSPOT_COLLISION, SmoothStopMemory,
+    SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError, SolidMotionState,
+    SolidObjectCandidate, SolidObjectZone, SolidQuery, SolidZoneBoundary, SolidZoneView,
+    resolve_object_collision, solve_retail_solid_motion_with_event_handler,
 };
 
 /// Maximum simultaneous VM identities: the 96-object retail pool plus its
@@ -1940,6 +1941,17 @@ struct HostRunOptions {
     return_link_halt: Option<HaltReason>,
 }
 
+/// Native local-bound refresh policy attached to animation opcode `0x83` or
+/// `0x84`. Asset resolution remains synchronous at the runtime host boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnimationLocalBoundRefresh {
+    /// `0x83`: refresh only for solid/collidable objects that are near Crash,
+    /// unless status B's source override bit is set.
+    Conditional,
+    /// `0x84`: refresh the selected frame without a status/range gate.
+    Unconditional,
+}
+
 /// Host-visible, deterministic effect emitted by GOOL.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum VmEffect {
@@ -2073,6 +2085,7 @@ pub enum VmEffect {
         object: ObjectHandle,
         frame: u32,
         scale_x: i32,
+        local_bound_refresh: AnimationLocalBoundRefresh,
     },
     Transition(i32),
     SaveState(ObjectHandle),
@@ -4214,6 +4227,78 @@ impl Machine {
         Ok(())
     }
 
+    /// Applies one checked, pointer-free `GoolCollide` call.
+    ///
+    /// All process fields are snapshotted before either object is mutated.
+    /// Link and status writes then retain native source-before-target ordering,
+    /// including when `target == source` or the current collider aliases one
+    /// of the participants.
+    pub(crate) fn collide_retail_objects(
+        &mut self,
+        target: ObjectHandle,
+        target_bound: Bounds3,
+        source: ObjectHandle,
+        source_bound: Bounds3,
+    ) -> Result<bool, VmError> {
+        let snapshot = |object: &VmObject| -> Result<ObjectCollisionState, VmError> {
+            let translation = object.retail_transform()?.translation;
+            Ok(ObjectCollisionState {
+                translation: Vec3 {
+                    x: translation[0],
+                    y: translation[1],
+                    z: translation[2],
+                },
+                state_flags: object.register(process_register::STATE_FLAGS)?,
+                hotspot_size: object.register(process_register::HOTSPOT_SIZE)? as i32,
+            })
+        };
+        let target_object = self.object(target)?;
+        let target_state = snapshot(target_object)?;
+        let target_collider = target_object.links[6];
+        let source_state = snapshot(self.object(source)?)?;
+        let current = if target_collider.is_some_and(|current| current != source)
+            && source_state.state_flags & 0x800 == 0
+        {
+            Some(snapshot(
+                self.object(target_collider.expect("checked some"))?,
+            )?)
+        } else {
+            None
+        };
+        let resolution = resolve_object_collision(
+            target_state,
+            target_collider.map(|object| u32::from(object.get())),
+            target_bound,
+            u32::from(source.get()),
+            source_state,
+            source_bound,
+            current,
+        )
+        .map_err(VmError::RetailSolidMotion)?;
+
+        if resolution.links != ObjectCollisionLinks::Unchanged {
+            self.object_mut(source)?.set_link(6, Some(target))?;
+        }
+        if resolution.links == ObjectCollisionLinks::Both {
+            self.object_mut(target)?.set_link(6, Some(source))?;
+        }
+        if resolution.target_hotspot {
+            let status_a = self.object(target)?.register(process_register::STATUS_A)?;
+            self.object_mut(target)?.set_register(
+                process_register::STATUS_A,
+                status_a | STATUS_HOTSPOT_COLLISION,
+            )?;
+        }
+        if resolution.source_hotspot {
+            let status_a = self.object(source)?.register(process_register::STATUS_A)?;
+            self.object_mut(source)?.set_register(
+                process_register::STATUS_A,
+                status_a | STATUS_HOTSPOT_COLLISION,
+            )?;
+        }
+        Ok(resolution.links == ObjectCollisionLinks::Both)
+    }
+
     /// Returns this frame's AABB snapshots in their exact registration order.
     #[must_use]
     pub fn frame_bounds(&self) -> &[FrameBound<ObjectHandle>] {
@@ -5415,6 +5500,29 @@ impl Machine {
         let mut condition = false;
         for steps in 0..MAX_EVENT_SERVICE_INSTRUCTIONS {
             match self.step(handle, &mut condition, return_link_halt)? {
+                Some(HaltReason::AnimationChanged { .. }) if service_audio => {
+                    let effect = self
+                        .effects
+                        .last()
+                        .cloned()
+                        .ok_or(VmError::MissingHostEffect)?;
+                    if !matches!(effect, VmEffect::AnimationFrameChanged { .. }) {
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    host(self, VmHostRequest::Effect(effect))?;
+                    if !self.incarnation_is_live(handle, incarnation) {
+                        return Ok(Execution {
+                            reason: HaltReason::ObjectTerminated,
+                            steps: steps + 1,
+                        });
+                    }
+                    if self.level_restart_requested {
+                        return Ok(Execution {
+                            reason: HaltReason::HostEffect,
+                            steps: steps + 1,
+                        });
+                    }
+                }
                 None | Some(HaltReason::AnimationChanged { .. }) => {}
                 Some(HaltReason::HostEffect) if self.pending_send_event_index(handle).is_some() => {
                     match self.service_pending_send_event(handle, host)? {
@@ -6853,8 +6961,33 @@ impl Machine {
                     }
                     continue;
                 }
-                if !suspend_on_animation && matches!(reason, HaltReason::AnimationChanged { .. }) {
-                    continue;
+                if matches!(reason, HaltReason::AnimationChanged { .. }) {
+                    if service_audio {
+                        let effect = self
+                            .effects
+                            .last()
+                            .cloned()
+                            .ok_or(VmError::MissingHostEffect)?;
+                        if !matches!(effect, VmEffect::AnimationFrameChanged { .. }) {
+                            return Err(VmError::MissingHostEffect);
+                        }
+                        host(self, VmHostRequest::Effect(effect))?;
+                        if !self.incarnation_is_live(handle, incarnation) {
+                            return Ok(Execution {
+                                reason: HaltReason::ObjectTerminated,
+                                steps: steps + 1,
+                            });
+                        }
+                        if self.level_restart_requested {
+                            return Ok(Execution {
+                                reason: HaltReason::HostEffect,
+                                steps: steps + 1,
+                            });
+                        }
+                    }
+                    if !suspend_on_animation {
+                        continue;
+                    }
                 }
                 return Ok(Execution {
                     reason,
@@ -7345,6 +7478,7 @@ impl Machine {
                     object: handle,
                     frame,
                     scale_x,
+                    local_bound_refresh: AnimationLocalBoundRefresh::Conditional,
                 })?;
                 return Ok(Some(HaltReason::AnimationChanged {
                     frame,
@@ -7377,6 +7511,7 @@ impl Machine {
                     object: handle,
                     frame,
                     scale_x,
+                    local_bound_refresh: AnimationLocalBoundRefresh::Unconditional,
                 })?;
                 return Ok(Some(HaltReason::AnimationChanged {
                     frame,
@@ -10684,6 +10819,7 @@ mod tests {
                     object: h,
                     frame: 0x200,
                     scale_x: 0x1000,
+                    local_bound_refresh: AnimationLocalBoundRefresh::Unconditional,
                 })
         );
     }
@@ -11061,6 +11197,7 @@ mod tests {
                     object: h,
                     frame: 5 << 8,
                     scale_x: 0x1000,
+                    local_bound_refresh: AnimationLocalBoundRefresh::Conditional,
                 },
             ]
         );
@@ -12150,6 +12287,189 @@ mod tests {
             (RetailSolidHit::Object(second), [80_000, 30, -20_000]),
             "the AABB is snapshotted but candidate status remains live"
         );
+    }
+
+    #[test]
+    fn checked_object_collision_writes_reciprocal_links_and_hotspot_bits() {
+        let target = handle(0);
+        let source = handle(1);
+        let mut target_object = VmObject::new(target, Vec::new()).unwrap();
+        let mut source_object = VmObject::new(source, Vec::new()).unwrap();
+        target_object
+            .set_register(process_register::HOTSPOT_SIZE, 10)
+            .unwrap();
+        source_object
+            .set_register(process_register::HOTSPOT_SIZE, 5)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(target_object).unwrap();
+        machine.insert_object(source_object).unwrap();
+        let target_bound = Bounds3 {
+            min: Vec3 {
+                x: -100,
+                y: -100,
+                z: -100,
+            },
+            max: Vec3 {
+                x: 100,
+                y: 100,
+                z: 100,
+            },
+        };
+        let source_bound = Bounds3 {
+            min: Vec3 {
+                x: -50,
+                y: -50,
+                z: -50,
+            },
+            max: Vec3 {
+                x: 50,
+                y: 50,
+                z: 50,
+            },
+        };
+
+        assert!(
+            machine
+                .collide_retail_objects(target, target_bound, source, source_bound)
+                .unwrap()
+        );
+
+        assert_eq!(machine.object(target).unwrap().links[6], Some(source));
+        assert_eq!(machine.object(source).unwrap().links[6], Some(target));
+        assert_ne!(
+            machine
+                .object(target)
+                .unwrap()
+                .register(process_register::STATUS_A)
+                .unwrap()
+                & STATUS_HOTSPOT_COLLISION,
+            0
+        );
+        assert_ne!(
+            machine
+                .object(source)
+                .unwrap()
+                .register(process_register::STATUS_A)
+                .unwrap()
+                & STATUS_HOTSPOT_COLLISION,
+            0
+        );
+    }
+
+    #[test]
+    fn checked_object_collision_preserves_native_priority_override_branches() {
+        let target = handle(0);
+        let current = handle(1);
+        let source = handle(2);
+        let bound = Bounds3 {
+            min: Vec3 {
+                x: -100,
+                y: -100,
+                z: -100,
+            },
+            max: Vec3 {
+                x: 100,
+                y: 100,
+                z: 100,
+            },
+        };
+        let build = |source_flags: u32, current_flags: u32| {
+            let mut target_object = VmObject::new(target, Vec::new()).unwrap();
+            target_object.set_link(6, Some(current)).unwrap();
+            let mut current_object = VmObject::new(current, Vec::new()).unwrap();
+            current_object
+                .set_retail_transform(RetailTransform {
+                    translation: [100, 0, 0],
+                    ..RetailTransform::default()
+                })
+                .unwrap();
+            current_object
+                .set_register(process_register::STATE_FLAGS, current_flags)
+                .unwrap();
+            let mut source_object = VmObject::new(source, Vec::new()).unwrap();
+            source_object
+                .set_retail_transform(RetailTransform {
+                    translation: [200, 0, 0],
+                    ..RetailTransform::default()
+                })
+                .unwrap();
+            source_object
+                .set_register(process_register::STATE_FLAGS, source_flags)
+                .unwrap();
+            let mut machine = Machine::new(0);
+            machine.insert_object(target_object).unwrap();
+            machine.insert_object(current_object).unwrap();
+            machine.insert_object(source_object).unwrap();
+            machine
+        };
+
+        let mut farther = build(0, 0);
+        assert!(
+            !farther
+                .collide_retail_objects(target, bound, source, bound)
+                .unwrap()
+        );
+        assert_eq!(farther.object(target).unwrap().links[6], Some(current));
+        assert_eq!(farther.object(source).unwrap().links[6], None);
+
+        let mut source_override = build(0x800, 0);
+        assert!(
+            !source_override
+                .collide_retail_objects(target, bound, source, bound)
+                .unwrap()
+        );
+        assert_eq!(
+            source_override.object(target).unwrap().links[6],
+            Some(current)
+        );
+        assert_eq!(
+            source_override.object(source).unwrap().links[6],
+            Some(target)
+        );
+
+        let mut current_override = build(0, 0x800);
+        assert!(
+            current_override
+                .collide_retail_objects(target, bound, source, bound)
+                .unwrap()
+        );
+        assert_eq!(
+            current_override.object(target).unwrap().links[6],
+            Some(source)
+        );
+        assert_eq!(
+            current_override.object(source).unwrap().links[6],
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn checked_object_collision_handles_target_source_self_alias() {
+        let object = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(object, Vec::new()).unwrap())
+            .unwrap();
+        let bound = Bounds3 {
+            min: Vec3 {
+                x: -10,
+                y: -10,
+                z: -10,
+            },
+            max: Vec3 {
+                x: 10,
+                y: 10,
+                z: 10,
+            },
+        };
+
+        assert!(
+            machine
+                .collide_retail_objects(object, bound, object, bound)
+                .unwrap()
+        );
+        assert_eq!(machine.object(object).unwrap().links[6], Some(object));
     }
 
     #[test]

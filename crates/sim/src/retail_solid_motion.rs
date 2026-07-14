@@ -336,6 +336,35 @@ pub struct SolidObjectCandidate {
     pub hotspot_size: i32,
 }
 
+/// Process fields read by native `GoolCollide` before it mutates either
+/// participant. Keeping this snapshot pointer-free lets the solid solver and
+/// the object-bound path share the exact same priority and hotspot decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectCollisionState {
+    pub(crate) translation: Vec3,
+    pub(crate) state_flags: u32,
+    pub(crate) hotspot_size: i32,
+}
+
+/// Pure result of one native `GoolCollide` decision.
+///
+/// `Both` means both reciprocal collider links are written. The source
+/// override branch rejects the target replacement while still writing only
+/// the source's collider link.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ObjectCollisionLinks {
+    Unchanged,
+    SourceOnly,
+    Both,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ObjectCollisionResolution {
+    pub(crate) links: ObjectCollisionLinks,
+    pub(crate) target_hotspot: bool,
+    pub(crate) source_hotspot: bool,
+}
+
 /// Level-dependent collision behavior kept explicit instead of consulting globals.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SolidLevelQuirks {
@@ -1378,57 +1407,119 @@ fn register_object_collision(
     moving_bound: Bounds3,
     effects: &mut Vec<SolidEffect>,
 ) -> Result<(), SolidMotionError> {
-    let mut accepted = true;
-    if let Some(current_id) = state.collider.filter(|current| *current != candidate.id) {
-        if candidate.state_flags & 0x800 != 0 {
-            effects.push(SolidEffect::ObjectCollision {
-                candidate: candidate.id,
-                accepted: false,
-            });
-            effects.push(SolidEffect::SetCandidateCollider {
-                candidate: candidate.id,
-            });
-            return Ok(());
-        }
-        if let Some(current) = candidates
-            .iter()
-            .find(|current| current.active && current.id == current_id)
-        {
-            let current_distance = approximate_distance(state.translation, current.translation)?;
-            let candidate_distance =
-                approximate_distance(state.translation, candidate.translation)?;
-            if candidate_distance >= current_distance && current.state_flags & 0x800 == 0 {
-                accepted = false;
-            }
-        }
-    }
+    let current = state
+        .collider
+        .filter(|current| *current != candidate.id)
+        .and_then(|current_id| {
+            candidates
+                .iter()
+                .find(|current| current.active && current.id == current_id)
+        })
+        .map(|current| ObjectCollisionState {
+            translation: current.translation,
+            state_flags: current.state_flags,
+            hotspot_size: current.hotspot_size,
+        });
+    let resolution = resolve_object_collision(
+        ObjectCollisionState {
+            translation: state.translation,
+            state_flags: state.state_flags,
+            hotspot_size: state.hotspot_size,
+        },
+        state.collider,
+        moving_bound,
+        candidate.id,
+        ObjectCollisionState {
+            translation: candidate.translation,
+            state_flags: candidate.state_flags,
+            hotspot_size: candidate.hotspot_size,
+        },
+        candidate.bounds,
+        current,
+    )?;
     effects.push(SolidEffect::ObjectCollision {
         candidate: candidate.id,
-        accepted,
+        accepted: resolution.links == ObjectCollisionLinks::Both,
     });
-    if !accepted {
+    if resolution.links != ObjectCollisionLinks::Unchanged {
+        effects.push(SolidEffect::SetCandidateCollider {
+            candidate: candidate.id,
+        });
+    }
+    if resolution.links != ObjectCollisionLinks::Both {
         return Ok(());
     }
     state.collider = Some(candidate.id);
-    effects.push(SolidEffect::SetCandidateCollider {
-        candidate: candidate.id,
-    });
-    if state.hotspot_size != 0 {
-        let inset = inset_horizontal(moving_bound, state.hotspot_size)?;
-        if source_bound_intersection(inset, candidate.bounds) {
-            state.status_a |= STATUS_HOTSPOT_COLLISION;
-        }
+    if resolution.target_hotspot {
+        state.status_a |= STATUS_HOTSPOT_COLLISION;
     }
-    if candidate.hotspot_size != 0 {
-        let inset = inset_horizontal(candidate.bounds, candidate.hotspot_size)?;
-        if source_bound_intersection(inset, moving_bound) {
-            effects.push(SolidEffect::SetCandidateStatus {
-                candidate: candidate.id,
-                status_bits: STATUS_HOTSPOT_COLLISION,
-            });
-        }
+    if resolution.source_hotspot {
+        effects.push(SolidEffect::SetCandidateStatus {
+            candidate: candidate.id,
+            status_bits: STATUS_HOTSPOT_COLLISION,
+        });
     }
     Ok(())
+}
+
+/// Resolves the priority, reciprocal-link, and hotspot branches shared by
+/// native `GoolCollide` callers without mutating either participant.
+///
+/// `current` is the live object named by `target_collider` when it is available
+/// to the caller. The solid solver deliberately supplies `None` for a stale or
+/// out-of-snapshot collider, matching its existing bounded-candidate policy.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn resolve_object_collision(
+    target: ObjectCollisionState,
+    target_collider: Option<u32>,
+    target_bound: Bounds3,
+    source_id: u32,
+    source: ObjectCollisionState,
+    source_bound: Bounds3,
+    current: Option<ObjectCollisionState>,
+) -> Result<ObjectCollisionResolution, SolidMotionError> {
+    if target_collider.is_some_and(|current_id| current_id != source_id) {
+        if source.state_flags & 0x800 != 0 {
+            return Ok(ObjectCollisionResolution {
+                links: ObjectCollisionLinks::SourceOnly,
+                target_hotspot: false,
+                source_hotspot: false,
+            });
+        }
+        if let Some(current) = current {
+            let current_distance = approximate_distance(target.translation, current.translation)?;
+            let source_distance = approximate_distance(target.translation, source.translation)?;
+            if source_distance >= current_distance && current.state_flags & 0x800 == 0 {
+                return Ok(ObjectCollisionResolution {
+                    links: ObjectCollisionLinks::Unchanged,
+                    target_hotspot: false,
+                    source_hotspot: false,
+                });
+            }
+        }
+    }
+
+    let target_hotspot = if target.hotspot_size == 0 {
+        false
+    } else {
+        source_bound_intersection(
+            inset_horizontal(target_bound, target.hotspot_size)?,
+            source_bound,
+        )
+    };
+    let source_hotspot = if source.hotspot_size == 0 {
+        false
+    } else {
+        source_bound_intersection(
+            inset_horizontal(source_bound, source.hotspot_size)?,
+            target_bound,
+        )
+    };
+    Ok(ObjectCollisionResolution {
+        links: ObjectCollisionLinks::Both,
+        target_hotspot,
+        source_hotspot,
+    })
 }
 
 fn approximate_distance(left: Vec3, right: Vec3) -> Result<i32, SolidMotionError> {

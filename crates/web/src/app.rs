@@ -44,10 +44,10 @@ use crust_sim::flow::{
 use crust_sim::gool::{
     AudioHostRequest, AudioHostResponse, CURRENT_DISPLAY_GLOBAL, CURRENT_MAP_LEVEL_GLOBAL,
     CardHostRequest, GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL,
-    KEY_COUNT_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL, MONO_GLOBAL,
-    MUSIC_VOLUME_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot,
-    RetailSolidEnvironment, RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL,
-    VmEffect, VmObject, VmStateProgram, process_register,
+    KEY_COUNT_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL, MUSIC_VOLUME_GLOBAL,
+    ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment,
+    RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject,
+    VmStateProgram, process_register,
 };
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
@@ -92,14 +92,15 @@ use crate::title_runtime::{
 };
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
-use crate::{BrowserFlowMirrorAdvance, browser_flow_mirror_advance};
+use crate::{
+    BrowserFlowMirrorAdvance, authoritative_save_or_last, browser_flow_mirror_advance,
+    initial_retail_level_state,
+};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
 const RETAIL_GLOBAL_WORDS: usize = 256;
 const RETAIL_INSTRUCTION_BUDGET: usize = 67;
-const HEALTH_GLOBAL: usize = 25;
-const FRUIT_COUNT_GLOBAL: usize = 26;
 const BOX_COUNT_GLOBAL: usize = 62;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
@@ -686,6 +687,10 @@ struct Runtime {
     storage: Option<StorageState>,
     card: VirtualCard,
     resume: ResumeManager,
+    /// Last payload successfully read from retail GOOL globals. This is the
+    /// only persistence fallback used if an impossible fixed-allocation VM
+    /// read fails; legacy `GameFlow::player` state is never serialized.
+    last_authoritative_save: SaveData,
     last_title_state: Option<u8>,
     pending_buttons: u16,
     pending_mount: Option<RetailPairMount>,
@@ -833,19 +838,21 @@ impl Runtime {
                     "could not initialize retail card globals: {error:?}"
                 ))
             })?;
+        let initial_level_state = initial_retail_level_state();
         retail_objects.set_level_state_context(build_retail_level_state_context(
             &retail_zone_graph,
             retail_camera.location(),
             &retail_zone_lifecycle,
-            i32::from(flow.player.boxes) << 8,
-            flow.player.checkpoint.map_or(-1, |id| i32::from(id) << 8),
-            [
-                flow.player.translation.x,
-                flow.player.translation.y,
-                flow.player.translation.z,
-            ],
+            initial_level_state.box_count,
+            initial_level_state.checkpoint_id,
+            initial_level_state.checkpoint_translation,
             false,
         )?);
+        let last_authoritative_save = retail_objects.card_save_data().map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not snapshot initial retail save globals: {error:?}"
+            ))
+        })?;
         let retail_core_objects = create_retail_core_objects_for_pair(
             &mut retail_objects,
             &pair,
@@ -879,6 +886,7 @@ impl Runtime {
             storage: storage.take(),
             card,
             resume,
+            last_authoritative_save,
             // Even the first authored title screen enters through
             // TitleLoadScreen's flag-two LevelUpdate. `sync_title_card` below
             // applies that transaction before the runtime is returned.
@@ -1083,6 +1091,11 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        let destination_authoritative_save = retail_objects.card_save_data().map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not snapshot destination retail save globals: {error:?}"
+            ))
+        })?;
         if let Some(image) = loading_image {
             self.stage.install_loading_image(&image)?;
             dom.log(
@@ -1125,6 +1138,7 @@ impl Runtime {
         self.retail_zone_graph = retail_zone_graph;
         self.retail_camera = retail_camera;
         self.retail_objects = retail_objects;
+        self.last_authoritative_save = destination_authoritative_save;
         self.retail_zones = retail_zones;
         self.retail_zone_lifecycle = retail_zone_lifecycle;
         self.retail_zone_pager = retail_zone_pager;
@@ -2110,6 +2124,7 @@ impl Runtime {
             return;
         };
         apply_save(&mut self.flow, save);
+        self.last_authoritative_save = save;
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         if let Some(audio) = &mut self.audio {
@@ -2134,9 +2149,6 @@ impl Runtime {
         let key_count = read(KEY_COUNT_GLOBAL)?;
         let item_pool_1 = read(ITEM_POOL_1_GLOBAL)?;
         let item_pool_2 = read(ITEM_POOL_2_GLOBAL)?;
-        let life_count = read(LIFE_COUNT_GLOBAL)?.cast_signed();
-        let health = read(HEALTH_GLOBAL)?.cast_signed();
-        let fruit_count = read(FRUIT_COUNT_GLOBAL)?.cast_signed();
         let box_count = read(BOX_COUNT_GLOBAL)?.cast_signed();
         let checkpoint_id = read(CHECKPOINT_ID_GLOBAL)?.cast_signed();
         let checkpoint_translation = [
@@ -2157,13 +2169,6 @@ impl Runtime {
         self.flow.progress.key_count = key_count;
         self.flow.progress.item_pool_1 = item_pool_1;
         self.flow.progress.item_pool_2 = item_pool_2;
-        self.flow.player.lives = life_count >> 8;
-        self.flow.player.health = (health >> 8).clamp(0, i32::from(u8::MAX)) as u8;
-        self.flow.player.fruit = (fruit_count >> 8).clamp(0, i32::from(u16::MAX)) as u16;
-        self.flow.player.boxes = (box_count >> 8).clamp(0, i32::from(u16::MAX)) as u16;
-        self.flow.player.checkpoint = (checkpoint_id != -1)
-            .then(|| (checkpoint_id >> 8).clamp(0, i32::from(u16::MAX)) as u16);
-
         if self.flow.options != options {
             self.flow.options = options;
             self.retail_audio.set_sfx_volume(options.sfx_volume);
@@ -2178,6 +2183,10 @@ impl Runtime {
             context.checkpoint_translation = checkpoint_translation;
             self.retail_objects.set_level_state_context(context);
         }
+        self.last_authoritative_save = self
+            .retail_objects
+            .card_save_data()
+            .map_err(|error| format!("retail save globals are unavailable: {error:?}"))?;
         Ok(())
     }
 
@@ -2714,34 +2723,21 @@ impl Runtime {
         &mut self,
         location: RetailCameraLocation,
     ) -> Result<(), String> {
-        let existing = self.retail_objects.level_state_context().cloned();
+        let existing = self
+            .retail_objects
+            .level_state_context()
+            .cloned()
+            .ok_or_else(|| {
+                "retail camera update has no authoritative level-state context".to_owned()
+            })?;
         let context = build_retail_level_state_context(
             &self.retail_zone_graph,
             location,
             &self.retail_zone_lifecycle,
-            existing
-                .as_ref()
-                .map_or(i32::from(self.flow.player.boxes) << 8, |state| {
-                    state.box_count
-                }),
-            existing.as_ref().map_or_else(
-                || {
-                    self.flow
-                        .player
-                        .checkpoint
-                        .map_or(-1, |id| i32::from(id) << 8)
-                },
-                |state| state.checkpoint_id,
-            ),
-            existing.as_ref().map_or(
-                [
-                    self.flow.player.translation.x,
-                    self.flow.player.translation.y,
-                    self.flow.player.translation.z,
-                ],
-                |state| state.checkpoint_translation,
-            ),
-            existing.as_ref().is_some_and(|state| state.first_spawn),
+            existing.box_count,
+            existing.checkpoint_id,
+            existing.checkpoint_translation,
+            existing.first_spawn,
         )?;
         self.retail_objects.set_level_state_context(context);
         Ok(())
@@ -2978,6 +2974,7 @@ impl Runtime {
                 ))
             })?;
         apply_save(&mut self.flow, protected);
+        self.last_authoritative_save = protected;
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         if let Some(audio) = &mut self.audio {
@@ -3488,24 +3485,10 @@ impl Runtime {
     }
 
     fn save_data(&self) -> SaveData {
-        self.retail_objects
-            .card_save_data()
-            .unwrap_or_else(|_| self.flow_save_data())
-    }
-
-    fn flow_save_data(&self) -> SaveData {
-        SaveData {
-            level_count: self.flow.progress.level_count,
-            initial_lives: u32::try_from(self.flow.player.lives.max(0)).unwrap_or_default() << 8,
-            unknown_6190c: 0,
-            mono: self.flow.options.mono,
-            sfx_volume: u32::from(self.flow.options.sfx_volume),
-            music_volume: u32::from(self.flow.options.music_volume),
-            item_pool_1: self.flow.progress.item_pool_1,
-            item_pool_2: self.flow.progress.item_pool_2,
-            gem_count: self.flow.progress.gem_count,
-            key_count: self.flow.progress.key_count,
-        }
+        authoritative_save_or_last(
+            self.retail_objects.card_save_data(),
+            self.last_authoritative_save,
+        )
     }
 
     fn flush(&mut self) {
@@ -4396,7 +4379,6 @@ fn apply_save(flow: &mut GameFlow, save: SaveData) {
         music_volume: save.music_volume.min(u32::from(u8::MAX)) as u8,
         mono: save.mono,
     };
-    flow.player.lives = i32::try_from(save.initial_lives >> 8).unwrap_or(4);
 }
 
 fn default_save() -> SaveData {

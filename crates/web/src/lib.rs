@@ -5,7 +5,7 @@
 use wasm_bindgen::prelude::*;
 
 #[cfg(any(target_arch = "wasm32", test))]
-use crust_sim::flow::FlowState;
+use crust_sim::{card::SaveData, flow::FlowState};
 
 #[cfg(target_arch = "wasm32")]
 mod app;
@@ -36,6 +36,41 @@ pub(crate) fn initial_presented_path_point(
 ) -> usize {
     let desired = if after_loading_image { 2 } else { 1 };
     desired.min(usize::from(point_count.get() - 1))
+}
+
+/// Retail's first mount starts without any checkpoint or collected boxes.
+///
+/// Keep this seed independent from the legacy `GameFlow::player` mirror: the
+/// mounted GOOL globals and level-state snapshot become authoritative as soon
+/// as the runtime is constructed.
+#[cfg(any(target_arch = "wasm32", test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct InitialRetailLevelState {
+    pub box_count: i32,
+    pub checkpoint_id: i32,
+    pub checkpoint_translation: [i32; 3],
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) const fn initial_retail_level_state() -> InitialRetailLevelState {
+    InitialRetailLevelState {
+        box_count: 0,
+        checkpoint_id: -1,
+        checkpoint_translation: [0; 3],
+    }
+}
+
+/// Returns the live retail payload when it is readable, otherwise retaining
+/// the most recent payload that was read successfully from the same globals.
+///
+/// The fallback is deliberately exact save data rather than a reconstruction
+/// from the legacy high-level flow mirror.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn authoritative_save_or_last<E>(
+    current: Result<SaveData, E>,
+    last: SaveData,
+) -> SaveData {
+    current.unwrap_or(last)
 }
 
 /// The browser may advance the high-level flow mirror only for the authored
@@ -93,6 +128,45 @@ mod tests {
         assert_eq!(
             initial_presented_path_point(core::num::NonZeroU16::new(3).unwrap(), true),
             2
+        );
+    }
+
+    #[test]
+    fn first_retail_mount_does_not_inherit_synthetic_player_state() {
+        assert_eq!(
+            initial_retail_level_state(),
+            InitialRetailLevelState {
+                box_count: 0,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+            }
+        );
+    }
+
+    #[test]
+    fn live_retail_save_wins_and_failure_retains_last_exact_payload() {
+        let last = SaveData {
+            level_count: 7,
+            initial_lives: 3 << 8,
+            item_pool_1: 0x1234,
+            ..SaveData::default()
+        };
+        let live = SaveData {
+            level_count: 19,
+            initial_lives: 8 << 8,
+            item_pool_1: 0xabcd,
+            ..SaveData::default()
+        };
+
+        assert_eq!(
+            authoritative_save_or_last::<()>(Ok(live), last),
+            live,
+            "a readable retail payload must always take precedence"
+        );
+        assert_eq!(
+            authoritative_save_or_last::<()>(Err(()), last),
+            last,
+            "an unreadable VM must retain the last exact retail payload"
         );
     }
 

@@ -2085,6 +2085,11 @@ impl Runtime {
         let fruit_count = read(FRUIT_COUNT_GLOBAL)? as i32;
         let box_count = read(BOX_COUNT_GLOBAL)? as i32;
         let checkpoint_id = read(CHECKPOINT_ID_GLOBAL)? as i32;
+        let checkpoint_translation = [
+            read(CHECKPOINT_TRANSLATION_GLOBALS[0])? as i32,
+            read(CHECKPOINT_TRANSLATION_GLOBALS[1])? as i32,
+            read(CHECKPOINT_TRANSLATION_GLOBALS[2])? as i32,
+        ];
         let options = GameOptions {
             mono: read(MONO_GLOBAL)? != 0,
             sfx_volume: read(SFX_VOLUME_GLOBAL)?.min(u32::from(u8::MAX)) as u8,
@@ -2116,6 +2121,7 @@ impl Runtime {
         if let Some(mut context) = self.retail_objects.level_state_context().cloned() {
             context.box_count = box_count;
             context.checkpoint_id = checkpoint_id;
+            context.checkpoint_translation = checkpoint_translation;
             self.retail_objects.set_level_state_context(context);
         }
         Ok(())

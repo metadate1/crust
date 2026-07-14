@@ -13,8 +13,8 @@ use crust_sim::retail_runtime::{
 };
 
 const ZONE_A: Eid = Eid::from_raw(0x1111_1111);
-const REG0: u16 = 0x0e00;
-const REG1: u16 = 0x0e01;
+const REG_A: u16 = 0x0e46;
+const REG_B: u16 = 0x0e47;
 const PARENT_REG0: u16 = 0x0c40;
 const CHANGE_TO_STATE_ONE: u32 = 0x8240_0001;
 const RETURN: u32 = 0x8289_4000;
@@ -106,24 +106,24 @@ impl ProgramHost for RecordingHost {
 
         let code = match binding.executable {
             // Push 0x1234, synchronously spawn executable five, then return.
-            1 => vec![Instruction::encode(0x00, REG0, REG1), 0x8a10_5001, RETURN],
+            1 => vec![Instruction::encode(0x00, REG_A, REG_B), 0x8a10_5001, RETURN],
             // The reclaiming spawn has the same nonfatal null result when no
             // expendable object exists in a full pool.
-            12 => vec![Instruction::encode(0x00, REG0, REG1), 0x9110_5001, RETURN],
+            12 => vec![Instruction::encode(0x00, REG_A, REG_B), 0x9110_5001, RETURN],
             // Read the creator/parent's register zero, proving the typed link.
-            5 => vec![Instruction::encode(0x11, PARENT_REG0, REG0), RETURN],
+            5 => vec![Instruction::encode(0x11, PARENT_REG0, REG_A), RETURN],
             // Yield a retail state change for host-backed state rebinding.
             7 => vec![CHANGE_TO_STATE_ONE],
             // Fail after fetch so a retry would incorrectly skip to RETURN.
-            8 => vec![Instruction::encode(0xff, REG0, REG1), RETURN],
+            8 => vec![Instruction::encode(0xff, REG_A, REG_B), RETURN],
             // Test the port-zero retail CROSS-tapped control query.
             10 => vec![0x1a00_1040],
             _ => vec![RETURN],
         };
         let mut object = VmObject::new(binding.object.vm(), code).map_err(|_| "VM object")?;
         if matches!(binding.executable, 1 | 12) {
-            object.set_register(0, 0x1200).map_err(|_| "register")?;
-            object.set_register(1, 0x34).map_err(|_| "register")?;
+            object.set_register(70, 0x1200).map_err(|_| "register")?;
+            object.set_register(71, 0x34).map_err(|_| "register")?;
             object
                 .set_register(process_register::MISC_VALUE, 0xdead_beef)
                 .map_err(|_| "misc child")?;
@@ -374,9 +374,9 @@ fn current_zone_entities_and_hosted_children_share_one_runtime_frame() {
             .machine()
             .object(child.vm())
             .unwrap()
-            .register(0)
+            .register(70)
             .unwrap(),
-        0x1200
+        CollisionObjectReference::new(parent.vm()).to_word()
     );
     let parent_vm = runtime.machine().object(parent.vm()).unwrap();
     let child_vm = runtime.machine().object(child.vm()).unwrap();

@@ -2610,6 +2610,8 @@ impl VmObject {
         if code.len() > MAX_CODE_WORDS {
             return Err(VmError::CodeTooLarge);
         }
+        let mut registers = vec![0; REGISTER_COUNT];
+        registers[0] = CollisionObjectReference::new(handle).to_word();
         Ok(Self {
             handle,
             program_identity: None,
@@ -2622,7 +2624,7 @@ impl VmObject {
             frame_base: SYNTHETIC_STACK_POINTER,
             internal: vec![0; TABLE_WORD_COUNT],
             external: vec![0; TABLE_WORD_COUNT],
-            registers: vec![0; REGISTER_COUNT],
+            registers,
             colors: [0; COLOR_COUNT],
             base_colors: [0; COLOR_COUNT],
             entity_spawn_flags: None,
@@ -2844,6 +2846,10 @@ impl VmObject {
             .registers
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
+        if index < self.links.len() {
+            self.links[index] =
+                CollisionObjectReference::from_word(value).map(CollisionObjectReference::object);
+        }
         let stack_origin = self.initial_stack_pointer as usize;
         if let Some(stack_index) = index.checked_sub(stack_origin)
             && let Some(stack_word) = self.stack.get_mut(stack_index)
@@ -3544,6 +3550,12 @@ impl VmObject {
             .links
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = target;
+        *self
+            .registers
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = target
+            .map(CollisionObjectReference::new)
+            .map_or(0, CollisionObjectReference::to_word);
         Ok(())
     }
 
@@ -3662,7 +3674,7 @@ pub struct Machine {
     pending_card_host_request: Option<CardHostRequest>,
     completed_card_load: Option<SaveData>,
     level_restart_requested: bool,
-    level_globals_reset_since_context: bool,
+    checkpoint_globals_changed_since_context: bool,
     spawn_flags: [u32; SPAWN_TABLE_CAPACITY],
     level_spawn_tags: Box<[u16]>,
     random_seed: u32,
@@ -3723,7 +3735,7 @@ impl Machine {
             pending_card_host_request: None,
             completed_card_load: None,
             level_restart_requested: false,
-            level_globals_reset_since_context: false,
+            checkpoint_globals_changed_since_context: false,
             spawn_flags: [0; SPAWN_TABLE_CAPACITY],
             level_spawn_tags: vec![0; RETAIL_LEVEL_SPAWN_CAPACITY].into_boxed_slice(),
             random_seed: 12_345,
@@ -3941,17 +3953,17 @@ impl Machine {
             self.set_global_word(index, value)?;
         }
         self.level_spawn_tags.fill(0);
-        self.level_globals_reset_since_context = true;
+        self.checkpoint_globals_changed_since_context = true;
         Ok(())
     }
 
     #[must_use]
-    pub(crate) const fn level_globals_reset_since_context(&self) -> bool {
-        self.level_globals_reset_since_context
+    pub(crate) const fn checkpoint_globals_changed_since_context(&self) -> bool {
+        self.checkpoint_globals_changed_since_context
     }
 
     pub(crate) fn acknowledge_level_state_context(&mut self) {
-        self.level_globals_reset_since_context = false;
+        self.checkpoint_globals_changed_since_context = false;
     }
 
     /// Clears the modeled solid BSS state used by `LevelInitMisc(0)`.
@@ -3993,6 +4005,9 @@ impl Machine {
             .globals
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
+        if matches!(index, 69 | 102 | 103 | 104) {
+            self.checkpoint_globals_changed_since_context = true;
+        }
         Ok(())
     }
 
@@ -4792,11 +4807,12 @@ impl Machine {
                 ),
                 SolidObjectZone::Detached { eid, .. } => Some(eid),
             };
-            object.links[6] = outcome
+            let collider = outcome
                 .state
                 .collider
                 .and_then(|candidate| u16::try_from(candidate).ok())
                 .and_then(ObjectHandle::new);
+            object.set_link(6, collider)?;
         }
         self.solid_smooth_stop = outcome.smooth_stop;
         self.apply_retail_solid_effects(handle, &outcome.effects[applied_effects..])?;
@@ -4827,10 +4843,11 @@ impl Machine {
         ] {
             object.set_register(register, value as u32)?;
         }
-        object.links[6] = state
+        let collider = state
             .collider
             .and_then(|candidate| u16::try_from(candidate).ok())
             .and_then(ObjectHandle::new);
+        object.set_link(6, collider)?;
         Ok(())
     }
 
@@ -5116,9 +5133,9 @@ impl Machine {
         self.pending_send_events
             .retain(|pending| pending.request.sender != handle || pending.servicing);
         for object in self.objects.values_mut() {
-            for link in &mut object.links {
-                if *link == Some(handle) {
-                    *link = None;
+            for index in 0..object.links.len() {
+                if object.links[index] == Some(handle) {
+                    object.set_link(index, None)?;
                 }
             }
         }
@@ -7081,10 +7098,14 @@ impl Machine {
             0x15 => {
                 let shift = self.read_operand(handle, a)? as i32;
                 let value = self.read_operand(handle, b)? as i32;
-                let magnitude = shift.unsigned_abs();
-                if magnitude >= 32 {
-                    return Err(VmError::InvalidShift(shift));
-                }
+                // Retail emits MIPS `sllv`/`srav`: variable shifts consume
+                // only the low five bits even though the decompiled C form
+                // has undefined behavior for magnitudes of 32 or greater.
+                let magnitude = if shift < 0 {
+                    shift.wrapping_neg() as u32
+                } else {
+                    shift as u32
+                } & 31;
                 let shifted = if shift < 0 {
                     value >> magnitude
                 } else {
@@ -7185,10 +7206,7 @@ impl Machine {
             0x20 => {
                 let value = self.read_operand(handle, a)?;
                 let index = (self.read_operand(handle, b)? >> 8) as usize;
-                *self
-                    .globals
-                    .get_mut(index)
-                    .ok_or(VmError::InvalidRegister(index))? = value;
+                self.set_global_word(index, value)?;
             }
             0x21 => {
                 let target = Angle12::new(self.read_operand(handle, a)? as i32);
@@ -8316,19 +8334,29 @@ impl Machine {
         register: usize,
     ) -> Result<u32, VmError> {
         let object = self.object(handle)?;
-        match register {
-            // `gool_process.regs` aliases the eight leading link pointers.
-            // A checked Rust handle may validly use slot zero, so expose link
-            // presence as canonical nonzero truth instead of leaking the raw
-            // slot number into GOOL arithmetic.
-            0..=7 => Ok(u32::from(object.links[register].is_some())),
-            0x1f => object
+        // `gool_process.regs` aliases the eight leading link pointers. Their
+        // checked tags are ordinary raw register words here, so VM slot zero
+        // is nonzero while scalar union values stay intact.
+        if register == 0x1f {
+            object
                 .stack
                 .last()
                 .copied()
-                .ok_or(VmError::StackUnderflow(handle)),
-            _ => object.register(register),
+                .ok_or(VmError::StackUnderflow(handle))
+        } else {
+            object.register(register)
         }
+    }
+
+    fn read_aliased_process_register(
+        &self,
+        handle: ObjectHandle,
+        register: usize,
+    ) -> Result<u32, VmError> {
+        // `VmObject::set_link` and `set_register` keep native's eight union
+        // words synchronized: a checked tagged handle is retained when the
+        // word is pointer-shaped, while ordinary scalar bits remain intact.
+        self.object(handle)?.register(register)
     }
 
     fn read_process_register_reference(
@@ -9095,7 +9123,7 @@ impl Machine {
                 let index = base.checked_add_signed(isize::from(offset)).ok_or(
                     VmError::UnsupportedReferenceOperand(0x0b00 | (u16::from(offset as u8) & 0x3f)),
                 )?;
-                self.object(handle)?.register(index)?;
+                self.read_aliased_process_register(handle, index)?;
                 StorageReference::checked(handle, StorageRegion::Register, index)?
             }
             Operand::Null => return Ok(None),
@@ -9104,11 +9132,11 @@ impl Machine {
                 let Some(target) = self.object(handle)?.links[usize::from(link)] else {
                     return Ok(None);
                 };
-                self.object(target)?.register(usize::from(register))?;
+                self.read_aliased_process_register(target, usize::from(register))?;
                 StorageReference::checked(target, StorageRegion::Register, usize::from(register))?
             }
             Operand::ObjectRegister(index) => {
-                self.object(handle)?.register(usize::from(index))?;
+                self.read_aliased_process_register(handle, usize::from(index))?;
                 StorageReference::checked(handle, StorageRegion::Register, usize::from(index))?
             }
             Operand::Stack => {
@@ -9160,7 +9188,7 @@ impl Machine {
                 let index = base.checked_add_signed(isize::from(offset)).ok_or(
                     VmError::UnsupportedReferenceOperand(0x0b00 | (u16::from(offset as u8) & 0x3f)),
                 )?;
-                self.object(handle)?.register(index)?;
+                self.read_aliased_process_register(handle, index)?;
                 StorageReference::checked(handle, StorageRegion::Register, index)?
             }
             Operand::Null => return Ok(None),
@@ -9169,21 +9197,21 @@ impl Machine {
                 let Some(target) = self.object(handle)?.links[usize::from(link)] else {
                     return Ok(None);
                 };
-                self.object(target)?.register(usize::from(register))?;
+                self.read_aliased_process_register(target, usize::from(register))?;
                 StorageReference::checked(target, StorageRegion::Register, usize::from(register))?
             }
             Operand::ObjectRegister(index) => {
-                self.object(handle)?.register(usize::from(index))?;
+                self.read_aliased_process_register(handle, usize::from(index))?;
                 StorageReference::checked(handle, StorageRegion::Register, usize::from(index))?
             }
             Operand::Stack => {
-                let (register_index, previous) = {
+                let register_index = {
                     let object = self.object(handle)?;
-                    let register_index = (object.initial_stack_pointer as usize)
+                    (object.initial_stack_pointer as usize)
                         .checked_add(object.stack.len())
-                        .ok_or(VmError::StackOverflow(handle))?;
-                    (register_index, object.register(register_index)?)
+                        .ok_or(VmError::StackOverflow(handle))?
                 };
+                let previous = self.read_aliased_process_register(handle, register_index)?;
                 // Translating an output stack GOP advances SP but does not
                 // itself write the pointed-to word. Retain the stale bounded
                 // register value until a caller stores through the reference.
@@ -9211,8 +9239,7 @@ impl Machine {
                 .copied()
                 .ok_or(VmError::InvalidStorageReference(reference.to_word())),
             StorageRegion::Register => self
-                .object(reference.object)?
-                .register(index)
+                .read_aliased_process_register(reference.object, index)
                 .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
             StorageRegion::Constant => self
                 .operand_constants
@@ -9375,17 +9402,19 @@ impl Machine {
                 let index = base
                     .checked_add_signed(isize::from(offset))
                     .ok_or(VmError::InvalidOperand(0))?;
-                self.object(handle)?.register(index)
+                self.read_aliased_process_register(handle, index)
             }
             Operand::Null => Ok(NULL_INPUT_VALUE),
             Operand::StackDouble => Err(VmError::InvalidOperand(0x0bf0)),
-            Operand::ObjectRegister(index) => self.object(handle)?.register(usize::from(index)),
+            Operand::ObjectRegister(index) => {
+                self.read_aliased_process_register(handle, usize::from(index))
+            }
             Operand::Stack => self.pop(handle),
             Operand::LinkRegister { link, register } => {
                 let Some(target) = self.object(handle)?.links[usize::from(link)] else {
                     return Ok(NULL_INPUT_VALUE);
                 };
-                self.object(target)?.register(usize::from(register))
+                self.read_aliased_process_register(target, usize::from(register))
             }
         }
     }
@@ -10021,7 +10050,6 @@ mod tests {
         let h = handle(0);
         let other = handle(1);
         let mut object = VmObject::new(h, vec![control_flow(1, 1, 0, 0, 7)]).unwrap();
-        object.set_register(0, 0).unwrap();
         object.set_register(8, 0xfeed_beef).unwrap();
         let mut machine = Machine::new(0);
         machine.insert_object(object).unwrap();
@@ -10029,14 +10057,20 @@ mod tests {
             .insert_object(VmObject::new(other, vec![0]).unwrap())
             .unwrap();
 
-        assert_eq!(machine.read_process_register_reference(h, 0), Ok(1));
+        assert_eq!(
+            machine.read_process_register_reference(h, 0),
+            Ok(CollisionObjectReference::new(h).to_word())
+        );
         assert_eq!(machine.read_process_register_reference(h, 6), Ok(0));
         machine
             .object_mut(h)
             .unwrap()
             .set_link(6, Some(other))
             .unwrap();
-        assert_eq!(machine.read_process_register_reference(h, 6), Ok(1));
+        assert_eq!(
+            machine.read_process_register_reference(h, 6),
+            Ok(CollisionObjectReference::new(other).to_word())
+        );
         assert_eq!(
             machine.read_process_register_reference(h, 8),
             Ok(0xfeed_beef)
@@ -10046,11 +10080,92 @@ mod tests {
         assert!(machine.object(h).unwrap().stack().is_empty());
 
         // The encoded state-link condition names register zero. Native sees
-        // the non-null self link even though scalar storage word zero is zero.
+        // the non-null self pointer stored in that union word.
         assert_eq!(
             machine.run(h, 1).unwrap().reason,
             HaltReason::StateChanged(7)
         );
+    }
+
+    #[test]
+    fn ordinary_input_gops_observe_typed_process_link_aliases() {
+        let h = handle(0);
+        let collider = handle(1);
+        // Exact Crash shared pc 872 word: `ANDL pop(), collider`. Retail's
+        // `obj->regs[6]` aliases the collider pointer, while Rust owns that
+        // pointer as a checked link instead of a scalar register word.
+        let mut object = VmObject::new(h, vec![0x05e1_fe06]).unwrap();
+        object.set_link(6, Some(collider)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .insert_object(VmObject::new(collider, vec![0x8289_4000]).unwrap())
+            .unwrap();
+        machine.push(h, 1).unwrap();
+
+        machine.run(h, 1).unwrap();
+
+        assert_eq!(machine.object(h).unwrap().stack(), &[1]);
+    }
+
+    #[test]
+    fn exact_boxs_link_copy_targets_the_found_object() {
+        let requester = handle(0);
+        let old_interrupter = handle(1);
+        let found = handle(2);
+        // Exact BoxsC pc 222 and 224: copy misc-seven's checked result into
+        // the interrupter word, then send event 0x800 through that link.
+        let mut object = VmObject::new(requester, vec![0x11e1_fe07, 0x87e0_0808]).unwrap();
+        object.set_link(7, Some(old_interrupter)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .insert_object(VmObject::new(old_interrupter, vec![0x8289_4000]).unwrap())
+            .unwrap();
+        machine
+            .insert_object(VmObject::new(found, vec![0x8289_4000]).unwrap())
+            .unwrap();
+        machine
+            .push(requester, CollisionObjectReference::new(found).to_word())
+            .unwrap();
+        let mut delivered = None;
+
+        machine
+            .run_with_host_requests(requester, 2, |_machine, request| {
+                let VmHostRequest::SendEvent(request) = request else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                delivered = Some(request);
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(machine.object(requester).unwrap().links[7], Some(found));
+        let delivered = delivered.expect("BoxsC sends its chain event");
+        assert_eq!(
+            delivered.target,
+            SendEventTarget::Direct { recipient: found }
+        );
+        assert_eq!(delivered.event, 0x800);
+    }
+
+    #[test]
+    fn process_link_output_preserves_non_pointer_union_words() {
+        let requester = handle(0);
+        let existing = handle(1);
+        let mut object = VmObject::new(requester, vec![0x11e1_fe07]).unwrap();
+        object.set_link(7, Some(existing)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .insert_object(VmObject::new(existing, vec![0x8289_4000]).unwrap())
+            .unwrap();
+        machine.push(requester, 1).unwrap();
+
+        machine.run(requester, 1).unwrap();
+
+        assert_eq!(machine.object(requester).unwrap().links[7], None);
+        assert_eq!(machine.object(requester).unwrap().register(7), Ok(1));
     }
 
     #[test]
@@ -10136,6 +10251,22 @@ mod tests {
 
         machine.run(h, 4).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[0, 0, 1, 1]);
+    }
+
+    #[test]
+    fn exact_crash_exit_shift_masks_the_mips_variable_count() {
+        let h = handle(0);
+        // Exact Crash shared pc 2461 word reached by state 32 during N.
+        // Sanity Beach's warp: `SHA pop(), ireg[0x170]` with a count of 67.
+        let mut object = VmObject::new(h, vec![0x15e1_f05c]).unwrap();
+        object.set_internal(0x5c, 0x123).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.push(h, 67).unwrap();
+
+        machine.run(h, 1).unwrap();
+
+        assert_eq!(machine.object(h).unwrap().stack(), &[0x918]);
     }
 
     #[test]
@@ -15356,6 +15487,9 @@ mod tests {
         assert_eq!(machine.object(first).unwrap().links[6], None);
         assert_eq!(machine.object(first).unwrap().links[7], None);
         assert_eq!(machine.object(second).unwrap().links[1], None);
+        assert_eq!(machine.object(first).unwrap().register(6).unwrap(), 0);
+        assert_eq!(machine.object(first).unwrap().register(7).unwrap(), 0);
+        assert_eq!(machine.object(second).unwrap().register(1).unwrap(), 0);
         assert_eq!(
             machine.remove_object(target),
             Err(VmError::UnknownObject(target))

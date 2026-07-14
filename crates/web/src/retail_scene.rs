@@ -3202,30 +3202,28 @@ mod tests {
                     && object.program.is_some_and(|program| {
                         program.global_eid().name().as_deref() == Some("FruiC")
                     })
-                    && object.transform.scale == [-655_688, 1_665_544, 1_257]
+                    && object.transform.scale == [-110_121, 279_039, 936]
             });
             if let Some(offender) = offender {
                 observed_offender = true;
                 assert_eq!(pbak_frame, 179);
-                assert_eq!(camera_step.after.progress.raw(), 0x297);
+                assert_eq!(camera_step.after.progress.raw(), 0x5ec);
                 assert_eq!(offender.object.arena().slot(), 11);
                 assert_eq!(offender.object.arena().generation(), 1);
                 assert_eq!(offender.object.vm().get(), 12);
                 assert_eq!(offender.animation_reference.unwrap().offset(), 0);
-                assert_eq!(offender.animation_frame, 0x0c00);
-                assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(24));
+                assert_eq!(offender.animation_frame, 0x0300);
+                assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(4));
                 let vm = runtime.machine().object(offender.object.vm()).unwrap();
                 assert_eq!(vm.state(), 12);
-                assert_eq!(vm.pc(), 953);
+                assert_eq!(vm.pc(), 966);
             }
             if let Some((raw_shrink, effective_shrink)) = match pbak_frame {
-                180 => Some((26_u32, 26_u8)),
-                181 => Some((28, 28)),
-                182 => Some((31, 31)),
-                183 => Some((34, 2)),
-                204 => Some((246, 22)),
-                205 => Some((271, 15)),
-                206 => Some((297, 9)),
+                180 | 181 => Some((4_u32, 4_u8)),
+                182 | 183 => Some((5, 5)),
+                204 => Some((41, 9)),
+                205 => Some((45, 13)),
+                206 => Some((49, 17)),
                 _ => None,
             } {
                 let transient = objects
@@ -3239,7 +3237,7 @@ mod tests {
                 assert_eq!(
                     transient.transform.scale[0].unsigned_abs() / 27_279,
                     raw_shrink,
-                    "pb0cB frame {pbak_frame} raw MIPS shift"
+                    "pb0cB frame {pbak_frame} raw scale quotient"
                 );
                 assert_eq!(
                     retail_sprite_shrink(transient.transform.scale[0]),
@@ -3250,7 +3248,7 @@ mod tests {
         }
         assert!(
             observed_offender,
-            "pb0cB did not reach its authored transient shrink-24 sprite"
+            "pb0cB did not reach its authored transient shrink-4 sprite"
         );
     }
 

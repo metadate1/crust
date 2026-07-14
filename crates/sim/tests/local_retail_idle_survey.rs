@@ -38,7 +38,7 @@ use crust_sim::{
         RetailTransformVectorsCamera, VmEffect, process_register,
     },
     object_arena::{NeighborZone, SpawnError},
-    player::{PAD_CROSS, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
+    player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
         NsfProgramError, NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome,
@@ -167,6 +167,11 @@ impl NSanityRouteController {
         let a8 = Eid::from_name("a8_9Z").expect("fixed N. Sanity route EID is valid");
         let a9 = Eid::from_name("a9_9Z").expect("fixed N. Sanity route EID is valid");
         let b0 = Eid::from_name("b0_9Z").expect("fixed N. Sanity route EID is valid");
+        let b1 = Eid::from_name("b1_9Z").expect("fixed N. Sanity route EID is valid");
+        let b2 = Eid::from_name("b2_9Z").expect("fixed N. Sanity route EID is valid");
+        let b3 = Eid::from_name("b3_9Z").expect("fixed N. Sanity route EID is valid");
+        let b6 = Eid::from_name("b6_9Z").expect("fixed N. Sanity route EID is valid");
+        let b7 = Eid::from_name("b7_9Z").expect("fixed N. Sanity route EID is valid");
         let progress = camera.progress.raw();
         let grounded = player.status_a & 1 != 0;
         if self.opening_stage < 2 {
@@ -515,6 +520,63 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
+            44 if camera.path.zone == b1 && camera.path.index == 0 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 8,
+                button: PAD_CROSS,
+                button_start: 0,
+                button_frames: 16,
+            },
+            45 if camera.path.zone == b2
+                && camera.path.index == 1
+                && progress >= 10_000
+                && grounded =>
+            {
+                RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 12,
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            46 if camera.path.zone == b3
+                && camera.path.index == 0
+                && progress >= 9_000
+                && grounded =>
+            {
+                RouteAction {
+                    direction: PAD_DOWN,
+                    direction_frames: 30,
+                    button: PAD_CROSS,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            47 if camera.path.zone == b3 && grounded => RouteAction {
+                direction: PAD_DOWN,
+                direction_frames: 80,
+                ..RouteAction::default()
+            },
+            48 if camera.path.zone == b3 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 18,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            49 if camera.path.zone == b6 && camera.path.index == 0 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            50 if camera.path.zone == b7 && camera.path.index == 0 && grounded => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 14,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
             _ => return PAD_UP,
         };
         self.active = Some(action);
@@ -1725,6 +1787,48 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
                 survey.summary()
             );
         }
+    }
+    if frames >= 1_700 {
+        for zone_name in ["b2_9Z", "b3_9Z", "b4_9Z"] {
+            let zone = Eid::from_name(zone_name).unwrap();
+            assert!(
+                survey.camera_ranges.keys().any(|path| path.zone == zone),
+                "the authored controller did not reach {zone_name}: {}",
+                survey.summary()
+            );
+        }
+    }
+    if frames >= 1_850 {
+        for zone_name in ["b5_9Z", "b6_9Z"] {
+            let zone = Eid::from_name(zone_name).unwrap();
+            assert!(
+                survey.camera_ranges.keys().any(|path| path.zone == zone),
+                "the authored controller did not reach {zone_name}: {}",
+                survey.summary()
+            );
+        }
+    }
+    if frames >= 1_900 {
+        let b7 = Eid::from_name("b7_9Z").unwrap();
+        assert!(
+            survey.camera_ranges.keys().any(|path| path.zone == b7),
+            "the authored controller did not reach b7_9Z: {}",
+            survey.summary()
+        );
+    }
+    if frames >= 2_000 {
+        assert_eq!(
+            survey.next_lid.map(|(_, lid)| lid),
+            Some(0x2d),
+            "the authored end warp must request Level Complete: {}",
+            survey.summary()
+        );
+        assert_eq!(
+            survey.restarts,
+            0,
+            "the complete route must not require a death/restart: {}",
+            survey.summary()
+        );
     }
     assert!(
         survey.is_clean(),

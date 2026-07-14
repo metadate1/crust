@@ -102,6 +102,7 @@ const BRIO_COUNT_GLOBAL: usize = 28;
 const TAWNA_COUNT_GLOBAL: usize = 29;
 const GAME_STATE_GLOBAL: usize = 17;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
+const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const DEATH_COUNT_GLOBAL: usize = 108;
 const BOX_COUNT_GLOBAL: usize = 62;
 const BONUS_ROUND_GLOBAL: usize = 60;
@@ -2276,21 +2277,38 @@ impl RetailRuntime {
             )
             .map_err(RetailLevelStateError::Vm)?;
         }
-        // Misc 12/11 can reset checkpoint_id and then save again later in the
-        // same event/interpreter invocation, before the browser has a chance
-        // to publish a fresh host context. In that narrow synchronous window
-        // the VM global is authoritative; ordinary frames retain the supplied
-        // pointer-free context contract.
-        let checkpoint_id = if machine.level_globals_reset_since_context() {
-            machine
-                .global_word(CHECKPOINT_ID_GLOBAL)
-                .map_err(RetailLevelStateError::Vm)?
-                .cast_signed()
-        } else {
-            context.checkpoint_id
-        };
+        // Checkpoint GOOL writes and misc 12/11 can precede a save in the same
+        // interpreter invocation, before the browser can publish a refreshed
+        // pointer-free context. All four native globals are authoritative in
+        // that synchronous window; ordinary frames retain the supplied host
+        // contract.
+        let (checkpoint_id, checkpoint_translation) =
+            if machine.checkpoint_globals_changed_since_context() {
+                (
+                    machine
+                        .global_word(CHECKPOINT_ID_GLOBAL)
+                        .map_err(RetailLevelStateError::Vm)?
+                        .cast_signed(),
+                    [
+                        machine
+                            .global_word(CHECKPOINT_TRANSLATION_GLOBALS[0])
+                            .map_err(RetailLevelStateError::Vm)?
+                            .cast_signed(),
+                        machine
+                            .global_word(CHECKPOINT_TRANSLATION_GLOBALS[1])
+                            .map_err(RetailLevelStateError::Vm)?
+                            .cast_signed(),
+                        machine
+                            .global_word(CHECKPOINT_TRANSLATION_GLOBALS[2])
+                            .map_err(RetailLevelStateError::Vm)?
+                            .cast_signed(),
+                    ],
+                )
+            } else {
+                (context.checkpoint_id, context.checkpoint_translation)
+            };
         if checkpoint_id != -1 && checkpoint_id != 0 {
-            player_translation = context.checkpoint_translation;
+            player_translation = checkpoint_translation;
         }
         let snapshot = RetailLevelSnapshot {
             player_translation,
@@ -2356,13 +2374,6 @@ impl RetailRuntime {
             .level_state_context
             .clone()
             .ok_or(RuntimeError::MissingLevelStateContext)?;
-        if self.machine.level_globals_reset_since_context() {
-            context.checkpoint_id = self
-                .machine
-                .global_word(CHECKPOINT_ID_GLOBAL)
-                .map_err(RuntimeError::Vm)?
-                .cast_signed();
-        }
 
         // `GoolSendToColliders(..., type=0)` is an all-root postorder
         // broadcast despite its name. Checked failures are retained while the
@@ -2393,6 +2404,32 @@ impl RetailRuntime {
             let report =
                 self.terminate_zone_objects(zone, ZoneTerminationMode::HardRestart, host)?;
             zone_reports.push((zone, report));
+        }
+
+        // Native samples the checkpoint globals only after the RESPAWN and
+        // TERM broadcasts. A synchronous handler may move the checkpoint in
+        // the same restart transaction, so the live words must win over the
+        // cloned browser context before spawn restoration and box accounting.
+        if self.machine.checkpoint_globals_changed_since_context() {
+            context.checkpoint_id = self
+                .machine
+                .global_word(CHECKPOINT_ID_GLOBAL)
+                .map_err(RuntimeError::Vm)?
+                .cast_signed();
+            context.checkpoint_translation = [
+                self.machine
+                    .global_word(CHECKPOINT_TRANSLATION_GLOBALS[0])
+                    .map_err(RuntimeError::Vm)?
+                    .cast_signed(),
+                self.machine
+                    .global_word(CHECKPOINT_TRANSLATION_GLOBALS[1])
+                    .map_err(RuntimeError::Vm)?
+                    .cast_signed(),
+                self.machine
+                    .global_word(CHECKPOINT_TRANSLATION_GLOBALS[2])
+                    .map_err(RuntimeError::Vm)?
+                    .cast_signed(),
+            ];
         }
 
         let first_spawn = context.first_spawn;
@@ -2531,6 +2568,7 @@ impl RetailRuntime {
             live_context.location = snapshot.location;
             live_context.box_count = restored_box_count;
             live_context.checkpoint_id = context.checkpoint_id;
+            live_context.checkpoint_translation = context.checkpoint_translation;
             live_context.first_spawn = false;
         }
         self.machine.acknowledge_level_state_context();
@@ -6171,6 +6209,13 @@ mod tests {
     const ZONE_C: Eid = Eid::from_raw(0x3234_5679);
     const CURRENT_ZONE: Eid = Eid::from_raw(0x4234_5679);
     const RETURN: u32 = 0x8289_4000;
+    const TEST_CONDITION_REGISTER: usize = 63;
+    const TEST_SCALAR_REGISTER_A: usize = 70;
+    const TEST_SCALAR_REGISTER_B: usize = 71;
+    const TEST_SCALAR_REGISTER_C: usize = 72;
+    const TEST_SCALAR_OPERAND_A: u16 = 0x0e46;
+    const TEST_SCALAR_OPERAND_B: u16 = 0x0e47;
+    const TEST_SCALAR_OPERAND_C: u16 = 0x0e48;
     const MODERN_NSD_HEADER_SIZE: usize = 0x520;
 
     const fn misc(primary: u32, secondary: i32, operand: u16) -> u32 {
@@ -7063,9 +7108,14 @@ mod tests {
         type Error = ();
 
         fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
-            let mut object = VmObject::new(binding.object.vm(), vec![misc(15, 4, 0x0e00), RETURN])
+            let mut object = VmObject::new(
+                binding.object.vm(),
+                vec![misc(15, 4, TEST_SCALAR_OPERAND_A), RETURN],
+            )
+            .map_err(|_| ())?;
+            object
+                .set_register(TEST_SCALAR_REGISTER_A, 2)
                 .map_err(|_| ())?;
-            object.set_register(0, 2).map_err(|_| ())?;
             Ok(object)
         }
 
@@ -7298,6 +7348,50 @@ mod tests {
             "the reset -1 checkpoint wins over the stale host mirror"
         );
         assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
+    }
+
+    #[test]
+    fn checkpoint_writes_then_save_in_one_handler_use_live_global_translation() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let mut player = VmObject::new(
+            main.vm,
+            vec![
+                Instruction::encode(0x20, 0x0807, 0x0845),
+                Instruction::encode(0x20, 0x0804, 0x0866),
+                Instruction::encode(0x20, 0x0805, 0x0867),
+                Instruction::encode(0x20, 0x0806, 0x0868),
+                misc(12, 0, 0x0be0),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        for (register, value) in [
+            (process_register::TRANSLATION_X, 111),
+            (process_register::TRANSLATION_Y, 222),
+            (process_register::TRANSLATION_Z, 333),
+            (process_register::SCALE_X, 0x1000),
+            (process_register::SCALE_Y, 0x1000),
+            (process_register::SCALE_Z, 0x1000),
+        ] {
+            player.set_register(register, value).unwrap();
+        }
+        runtime.machine.upsert_object(player).unwrap();
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.checkpoint_id = -1;
+        context.checkpoint_translation = [700, 701, 702];
+        runtime.set_level_state_context(context);
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(frame.effects, [VmEffect::SaveState(main.vm)]);
+        assert_eq!(
+            runtime.saved_level_state().unwrap().player_translation,
+            [4 << 8, 5 << 8, 6 << 8],
+            "the same-handler checkpoint globals win over player and stale host positions"
+        );
+        assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(7 << 8));
     }
 
     #[test]
@@ -7536,13 +7630,13 @@ mod tests {
     }
 
     const fn audio_create() -> u32 {
-        Instruction::encode(0x8c, 0x0e01, 0x0e02)
+        Instruction::encode(0x8c, TEST_SCALAR_OPERAND_A, TEST_SCALAR_OPERAND_B)
     }
 
     fn prepare_audio_registers(runtime: &mut RetailRuntime, object: RuntimeObjectHandle) {
         let vm = runtime.machine.object_mut(object.vm).unwrap();
-        vm.set_register(1, 0x3fff).unwrap();
-        vm.set_register(2, Eid::from_raw(0x1234_5679).raw())
+        vm.set_register(TEST_SCALAR_REGISTER_A, 0x3fff).unwrap();
+        vm.set_register(TEST_SCALAR_REGISTER_B, Eid::from_raw(0x1234_5679).raw())
             .unwrap();
     }
 
@@ -7780,9 +7874,14 @@ mod tests {
         let requester = spawn_test_object(&mut runtime, ZONE, 20, 2, 0);
         let rejected = spawn_test_object(&mut runtime, ZONE, 21, 2, 0);
         let accepted = spawn_test_object(&mut runtime, ZONE, 22, 2, 0);
-        let mut requester_vm =
-            VmObject::new(requester.vm, vec![misc(13, 0b0_1000, 0x0e00), RETURN]).unwrap();
-        requester_vm.set_register(0, STATUS_EVENT).unwrap();
+        let mut requester_vm = VmObject::new(
+            requester.vm,
+            vec![misc(13, 0b0_1000, TEST_SCALAR_OPERAND_A), RETURN],
+        )
+        .unwrap();
+        requester_vm
+            .set_register(TEST_SCALAR_REGISTER_A, STATUS_EVENT)
+            .unwrap();
         set_test_translation(&mut requester_vm, [0; 3]);
         runtime.machine.upsert_object(requester_vm).unwrap();
 
@@ -8264,12 +8363,16 @@ mod tests {
             .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
             .unwrap();
         runtime.set_level_state_context(level_context(CURRENT_ZONE, false, Vec::new()));
-        install_neighbor_termination_program(&mut runtime, requester, &[misc(10, 1, 0x0e00)]);
+        install_neighbor_termination_program(
+            &mut runtime,
+            requester,
+            &[misc(10, 1, TEST_SCALAR_OPERAND_A)],
+        );
         runtime
             .machine
             .object_mut(requester.vm)
             .unwrap()
-            .set_register(0, 70 << 8)
+            .set_register(TEST_SCALAR_REGISTER_A, 70 << 8)
             .unwrap();
         let mut host = NeighborTerminationHost::new(vec![ZONE]);
 
@@ -8303,9 +8406,8 @@ mod tests {
         )
         .unwrap();
         vm.set_link(0, Some(object.vm)).unwrap();
-        vm.set_register(1, 0x3fff).unwrap();
-        vm.set_register(2, ZONE.raw()).unwrap();
         runtime.machine.upsert_object(vm).unwrap();
+        prepare_audio_registers(&mut runtime, object);
         let mut host = AudioRecordingHost::new(None);
 
         runtime.run_frame(&mut host, 3).unwrap();
@@ -8412,10 +8514,14 @@ mod tests {
         event: u32,
     ) {
         let link = usize::from(recipient.is_some() && opcode != 0x90);
-        let operand_a = u16::try_from(link << 9).unwrap();
+        let operand_a =
+            (u16::try_from(link).unwrap() << 9) | u16::try_from(TEST_CONDITION_REGISTER).unwrap();
         let mut object = VmObject::new(
             sender.vm,
-            vec![Instruction::encode(opcode, operand_a, 0x0e00), RETURN],
+            vec![
+                Instruction::encode(opcode, operand_a, TEST_SCALAR_OPERAND_A),
+                RETURN,
+            ],
         )
         .unwrap();
         object
@@ -8431,7 +8537,8 @@ mod tests {
         if let Some(recipient) = recipient {
             object.set_link(link, Some(recipient.vm)).unwrap();
         }
-        object.set_register(0, event).unwrap();
+        object.set_register(TEST_CONDITION_REGISTER, 1).unwrap();
+        object.set_register(TEST_SCALAR_REGISTER_A, event).unwrap();
         runtime.machine.upsert_object(object).unwrap();
     }
 
@@ -9215,11 +9322,17 @@ mod tests {
         let mover = spawn_test_object(&mut runtime, ZONE, 280, 2, 0);
         let sender = spawn_test_object(&mut runtime, ZONE, 281, 2, 0);
         let mover_vm = runtime.machine.object_mut(mover.vm).unwrap();
-        mover_vm.set_register(0, 7 << 8).unwrap();
+        mover_vm
+            .set_register(TEST_SCALAR_REGISTER_C, 7 << 8)
+            .unwrap();
         mover_vm
             .configure_test_event_interrupt(
                 EVENT,
-                vec![audio_create(), misc(12, 2, 0x0e00), 0x8280_0000],
+                vec![
+                    audio_create(),
+                    misc(12, 2, TEST_SCALAR_OPERAND_C),
+                    0x8280_0000,
+                ],
             )
             .unwrap();
         prepare_audio_registers(&mut runtime, mover);
@@ -11030,6 +11143,53 @@ mod tests {
         assert!(!runtime.level_state_context().unwrap().first_spawn);
         assert_eq!(runtime.respawn_count, 0);
         assert_eq!(runtime.death_count, 0);
+    }
+
+    #[test]
+    fn restart_samples_checkpoint_globals_after_respawn_handlers() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let mut context = level_context(ZONE, true, Vec::new());
+        context.checkpoint_id = -1;
+        context.checkpoint_translation = [700, 701, 702];
+        runtime.set_level_state_context(context);
+        runtime.save_level_state(main, true).unwrap();
+        let snapshot = runtime.saved_level_state.as_mut().unwrap();
+        snapshot.spawn_words[7] = u32::MAX;
+        snapshot.spawn_words[8] = 0x11;
+        snapshot.box_count = 0x900;
+        runtime.arena.spawn_table_mut().set_flags(7, 0).unwrap();
+        runtime.arena.spawn_table_mut().set_flags(8, 0).unwrap();
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                RESPAWN_EVENT,
+                vec![
+                    Instruction::encode(0x20, 0x0807, 0x0845),
+                    Instruction::encode(0x20, 0x0804, 0x0866),
+                    Instruction::encode(0x20, 0x0805, 0x0867),
+                    Instruction::encode(0x20, 0x0806, 0x0868),
+                    0x8280_0000,
+                ],
+            )
+            .unwrap();
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level first spawn must restart locally");
+        };
+
+        assert!(report.respawn_event_failures.is_empty());
+        assert_eq!(runtime.arena.spawn_table().flags(7), Some(0xffff_fffc));
+        assert_eq!(runtime.arena.spawn_table().flags(8), Some(0x10));
+        assert_eq!(report.restored_box_count, 0x800);
+        let context = runtime.level_state_context().unwrap();
+        assert_eq!(context.checkpoint_id, 7 << 8);
+        assert_eq!(context.checkpoint_translation, [4 << 8, 5 << 8, 6 << 8]);
     }
 
     #[test]

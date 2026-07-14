@@ -57,10 +57,10 @@ use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
-    ProgramBinding, ProgramHost, RetailDemoFinishOutcome, RetailLevelStateContext,
-    RetailRestartOutcome, RetailRuntime, RetailSaveStateOutcome, RetailSessionCarry,
-    RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError,
-    RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
+    ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
+    RetailLevelStateContext, RetailRestartOutcome, RetailRuntime, RetailSaveStateOutcome,
+    RetailSessionCarry, RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction,
+    RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -848,6 +848,11 @@ impl Runtime {
             ],
             false,
         )?);
+        let retail_core_objects = create_retail_core_objects_for_pair(
+            &mut retail_objects,
+            &pair,
+            retail_camera.location().path.zone,
+        )?;
         let title_seen = pair.level == FormatLevelId::TITLE;
         let mut runtime = Self {
             flow,
@@ -894,6 +899,7 @@ impl Runtime {
             last_gl_error: 0,
         };
         runtime.seed_title_state_global()?;
+        log_retail_core_objects(dom, retail_core_objects);
         runtime.sync_title_card(dom)?;
         let initial_zone = runtime.retail_camera.location().path.zone;
         let initial_music = runtime
@@ -1004,37 +1010,8 @@ impl Runtime {
             false,
         );
         let retail_point_count = retail_spawn_point_count(&retail_zone_graph)?;
-        let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
-            self.stage.install_loading_image(&image)?;
-            dom.log(
-                &format!(
-                    "Decoded and uploaded the {}x{} destination loading image.",
-                    image.width(),
-                    image.height()
-                ),
-                false,
-            );
-            true
-        } else {
-            false
-        };
-        // A validated pair transition gets a fresh owner so parsed graph data,
-        // TPAG mappings, and decoded pixels cannot cross the mount boundary.
-        let mut retail_scene_builder = RetailSceneBuilder::new();
-        install_retail_scene_for_pair(
-            &pair,
-            &mut retail_scene_builder,
-            &mut self.stage,
-            dom,
-            after_loading_image,
-            retail_point_count,
-        )?;
-        self.retail_frame = if after_loading_image {
-            RetailFrameState::after_loading_image(retail_point_count, 0)
-        } else {
-            RetailFrameState::ready(retail_point_count, 0)
-        };
-        self.show_loading_image = after_loading_image;
+        let loading_image = decode_pair_loading_image(&pair)?;
+        let after_loading_image = loading_image.is_some();
         let pages = pair.nsf.pages.len();
         let entries = pair_entry_count(&pair);
         let level = pair.level;
@@ -1077,14 +1054,6 @@ impl Runtime {
                     ))
                 })?;
         }
-        self.flow
-            .mount_retail_level(flow_level, title_screen)
-            .map_err(|error| {
-                JsValue::from_str(&format!("could not mirror mounted retail flow: {error:?}"))
-            })?;
-        if flow_level == LevelId::TITLE {
-            self.title_seen = true;
-        }
         let read_mount_global = |index| {
             retail_objects
                 .global_word(index)
@@ -1111,6 +1080,52 @@ impl Runtime {
             mounted_checkpoint_translation,
             false,
         )?);
+        // Materialize the destination's process-lifetime roots against the
+        // candidate runtime and candidate stream host. A malformed DispC or
+        // ZDAT therefore fails before the active flow/runtime mount is
+        // committed below.
+        let retail_core_objects = create_retail_core_objects_for_pair(
+            &mut retail_objects,
+            &pair,
+            retail_camera.location().path.zone,
+        )?;
+        if let Some(image) = loading_image {
+            self.stage.install_loading_image(&image)?;
+            dom.log(
+                &format!(
+                    "Decoded and uploaded the {}x{} destination loading image.",
+                    image.width(),
+                    image.height()
+                ),
+                false,
+            );
+        }
+        // A validated pair transition gets a fresh owner so parsed graph data,
+        // TPAG mappings, and decoded pixels cannot cross the mount boundary.
+        let mut retail_scene_builder = RetailSceneBuilder::new();
+        install_retail_scene_for_pair(
+            &pair,
+            &mut retail_scene_builder,
+            &mut self.stage,
+            dom,
+            after_loading_image,
+            retail_point_count,
+        )?;
+        let retail_frame = if after_loading_image {
+            RetailFrameState::after_loading_image(retail_point_count, 0)
+        } else {
+            RetailFrameState::ready(retail_point_count, 0)
+        };
+        self.flow
+            .mount_retail_level(flow_level, title_screen)
+            .map_err(|error| {
+                JsValue::from_str(&format!("could not mirror mounted retail flow: {error:?}"))
+            })?;
+        if flow_level == LevelId::TITLE {
+            self.title_seen = true;
+        }
+        self.retail_frame = retail_frame;
+        self.show_loading_image = after_loading_image;
         self.level_assets = pair;
         self.retail_scene_builder = retail_scene_builder;
         self.retail_zone_graph = retail_zone_graph;
@@ -1129,6 +1144,7 @@ impl Runtime {
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         self.last_title_state = None;
+        log_retail_core_objects(dom, retail_core_objects);
         self.sync_title_card(dom)?;
         self.apply_prepared_retail_music(destination_music, true, destination_zone, dom)
             .map_err(|error| JsValue::from_str(&error))?;
@@ -1614,15 +1630,25 @@ impl Runtime {
                 let mut scene_location = None;
                 let frame_display_mask = self.effective_retail_display_mask();
                 let frame_draw_count = self.retail_objects.draw_count();
-                let camera_location = match self.update_retail_camera(snapshot, dom) {
-                    Ok(step) => Some(step.after),
-                    Err(error) => {
-                        let message = format!("retail camera update failed: {error}");
-                        dom.log(&message, true);
-                        self.retail_runtime_error = Some(message);
-                        self.retail_tick_state = RetailTickState::Paused;
-                        None
+                if let Err(error) = self.retail_objects.advance_level_shader() {
+                    let message = format!("retail level shader update failed: {error:?}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = RetailTickState::Paused;
+                }
+                let camera_location = if self.retail_runtime_error.is_none() {
+                    match self.update_retail_camera(snapshot, dom) {
+                        Ok(step) => Some(step.after),
+                        Err(error) => {
+                            let message = format!("retail camera update failed: {error}");
+                            dom.log(&message, true);
+                            self.retail_runtime_error = Some(message);
+                            self.retail_tick_state = RetailTickState::Paused;
+                            None
+                        }
                     }
+                } else {
+                    None
                 };
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
@@ -4835,6 +4861,33 @@ fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTextu
     )
     .map(Some)
     .map_err(|error| JsValue::from_str(&format!("{} loading image: {error}", pair.level)))
+}
+
+fn create_retail_core_objects_for_pair(
+    runtime: &mut RetailRuntime,
+    pair: &ValidatedPair,
+    current_zone: Eid,
+) -> Result<Option<RetailCoreObjects>, JsValue> {
+    let mut host = NsfProgramHost::new(&pair.nsd, &pair.nsf, &pair.nsf_bytes);
+    runtime
+        .create_retail_core_objects(current_zone, &mut host)
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not create retail core HUD objects: {error:?}"
+            ))
+        })
+}
+
+fn log_retail_core_objects(dom: &Dom, created: Option<RetailCoreObjects>) {
+    if let Some(objects) = created {
+        dom.log(
+            &format!(
+                "Created retail life, fruit, and pickup HUD roots: {:?}, {:?}, {:?}.",
+                objects.life, objects.fruit, objects.pickup
+            ),
+            false,
+        );
+    }
 }
 
 fn install_retail_scene_for_pair(

@@ -27,7 +27,10 @@ gameplay path.
 - Displayed current-zone neighbors are decoded into owned ZDAT entity descriptors when a pair is
   mounted. In title, gameplay, bonus, boss, level-complete, intro and ending flow states, the
   browser spawns their group-three entities into the checked retail arena and executes that arena
-  at the cooperative 30 Hz boundary.
+  at the cooperative 30 Hz boundary. Before the first zone scan, every gameplay, boss, bonus, and
+  map mount creates native executable-four life, fruit, and pickup roots beneath logical root one
+  and publishes their checked references to globals 7, 6, and 14. The four native exclusions—title,
+  level complete, intro, and ending—create none.
 - The NSF program host binds initial and requested GOOL states, synchronously applies characterized
   child-spawn effects, maintains typed arena/VM links, and advances the implemented state-change
   and animation-select/wait path using frame/draw counters. Initial and global-call frames share the
@@ -89,8 +92,11 @@ gameplay path.
   font, retail formatting/control commands, per-corner color modulation and ordered glyph/backdrop
   quads. Standalone type-three font descriptors remain resource-only, as in the source. ZDAT object
   shader modes two and three are connected with their separate SVTX/CVTX ramps and far-object
-  cutoffs. Graphics flag `0x1000` replaces only the GOOL-object camera with the source Q24.8 fixed
-  position, triangular Y bob and fixed pitch; the world keeps the authored path camera.
+  cutoffs. Mode four consumes a source-order player translation (or a checked live pause-object
+  translation) and the Lights Out/Fumbling `dark_dist` ramp advanced at the unpaused pre-camera
+  boundary; its five renderer-BSS words survive stream remounts. Graphics flag `0x1000` replaces
+  only the GOOL-object camera with the source Q24.8 fixed position, triangular Y bob and fixed
+  pitch; the world keeps the authored path camera.
 - The WebGL stage has a validated transactional scene-update path with shared immutable
   decoded-texture identity reuse, atomic replacement/removal and a command-only fast path. Distinct
   allocations are conservatively uploaded without cloning or scanning their pixel vectors. Pair
@@ -193,11 +199,14 @@ gameplay path.
   are coupled to the same ordered command/texture path. Mid-frame paging-driven texture changes are
   not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown and the
   current display mask.
-  Twenty-two starts use fog/ripple/lightning/dark variants whose dynamic vertex/color effects
-  remain incomplete. Object shader modes two and three and their source far-object rejection are
-  live, as is the object-only `0x1000` fixed-camera substitution. Mode four has a checked pure
-  renderer implementation and focused tests, but is deliberately unwired because immutable render
-  snapshots do not yet carry the runtime's live pause-object/player selection and `dark_dist`.
+  Twenty-two starts use fog/ripple/lightning/dark variants whose world-level dynamic vertex/color
+  effects remain incomplete. Object shader modes two and three and their source far-object
+  rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
+  through immutable snapshots carrying source-order player/pause selection and `dark_dist`; a legal
+  all-pair boot trace rendered 1,800 mode-four vertices into 2,880 object primitives. Browser pause
+  still freezes the last presented snapshot rather than creating the native executable-four,
+  subtype-four root-seven controller. Mode four's derived light matrix and ambient color are not
+  yet written back into mutable GOOL object colors, so subsequent GOOL color reads can differ.
   Rendering snapshots
   the complete arena after GOOL, while the source interleaves each object's simulation and drawing
   during preorder traversal. The current builder avoids reparsing an unchanged active graph,
@@ -215,10 +224,11 @@ gameplay path.
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
   used. A strict legally-local 18,000-frame authored-input trace moves the camera and Crash through
-  N. Sanity zones `a1_9Z` through `a9_9Z`, `b0_9Z`, and into `b1_9Z` by frame 1,396 with no VM
-  errors, faults, restart or terminal fall. It remains stable there through frame 18,000. That is
-  a real playable progression path, not a certified level completion: late bound refresh, broader collision and later Crash, boss, box,
-  checkpoint, enemy, bonus and ending behavior remain open. Hog Wild's checked 360-frame idle trace
+  the complete N. Sanity `a1_9Z` through `b7_9Z` chain and emits the authored Level Complete
+  destination `0x2d` at frame 1,995 with no VM errors, faults, restart or terminal fall. This is one
+  certified deterministic authored level completion, not a full-playthrough claim: late bound
+  refresh, broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending
+  behavior remain open. Hog Wild's checked 360-frame idle trace
   now delivers the
   authored fall-kill event to state 22, advances `fade_counter` through the native `-2`/`-1`
   sentinels, emits `LoadState`, and completes two same-level restarts with no VM error, faulted
@@ -237,10 +247,9 @@ gameplay path.
   128-byte virtual-card model, including rescan/format/save/load handshakes and synchronous GOOL
   result globals. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- One historical diagnostic level and its completion/title-map transition were completed in an
-  earlier browser build before the placeholder geometry and movement path were removed. No
-  retail-authored level, boss, bonus route, ending, death/checkpoint sequence, long soak, mobile
-  audio session, or multiple physical gamepad matrix has been completed.
+- One deterministic retail-authored N. Sanity route now reaches its real end warp and requests
+  Level Complete. No boss, complete bonus round trip, ending, broad death/checkpoint sequence,
+  long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
 
 ## Automated coverage
 

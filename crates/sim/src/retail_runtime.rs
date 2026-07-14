@@ -106,6 +106,8 @@ const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const DEATH_COUNT_GLOBAL: usize = 108;
 const BOX_COUNT_GLOBAL: usize = 62;
 const BONUS_ROUND_GLOBAL: usize = 60;
+const PAUSE_OBJECT_GLOBAL: usize = 12;
+const LIGHT_SOURCE_OBJECT_GLOBAL: usize = 54;
 const ISLAND_CAMERA_ROTATION_GLOBAL: usize = 64;
 const GEM_STAMP_GLOBAL: usize = 65;
 const ISLAND_CAMERA_STATE_GLOBAL: usize = 66;
@@ -197,6 +199,18 @@ pub struct RuntimeObjectHandle {
     vm: VmObjectHandle,
 }
 
+/// Process-lifetime HUD controllers created by native `CoreObjectsCreate`.
+///
+/// The three objects live beneath logical root one. Their handles are also
+/// published through the exact GOOL pointer globals consumed by authored
+/// display, pickup, save, and bonus code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailCoreObjects {
+    pub life: RuntimeObjectHandle,
+    pub fruit: RuntimeObjectHandle,
+    pub pickup: RuntimeObjectHandle,
+}
+
 impl RuntimeObjectHandle {
     /// Generational identity used by the allocation forest.
     #[must_use]
@@ -242,6 +256,11 @@ pub struct RetailRenderObject {
     /// pluralization command can select any decimal `N` in `0..=9`. Missing
     /// words stay explicit instead of reproducing an out-of-bounds C read.
     pub text_arguments: [Option<u32>; 10],
+    /// Live source reference for ZDAT object-shader mode four. Native uses the
+    /// pause object while it exists and the dedicated player otherwise.
+    pub dark_reference_translation: Option<[i32; 3]>,
+    /// Source `dark_dist` after this frame's `ShaderParamsUpdate(0)` step.
+    pub dark_distance: i32,
     /// Exact per-object display decision captured after this object's update.
     pub display_eligible: bool,
 }
@@ -1029,6 +1048,10 @@ pub struct RetailSessionCarry {
     /// Native `first_spawn`, armed by a different-level `LevelRestart` and
     /// applied when the destination host supplies its new camera context.
     pub first_spawn: bool,
+    /// Renderer BSS retained by `NSKill`/`NSInit`. The destination's
+    /// `ShaderParamsUpdate(1)` subsequently resets only the two native words
+    /// that initialization actually writes.
+    dark_shader: RetailDarkShaderState,
 }
 
 /// Checked failure while rebuilding a pair-owned runtime from retained
@@ -1541,6 +1564,73 @@ impl HandleMap {
     }
 }
 
+/// Pointer-free state used by the Lights Out/Fumbling object-darkness shader.
+///
+/// Native retains these words in renderer BSS and advances them once before
+/// camera/object work whenever the active zone requests dark or lightning
+/// shading. The light-source word is compared by identity only; no C pointer
+/// is dereferenced here.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RetailDarkShaderState {
+    previous_light_source: u32,
+    distance_target: i32,
+    distance_step: i32,
+    distance_next: i32,
+    distance: i32,
+}
+
+impl RetailDarkShaderState {
+    fn initialize(&mut self, level: LevelId) {
+        if matches!(level.get(), 0x28 | 0x2a) {
+            // Native ShaderParamsUpdate(1) only resets the previous source and
+            // the pending distance. The target, step, and published distance
+            // are renderer BSS and deliberately survive a same-level reset.
+            self.previous_light_source = 0;
+            self.distance_next = 2_000;
+        }
+    }
+
+    fn advance(&mut self, level: LevelId, light_source: u32) {
+        if !matches!(level.get(), 0x28 | 0x2a) {
+            return;
+        }
+        if light_source == 0 {
+            if self.previous_light_source != 0 {
+                self.distance_target = 2_000;
+                self.distance_step = 20;
+            }
+        } else if light_source != self.previous_light_source {
+            self.distance_target = 75;
+            self.distance_step = -75;
+        }
+        self.previous_light_source = light_source;
+        if self.distance_next != self.distance_target {
+            self.distance_next = shader_step_toward(
+                self.distance_next,
+                self.distance_target,
+                &mut self.distance_step,
+            );
+        }
+        self.distance = self.distance_next;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailDisplaySnapshot {
+    enabled: bool,
+    dark_reference_translation: Option<[i32; 3]>,
+}
+
+fn shader_step_toward(current: i32, target: i32, step: &mut i32) -> i32 {
+    let next = current.wrapping_add(*step);
+    if (target > current && next >= target) || (target < current && next <= target) {
+        *step = 0;
+        target
+    } else {
+        next
+    }
+}
+
 /// Pointer-free native coordinator for the first retail runtime slice.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetailRuntime {
@@ -1552,7 +1642,7 @@ pub struct RetailRuntime {
     reclaim_event_faults: Vec<RuntimeReclaimEventFault>,
     solid_event_faults: Vec<RuntimeSolidEventFault>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
-    displayed_objects: BTreeMap<RuntimeObjectHandle, bool>,
+    displayed_objects: BTreeMap<RuntimeObjectHandle, RetailDisplaySnapshot>,
     level: Option<LevelId>,
     transition_zone_context: ObjectZoneContext,
     level_state_context: Option<RetailLevelStateContext>,
@@ -1566,6 +1656,9 @@ pub struct RetailRuntime {
     death_count: u32,
     frame_index: u64,
     draw_count: u32,
+    dark_shader: RetailDarkShaderState,
+    core_objects_initialized: bool,
+    core_objects: Option<RetailCoreObjects>,
 }
 
 impl RetailRuntime {
@@ -1601,6 +1694,9 @@ impl RetailRuntime {
             death_count: 0,
             frame_index: 0,
             draw_count: 0,
+            dark_shader: RetailDarkShaderState::default(),
+            core_objects_initialized: false,
+            core_objects: None,
         }
     }
 
@@ -1650,8 +1746,10 @@ impl RetailRuntime {
             respawn_count,
             death_count,
             first_spawn,
+            dark_shader,
         } = carry;
         let mut runtime = Self::new(global_words);
+        runtime.dark_shader = dark_shader;
         runtime.machine.restore_global_words(globals);
         runtime
             .machine
@@ -1701,6 +1799,7 @@ impl RetailRuntime {
                     .level_state_context
                     .as_ref()
                     .is_some_and(|context| context.first_spawn),
+            dark_shader: self.dark_shader,
         }
     }
 
@@ -1713,6 +1812,7 @@ impl RetailRuntime {
     }
 
     fn apply_stream_mount_globals(&mut self, level: LevelId) {
+        self.dark_shader.initialize(level);
         for index in POINTER_GLOBALS {
             self.set_mount_global(index, 0);
         }
@@ -1789,6 +1889,25 @@ impl RetailRuntime {
         Ok(())
     }
 
+    /// Advances the source level-shader globals at the unpaused pre-camera
+    /// boundary. Levels other than Lights Out/Fumbling, and zones without the
+    /// dark/lightning flags, intentionally leave the state unchanged.
+    pub fn advance_level_shader(&mut self) -> Result<(), VmError> {
+        let Some(level) = self.level else {
+            return Ok(());
+        };
+        let graphics_flags = self
+            .level_state_context
+            .as_ref()
+            .map_or(0, |context| context.graphics_flags);
+        if graphics_flags & 0x600 == 0 || !matches!(level.get(), 0x28 | 0x2a) {
+            return Ok(());
+        }
+        let light_source = self.machine.global_word(LIGHT_SOURCE_OBJECT_GLOBAL)?;
+        self.dark_shader.advance(level, light_source);
+        Ok(())
+    }
+
     /// Captures the exact persistent globals serialized by memory-card saves.
     pub fn card_save_data(&self) -> Result<SaveData, VmError> {
         self.machine.retail_card_save_data()
@@ -1840,10 +1959,11 @@ impl RetailRuntime {
     /// The machine-owned, pointer-free `cur_zone_query` cache is invalidated
     /// here beside native smooth-stop history, rebuilt by the next solid-floor
     /// query, and thereafter retained until a strict-bound escape.
-    /// `ShaderParamsUpdate(1)` for levels 0x28/0x2a is
-    /// renderer-owned and is reapplied by the mounted-zone host rather than
-    /// retained in simulation state.
+    /// `ShaderParamsUpdate(1)` for levels 0x28/0x2a resets only its native
+    /// previous-source and pending-distance words; target, step, and current
+    /// distance retain their renderer-BSS values across this boundary.
     fn apply_level_init_misc_zero(&mut self, level: LevelId) {
+        self.dark_shader.initialize(level);
         // Cases with a level-specific branch do not execute the default
         // `ambiance_obj = 0` assignment when flag is zero.
         if !matches!(
@@ -1999,29 +2119,93 @@ impl RetailRuntime {
         self.saved_level_state.as_ref()
     }
 
-    /// Creates the process-lifetime caption controller installed by native
-    /// `PbakPlay` before its same-level `LevelRestart`.
+    /// Creates the process-lifetime HUD roots installed by native
+    /// `CoreObjectsCreate` before the first ZDAT spawn scan.
     ///
-    /// The object is executable four, subtype eight, receives the exact two
-    /// caption arguments, and is inserted beneath logical root one with the
-    /// reclaiming `GoolObjectAlloc(1)` policy. Executable four clears its
-    /// native `obj->zone` pointer during initialization, so the arena retains
-    /// [`Eid::NONE`] for lifecycle decisions while the supplied current ZDAT
-    /// still provides its initial colors and solid environment.
-    pub fn create_retail_demo_caption<H: ProgramHost>(
+    /// Gameplay, boss, bonus, and map streams receive executable-four life,
+    /// fruit, and pickup controllers in that exact order. Title, level-end,
+    /// intro, and ending streams only pre-open programs in native code and do
+    /// not create these objects. Repeated calls on one mounted runtime are
+    /// idempotent so a same-level restart cannot duplicate the roots.
+    pub fn create_retail_core_objects<H: ProgramHost>(
         &mut self,
         current_zone: Eid,
+        host: &mut H,
+    ) -> Result<Option<RetailCoreObjects>, RuntimeError<H::Error>> {
+        if self.core_objects_initialized {
+            return Ok(self.core_objects);
+        }
+        let Some(level) = self.level else {
+            self.core_objects_initialized = true;
+            return Ok(None);
+        };
+        if matches!(
+            level,
+            LevelId::TITLE | LevelId::LEVEL_COMPLETE | LevelId::INTRO | LevelId::ENDING
+        ) {
+            self.core_objects_initialized = true;
+            return Ok(None);
+        }
+
+        // Preflight the three pointer-global slots before allocating anything
+        // so a deliberately undersized test VM stays transactionally empty.
+        for global in [7, 6, 14] {
+            self.machine.global_word(global).map_err(RuntimeError::Vm)?;
+        }
+
+        let mut created = Vec::with_capacity(3);
+        for subtype in [0, 1, 5] {
+            match self.create_root_one_program(current_zone, 4, subtype, &[], false, host) {
+                Ok(object) => created.push(object),
+                Err(error) => {
+                    self.discard_unstarted_runtime_roots::<H::Error>(&created)?;
+                    return Err(error);
+                }
+            }
+        }
+        let objects = RetailCoreObjects {
+            life: created[0],
+            fruit: created[1],
+            pickup: created[2],
+        };
+        for (global, object) in [(7, objects.life), (6, objects.fruit), (14, objects.pickup)] {
+            self.machine
+                .set_global_word(global, CollisionObjectReference::new(object.vm).to_word())
+                .map_err(RuntimeError::Vm)?;
+        }
+        self.core_objects = Some(objects);
+        self.core_objects_initialized = true;
+        Ok(Some(objects))
+    }
+
+    fn discard_unstarted_runtime_roots<E>(
+        &mut self,
+        objects: &[RuntimeObjectHandle],
+    ) -> Result<(), RuntimeError<E>> {
+        let mut report = ZoneTerminationReport::new();
+        for object in objects.iter().rev() {
+            if self.handles.is_live_pair(*object) {
+                self.remove_runtime_subtree(object.arena, &mut report)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn create_root_one_program<H: ProgramHost>(
+        &mut self,
+        binding_zone: Eid,
+        executable: u8,
+        subtype: u8,
+        arguments: &[u32],
+        allow_reclaim: bool,
         host: &mut H,
     ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
         let root = RootHandle::new(1).ok_or(RuntimeError::InvalidRootIndex(1))?;
         let arena_handle = loop {
-            match self.arena.create_root_object(
-                root,
-                Eid::NONE,
-                PBAK_CAPTION_EXECUTABLE,
-                PBAK_CAPTION_SUBTYPE,
-                true,
-            ) {
+            match self
+                .arena
+                .create_root_object(root, Eid::NONE, executable, subtype, allow_reclaim)
+            {
                 Ok(arena_handle) => break arena_handle,
                 Err(RuntimeCreateError::ReclaimRequired(candidate)) => {
                     let mut spawned_children = Vec::new();
@@ -2043,12 +2227,10 @@ impl RetailRuntime {
         };
         let binding = ProgramBinding {
             object,
-            zone: current_zone,
-            executable: PBAK_CAPTION_EXECUTABLE,
-            subtype: PBAK_CAPTION_SUBTYPE,
-            origin: ProgramOrigin::RuntimeChild {
-                arguments: &PBAK_CAPTION_ARGUMENTS,
-            },
+            zone: binding_zone,
+            executable,
+            subtype,
+            origin: ProgramOrigin::RuntimeChild { arguments },
         };
         if let Err(error) = self.materialize(binding, host) {
             self.handles.release(object);
@@ -2058,6 +2240,30 @@ impl RetailRuntime {
             return Err(error);
         }
         Ok(object)
+    }
+
+    /// Creates the process-lifetime caption controller installed by native
+    /// `PbakPlay` before its same-level `LevelRestart`.
+    ///
+    /// The object is executable four, subtype eight, receives the exact two
+    /// caption arguments, and is inserted beneath logical root one with the
+    /// reclaiming `GoolObjectAlloc(1)` policy. Executable four clears its
+    /// native `obj->zone` pointer during initialization, so the arena retains
+    /// [`Eid::NONE`] for lifecycle decisions while the supplied current ZDAT
+    /// still provides its initial colors and solid environment.
+    pub fn create_retail_demo_caption<H: ProgramHost>(
+        &mut self,
+        current_zone: Eid,
+        host: &mut H,
+    ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
+        self.create_root_one_program(
+            current_zone,
+            PBAK_CAPTION_EXECUTABLE,
+            PBAK_CAPTION_SUBTYPE,
+            &PBAK_CAPTION_ARGUMENTS,
+            true,
+            host,
+        )
     }
 
     /// Installs the process-lifetime state written by native `PbakStart`.
@@ -2967,6 +3173,10 @@ impl RetailRuntime {
     pub fn render_objects(&self) -> Result<Vec<RetailRenderObject>, RenderObjectsError> {
         self.validate_render_object_pairs()?;
         let mut objects = Vec::with_capacity(self.arena.len());
+        let current_dark_reference_translation = self
+            .current_dark_reference_translation()
+            .map_err(RenderObjectsError::Vm)?;
+        let dark_distance = self.dark_shader.distance;
 
         for root_index in 0..ROOT_HANDLE_COUNT {
             let root_index_u8 = u8::try_from(root_index)
@@ -2997,12 +3207,17 @@ impl RetailRuntime {
                     return Err(RenderObjectsError::StaleObjectPair(object));
                 }
                 let origin = spawned.origin();
-                let display_eligible = self
-                    .displayed_objects
-                    .get(&object)
-                    .copied()
-                    .map_or_else(|| self.retail_display_enabled(object), Ok)
+                let display_snapshot = self.displayed_objects.get(&object).copied();
+                let display_eligible = display_snapshot
+                    .map_or_else(
+                        || self.retail_display_enabled(object),
+                        |snapshot| Ok(snapshot.enabled),
+                    )
                     .map_err(RenderObjectsError::Vm)?;
+                let dark_reference_translation = display_snapshot
+                    .map_or(current_dark_reference_translation, |snapshot| {
+                        snapshot.dark_reference_translation
+                    });
                 objects.push(RetailRenderObject {
                     object,
                     zone: spawned.zone(),
@@ -3033,12 +3248,34 @@ impl RetailRuntime {
                         .map_err(RenderObjectsError::Vm)?
                         >> 8,
                     text_arguments: retail_text_arguments(vm_object.stack()),
+                    dark_reference_translation,
+                    dark_distance,
                     display_eligible,
                 });
             }
         }
 
         Ok(objects)
+    }
+
+    fn current_dark_reference_translation(&self) -> Result<Option<[i32; 3]>, VmError> {
+        let pause = self
+            .machine
+            .global_word(PAUSE_OBJECT_GLOBAL)
+            .ok()
+            .and_then(CollisionObjectReference::from_word)
+            .and_then(|reference| self.handles.for_vm(reference.object()))
+            .filter(|object| self.handles.is_live_pair(*object));
+        let main = self
+            .arena
+            .main_object()
+            .and_then(|arena| self.handles.for_arena(arena))
+            .filter(|object| self.handles.is_live_pair(*object));
+        let Some(reference) = pause.or(main) else {
+            return Ok(None);
+        };
+        let transform = self.machine.object(reference.vm)?.retail_transform()?;
+        Ok(Some(transform.translation))
     }
 
     fn validate_render_object_pairs(&self) -> Result<(), RenderObjectsError> {
@@ -3329,7 +3566,16 @@ impl RetailRuntime {
             let displayed = self
                 .retail_display_enabled(object)
                 .map_err(RuntimeError::Vm)?;
-            self.displayed_objects.insert(object, displayed);
+            let dark_reference_translation = self
+                .current_dark_reference_translation()
+                .map_err(RuntimeError::Vm)?;
+            self.displayed_objects.insert(
+                object,
+                RetailDisplaySnapshot {
+                    enabled: displayed,
+                    dark_reference_translation,
+                },
+            );
         }
 
         let mut child = self
@@ -7962,7 +8208,13 @@ mod tests {
                 .unwrap();
             runtime.pending_states.insert(object.vm, 7);
             runtime.faulted_objects.insert(object);
-            runtime.displayed_objects.insert(object, true);
+            runtime.displayed_objects.insert(
+                object,
+                RetailDisplaySnapshot {
+                    enabled: true,
+                    dark_reference_translation: None,
+                },
+            );
         }
         mark_reclaimable(&mut runtime, candidate);
 
@@ -9484,7 +9736,13 @@ mod tests {
         for (index, object) in [parent, child, grandchild].into_iter().enumerate() {
             runtime.pending_states.insert(object.vm, index as u16);
             runtime.faulted_objects.insert(object);
-            runtime.displayed_objects.insert(object, true);
+            runtime.displayed_objects.insert(
+                object,
+                RetailDisplaySnapshot {
+                    enabled: true,
+                    dark_reference_translation: None,
+                },
+            );
             runtime
                 .machine
                 .register_frame_bound(object.vm, Bounds3::default())
@@ -9860,6 +10118,227 @@ mod tests {
         assert_eq!(
             snapshot.text_arguments,
             std::array::from_fn(|index| Some((3_u32 << 16) | (14 - index) as u32))
+        );
+    }
+
+    #[test]
+    fn dark_reference_translation_is_captured_at_each_root_display_boundary() {
+        let level = LevelId::new_const(0x28);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let before_main = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let main = spawn_test_object(&mut runtime, ZONE, 11, 0, 0);
+        let after_main = spawn_test_object(&mut runtime, ZONE, 12, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(after_main.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+
+        let initial_translation = [0x1000, 0x2000, 0x3000];
+        let updated_translation = [0x100, 0x2000, 0x3000];
+        let mut main_vm = VmObject::new(
+            main.vm,
+            vec![
+                Instruction::encode(
+                    0x11,
+                    0x0801,
+                    0x0e00 | process_register::TRANSLATION_X as u16,
+                ),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        main_vm
+            .set_retail_transform(RetailTransform {
+                translation: initial_translation,
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        runtime.machine.upsert_object(main_vm).unwrap();
+
+        runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+
+        let snapshots = runtime.render_objects().unwrap();
+        let dark_reference = |object| {
+            snapshots
+                .iter()
+                .find(|snapshot| snapshot.object == object)
+                .unwrap()
+                .dark_reference_translation
+        };
+        assert_eq!(dark_reference(before_main), Some(initial_translation));
+        assert_eq!(dark_reference(main), Some(updated_translation));
+        assert_eq!(dark_reference(after_main), Some(updated_translation));
+    }
+
+    #[test]
+    fn dark_level_shader_tracks_light_distance_and_pause_reference() {
+        let level = LevelId::new_const(0x28);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 10, 0, 0);
+        let light = spawn_test_object(&mut runtime, ZONE, 11, 2, 0);
+        let pause = spawn_test_object(&mut runtime, ZONE, 12, 4, 4);
+        let main_translation = [0x1000, 0x2000, 0x3000];
+        let pause_translation = [-0x4000, 0x5000, -0x6000];
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_retail_transform(RetailTransform {
+                translation: main_translation,
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(pause.vm)
+            .unwrap()
+            .set_retail_transform(RetailTransform {
+                translation: pause_translation,
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.graphics_flags = 0x400;
+        runtime.set_level_state_context(context);
+
+        let initial = runtime.render_objects().unwrap();
+        assert!(initial.iter().all(|object| {
+            object.dark_reference_translation == Some(main_translation) && object.dark_distance == 0
+        }));
+
+        runtime
+            .set_global_word(
+                LIGHT_SOURCE_OBJECT_GLOBAL,
+                CollisionObjectReference::new(light.vm).to_word(),
+            )
+            .unwrap();
+        runtime.advance_level_shader().unwrap();
+        assert!(
+            runtime
+                .render_objects()
+                .unwrap()
+                .iter()
+                .all(|object| object.dark_distance == 1_925)
+        );
+
+        runtime
+            .set_global_word(LIGHT_SOURCE_OBJECT_GLOBAL, 0)
+            .unwrap();
+        runtime.advance_level_shader().unwrap();
+        assert!(
+            runtime
+                .render_objects()
+                .unwrap()
+                .iter()
+                .all(|object| object.dark_distance == 1_945)
+        );
+
+        runtime
+            .set_global_word(
+                PAUSE_OBJECT_GLOBAL,
+                CollisionObjectReference::new(pause.vm).to_word(),
+            )
+            .unwrap();
+        assert!(
+            runtime
+                .render_objects()
+                .unwrap()
+                .iter()
+                .all(|object| { object.dark_reference_translation == Some(pause_translation) })
+        );
+    }
+
+    #[test]
+    fn dark_level_reinit_preserves_target_step_and_current_on_first_tick() {
+        let level = LevelId::new_const(0x28);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.graphics_flags = 0x400;
+        runtime.set_level_state_context(context);
+        runtime
+            .set_global_word(LIGHT_SOURCE_OBJECT_GLOBAL, 0x100)
+            .unwrap();
+
+        runtime.advance_level_shader().unwrap();
+        assert_eq!(
+            runtime.dark_shader,
+            RetailDarkShaderState {
+                previous_light_source: 0x100,
+                distance_target: 75,
+                distance_step: -75,
+                distance_next: 1_925,
+                distance: 1_925,
+            }
+        );
+
+        runtime
+            .set_global_word(LIGHT_SOURCE_OBJECT_GLOBAL, 0)
+            .unwrap();
+        runtime.apply_level_init_misc_zero(level);
+        assert_eq!(
+            runtime.dark_shader,
+            RetailDarkShaderState {
+                previous_light_source: 0,
+                distance_target: 75,
+                distance_step: -75,
+                distance_next: 2_000,
+                distance: 1_925,
+            }
+        );
+
+        runtime.advance_level_shader().unwrap();
+        assert_eq!(
+            runtime.dark_shader,
+            RetailDarkShaderState {
+                previous_light_source: 0,
+                distance_target: 75,
+                distance_step: -75,
+                distance_next: 1_925,
+                distance: 1_925,
+            }
+        );
+    }
+
+    #[test]
+    fn dark_level_renderer_bss_survives_stream_remount_and_first_tick() {
+        let level = LevelId::new_const(0x28);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.graphics_flags = 0x400;
+        runtime.set_level_state_context(context.clone());
+        runtime
+            .set_global_word(LIGHT_SOURCE_OBJECT_GLOBAL, 0x100)
+            .unwrap();
+        runtime.advance_level_shader().unwrap();
+
+        let carry = runtime.export_session_carry();
+        let mut mounted = RetailRuntime::new_from_session(119, level, carry).unwrap();
+        mounted.set_level_state_context(context);
+        assert_eq!(mounted.global_word(LIGHT_SOURCE_OBJECT_GLOBAL), Ok(0));
+        assert_eq!(
+            mounted.dark_shader,
+            RetailDarkShaderState {
+                previous_light_source: 0,
+                distance_target: 75,
+                distance_step: -75,
+                distance_next: 2_000,
+                distance: 1_925,
+            }
+        );
+
+        mounted.advance_level_shader().unwrap();
+        assert_eq!(
+            mounted.dark_shader,
+            RetailDarkShaderState {
+                previous_light_source: 0,
+                distance_target: 75,
+                distance_step: -75,
+                distance_next: 1_925,
+                distance: 1_925,
+            }
         );
     }
 
@@ -10283,6 +10762,109 @@ mod tests {
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
         }
+    }
+
+    #[test]
+    fn retail_core_objects_publish_exact_root_order_and_pointer_globals() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        let mut host = CaptionHost::default();
+
+        let objects = runtime
+            .create_retail_core_objects(ZONE, &mut host)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            host.bindings,
+            [
+                (ZONE, 4, 0, Vec::new()),
+                (ZONE, 4, 1, Vec::new()),
+                (ZONE, 4, 5, Vec::new()),
+            ]
+        );
+        let root = RootHandle::new(1).unwrap();
+        assert_eq!(
+            runtime
+                .arena
+                .preorder(TreeParent::Root(root))
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [
+                objects.pickup.arena,
+                objects.fruit.arena,
+                objects.life.arena
+            ]
+        );
+        for (object, subtype) in [(objects.life, 0), (objects.fruit, 1), (objects.pickup, 5)] {
+            let spawned = runtime.arena.get(object.arena).unwrap();
+            assert_eq!(spawned.zone(), Eid::NONE);
+            assert_eq!(spawned.parent(), TreeParent::Root(root));
+            assert_eq!(
+                (spawned.origin().executable(), spawned.origin().subtype()),
+                (4, subtype)
+            );
+        }
+        for (global, object) in [(7, objects.life), (6, objects.fruit), (14, objects.pickup)] {
+            assert_eq!(
+                runtime.global_word(global),
+                Ok(CollisionObjectReference::new(object.vm).to_word())
+            );
+        }
+
+        assert_eq!(
+            runtime.create_retail_core_objects(ZONE_B, &mut host),
+            Ok(Some(objects))
+        );
+        assert_eq!(host.bindings.len(), 3, "a same-level restart is idempotent");
+    }
+
+    #[test]
+    fn retail_core_objects_skip_four_native_non_gameplay_streams() {
+        for level in [
+            LevelId::TITLE,
+            LevelId::LEVEL_COMPLETE,
+            LevelId::INTRO,
+            LevelId::ENDING,
+        ] {
+            let mut runtime = RetailRuntime::new_for_level(119, level);
+            let mut host = CaptionHost::default();
+            assert_eq!(
+                runtime.create_retail_core_objects(ZONE, &mut host),
+                Ok(None)
+            );
+            assert!(host.bindings.is_empty());
+            assert!(
+                runtime
+                    .arena
+                    .preorder(TreeParent::Root(RootHandle::new(1).unwrap()))
+                    .unwrap()
+                    .next()
+                    .is_none()
+            );
+            assert_eq!(runtime.global_word(6), Ok(0));
+            assert_eq!(runtime.global_word(7), Ok(0));
+            assert_eq!(runtime.global_word(14), Ok(0));
+        }
+    }
+
+    #[test]
+    fn retail_core_object_preflight_keeps_an_undersized_vm_empty() {
+        let mut runtime = RetailRuntime::new_for_level(14, LevelId::N_SANITY_BEACH);
+        let mut host = CaptionHost::default();
+
+        assert_eq!(
+            runtime.create_retail_core_objects(ZONE, &mut host),
+            Err(RuntimeError::Vm(VmError::InvalidRegister(14)))
+        );
+        assert!(host.bindings.is_empty());
+        assert!(
+            runtime
+                .arena
+                .preorder(TreeParent::Root(RootHandle::new(1).unwrap()))
+                .unwrap()
+                .next()
+                .is_none()
+        );
     }
 
     #[test]

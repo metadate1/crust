@@ -94,12 +94,15 @@ glyph/backdrop quads; standalone type-three fonts remain resource-only. Status-B
 the same 2D matrix path. Retail sprite half-size calculation keeps the raw signed scale quotient,
 masks MIPS variable shifts to five bits, and performs the source's wrapping 32-bit shift before the
 checked GTE range/cull decision; it never applies a host-width shift or treats a saturating sprite as
-a scene-wide fault. ZDAT object shader modes two and three feed source-specific SVTX light
-ramps or CVTX shifts into that projection and can reject objects at their authored depth cutoffs.
-The pure mode-four evaluator is also checked and tested, but the live builder does not invoke it
-until render snapshots carry the current pause-object/player selection and `dark_dist`. For zones
-with graphics flag `0x1000`, a fixed Q24.8 camera with the 128-frame triangular Y bob and fixed
-pitch is substituted only for object projection; the ordinary world camera is unchanged.
+a scene-wide fault. ZDAT object shader modes two and three feed source-specific SVTX light ramps or
+CVTX shifts into that projection and can reject objects at their authored depth cutoffs. Mode four
+is also live: renderer-BSS darkness state survives stream remounts, the player (or a checked live
+pause object) is sampled at each object's post-update/pre-child display boundary, and the builder
+passes that translation plus the pre-camera `dark_dist` value to the fixed-point evaluator. The
+browser pause path does not yet materialize the native root-seven subtype-four controller, and the
+derived light matrix/color remain render-owned rather than being written back to VM object colors.
+For zones with graphics flag `0x1000`, a fixed Q24.8 camera with the 128-frame triangular Y bob and
+fixed pitch is substituted only for object projection; the ordinary world camera is unchanged.
 
 `GlStage` can transactionally update an installed retail scene. It validates command texture
 references, compares immutable decoded-texture allocation identities, prepares all new/replacement

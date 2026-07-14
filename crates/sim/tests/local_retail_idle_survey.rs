@@ -1423,6 +1423,9 @@ fn survey_pair(
     let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, level);
     refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
     let mut host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
+    runtime
+        .create_retail_core_objects(camera.location().path.zone, &mut host)
+        .map_err(|error| format!("core object creation: {error:?}"))?;
     let mut survey = LevelSurvey::new(level, name, input_profile);
     let mut input_controller = SurveyInputController::new(input_profile);
     let mut empty_frames = 0_u32;
@@ -1488,6 +1491,10 @@ fn survey_pair(
             }
         }
         drain_reclaim_diagnostics(&mut runtime, &mut survey, frame);
+
+        runtime
+            .advance_level_shader()
+            .map_err(|error| format!("level shader update: {error:?}"))?;
 
         if let Err(error) = update_camera(
             frame,

@@ -30,8 +30,9 @@ use crust_renderer::sprite::{
 use crust_renderer::text::{RetailTextProjection, project_retail_text};
 use crust_renderer::texture::{DecodedTexture, Rgba8};
 use crust_renderer::{
-    GoolObjectLighting, ObjectProjectionParameters, ObjectProjectionTransform,
-    ProjectedObjectPolygon, apply_object_zone_shader, project_object_model,
+    GoolObjectLighting, ObjectDarkShaderInput, ObjectProjectionParameters,
+    ObjectProjectionTransform, ProjectedObjectPolygon, apply_object_zone_shader,
+    project_object_model,
 };
 use crust_sim::Angle12;
 use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
@@ -1199,8 +1200,15 @@ fn prepare_vertex_animation(
         if display_flags & 0x1_0000 == 0
             && !is_main
             && object.status_b & 0x400 == 0
-            && matches!(zone_header.graphics.unknown_a, 2 | 3)
+            && matches!(zone_header.graphics.unknown_a, 2..=4)
         {
+            let dark = object
+                .dark_reference_translation
+                .map(|reference_translation| ObjectDarkShaderInput {
+                    reference_translation,
+                    object_translation: object.transform.translation,
+                    dark_distance: object.dark_distance,
+                });
             let Some(shading) = apply_object_zone_shader(
                 zone_header.graphics.unknown_a,
                 model.frame.kind,
@@ -1208,7 +1216,7 @@ fn prepare_vertex_animation(
                 zone_header.graphics.object_colors.words,
                 camera_translation.z,
                 object_zone_depth_anchor(nsd, zone_header),
-                None,
+                dark,
             )
             .map_err(|error| scene_error(format!("GOOL object zone shader: {error}")))?
             else {
@@ -1217,11 +1225,6 @@ fn prepare_vertex_animation(
             effective_colors = shading.colors;
             colored_shift = shading.colored_shift;
         }
-        // Mode four also runs here in the source, but it consumes the live
-        // pause/player reference and the `dark_dist` scalar advanced by
-        // ShaderParamsUpdate. Neither value is part of the immutable render
-        // snapshot yet, so retaining the object's authored colors is the only
-        // non-invented behavior at this boundary.
         (
             ObjectProjectionTransform::from_retail(
                 raw_camera_matrix,
@@ -2043,17 +2046,117 @@ mod tests {
         KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity,
         parse_nsd, parse_nsf,
     };
-    use crust_sim::camera::{RetailCameraFollowInput, RetailCameraInput, RetailCameraRuntime};
-    use crust_sim::gool::{RetailPadSnapshot, RetailTransformVectorsCamera, process_register};
+    use crust_sim::camera::{
+        RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
+        RetailCameraRuntime, RetailCameraStep,
+    };
+    use crust_sim::gool::{
+        CollisionObjectReference, RetailPadSnapshot, RetailTransformVectorsCamera, process_register,
+    };
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
     use crust_sim::retail_runtime::{
         NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
+        ZoneTerminationMode,
     };
-    use crust_sim::zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone};
+    use crust_sim::zone_lifecycle::{
+        OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
+    };
     use std::path::PathBuf;
 
-    use crate::pbak_runtime::{RetailPbakPlayback, prepare_pair_pbak};
+    use crate::pbak_runtime::{RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak};
+
+    fn refresh_pbak_level_context(
+        graph: &RetailZoneGraph,
+        lifecycle: &ZoneLifecycle,
+        runtime: &mut RetailRuntime,
+        location: RetailCameraLocation,
+    ) -> Result<(), String> {
+        let existing = runtime.level_state_context().cloned();
+        let read_global = |index| {
+            runtime
+                .global_word(index)
+                .map(u32::cast_signed)
+                .map_err(|error| format!("retail global {index}: {error:?}"))
+        };
+        let graphics_flags = graph
+            .zone(location.path.zone)
+            .ok_or_else(|| format!("camera graph has no zone {}", location.path.zone))?
+            .graphics_flags;
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location,
+            graphics_flags,
+            box_count: read_global(62)?,
+            checkpoint_id: read_global(69)?,
+            checkpoint_translation: [read_global(102)?, read_global(103)?, read_global(104)?],
+            first_spawn: existing.as_ref().is_some_and(|state| state.first_spawn),
+            active_neighbor_zones: lifecycle.active_neighbor_zones(),
+        });
+        Ok(())
+    }
+
+    fn apply_pbak_camera_effects(
+        level: LevelId,
+        graph: &RetailZoneGraph,
+        lifecycle: &mut ZoneLifecycle,
+        runtime: &mut RetailRuntime,
+        host: &mut NsfProgramHost<'_>,
+        step: &RetailCameraStep,
+    ) -> Result<(), String> {
+        for effect in &step.effects {
+            match *effect {
+                RetailCameraEffect::LevelUpdate {
+                    before,
+                    after,
+                    flags,
+                } => {
+                    if before.path.zone != after.path.zone {
+                        let activation_marker = (lifecycle.current_zone().is_none()
+                            && level != LevelId::TITLE)
+                            || flags & 2 != 0;
+                        let plan = lifecycle
+                            .plan_transition_with_marker(after.path.zone, activation_marker)
+                            .map_err(|error| error.to_string())?;
+                        for action in plan.actions().iter().copied() {
+                            if let ZoneTransitionAction::TerminateZoneObjects(zone) = action {
+                                let report = runtime
+                                    .terminate_zone_objects(
+                                        zone,
+                                        ZoneTerminationMode::Departure {
+                                            target: after.path.zone,
+                                        },
+                                        host,
+                                    )
+                                    .map_err(|error| format!("TERM {zone}: {error:?}"))?;
+                                if let Some(failure) = report.event_failures.first() {
+                                    return Err(format!(
+                                        "TERM {zone} object {:?}: {:?}",
+                                        failure.object, failure.error
+                                    ));
+                                }
+                            }
+                        }
+                        lifecycle
+                            .commit_transition(&plan)
+                            .map_err(|error| error.to_string())?;
+                    }
+                    refresh_pbak_level_context(graph, lifecycle, runtime, after)?;
+                }
+                RetailCameraEffect::SaveStateHandshake { location } => {
+                    refresh_pbak_level_context(graph, lifecycle, runtime, location)?;
+                    let main = runtime
+                        .arena()
+                        .main_object()
+                        .and_then(|arena| runtime.object_for_arena(arena))
+                        .ok_or_else(|| "camera save handshake has no main object".to_owned())?;
+                    runtime
+                        .save_level_state(main, true)
+                        .map_err(|error| format!("camera save handshake: {error:?}"))?;
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn text_font_resolution_prefers_the_validated_dynamic_word_offset() {
@@ -2913,7 +3016,7 @@ mod tests {
 
     #[test]
     #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-    fn jungle_rollers_pbak_restored_scene_is_renderable() {
+    fn local_pbak_restored_scene_is_renderable() {
         const RETAIL_GLOBAL_WORDS: usize = 256;
         const PBAK_STATE_GLOBAL: usize = 105;
 
@@ -2921,7 +3024,18 @@ mod tests {
             std::env::var_os("C1_STREAM_DIR")
                 .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
         );
-        let level = LevelId::new_const(0x0c);
+        let level = std::env::var("C1_PBAK_LEVEL").ok().map_or_else(
+            || LevelId::new_const(0x0c),
+            |value| {
+                let digits = value
+                    .strip_prefix("0x")
+                    .or_else(|| value.strip_prefix("0X"))
+                    .unwrap_or(&value);
+                let raw = u32::from_str_radix(digits, 16)
+                    .unwrap_or_else(|error| panic!("C1_PBAK_LEVEL {value:?}: {error}"));
+                LevelId::new(raw).expect("C1_PBAK_LEVEL fits the retail filename field")
+            },
+        );
         let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
         let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
         let nsd_bytes = std::fs::read(&nsd_path)
@@ -2982,6 +3096,10 @@ mod tests {
             active_neighbor_zones: lifecycle.active_neighbor_zones(),
         });
         let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        runtime
+            .create_retail_core_objects(camera.location().path.zone, &mut host)
+            .unwrap()
+            .expect("PBAK gameplay levels create the three retail HUD roots");
         let initial_neighbors = lifecycle
             .next_frame_spawn_scan()
             .into_iter()
@@ -2994,7 +3112,7 @@ mod tests {
         let attempts = runtime.spawn_current_zone_neighbors(&initial_neighbors, &mut host);
         assert!(
             attempts.iter().any(|attempt| attempt.result.is_ok()),
-            "Jungle Rollers initial spawn scan must create Crash"
+            "selected PBAK level initial spawn scan must create Crash"
         );
         assert!(runtime.arena().main_object().is_some());
 
@@ -3014,7 +3132,7 @@ mod tests {
                 },
                 player_cam_zoom: signed(process_register::CAMERA_ZOOM),
                 held_buttons,
-                level_id: 0x0c,
+                level_id: i32::try_from(level.get()).unwrap(),
                 frames_elapsed: runtime.machine().frames_elapsed(),
                 gem_stamp: 0,
             }
@@ -3030,21 +3148,31 @@ mod tests {
                 projection_distance(nsd.ldat().unwrap().field_of_view).unwrap(),
             ));
         };
-        let initial_camera_step = camera
-            .update_follow(&graph, follow_input(&runtime, 0))
+        let update_camera = |camera: &mut RetailCameraRuntime,
+                             runtime: &RetailRuntime,
+                             held_buttons: u32| {
+            let mode = graph.path(camera.location().path).unwrap().camera_mode;
+            let display_mask = runtime.current_display_mask();
+            if runtime.arena().main_object().is_none() || display_mask & (0x2 | 0x1_0000) != 0x2 {
+                Ok(camera.stationary_step())
+            } else if matches!(mode, 5 | 6) {
+                camera.update_follow(&graph, follow_input(runtime, held_buttons))
+            } else {
+                camera.update(&graph, RetailCameraInput::default())
+            }
+        };
+        let initial_camera_step = update_camera(&mut camera, &runtime, 0).unwrap();
+        apply_pbak_camera_effects(
+            level,
+            &graph,
+            &mut lifecycle,
+            &mut runtime,
+            &mut host,
+            &initial_camera_step,
+        )
+        .unwrap();
+        refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, initial_camera_step.after)
             .unwrap();
-        runtime.set_level_state_context(RetailLevelStateContext {
-            location: initial_camera_step.after,
-            graphics_flags: graph
-                .zone(initial_camera_step.after.path.zone)
-                .unwrap()
-                .graphics_flags,
-            box_count: 0,
-            checkpoint_id: -1,
-            checkpoint_translation: [0; 3],
-            first_spawn: false,
-            active_neighbor_zones: lifecycle.active_neighbor_zones(),
-        });
         publish_camera(&mut runtime, &camera, initial_camera_step.game_state);
         runtime.set_frame_timing(34, 34);
         runtime
@@ -3054,9 +3182,21 @@ mod tests {
 
         let prepared = prepare_pair_pbak(&nsd, &nsf, &nsf_bytes, &graph)
             .unwrap()
-            .expect("Jungle Rollers has pb0cB");
-        assert_eq!(prepared.eid.name().as_deref(), Some("pb0cB"));
-        assert_eq!(prepared.snapshot.location.progress.raw(), 0);
+            .expect("selected level has one PBAK recording");
+        assert_eq!(prepared.snapshot.level, level);
+        let trace_frames = std::env::var("C1_PBAK_FRAMES").ok().map_or(232, |value| {
+            value
+                .parse::<usize>()
+                .unwrap_or_else(|error| panic!("C1_PBAK_FRAMES {value:?}: {error}"))
+        });
+        assert!(
+            trace_frames <= prepared.frame_count(),
+            "the render trace cannot outlive the recording"
+        );
+        if level == LevelId::new_const(0x0c) {
+            assert_eq!(prepared.eid.name().as_deref(), Some("pb0cB"));
+            assert_eq!(prepared.snapshot.location.progress.raw(), 0);
+        }
         let mut playback = RetailPbakPlayback::new(prepared.clone());
         runtime
             .create_retail_demo_caption(camera.location().path.zone, &mut host)
@@ -3086,25 +3226,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(restart_camera_step.after, report.snapshot.location);
-        assert_eq!(report.snapshot.location.progress.raw(), 0);
-        runtime.set_level_state_context(RetailLevelStateContext {
-            location: report.snapshot.location,
-            graphics_flags: graph
-                .zone(report.snapshot.location.path.zone)
-                .unwrap()
-                .graphics_flags,
-            box_count: report.restored_box_count,
-            checkpoint_id: -1,
-            checkpoint_translation: [0; 3],
-            first_spawn: false,
-            active_neighbor_zones: lifecycle.active_neighbor_zones(),
-        });
+        if level == LevelId::new_const(0x0c) {
+            assert_eq!(report.snapshot.location.progress.raw(), 0);
+        }
+        refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, report.snapshot.location)
+            .unwrap();
 
         playback.mark_started();
         let mut pad = RetailPadSnapshot::default();
         let mut builder = RetailSceneBuilder::new();
-        let mut observed_offender = false;
-        for pbak_frame in 0..232 {
+        let mut observed_offender = None;
+        let mut finish_outcome = None;
+        let mut pad_boundaries = 0_usize;
+        let maximum_wall_frames = trace_frames.saturating_mul(8).max(trace_frames + 512);
+        for pbak_frame in 0..maximum_wall_frames {
             let restored_neighbors = lifecycle
                 .next_frame_spawn_scan()
                 .into_iter()
@@ -3120,27 +3255,28 @@ mod tests {
             let display_mask = runtime.current_display_mask();
             let timing = playback.frame_timing(34, 34).unwrap();
             runtime.set_frame_timing(timing.prior.current, timing.prior.period);
-            let camera_step = camera
-                .update_follow(&graph, follow_input(&runtime, pad.held))
-                .unwrap();
-            assert_eq!(camera_step.after.path, report.snapshot.location.path);
-            runtime.set_level_state_context(RetailLevelStateContext {
-                location: camera_step.after,
-                graphics_flags: graph
-                    .zone(camera_step.after.path.zone)
-                    .unwrap()
-                    .graphics_flags,
-                box_count: report.restored_box_count,
-                checkpoint_id: -1,
-                checkpoint_translation: [0; 3],
-                first_spawn: false,
-                active_neighbor_zones: lifecycle.active_neighbor_zones(),
+            let camera_step = update_camera(&mut camera, &runtime, pad.held).unwrap();
+            if level == LevelId::new_const(0x0c) && trace_frames <= 232 {
+                assert_eq!(camera_step.after.path, report.snapshot.location.path);
+            }
+            apply_pbak_camera_effects(
+                level,
+                &graph,
+                &mut lifecycle,
+                &mut runtime,
+                &mut host,
+                &camera_step,
+            )
+            .unwrap_or_else(|error| {
+                panic!("{} frame {pbak_frame} camera effect: {error}", prepared.eid)
             });
+            refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, camera_step.after)
+                .unwrap();
             publish_camera(&mut runtime, &camera, camera_step.game_state);
             let runtime_frame = runtime
-                .run_frame_with_traversal_hook(&mut host, 67, |runtime, _host, _point| {
+                .run_frame_with_traversal_hook(&mut host, 67, |runtime, host, _point| {
+                    pad_boundaries += 1;
                     let (input, end) = playback.advance_pad_boundary(0);
-                    assert!(end.is_none());
                     runtime.set_frame_timing(timing.crash.current, timing.crash.period);
                     let previous = pad;
                     pad = RetailPadSnapshot {
@@ -3150,23 +3286,61 @@ mod tests {
                         tapped_previous: previous.tapped,
                         held_previous_2: previous.held_previous,
                     };
+                    if end.is_some() {
+                        runtime
+                            .set_pad_snapshot(0, pbak_event_pad_snapshot(previous, pad))
+                            .map_err(crust_sim::retail_runtime::RuntimeError::Vm)?;
+                        finish_outcome = Some(runtime.finish_retail_demo(host)?);
+                    }
                     runtime
                         .set_pad_snapshot(0, pad)
                         .map_err(crust_sim::retail_runtime::RuntimeError::Vm)
                 })
-                .unwrap_or_else(|error| panic!("pb0cB frame {pbak_frame}: {error:?}"));
+                .unwrap_or_else(|error| panic!("{} frame {pbak_frame}: {error:?}", prepared.eid));
             assert!(
                 runtime_frame
                     .executions
                     .iter()
                     .all(|execution| execution.result.is_ok()),
-                "pb0cB frame {pbak_frame} reached a checked object failure: {:?}",
+                "{} frame {pbak_frame} reached a checked object failure: {:?}",
+                prepared.eid,
                 runtime_frame
                     .executions
                     .iter()
                     .filter(|execution| execution.result.is_err())
                     .collect::<Vec<_>>()
             );
+
+            if runtime.machine().level_restart_requested() {
+                let saved_location = runtime
+                    .saved_level_state()
+                    .expect("PBAK death restart retains its installed snapshot")
+                    .location;
+                let restart_plan = lifecycle
+                    .plan_hard_restart(saved_location.path.zone, true)
+                    .unwrap();
+                let outcome = runtime.restart_saved_level(&mut host).unwrap();
+                let RetailRestartOutcome::Restarted(death_report) = outcome else {
+                    panic!("same-level PBAK death requested an external remount");
+                };
+                lifecycle.commit_hard_restart(&restart_plan).unwrap();
+                let death_camera_step = camera
+                    .level_update(
+                        &graph,
+                        death_report.snapshot.location.path,
+                        death_report.snapshot.location.progress.raw(),
+                        death_report.level_update_flags,
+                    )
+                    .unwrap();
+                refresh_pbak_level_context(
+                    &graph,
+                    &lifecycle,
+                    &mut runtime,
+                    death_camera_step.after,
+                )
+                .unwrap();
+                continue;
+            }
 
             let objects = runtime.render_objects().unwrap();
             let main_object = runtime
@@ -3191,65 +3365,175 @@ mod tests {
                 )
                 .unwrap_or_else(|error| {
                     panic!(
-                        "pb0cB frame {pbak_frame} scene at progress {:#x}: {error}",
-                        location.path_progress
+                        "{} frame {pbak_frame} scene at progress {:#x}: {error}",
+                        prepared.eid, location.path_progress
                     )
                 });
 
-            let offender = objects.iter().find(|object| {
-                object.executable == 3
-                    && object.subtype == 13
-                    && object.program.is_some_and(|program| {
-                        program.global_eid().name().as_deref() == Some("FruiC")
+            let offender = (level == LevelId::new_const(0x0c))
+                .then(|| {
+                    objects.iter().find(|object| {
+                        object.executable == 3
+                            && object.subtype == 13
+                            && object.program.is_some_and(|program| {
+                                program.global_eid().name().as_deref() == Some("FruiC")
+                            })
+                            && object.transform.scale == [-110_121, 279_039, 936]
                     })
-                    && object.transform.scale == [-110_121, 279_039, 936]
-            });
+                })
+                .flatten();
             if let Some(offender) = offender {
-                observed_offender = true;
+                observed_offender = Some(offender.object);
                 assert_eq!(pbak_frame, 179);
                 assert_eq!(camera_step.after.progress.raw(), 0x5ec);
-                assert_eq!(offender.object.arena().slot(), 11);
-                assert_eq!(offender.object.arena().generation(), 1);
-                assert_eq!(offender.object.vm().get(), 12);
+                assert_eq!(
+                    runtime.object_for_arena(offender.object.arena()),
+                    Some(offender.object)
+                );
+                assert_eq!(
+                    runtime.object_for_vm(offender.object.vm()),
+                    Some(offender.object)
+                );
                 assert_eq!(offender.animation_reference.unwrap().offset(), 0);
-                assert_eq!(offender.animation_frame, 0x0300);
                 assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(4));
                 let vm = runtime.machine().object(offender.object.vm()).unwrap();
                 assert_eq!(vm.state(), 12);
-                assert_eq!(vm.pc(), 966);
             }
-            if let Some((raw_shrink, effective_shrink)) = match pbak_frame {
-                180 | 181 => Some((4_u32, 4_u8)),
-                182 | 183 => Some((5, 5)),
-                204 => Some((41, 9)),
-                205 => Some((45, 13)),
-                206 => Some((49, 17)),
-                _ => None,
-            } {
+            if let Some((raw_shrink, effective_shrink)) = (level == LevelId::new_const(0x0c))
+                .then_some(match pbak_frame {
+                    180 | 181 => Some((4_u32, 4_u8)),
+                    182 | 183 => Some((5, 5)),
+                    204 => Some((41, 9)),
+                    205 => Some((45, 13)),
+                    206 => Some((49, 17)),
+                    _ => None,
+                })
+                .flatten()
+            {
                 let transient = objects
                     .iter()
-                    .find(|object| {
-                        object.object.arena().slot() == 11
-                            && object.object.arena().generation() == 1
-                            && object.object.vm().get() == 12
-                    })
+                    .find(|object| Some(object.object) == observed_offender)
                     .expect("the authored FruiC transient remains live");
                 assert_eq!(
                     transient.transform.scale[0].unsigned_abs() / 27_279,
                     raw_shrink,
-                    "pb0cB frame {pbak_frame} raw scale quotient"
+                    "{} frame {pbak_frame} raw scale quotient",
+                    prepared.eid,
                 );
                 assert_eq!(
                     retail_sprite_shrink(transient.transform.scale[0]),
                     Ok(effective_shrink),
-                    "pb0cB frame {pbak_frame} effective five-bit shift"
+                    "{} frame {pbak_frame} effective five-bit shift",
+                    prepared.eid,
+                );
+            }
+            if pad_boundaries == trace_frames {
+                break;
+            }
+        }
+        assert_eq!(
+            pad_boundaries, trace_frames,
+            "the requested recorded pad boundaries must run within the bounded wall window"
+        );
+        if level == LevelId::new_const(0x0c) && trace_frames >= 207 {
+            assert!(
+                observed_offender.is_some(),
+                "pb0cB did not reach its authored transient shrink-4 sprite"
+            );
+        }
+        if trace_frames == prepared.frame_count() {
+            assert!(
+                playback.is_returning(),
+                "{pad_boundaries} Crash pad boundaries ran across {trace_frames} wall frames"
+            );
+            assert!(
+                finish_outcome.is_some(),
+                "the final recorded pad boundary must complete the retail demo handshake"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn every_local_gameplay_pair_materializes_retail_core_hud_roots() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let mut created_levels = 0_usize;
+        for known in KNOWN_LEVELS.iter().filter(|known| known.bootable) {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = std::fs::read(&nsd_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+            let nsf_bytes = std::fs::read(&nsf_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let current_zone = nsd.ldat().unwrap().spawn_zone;
+            let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+            let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, known.id);
+            let created = runtime
+                .create_retail_core_objects(current_zone, &mut host)
+                .unwrap();
+
+            if matches!(
+                known.id,
+                LevelId::TITLE | LevelId::LEVEL_COMPLETE | LevelId::INTRO | LevelId::ENDING
+            ) {
+                assert_eq!(
+                    created, None,
+                    "{} must not create gameplay HUDs",
+                    known.name
+                );
+                continue;
+            }
+
+            let objects = created.unwrap_or_else(|| panic!("{} omitted gameplay HUDs", known.name));
+            created_levels += 1;
+            for (global, object, subtype) in [
+                (7, objects.life, 0),
+                (6, objects.fruit, 1),
+                (14, objects.pickup, 5),
+            ] {
+                assert_eq!(
+                    runtime.global_word(global).unwrap(),
+                    CollisionObjectReference::new(object.vm()).to_word(),
+                    "{} global {global}",
+                    known.name,
+                );
+                let spawned = runtime.arena().get(object.arena()).unwrap();
+                assert_eq!(
+                    spawned.zone(),
+                    Eid::NONE,
+                    "{} subtype {subtype}",
+                    known.name
+                );
+                assert_eq!(
+                    (spawned.origin().executable(), spawned.origin().subtype()),
+                    (4, subtype),
+                    "{} subtype {subtype}",
+                    known.name,
+                );
+                assert_eq!(
+                    runtime
+                        .machine()
+                        .object(object.vm())
+                        .unwrap()
+                        .program_identity()
+                        .unwrap()
+                        .global_eid()
+                        .name()
+                        .as_deref(),
+                    Some("DispC"),
+                    "{} subtype {subtype}",
+                    known.name,
                 );
             }
         }
-        assert!(
-            observed_offender,
-            "pb0cB did not reach its authored transient shrink-4 sprite"
-        );
+        assert_eq!(created_levels, 39);
     }
 
     #[test]
@@ -3271,6 +3555,8 @@ mod tests {
         let mut emitted_sprite_quads = 0_usize;
         let mut emitted_fragment_quads = 0_usize;
         let mut emitted_text_quads = 0_usize;
+        let mut live_mode_four_vertices = 0_usize;
+        let mut emitted_mode_four_primitives = 0_usize;
         let mut observed_levels = std::collections::BTreeSet::new();
 
         for known in KNOWN_LEVELS
@@ -3320,17 +3606,50 @@ mod tests {
                     entities,
                 })
                 .collect::<Vec<_>>();
+            let active_neighbor_zones = neighbors
+                .iter()
+                .filter(|neighbor| neighbor.display_flags & 2 != 0)
+                .map(|neighbor| neighbor.eid)
+                .collect::<Vec<_>>();
             let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
             let mut camera = RetailCameraRuntime::new(&graph).unwrap();
-            let mut runtime = RetailRuntime::new(RETAIL_GLOBAL_WORDS);
+            let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, known.id);
+            runtime.set_level_state_context(RetailLevelStateContext {
+                location: camera.location(),
+                graphics_flags: graph
+                    .zone(camera.location().path.zone)
+                    .unwrap()
+                    .graphics_flags,
+                box_count: 0,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+                first_spawn: false,
+                active_neighbor_zones: active_neighbor_zones.clone(),
+            });
             let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+            runtime
+                .create_retail_core_objects(camera.location().path.zone, &mut host)
+                .unwrap();
             let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
             if !attempts.iter().any(|attempt| attempt.result.is_ok()) {
                 continue;
             }
             let mut builder = RetailSceneBuilder::new();
             for draw_count in 0..FRAMES_PER_LEVEL {
+                runtime.advance_level_shader().unwrap();
                 let camera_step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+                runtime.set_level_state_context(RetailLevelStateContext {
+                    location: camera_step.after,
+                    graphics_flags: graph
+                        .zone(camera_step.after.path.zone)
+                        .unwrap()
+                        .graphics_flags,
+                    box_count: 0,
+                    checkpoint_id: -1,
+                    checkpoint_translation: [0; 3],
+                    first_spawn: false,
+                    active_neighbor_zones: active_neighbor_zones.clone(),
+                });
                 runtime
                     .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
                     .unwrap_or_else(|error| panic!("{} frame {draw_count}: {error:?}", known.name));
@@ -3339,6 +3658,23 @@ mod tests {
                 let mut sprite_handles = std::collections::BTreeSet::new();
                 let mut fragment_handles = std::collections::BTreeSet::new();
                 let mut text_handles = std::collections::BTreeSet::new();
+                let mut mode_four_handles = std::collections::BTreeSet::new();
+                let current_entry = typed_entry(
+                    &nsf,
+                    &nsd,
+                    camera_step.after.path.zone,
+                    ZDAT_ENTRY_TYPE,
+                    "camera ZDAT",
+                )
+                .unwrap();
+                let current_header = ZoneHeader::parse(
+                    entry_item(current_entry, &nsf_bytes, 0, "camera ZDAT header").unwrap(),
+                )
+                .unwrap();
+                let main_object = runtime
+                    .arena()
+                    .main_object()
+                    .and_then(|arena| runtime.object_for_arena(arena));
                 for object in objects.iter().filter(|object| object.display_eligible) {
                     let (Some(program), Some(reference)) =
                         (object.program, object.animation_reference)
@@ -3371,24 +3707,30 @@ mod tests {
                             has_live_non_vertex = true;
                             text_handles.insert(u32::from(object.object.vm().get()));
                         }
-                        GoolAnimationDescriptor::Vertex(vertex)
+                        GoolAnimationDescriptor::Vertex(vertex) => {
                             if object.status_b & 0x200 != 0
                                 && nsf
                                     .resolve_entry(&nsd, vertex.model_eid)
-                                    .is_ok_and(|entry| entry.entry_type == 20) =>
-                        {
-                            live_2d_cvtx += 1;
+                                    .is_ok_and(|entry| entry.entry_type == 20)
+                            {
+                                live_2d_cvtx += 1;
+                            }
+                            if current_header.graphics.unknown_a == 4
+                                && current_header.display_flags & 0x1_0000 == 0
+                                && Some(object.object) != main_object
+                                && object.status_b & 0x400 == 0
+                            {
+                                live_mode_four_vertices += 1;
+                                has_live_non_vertex = true;
+                                mode_four_handles.insert(u32::from(object.object.vm().get()));
+                            }
                         }
-                        _ => {}
+                        GoolAnimationDescriptor::Font(_) => {}
                     }
                 }
                 if !has_live_non_vertex {
                     continue;
                 }
-                let main_object = runtime
-                    .arena()
-                    .main_object()
-                    .and_then(|arena| runtime.object_for_arena(arena));
                 let scene = builder
                     .build_at_progress_with_objects(
                         &nsd,
@@ -3409,6 +3751,9 @@ mod tests {
                     let CommandSource::Object { handle, .. } = command.source else {
                         continue;
                     };
+                    if mode_four_handles.contains(&handle) {
+                        emitted_mode_four_primitives += 1;
+                    }
                     if !matches!(&command.primitive, PrimitiveCommand::TexturedQuad(_)) {
                         continue;
                     }
@@ -3430,7 +3775,7 @@ mod tests {
         }
 
         eprintln!(
-            "live non-vertex boot frames: sprites={live_sprites}, fragments={live_fragments}, texts={live_texts} ({live_dynamic_fonts} dynamic-font overrides), 2D CVTX={live_2d_cvtx}, sprite quads={emitted_sprite_quads}, fragment quads={emitted_fragment_quads}, text quads={emitted_text_quads}, levels={observed_levels:?}"
+            "live non-vertex boot frames: sprites={live_sprites}, fragments={live_fragments}, texts={live_texts} ({live_dynamic_fonts} dynamic-font overrides), 2D CVTX={live_2d_cvtx}, mode-4 vertices={live_mode_four_vertices}, sprite quads={emitted_sprite_quads}, fragment quads={emitted_fragment_quads}, text quads={emitted_text_quads}, mode-4 primitives={emitted_mode_four_primitives}, levels={observed_levels:?}"
         );
         assert!(live_sprites > 0);
         assert!(live_fragments > 0);
@@ -3438,6 +3783,8 @@ mod tests {
         assert!(emitted_fragment_quads > 0);
         assert!(live_texts > 0);
         assert!(emitted_text_quads > 0);
+        assert!(live_mode_four_vertices > 0);
+        assert!(emitted_mode_four_primitives > 0);
         // Fragment/2D-CVTX descriptors are corpus-covered by renderer tests;
         // an idle direct boot is not guaranteed to enter those object states.
     }

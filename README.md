@@ -37,6 +37,10 @@ ZDAT entities into the bounded arena, binds their GOOL programs from the mounted
 child-spawn effects, and preserves typed arena/VM links. Entity objects now receive their
 zone-relative path position, rotation/mode flags, scale, process defaults, player/object color
 matrix and typed parent/player links; runtime children inherit their parent's transform.
+Every gameplay, boss, bonus, and map mount also creates the native executable-four life, fruit,
+and pickup HUD roots before the first zone scan and publishes their checked tagged references to
+the exact GOOL globals used by pickups, saves, and bonus routing. Title, level-complete, intro, and
+ending mounts retain the source's no-HUD branch.
 State changes rebind at the synchronous host boundary: a captured once block runs before the state
 stamp, then the target transition block runs after it, including nested calls and hosted spawns;
 normal updates continue into newly bound state code in that same native update. Initial/call frames
@@ -62,14 +66,15 @@ to cross the former N. Sanity animation-bound boundary without emulating undefin
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A strict 18,000-frame
-state-aware input trace carries the camera and Crash from `e0_9Z` through `a0_9Z`, `a1_9Z`–
-`a9_9Z`, `b0_9Z`, and into `b1_9Z` by frame 1,396. It remains stable there through frame 18,000
-with no VM errors, faulted objects, restart, below-zero position, or terminal fall.
+state-aware input trace now carries the camera and Crash from `e0_9Z` through the complete
+`a0_9Z`–`b7_9Z` authored chain and requests Level Complete `0x2d` at frame 1,995 with no VM error,
+faulted object, death restart, below-zero position, or terminal fall.
 The strict 360-frame Hog Wild idle characterization now delivers the authored `0x900` fall-kill
 event, advances the native signed display fade through `-2`/`-1`, performs two same-level
 load-state restarts, and retains no terminal fall or checked runtime issue.
-These are real data-backed runtime paths, but they do not certify a completed retail level or
-playthrough. Full progression, several GOOL host operations, dynamic rendering effects and later
+These are real data-backed runtime paths, including one deterministic authored level completion,
+but they do not certify a full retail playthrough. Broader progression, several GOOL host operations,
+dynamic rendering effects and later
 same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
 connected. Zone graphics now select local
@@ -82,11 +87,16 @@ active spawn table. Exact `LevelResetGlobals(1)` and `CardRestorePayload` orderi
 active table and savestate while resetting the documented scalar globals and encounter registry.
 Retail object shader modes two and three, including their source depth rejection/ramp behavior,
 are live; zone-graphics flag `0x1000` substitutes the fixed Q24.8 bobbing camera and pitch for GOOL
-objects only. Mode four is implemented as a checked pure renderer operation but is not connected
-until the runtime snapshot carries the live pause-object/player selection and `dark_dist` value.
+objects only. Mode four is also live: the simulation advances the Lights Out/Fumbling
+`dark_dist` ramp before camera work, retains its renderer-BSS words across stream remounts, and
+captures the checked player reference at each object's source-order display boundary. A checked
+pause-object reference is preferred when one exists; the browser pause control still freezes the
+presented snapshot and does not yet create the native subtype-four pause controller.
 Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
 snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
-(10,966 frames) pass the adapter characterization. The checked caption controller now survives
+(10,966 Crash pad boundaries) pass complete live runtime/render traces, including same-level death
+restart handling, display-mask camera suppression, zone TERM/lifecycle commits, and camera save
+handshakes. The checked caption controller now survives
 the demo restart beneath logical root one; a nonzero island-camera target dispatches its checked
 event `0xE00`, while a zero target releases physical input without inventing a title transition.
 Playback advances at Crash's actual root-six traversal boundary: root-one caption work runs first,
@@ -122,9 +132,9 @@ entry/state graphs can be validated and bound natively. Zone entities and their 
 flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
-camera-selected world; Crash accepts retail pad input and has a clean 18,000-frame characterized
-route from `e0_9Z` through `a0_9Z`, `a1_9Z`–`a9_9Z`, `b0_9Z`, and into `b1_9Z`, but no authored
-level completion has been certified. Save/checkpoint behavior is not yet playthrough-certified, and a
+camera-selected world; Crash accepts retail pad input and has a clean characterized route from
+`e0_9Z` through `a0_9Z`–`b7_9Z` to the authored Level Complete transition. Save/checkpoint behavior
+is not yet broadly playthrough-certified, and a
 same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
 local scan of all 44 retail pairs found zero authored occurrences of that nested case.
 

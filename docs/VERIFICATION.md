@@ -114,14 +114,29 @@ copy any disc or stream bytes into the repository:
   display masks `0x22_3ff0` at load and `0x22_3ffc` when active. Focused tests cover the complete
   nonlinear overlay-alpha sequence, including opaque blank/swap phases and the pre-quantization
   counter step used by the WebGL pass.
-- The strict goal-directed N. Sanity survey completed its default 18,000 frames with
-  `terminal=None`, `next_lid=None`, 352,077 GOOL executions, zero VM errors and zero faulted
-  objects. It recorded 50 successful spawns, zero unexpected spawn failures, 12 zone transitions,
-  no restart, and neither a below-zero player position nor terminal-fall velocity. State-aware
-  forward/jump/spin/steering input carried Crash through
-  `e0_9Z → a0_9Z → a1_9Z → … → a9_9Z → b0_9Z → b1_9Z`; the trace reached `b1_9Z` path zero at
-  progress 218 by frame 1,396 and remained stable there through frame 18,000. This proves a clean
-  authored progression window, not a completed level.
+- The strict goal-directed N. Sanity survey now exits at frame 1,995 through the authored
+  `Transition(0x2d)` Level Complete warp. It recorded 74 successful spawns, 40,480 GOOL executions,
+  18 zone transitions, four save handshakes, zero unexpected spawn failures, zero VM errors, zero
+  faulted objects and no death restart, below-zero player position or terminal-fall velocity.
+  State-aware forward/jump/spin/steering input carried Crash through
+  `e0_9Z → a0_9Z → a1_9Z → … → b7_9Z`. The survey includes the three native root-one HUD
+  controllers, so the completed route exercises the same process-lifetime object infrastructure as
+  the browser mount.
+- The mount-time core-object corpus test materialized executable-four subtypes 0, 1, and 5 from
+  `DispC` in all 39 eligible legal pairs, verified native creation/preorder, null lifecycle-zone
+  identity and exact tagged globals 7/6/14, and verified that title `0x19`, level complete `0x2d`,
+  intro `0x38`, and ending `0x39` create none. The all-pair live renderer trace then exercised
+  1,800 mode-four vertices and emitted 2,880 mode-four object primitives while Lights Out and
+  Fumbling in the Dark consumed the live player reference and darkness distance. Focused tests
+  verify that the reference is sampled separately around the root-six player update, that native
+  target/step/current darkness survive level reinitialization, and that all five renderer-BSS words
+  retain their exact first-tick behavior across a fresh stream runtime.
+- All nine PBAK recordings completed full live simulation/render traces across their 10,966 Crash
+  pad boundaries. Papu Papu's recording exercised an authored same-level death/restart before
+  continuing to its final input handshake. These traces honor display-mask/spin-death camera
+  suppression, apply camera-emitted zone TERM/lifecycle transitions and save handshakes, refresh
+  live box/checkpoint globals, preserve the final recorded pad word, and return through the checked
+  caption-controller path.
 - A separate strict 360-frame Hog Wild idle trace completed with 713 GOOL executions, zero
   execution errors, zero faulted objects and no checked issues. Crash retained the typed detached
   object zone `0c_hZ`; its rectangle, graphics and water fallback remained available without
@@ -134,9 +149,9 @@ copy any disc or stream bytes into the repository:
   first fresh `PAD_START` tap, observed state 16, and received the authored `Transition(0x19)`
   within four frames.
 - Focused renderer tests exercise mode-two dual color ramps and cutoff, mode-three SVTX fade and
-  CVTX shift/cutoff, the checked pure mode-four lighting calculation and malformed-coordinate
-  rejection. Web scene tests confirm modes two/three are gated into live object rendering and that
-  graphics flag `0x1000` substitutes the Q24.8 bobbing/fixed-pitch camera for objects only.
+  CVTX shift/cutoff, mode-four lighting and malformed-coordinate rejection. Web scene tests confirm
+  all three modes are gated into live object rendering and that graphics flag `0x1000` substitutes
+  the Q24.8 bobbing/fixed-pitch camera for objects only.
 - The exact Jungle Rollers `pb0cB` integration trace builds every scene through frame 231 and
   checks every contained object execution. It covers `FruiC` raw sprite shifts 24, 26, 28, 31, 34,
   246, 271 and 297 with their low-five-bit effective values, and verifies the caption's
@@ -249,19 +264,25 @@ regressions. At retail frame 1,601, the live debug surface reported zero executi
 faulted objects, no warning, no runtime error and WebGL error zero. The visible tab was left running
 the real local-data scene with synthesized audio enabled.
 
+After the current core-object/dark-shader build, the release files were rebuilt behind the existing
+`127.0.0.1:4174` local server and reloaded in the visible Codex in-app browser. The mount UI reached
+`Awaiting local media` with the expected 43-target selector and no captured browser warning or
+error. The BIN was not reselected in this final reload, so the foreground Chrome run above remains
+the latest claimed end-to-end local-disc browser exercise.
+
 ## Final automated results
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 680 asset-free tests passed, zero failed; 48 legally local tests
-  remain ignored by default (728 tests total across all targets).
+- locked native workspace suite: 693 asset-free tests passed, zero failed; 49 legally local tests
+  remain ignored by default (742 tests total across all targets).
 - post-fix legal-data gates passed against the supplied raw BIN and read-only extracted streams:
-  the complete opt-in workspace sweep passed 48 tests with zero failures, including the final
+  the complete opt-in workspace sweep passed 49 tests with zero failures, including the final
   Jungle Rollers PBAK scene regression;
   88 exact streams/44 pairs and 229,312,048 extracted bytes; all nine PBAK recordings/10,966
   controller frames; the exact title-MDAT runtime check; all 43 bootable pairs for 360 strict
-  frames; N. Sanity for 17,000 strict idle frames and 18,000 goal-directed frames; the focused Hog
-  Wild death/restart trace; and the Intro terminal-camera and all-nine PBAK caption bindings.
+  frames; the N. Sanity authored Level Complete route; the focused Hog Wild death/restart trace;
+  and the Intro terminal-camera and all-nine PBAK caption bindings.
 - the previously recorded 24-test opt-in sweep passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`:
   raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
@@ -273,8 +294,8 @@ the real local-data scene with synthesized audio enabled.
   raw BIN alone in the earlier sweep.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 1,162,154 bytes (SHA-256
-  `179489a2a99008a34cb9a80eb1fccb99a8105ac37e6bd151195c59baacc03328`).
+- generated web release: passed; Wasm payload was 1,216,158 bytes (SHA-256
+  `4c45cd45e9af827fa4d252d67fffbcfb9db7713e88e2b0492414db45cfbaa6ea`).
 
 ## Reproducible commands
 

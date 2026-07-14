@@ -58,6 +58,7 @@ fn zone_environment() -> RetailZoneEnvironment {
         player_colors: std::array::from_fn(|index| {
             0x2000 + u16::try_from(index).expect("color index fits u16")
         }),
+        graphics_flags: 0,
     }
 }
 

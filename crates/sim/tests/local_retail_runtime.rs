@@ -8,7 +8,7 @@ use crust_formats::stream::{
     LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
     parse_nsf,
 };
-use crust_sim::gool::{RetailPadSnapshot, VmEffect, process_register};
+use crust_sim::gool::{CollisionObjectReference, RetailPadSnapshot, VmEffect, process_register};
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
@@ -71,6 +71,86 @@ fn scan_entity_ids(scan: &[SpawnScanZone], entity_ids: &BTreeMap<Eid, Vec<u16>>)
     scan.iter()
         .flat_map(|zone| entity_ids[&zone.zone].iter().copied())
         .collect()
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_a3_authored_crate_pair_has_native_bidirectional_links() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::N_SANITY_BEACH;
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let zone = retail_eid("a3_9Z");
+    let entry = nsf.resolve_entry(&nsd, zone).unwrap();
+    let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let entities = (0..header.entity_count)
+        .map(|entity_index| {
+            let item_index =
+                usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+            ZoneEntity::parse(entry.item(item_index).unwrap().bytes(&nsf_bytes).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let lower = entities.iter().find(|entity| entity.id == 23).unwrap();
+    let upper = entities.iter().find(|entity| entity.id == 24).unwrap();
+    assert_eq!((lower.executable, upper.executable), (0x22, 0x22));
+    assert_eq!(lower.path_points[0].x, upper.path_points[0].x);
+    assert_eq!(lower.path_points[0].z, upper.path_points[0].z);
+    assert_eq!(upper.path_points[0].y - lower.path_points[0].y, 100);
+
+    let neighbors = [NeighborZone {
+        eid: zone,
+        display_flags: 2,
+        entities: &entities,
+    }];
+    let mut runtime = RetailRuntime::new_for_level(256, level);
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+    let lower = attempts
+        .iter()
+        .find(|attempt| attempt.descriptor.id == 23)
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+    let upper = attempts
+        .iter()
+        .find(|attempt| attempt.descriptor.id == 24)
+        .unwrap()
+        .result
+        .as_ref()
+        .unwrap();
+
+    assert_eq!(
+        CollisionObjectReference::from_word(
+            runtime
+                .machine()
+                .object(lower.vm())
+                .unwrap()
+                .register(process_register::MISC_A_Y)
+                .unwrap(),
+        )
+        .map(CollisionObjectReference::object),
+        Some(upper.vm()),
+    );
+    assert_eq!(
+        CollisionObjectReference::from_word(
+            runtime
+                .machine()
+                .object(upper.vm())
+                .unwrap()
+                .register(process_register::MISC_A_X)
+                .unwrap(),
+        )
+        .map(CollisionObjectReference::object),
+        Some(lower.vm()),
+    );
 }
 
 #[test]

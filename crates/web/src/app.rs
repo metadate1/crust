@@ -63,7 +63,8 @@ use crust_sim::retail_runtime::{
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
-    OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
+    OrderedZoneLoadList, ZONE_OBJECTS_ACTIVE, ZoneLifecycle, ZoneLifecycleZone,
+    ZoneTransitionAction,
 };
 use js_sys::{Object, Reflect};
 use wasm_bindgen::JsCast as _;
@@ -2786,8 +2787,12 @@ impl Runtime {
                             .map(|failure| format!("{:?}: {:?}", failure.object, failure.error)),
                     );
                 }
-                ZoneTransitionAction::SetDisplayFlags { .. }
-                | ZoneTransitionAction::CloseEntry(_)
+                ZoneTransitionAction::SetDisplayFlags { before, after, .. } => {
+                    if before & ZONE_OBJECTS_ACTIVE == 0 && after & ZONE_OBJECTS_ACTIVE != 0 {
+                        self.retail_objects.reset_retail_box_spawn_state();
+                    }
+                }
+                ZoneTransitionAction::CloseEntry(_)
                 | ZoneTransitionAction::ClosePage(_)
                 | ZoneTransitionAction::OpenEntry(_)
                 | ZoneTransitionAction::OpenPage(_) => {}

@@ -11,9 +11,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crust_formats::{
     binary::{Eid, FormatError},
     stream::{
-        GoolAnimationDescriptor, LevelId, Nsd, Nsf, ObjectVertexKind, ZoneEntity, ZoneHeader,
-        ZoneRect, load_gool_program, load_gool_state_program, load_object_model_frame,
-        parse_gool_animation_descriptor, parse_object_frame,
+        GoolAnimationDescriptor, LevelId, Nsd, Nsf, ObjectVertexKind, ZoneEntity,
+        ZoneEntityPathPoint, ZoneHeader, ZoneRect, load_gool_program, load_gool_state_program,
+        load_object_model_frame, parse_gool_animation_descriptor, parse_object_frame,
     },
 };
 
@@ -62,6 +62,14 @@ const LATE_BOUND_RANGE: Vec3 = Vec3 {
     z: 0x7d000,
 };
 const STALL_STATUS_B: u32 = 0x1000_0000;
+const BOX_EXECUTABLE: u8 = 0x22;
+const BOX_OBJECT_TYPE: u32 = 0x22;
+const BOX_STACK_SPACING: i32 = 0x19000;
+const BOX_NEAR_TOLERANCE: u32 = 10;
+const BOX_NO_STAGGER_GRAPHICS_FLAG: u32 = 4;
+const PREVIOUS_BOX_GLOBAL: usize = 116;
+const BOXES_Y_GLOBAL: usize = 117;
+const PREVIOUS_BOX_ENTITY_GLOBAL: usize = 118;
 const FORCE_UPDATE_STATUS_B: u32 = 0x0200_0000;
 const MENU_TEXT_STATE_FLAG: u32 = 0x0002_0000;
 const INVISIBLE_STATUS_B: u32 = 0x100;
@@ -472,6 +480,8 @@ pub struct RetailZoneEnvironment {
     pub origin: [i32; 3],
     pub object_colors: [u16; COLOR_COUNT],
     pub player_colors: [u16; COLOR_COUNT],
+    /// Native ZDAT graphics flags, including bit two's crate-stagger bypass.
+    pub graphics_flags: u32,
 }
 
 /// Returns whether one native Q24.8 point lies inside a serialized ZDAT
@@ -485,6 +495,19 @@ fn retail_zone_rect_contains(rect: ZoneRect, point: [i32; 3]) -> bool {
             coordinate >= lower && coordinate <= upper
         },
     )
+}
+
+fn retail_box_points_are_adjacent(
+    current: ZoneEntityPathPoint,
+    previous: ZoneEntityPathPoint,
+) -> bool {
+    i32::from(current.x).abs_diff(i32::from(previous.x)) < BOX_NEAR_TOLERANCE
+        && i32::from(current.z).abs_diff(i32::from(previous.z)) < BOX_NEAR_TOLERANCE
+        && i32::from(current.y).abs_diff(i32::from(previous.y) + 100) < BOX_NEAR_TOLERANCE
+}
+
+fn retail_box_stagger_count(translation: [i32; 3]) -> u32 {
+    (((translation[2] >> 4) ^ translation[0]) & 7) as u32
 }
 
 /// Mirrors `ZoneFindNeighbor`'s reverse serialized-header scan. Rectangle
@@ -744,6 +767,7 @@ impl ProgramHost for NsfProgramHost<'_> {
             origin: rect.origin,
             object_colors: header.graphics.object_colors.words,
             player_colors: header.graphics.player_colors.words,
+            graphics_flags: header.graphics.flags,
         }))
     }
 
@@ -1739,6 +1763,39 @@ struct RetailDisplaySnapshot {
     dark_reference_translation: Option<[i32; 3]>,
 }
 
+/// Safe replacement for native's `prev_box`, `prev_box_entity`, and
+/// `boxes_y` globals. Entity adjacency is retained as an owned path point and
+/// a live crate is retained as a generation-checked runtime handle, so neither
+/// field can become a dangling C pointer after zone teardown or pool reuse.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailBoxSpawnState {
+    previous_entity_point: Option<ZoneEntityPathPoint>,
+    previous_live_box: Option<RuntimeObjectHandle>,
+    boxes_y: i32,
+}
+
+impl Default for RetailBoxSpawnState {
+    fn default() -> Self {
+        Self {
+            previous_entity_point: None,
+            previous_live_box: None,
+            boxes_y: BOX_STACK_SPACING,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailBoxSpawnPlan {
+    near_box: Option<RuntimeObjectHandle>,
+    boxes_y: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MaterializedObject {
+    object: RuntimeObjectHandle,
+    environment: Option<RetailZoneEnvironment>,
+}
+
 fn shader_step_toward(current: i32, target: i32, step: &mut i32) -> i32 {
     let next = current.wrapping_add(*step);
     if (target > current && next >= target) || (target < current && next <= target) {
@@ -1776,6 +1833,7 @@ pub struct RetailRuntime {
     frame_index: u64,
     draw_count: u32,
     dark_shader: RetailDarkShaderState,
+    box_spawn: RetailBoxSpawnState,
     core_objects_initialized: bool,
     core_objects: Option<RetailCoreObjects>,
     pause: RetailPauseState,
@@ -1816,6 +1874,7 @@ impl RetailRuntime {
             frame_index: 0,
             draw_count: 0,
             dark_shader: RetailDarkShaderState::default(),
+            box_spawn: RetailBoxSpawnState::default(),
             core_objects_initialized: false,
             core_objects: None,
             pause: RetailPauseState::default(),
@@ -1933,6 +1992,17 @@ impl RetailRuntime {
         }
     }
 
+    /// Clears native's per-activation crate scan state before the next ordered
+    /// neighbor/entity pass. Raw ZDAT and object pointers are represented by
+    /// owned data and checked handles internally; their exposed GOOL words are
+    /// cleared or published as tagged object references.
+    pub fn reset_retail_box_spawn_state(&mut self) {
+        self.box_spawn = RetailBoxSpawnState::default();
+        self.set_mount_global(PREVIOUS_BOX_GLOBAL, 0);
+        self.set_mount_global(BOXES_Y_GLOBAL, BOX_STACK_SPACING as u32);
+        self.set_mount_global(PREVIOUS_BOX_ENTITY_GLOBAL, 0);
+    }
+
     fn apply_stream_mount_globals(&mut self, level: LevelId) {
         self.dark_shader.initialize(level);
         for index in POINTER_GLOBALS {
@@ -1954,7 +2024,7 @@ impl RetailRuntime {
         }
         // The destination's initial LevelUpdate activates a fresh neighbor
         // band and establishes the first box stack offset before entity scan.
-        self.set_mount_global(117, 0x19000); // boxes_y
+        self.reset_retail_box_spawn_state();
         self.set_mount_global(CURRENT_LEVEL_GLOBAL, level.get() << 8);
         self.set_mount_global(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
         self.set_mount_global(CURRENT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
@@ -3038,6 +3108,9 @@ impl RetailRuntime {
             live_context.first_spawn = false;
         }
         self.machine.acknowledge_level_state_context();
+        // The following native LevelUpdate activates a fresh neighbor band
+        // before its first post-restart entity scan.
+        self.reset_retail_box_spawn_state();
         Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
 
         Ok(RetailRestartOutcome::Restarted(Box::new(
@@ -3370,7 +3443,16 @@ impl RetailRuntime {
         );
         faulted_objects.retain(|object| handles.is_live_pair(*object));
         displayed_objects.retain(|object, _| handles.is_live_pair(*object));
-        result
+        match result {
+            Ok(report) => {
+                self.clear_stale_retail_box_links()?;
+                Ok(report)
+            }
+            Err(error) => {
+                let _ = self.clear_stale_retail_box_links::<H::Error>();
+                Err(error)
+            }
+        }
     }
 
     /// Implements title `TitleTerminateObjects`: signal and kill every object
@@ -3924,6 +4006,7 @@ impl RetailRuntime {
             .retain(|candidate| self.handles.is_live_pair(*candidate));
         self.displayed_objects
             .retain(|candidate, _| self.handles.is_live_pair(*candidate));
+        self.clear_stale_retail_box_links()?;
         self.pause.controller = None;
         Ok(())
     }
@@ -4571,9 +4654,19 @@ impl RetailRuntime {
         host: &mut H,
     ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
         let descriptor = EntitySpawnDescriptor::from(entity);
+        // Native performs crate adjacency bookkeeping before consulting the
+        // persistent spawn bits. Keep this outside the allocation retry loop:
+        // reclaiming a full pool must not advance the ordered entity scan.
+        let box_plan = self.begin_retail_box_spawn(entity);
         loop {
             match self.arena.spawn_entity(zone, descriptor) {
-                Ok(arena_handle) => return self.bind_new_entity(arena_handle, zone, entity, host),
+                Ok(arena_handle) => {
+                    let materialized = self.bind_new_entity(arena_handle, zone, entity, host)?;
+                    if let Some(plan) = box_plan {
+                        self.finish_retail_box_spawn(materialized, plan)?;
+                    }
+                    return Ok(materialized.object);
+                }
                 Err(SpawnError::ObjectPoolFull) => {
                     let candidate = self
                         .arena
@@ -4583,9 +4676,225 @@ impl RetailRuntime {
                     let mut spawned_children = Vec::new();
                     self.reclaim_runtime_subtree(candidate, host, &mut spawned_children)?;
                 }
+                Err(error @ SpawnError::SpawnBlocked { .. }) => {
+                    if box_plan.is_some() {
+                        self.box_spawn.boxes_y =
+                            self.box_spawn.boxes_y.wrapping_add(BOX_STACK_SPACING);
+                        self.set_mount_global(
+                            BOXES_Y_GLOBAL,
+                            self.box_spawn.boxes_y.cast_unsigned(),
+                        );
+                    }
+                    return Err(RuntimeError::Spawn(error));
+                }
                 Err(error) => return Err(RuntimeError::Spawn(error)),
             }
         }
+    }
+
+    fn begin_retail_box_spawn(&mut self, entity: &ZoneEntity) -> Option<RetailBoxSpawnPlan> {
+        if entity.executable != BOX_EXECUTABLE {
+            return None;
+        }
+        let current_point = entity.path_points.first().copied();
+        let adjacent = current_point
+            .zip(self.box_spawn.previous_entity_point)
+            .is_some_and(|(current, previous)| retail_box_points_are_adjacent(current, previous));
+        if !adjacent {
+            self.reset_retail_box_spawn_state();
+        }
+
+        // A terminated/reclaimed predecessor is a defined null link in Rust,
+        // never a recycled pointer alias. Preserve the native stack offset and
+        // entity adjacency while dropping only the stale object identity.
+        let near_box = self.box_spawn.previous_live_box.filter(|object| {
+            self.handles.is_live_pair(*object) && self.machine.object(object.vm).is_ok()
+        });
+        if near_box != self.box_spawn.previous_live_box {
+            self.box_spawn.previous_live_box = near_box;
+            self.set_mount_global(PREVIOUS_BOX_GLOBAL, 0);
+        }
+        self.box_spawn.previous_entity_point = current_point;
+        Some(RetailBoxSpawnPlan {
+            near_box,
+            boxes_y: self.box_spawn.boxes_y,
+        })
+    }
+
+    fn finish_retail_box_spawn<E>(
+        &mut self,
+        materialized: MaterializedObject,
+        plan: RetailBoxSpawnPlan,
+    ) -> Result<(), RuntimeError<E>> {
+        let object = materialized.object;
+        let is_retail_box = self
+            .machine
+            .object(object.vm)
+            .map_err(RuntimeError::Vm)?
+            .program_identity()
+            .is_some_and(|identity| identity.object_type() == BOX_OBJECT_TYPE);
+        if !is_retail_box {
+            return Ok(());
+        }
+
+        let near_box = plan.near_box.filter(|candidate| {
+            self.handles.is_live_pair(*candidate) && self.machine.object(candidate.vm).is_ok()
+        });
+        let previous_word = near_box.map_or(0, |previous| {
+            CollisionObjectReference::new(previous.vm).to_word()
+        });
+        let current_word = CollisionObjectReference::new(object.vm).to_word();
+        if let Some(previous) = near_box {
+            self.machine
+                .object_mut(previous.vm)
+                .map_err(RuntimeError::Vm)?
+                .set_register(process_register::MISC_A_Y, current_word)
+                .map_err(RuntimeError::Vm)?;
+        }
+
+        let y_adjustment = BOX_STACK_SPACING.wrapping_sub(plan.boxes_y);
+        let object_vm = self
+            .machine
+            .object_mut(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        object_vm
+            .set_register(process_register::MISC_A_X, previous_word)
+            .map_err(RuntimeError::Vm)?;
+        object_vm
+            .set_register(process_register::MISC_A_Y, 0)
+            .map_err(RuntimeError::Vm)?;
+        let translation_y = object_vm
+            .register(process_register::TRANSLATION_Y)
+            .map_err(RuntimeError::Vm)?
+            .cast_signed()
+            .wrapping_add(y_adjustment);
+        object_vm
+            .set_register(
+                process_register::TRANSLATION_Y,
+                translation_y.cast_unsigned(),
+            )
+            .map_err(RuntimeError::Vm)?;
+
+        if materialized.environment.is_none_or(|environment| {
+            environment.graphics_flags & BOX_NO_STAGGER_GRAPHICS_FLAG == 0
+        }) {
+            let translation = object_vm
+                .retail_transform()
+                .map_err(RuntimeError::Vm)?
+                .translation;
+            let stagger = retail_box_stagger_count(translation);
+            object_vm
+                .set_register(process_register::ANIMATION_COUNTER, stagger)
+                .map_err(RuntimeError::Vm)?;
+            if stagger != 0 {
+                let status_b = object_vm
+                    .register(process_register::STATUS_B)
+                    .map_err(RuntimeError::Vm)?;
+                object_vm
+                    .set_register(process_register::STATUS_B, status_b | STALL_STATUS_B)
+                    .map_err(RuntimeError::Vm)?;
+            }
+        }
+
+        self.box_spawn.previous_live_box = Some(object);
+        self.set_mount_global(PREVIOUS_BOX_GLOBAL, current_word);
+        self.set_mount_global(BOXES_Y_GLOBAL, self.box_spawn.boxes_y.cast_unsigned());
+        // Native stores a transient `zone_entity *` here. The owned path point
+        // above is its only required runtime information, so no raw-address
+        // surrogate is exposed to GOOL.
+        self.set_mount_global(PREVIOUS_BOX_ENTITY_GLOBAL, 0);
+        Ok(())
+    }
+
+    fn clear_stale_retail_box_links<E>(&mut self) -> Result<(), RuntimeError<E>> {
+        if self.box_spawn.previous_live_box.is_some_and(|object| {
+            !self.handles.is_live_pair(object) || self.machine.object(object.vm).is_err()
+        }) {
+            self.box_spawn.previous_live_box = None;
+        }
+        let previous_word = self.box_spawn.previous_live_box.map_or(0, |object| {
+            CollisionObjectReference::new(object.vm).to_word()
+        });
+        self.set_mount_global(PREVIOUS_BOX_GLOBAL, previous_word);
+
+        let live = self
+            .handles
+            .vm_by_arena
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        for vm in live {
+            let is_box = self
+                .machine
+                .object(vm)
+                .map_err(RuntimeError::Vm)?
+                .program_identity()
+                .is_some_and(|identity| identity.object_type() == BOX_OBJECT_TYPE);
+            if !is_box {
+                continue;
+            }
+            for register in [process_register::MISC_A_X, process_register::MISC_A_Y] {
+                let word = self
+                    .machine
+                    .object(vm)
+                    .map_err(RuntimeError::Vm)?
+                    .register(register)
+                    .map_err(RuntimeError::Vm)?;
+                let stale = CollisionObjectReference::from_word(word)
+                    .is_some_and(|reference| self.handles.for_vm(reference.object()).is_none());
+                if stale {
+                    self.machine
+                        .object_mut(vm)
+                        .map_err(RuntimeError::Vm)?
+                        .set_register(register, 0)
+                        .map_err(RuntimeError::Vm)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn clear_removed_retail_box_word_references(
+        machine: &mut Machine,
+        handles: &HandleMap,
+        removed: VmObjectHandle,
+    ) -> Result<(), VmError> {
+        let removed_word = CollisionObjectReference::new(removed).to_word();
+        if machine
+            .global_word(PREVIOUS_BOX_GLOBAL)
+            .is_ok_and(|word| word == removed_word)
+        {
+            machine.set_global_word(PREVIOUS_BOX_GLOBAL, 0)?;
+        }
+
+        // Clear the register aliases before the compact VM handle can be
+        // returned to an allocator. This closes the nested TERM/reclaim ABA
+        // window even when another object is created before the outer runtime
+        // operation regains control and prunes its typed BoxSpawnState.
+        let live = handles
+            .vm_by_arena
+            .values()
+            .copied()
+            .filter(|vm| *vm != removed)
+            .collect::<Vec<_>>();
+        for vm in live {
+            let Ok(object) = machine.object(vm) else {
+                continue;
+            };
+            if object
+                .program_identity()
+                .map(GoolProgramIdentity::object_type)
+                != Some(BOX_OBJECT_TYPE)
+            {
+                continue;
+            }
+            for register in [process_register::MISC_A_X, process_register::MISC_A_Y] {
+                if machine.object(vm)?.register(register)? == removed_word {
+                    machine.object_mut(vm)?.set_register(register, 0)?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn reclaim_runtime_subtree<H: ProgramHost>(
@@ -4626,6 +4935,7 @@ impl RetailRuntime {
         )?;
         faulted_objects.retain(|object| handles.is_live_pair(*object));
         displayed_objects.retain(|object, _| handles.is_live_pair(*object));
+        self.clear_stale_retail_box_links()?;
         Ok(())
     }
 
@@ -4635,7 +4945,7 @@ impl RetailRuntime {
         zone: Eid,
         entity: &ZoneEntity,
         host: &mut H,
-    ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
+    ) -> Result<MaterializedObject, RuntimeError<H::Error>> {
         self.handles.prune_stale(&self.arena);
         let object = match self.handles.reserve(arena_handle) {
             Ok(object) => object,
@@ -4654,7 +4964,7 @@ impl RetailRuntime {
             origin: ProgramOrigin::Entity(entity),
         };
         let result = self.materialize(binding, host);
-        if let Ok(object) = result.as_ref().copied()
+        if let Ok(materialized) = result.as_ref().copied()
             && EntitySpawnDescriptor::from(entity).is_crash_program()
             && !self.suppress_initial_crash_save
             && self.level_state_context.is_some()
@@ -4662,7 +4972,7 @@ impl RetailRuntime {
             // `GoolObjectSpawn` establishes the initial death checkpoint as
             // soon as Crash is bound unless native's temporary transition
             // guard is active for the bonus-return pre-restart scan.
-            let _initial_save = self.save_level_state(object, true);
+            let _initial_save = self.save_level_state(materialized.object, true);
         }
         let preserve_spawned_bit = matches!(&result, Err(RuntimeError::Program(_)));
         if result.is_err() {
@@ -5667,6 +5977,8 @@ impl RetailRuntime {
         machine
             .remove_object_for_host_termination(object.vm)
             .map_err(RuntimeError::Vm)?;
+        Self::clear_removed_retail_box_word_references(machine, handles, object.vm)
+            .map_err(RuntimeError::Vm)?;
         pending_states.remove(&object.vm);
         let audio_freed = host.free_object_audio(object);
         handles.release(object);
@@ -5709,6 +6021,12 @@ impl RetailRuntime {
             self.machine
                 .remove_object(object.vm)
                 .map_err(RuntimeError::Vm)?;
+            Self::clear_removed_retail_box_word_references(
+                &mut self.machine,
+                &self.handles,
+                object.vm,
+            )
+            .map_err(RuntimeError::Vm)?;
             self.pending_states.remove(&object.vm);
             self.faulted_objects.remove(&object);
             self.displayed_objects.remove(&object);
@@ -5718,6 +6036,7 @@ impl RetailRuntime {
                 .cleanup_actions
                 .push(RuntimeCleanupAction::FreeObjectAudio(object));
         }
+        self.clear_stale_retail_box_links()?;
         Ok(())
     }
 
@@ -5909,6 +6228,8 @@ impl RetailRuntime {
             })
             .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
         machine.remove_object(object.vm).map_err(RuntimeError::Vm)?;
+        Self::clear_removed_retail_box_word_references(machine, handles, object.vm)
+            .map_err(RuntimeError::Vm)?;
         pending_states.remove(&object.vm);
         let audio_freed = host.free_object_audio(object);
         handles.release(object);
@@ -6864,7 +7185,7 @@ impl RetailRuntime {
         &mut self,
         binding: ProgramBinding<'_>,
         host: &mut H,
-    ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
+    ) -> Result<MaterializedObject, RuntimeError<H::Error>> {
         let mut vm_object = host.bind_program(binding).map_err(RuntimeError::Program)?;
         if vm_object.handle() != binding.object.vm {
             return Err(RuntimeError::HostObjectHandleMismatch {
@@ -6919,7 +7240,10 @@ impl RetailRuntime {
             )
             .map_err(RuntimeError::Tree)?;
         Self::refresh_player_links(&self.arena, &self.handles, &mut self.machine)?;
-        Ok(binding.object)
+        Ok(MaterializedObject {
+            object: binding.object,
+            environment,
+        })
     }
 
     fn initialize_vm_process<E>(
@@ -8163,6 +8487,39 @@ mod tests {
         }
     }
 
+    struct BoxHost {
+        graphics_flags: u32,
+    }
+
+    impl ProgramHost for BoxHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let mut object = VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())?;
+            object.configure_test_program_identity_with_type(0x200, BOX_OBJECT_TYPE);
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn zone_environment(
+            &mut self,
+            _zone: Eid,
+        ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
+            Ok(Some(RetailZoneEnvironment {
+                origin: [0; 3],
+                object_colors: [0; COLOR_COUNT],
+                player_colors: [0; COLOR_COUNT],
+                graphics_flags: self.graphics_flags,
+            }))
+        }
+    }
+
     struct RejectProgramHost;
 
     impl ProgramHost for RejectProgramHost {
@@ -8899,6 +9256,204 @@ mod tests {
             subtype,
             path_points: vec![ZoneEntityPathPoint { x: 0, y: 0, z: 0 }],
         }
+    }
+
+    fn box_entity(id: u16, point: ZoneEntityPathPoint) -> ZoneEntity {
+        let mut entity = entity(id, BOX_EXECUTABLE, 0);
+        entity.path_points[0] = point;
+        entity
+    }
+
+    #[test]
+    fn box_adjacency_uses_native_strict_tolerance_and_vertical_spacing() {
+        let previous = ZoneEntityPathPoint { x: 0, y: 0, z: 0 };
+
+        assert!(retail_box_points_are_adjacent(
+            ZoneEntityPathPoint {
+                x: 9,
+                y: 109,
+                z: -9,
+            },
+            previous,
+        ));
+        for current in [
+            ZoneEntityPathPoint {
+                x: 10,
+                y: 100,
+                z: 0,
+            },
+            ZoneEntityPathPoint {
+                x: 0,
+                y: 100,
+                z: -10,
+            },
+            ZoneEntityPathPoint { x: 0, y: 110, z: 0 },
+            ZoneEntityPathPoint { x: 0, y: 90, z: 0 },
+        ] {
+            assert!(!retail_box_points_are_adjacent(current, previous));
+        }
+    }
+
+    #[test]
+    fn adjacent_box_entities_publish_bidirectional_checked_links() {
+        let entities = [
+            box_entity(
+                23,
+                ZoneEntityPathPoint {
+                    x: 431,
+                    y: 942,
+                    z: -1550,
+                },
+            ),
+            box_entity(
+                24,
+                ZoneEntityPathPoint {
+                    x: 431,
+                    y: 1042,
+                    z: -1550,
+                },
+            ),
+        ];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        let attempts = runtime.spawn_current_zone_neighbors(
+            &neighbors,
+            &mut BoxHost {
+                graphics_flags: BOX_NO_STAGGER_GRAPHICS_FLAG,
+            },
+        );
+        let first = *attempts[0].result.as_ref().unwrap();
+        let second = *attempts[1].result.as_ref().unwrap();
+        let first_vm = runtime.machine.object(first.vm).unwrap();
+        let second_vm = runtime.machine.object(second.vm).unwrap();
+
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                first_vm.register(process_register::MISC_A_Y).unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(second.vm),
+        );
+        assert_eq!(
+            CollisionObjectReference::from_word(
+                second_vm.register(process_register::MISC_A_X).unwrap()
+            )
+            .map(CollisionObjectReference::object),
+            Some(first.vm),
+        );
+        assert_eq!(second_vm.register(process_register::MISC_A_Y), Ok(0),);
+        assert_eq!(
+            runtime.global_word(PREVIOUS_BOX_GLOBAL),
+            Ok(CollisionObjectReference::new(second.vm).to_word()),
+        );
+        assert_eq!(
+            runtime.global_word(BOXES_Y_GLOBAL),
+            Ok(BOX_STACK_SPACING as u32)
+        );
+        assert_eq!(runtime.global_word(PREVIOUS_BOX_ENTITY_GLOBAL), Ok(0));
+    }
+
+    #[test]
+    fn blocked_lower_box_compacts_the_next_adjacent_box_by_one_spacing() {
+        let entities = [
+            box_entity(30, ZoneEntityPathPoint { x: 0, y: 0, z: 0 }),
+            box_entity(31, ZoneEntityPathPoint { x: 0, y: 100, z: 0 }),
+        ];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        runtime
+            .arena
+            .spawn_table_mut()
+            .set_flags(30, SPAWN_CHECKPOINT_BLOCKED_BIT)
+            .unwrap();
+
+        let attempts = runtime.spawn_current_zone_neighbors(
+            &neighbors,
+            &mut BoxHost {
+                graphics_flags: BOX_NO_STAGGER_GRAPHICS_FLAG,
+            },
+        );
+        assert!(matches!(
+            attempts[0].result,
+            Err(RuntimeError::Spawn(SpawnError::SpawnBlocked {
+                id: 30,
+                flags: SPAWN_CHECKPOINT_BLOCKED_BIT,
+            }))
+        ));
+        let upper = *attempts[1].result.as_ref().unwrap();
+        assert_eq!(
+            runtime
+                .machine
+                .object(upper.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_Y),
+            Ok(0),
+        );
+        assert_eq!(
+            runtime.global_word(BOXES_Y_GLOBAL),
+            Ok(BOX_STACK_SPACING.wrapping_mul(2) as u32),
+        );
+    }
+
+    #[test]
+    fn crate_stagger_formula_retains_all_three_low_bits() {
+        for expected in 0..=7 {
+            assert_eq!(retail_box_stagger_count([expected, 0, 0]), expected as u32);
+        }
+        assert_eq!(retail_box_stagger_count([-1, 0, -1]), 0);
+    }
+
+    #[test]
+    fn box_state_reset_and_removal_clear_only_transient_checked_links() {
+        let entities = [
+            box_entity(40, ZoneEntityPathPoint { x: 0, y: 0, z: 0 }),
+            box_entity(41, ZoneEntityPathPoint { x: 0, y: 100, z: 0 }),
+        ];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        let attempts = runtime.spawn_current_zone_neighbors(
+            &neighbors,
+            &mut BoxHost {
+                graphics_flags: BOX_NO_STAGGER_GRAPHICS_FLAG,
+            },
+        );
+        let first = *attempts[0].result.as_ref().unwrap();
+        let second = *attempts[1].result.as_ref().unwrap();
+
+        let mut report = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(second.arena, &mut report)
+            .unwrap();
+        assert_eq!(
+            runtime
+                .machine
+                .object(first.vm)
+                .unwrap()
+                .register(process_register::MISC_A_Y),
+            Ok(0),
+        );
+        assert_eq!(runtime.global_word(PREVIOUS_BOX_GLOBAL), Ok(0));
+
+        runtime.reset_retail_box_spawn_state();
+        assert_eq!(runtime.box_spawn, RetailBoxSpawnState::default());
+        assert_eq!(runtime.global_word(PREVIOUS_BOX_GLOBAL), Ok(0));
+        assert_eq!(
+            runtime.global_word(BOXES_Y_GLOBAL),
+            Ok(BOX_STACK_SPACING as u32)
+        );
+        assert_eq!(runtime.global_word(PREVIOUS_BOX_ENTITY_GLOBAL), Ok(0));
     }
 
     fn spawn_test_object(
@@ -12606,6 +13161,7 @@ mod tests {
                 origin: [0; 3],
                 object_colors: [0x1234; COLOR_COUNT],
                 player_colors: [0x5678; COLOR_COUNT],
+                graphics_flags: 0,
             }))
         }
 

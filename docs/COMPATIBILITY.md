@@ -172,8 +172,12 @@ gameplay path.
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode
   flags, player/object colors and the characterized scalar process defaults; runtime children
   inherit the parent transform and receive zone colors. Entity-pointer words deliberately remain
-  outside raw registers, while box stacking/stall adjustment, remaining process globals and several
-  host effects remain absent or partial. Initial Crash saves, checkpoint
+  outside raw registers. Executable-`0x22` crate scans now retain owned entity locations and
+  generation-checked object handles, reproduce strict vertical-stack adjacency, bidirectional
+  misc-A links, blocked-crate height compaction, activation/restart resets and the native stagger
+  counter without exposing raw pointers. The legally local `a3_9Z` entity 23/24 pair is covered by
+  an opt-in golden. Remaining process globals and several host effects remain absent or partial.
+  Initial Crash saves, checkpoint
   captures, in-stream restarts and cross-pair session carry are connected. Camera zone
   crossings now execute the ordered lifecycle, dynamic pager references, TERM/migration teardown
   and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch is synchronous;

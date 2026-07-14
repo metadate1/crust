@@ -326,11 +326,15 @@ The final checks below were run against this change set on 2026-07-14:
 - `cargo fmt --all -- --check` passed.
 - locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
   `crust-web` Clippy pass both completed with warnings denied.
-- the locked asset-free workspace suite passed all 715 default tests across 33 targets. Another 50
-  legally local tests remain ignored by default, for 765 listed tests across all targets.
+- the locked asset-free workspace suite passed all 720 default tests across 33 targets. Another 51
+  legally local tests remain ignored by default, for 771 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. All 50 selected tests passed with zero failures, including every
+  streams in place. All 51 selected tests passed with zero failures, including every
   raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
+- executable-`0x22` crate coverage now checks the native strict adjacency boundary, checked
+  bidirectional misc-A links, skipped-lower-crate Y compaction, activation/restart reset, stagger
+  calculation and stale-reference cleanup before VM-handle reuse. The opt-in local golden confirms
+  that authored N. Sanity `a3_9Z` entities 23 and 24 are linked in both directions.
 - the corrected legally local 2,100-frame N. Sanity invocation passes. Its controller follows
   `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits the authored
   `Transition(0x2d)` at frame 1,906. It records 18 zone transitions, 42 observed paths, 65
@@ -351,8 +355,8 @@ The final checks below were run against this change set on 2026-07-14:
   START pause/resume path and visible authored controller panel were exercised in the browser below;
   exact prior-pad latency and per-object paused execution are not claimed by that UI check.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,219,750 bytes with SHA-256
-  `422ffb4825d23f5329f58b0fa47ee4108c97c68fa70ea4ea2e7ad79f229265e4`.
+  web release. The Wasm payload is 1,226,585 bytes with SHA-256
+  `4bff814ee6569be65824ccf0ff875cac6bc264d22ca62c1d226c36d985549a75`.
 - the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
   the route and pause integration was loaded in the visible in-app browser. Because that browser
   cannot automate a native file picker,
@@ -392,6 +396,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_runtime --locked \
+  n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
   C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
   every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture

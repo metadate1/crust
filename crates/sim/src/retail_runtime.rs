@@ -20,16 +20,17 @@ use crust_formats::{
 use crate::{
     camera::RetailCameraLocation,
     card::{CardPublishedState, SaveData},
+    flow::{TITLE_FADE_START, TITLE_FADE_STEP, TitlePhase, TitleScreen},
     gool::{
-        AnimationLocalBoundRefresh, AnimationReference, AudioHostRequest, AudioHostResponse,
-        COLOR_COUNT, CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL, CardHostRequest,
-        CollisionObjectReference, EventDispatchOutcome, EventStateChange, Execution,
-        GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
+        AnimationLocalBoundRefresh, AnimationReference, AnimationSource, AudioHostRequest,
+        AudioHostResponse, COLOR_COUNT, CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL,
+        CardHostRequest, CollisionObjectReference, EventDispatchOutcome, EventStateChange,
+        Execution, GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
         ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
         ObjectHandle as VmObjectHandle, RETAIL_LEVEL_SPAWN_CAPACITY, RetailPadSnapshot,
         RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
-        SendEventRequest, SendEventTarget, VmEffect, VmError, VmHostRequest, VmObject,
-        VmStateProgram, process_register,
+        SendEventRequest, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmError, VmHostRequest,
+        VmObject, VmStateProgram, process_register,
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
@@ -142,6 +143,7 @@ const PBAK_CAPTION_EVENT: u32 = 0x0e00;
 const PBAK_CAPTION_EXECUTABLE: u8 = 4;
 const PBAK_CAPTION_SUBTYPE: u8 = 8;
 const PBAK_CAPTION_ARGUMENTS: [u32; 2] = [2_279, 19_993];
+const LEVEL_MISC_CONTROLLER_ROOT: u8 = 4;
 const PAUSE_RESUME_EVENT: u32 = 0x0c00;
 const PAUSE_CONTROLLER_EXECUTABLE: u8 = 4;
 const PAUSE_CONTROLLER_SUBTYPE: u8 = 4;
@@ -379,6 +381,13 @@ pub struct RetailRenderObject {
     pub executable: u8,
     pub subtype: u8,
     pub program: Option<GoolProgramIdentity>,
+    /// Authoritative checked replacement for native `process.anim_seq`.
+    /// Process-local type-zero descriptors are present here even though they
+    /// deliberately have no item-five offset and draw no primitives.
+    pub animation_source: Option<AnimationSource>,
+    /// Compatibility item-five view used by asset renderers. This is `None`
+    /// for a valid process-local animation; presence decisions must use
+    /// [`Self::animation_source`].
     pub animation_reference: Option<AnimationReference>,
     pub animation_frame: u32,
     pub transform: RetailTransform,
@@ -1174,6 +1183,60 @@ pub struct RuntimeFrame<E> {
     pub effects: Vec<VmEffect>,
 }
 
+/// Authoritative pointer-free state corresponding to native `title_struct`.
+///
+/// The requested screen remains the exact 32-bit GOOL global at word 18;
+/// this snapshot owns only the C-side current/pending screen and transition
+/// phase that are not serialized in the stream VM.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailTitlePresentation {
+    pub screen: TitleScreen,
+    pub next_screen: TitleScreen,
+    pub phase: TitlePhase,
+    /// Native `TitleUpdate` submitted an opaque overlay while swapping the
+    /// screen in this source frame. This remains set through the following
+    /// `GLUpdate`/browser render even if `TitleLoadState` synchronously starts
+    /// another fade-out.
+    pub opaque_swap_overlay: bool,
+    /// Live signed global 106 after the most recent `GLUpdate` fade step.
+    pub fade_counter: i32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailTitleState {
+    screen: TitleScreen,
+    next_screen: TitleScreen,
+    phase: TitlePhase,
+    opaque_swap_overlay: bool,
+}
+
+/// Host work requested from the middle of native `TitleUpdate`.
+///
+/// The browser applies this before [`RetailRuntime::finish_retail_title_update`]
+/// because `TitleLoadState` can synchronously spawn authored objects before
+/// the source's final title-state comparison.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailTitleAction {
+    LoadScreen {
+        previous: TitleScreen,
+        screen: TitleScreen,
+    },
+}
+
+/// Checked failure at the source title/GL boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetailTitleError {
+    NotConfigured,
+    InvalidTitleState(u32),
+    Vm(VmError),
+}
+
+impl From<VmError> for RetailTitleError {
+    fn from(error: VmError) -> Self {
+        Self::Vm(error)
+    }
+}
+
 /// A source-ordered boundary inside one retail object-tree traversal.
 ///
 /// Native calls `PadUpdate` from `GoolObjectUpdate` immediately before it
@@ -1830,9 +1893,9 @@ struct RetailDisplaySnapshot {
     /// Live global nine consumed by this object's display/transform path.
     display_mask: u32,
     enabled: bool,
-    /// Validation is retained until `render_objects()` so malformed animation
-    /// references keep their historical render-snapshot error boundary.
-    animation_reference: Result<Option<AnimationReference>, VmError>,
+    /// Validation is retained until `render_objects()` so malformed item-five
+    /// or process-local sources keep the render-snapshot error boundary.
+    animation_source: Result<Option<AnimationSource>, VmError>,
     animation_frame: u32,
     transform: RetailTransform,
     status_a: u32,
@@ -1862,7 +1925,7 @@ impl RetailDisplaySnapshot {
         Ok(Self {
             display_mask,
             enabled,
-            animation_reference: vm_object.animation_reference(),
+            animation_source: vm_object.animation_source(),
             animation_frame: vm_object.animation_frame(),
             transform: vm_object.retail_transform()?,
             status_a: vm_object.register(process_register::STATUS_A)?,
@@ -1914,6 +1977,12 @@ struct MaterializedObject {
     environment: Option<RetailZoneEnvironment>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetailLevelMiscObjectState {
+    Uninitialized,
+    Initialized(Option<RuntimeObjectHandle>),
+}
+
 fn shader_step_toward(current: i32, target: i32, step: &mut i32) -> i32 {
     let next = current.wrapping_add(*step);
     if (target > current && next >= target) || (target < current && next <= target) {
@@ -1955,7 +2024,9 @@ pub struct RetailRuntime {
     box_spawn: RetailBoxSpawnState,
     core_objects_initialized: bool,
     core_objects: Option<RetailCoreObjects>,
+    level_misc_object: RetailLevelMiscObjectState,
     pause: RetailPauseState,
+    title: Option<RetailTitleState>,
 }
 
 impl RetailRuntime {
@@ -1997,7 +2068,9 @@ impl RetailRuntime {
             box_spawn: RetailBoxSpawnState::default(),
             core_objects_initialized: false,
             core_objects: None,
+            level_misc_object: RetailLevelMiscObjectState::Uninitialized,
             pause: RetailPauseState::default(),
+            title: None,
         }
     }
 
@@ -2335,6 +2408,134 @@ impl RetailRuntime {
         self.level
     }
 
+    /// Frame stamp written by authored gem pickup logic and consumed by the
+    /// following native `CamUpdate` gem-path gate.
+    pub fn gem_stamp(&self) -> Result<u32, VmError> {
+        self.machine.global_word(GEM_STAMP_GLOBAL)
+    }
+
+    /// Installs the C-side title state for a newly mounted title stream.
+    ///
+    /// `first_boot` selects native transition state zero; subsequent title
+    /// mounts enter through blank state one. Both paths seed the exact live
+    /// fade globals and leave screen-specific display flags to `TitleLoadState`.
+    pub fn configure_retail_title(
+        &mut self,
+        screen: TitleScreen,
+        first_boot: bool,
+    ) -> Result<(), RetailTitleError> {
+        self.machine
+            .set_global_word(TITLE_STATE_GLOBAL, screen.raw())?;
+        self.machine
+            .set_global_word(FADE_COUNTER_GLOBAL, TITLE_FADE_START as u32)?;
+        self.machine
+            .set_global_word(FADE_STEP_GLOBAL, TITLE_FADE_STEP as u32)?;
+        self.title = Some(RetailTitleState {
+            screen,
+            next_screen: screen,
+            phase: if first_boot {
+                TitlePhase::Start
+            } else {
+                TitlePhase::Blank
+            },
+            opaque_swap_overlay: false,
+        });
+        Ok(())
+    }
+
+    /// Returns the authoritative title presentation after the latest display
+    /// boundary, or `None` for non-title runtimes.
+    pub fn retail_title_presentation(
+        &self,
+    ) -> Result<Option<RetailTitlePresentation>, RetailTitleError> {
+        let Some(title) = self.title else {
+            return Ok(None);
+        };
+        let fade_counter = self.machine.global_word(FADE_COUNTER_GLOBAL)? as i32;
+        Ok(Some(RetailTitlePresentation {
+            screen: title.screen,
+            next_screen: title.next_screen,
+            phase: title.phase,
+            opaque_swap_overlay: title.opaque_swap_overlay,
+            fade_counter,
+        }))
+    }
+
+    /// Runs native `TitleUpdate` through the optional `TitleLoadState` call.
+    ///
+    /// Call this after GOOL traversal and before `GLUpdate`. If it returns a
+    /// load action, the host must apply it before calling
+    /// [`Self::finish_retail_title_update`].
+    pub fn begin_retail_title_update(
+        &mut self,
+    ) -> Result<Option<RetailTitleAction>, RetailTitleError> {
+        let mut title = self.title.ok_or(RetailTitleError::NotConfigured)?;
+        let fade_counter = self.machine.global_word(FADE_COUNTER_GLOBAL)? as i32;
+        // The previous frame's immediate GL draw remains visible until this
+        // source TitleUpdate boundary. A swap below republishes it for the
+        // new frame before the final authored-state comparison can change the
+        // transition phase again.
+        title.opaque_swap_overlay = false;
+        let mut action = None;
+        match title.phase {
+            TitlePhase::Start | TitlePhase::Blank => {
+                let display = self.machine.global_word(NEXT_DISPLAY_GLOBAL)?;
+                self.machine.set_global_word(
+                    NEXT_DISPLAY_GLOBAL,
+                    display | DISPLAY_OBJECTS | ANIMATE_OBJECTS,
+                )?;
+                self.machine
+                    .set_global_word(FADE_COUNTER_GLOBAL, TITLE_FADE_START as u32)?;
+                title.phase = TitlePhase::FadingIn;
+            }
+            TitlePhase::FadingOut if fade_counter == 0 => {
+                let display = self.machine.global_word(NEXT_DISPLAY_GLOBAL)?;
+                self.machine.set_global_word(
+                    NEXT_DISPLAY_GLOBAL,
+                    display & !(DISPLAY_OBJECTS | ANIMATE_OBJECTS),
+                )?;
+                title.phase = TitlePhase::FinishedFadingOut;
+                title.opaque_swap_overlay = true;
+            }
+            TitlePhase::FadingIn if fade_counter == 0 => {
+                title.phase = TitlePhase::Ready;
+            }
+            TitlePhase::FinishedFadingOut => {
+                let previous = title.screen;
+                title.screen = title.next_screen;
+                title.phase = TitlePhase::Blank;
+                title.opaque_swap_overlay = true;
+                action = Some(RetailTitleAction::LoadScreen {
+                    previous,
+                    screen: title.screen,
+                });
+            }
+            TitlePhase::Ready | TitlePhase::FadingIn | TitlePhase::FadingOut => {}
+        }
+        self.title = Some(title);
+        Ok(action)
+    }
+
+    /// Completes native `TitleUpdate` after any synchronous screen load.
+    ///
+    /// This final comparison is intentionally separate: an authored object
+    /// initialized by `TitleLoadState` may write global 18 before the source
+    /// checks it and starts another fade.
+    pub fn finish_retail_title_update(&mut self) -> Result<(), RetailTitleError> {
+        let mut title = self.title.ok_or(RetailTitleError::NotConfigured)?;
+        let raw = self.machine.global_word(TITLE_STATE_GLOBAL)?;
+        let requested =
+            TitleScreen::from_raw(raw).ok_or(RetailTitleError::InvalidTitleState(raw))?;
+        if title.next_screen != requested {
+            self.machine
+                .set_global_word(FADE_COUNTER_GLOBAL, (-256_i32) as u32)?;
+            title.next_screen = requested;
+            title.phase = TitlePhase::FadingOut;
+        }
+        self.title = Some(title);
+        Ok(())
+    }
+
     /// GOOL display/animation word currently consumed by object/render logic.
     ///
     /// Authored zero-global runtimes retain the historical all-enabled
@@ -2372,6 +2573,18 @@ impl RetailRuntime {
         self.machine.set_draw_count(self.draw_count);
         self.advance_native_display_fade(display_mask)?;
         Ok(display_mask)
+    }
+
+    /// Completes the deferred native `GLUpdate` boundary after a host has run
+    /// title work between GOOL and display latching.
+    ///
+    /// A level-restart request suppresses this boundary exactly as the ordinary
+    /// one-shot frame runner does.
+    pub fn finish_deferred_display_frame(&mut self) -> Result<Option<u32>, VmError> {
+        if self.machine.level_restart_requested() {
+            return Ok(None);
+        }
+        self.finish_display_frame(self.pause.paused).map(Some)
     }
 
     /// Advances the signed global brightness state at the same end-of-frame
@@ -2630,6 +2843,68 @@ impl RetailRuntime {
         self.core_objects = Some(objects);
         self.core_objects_initialized = true;
         Ok(Some(objects))
+    }
+
+    /// Creates the optional root-four controller installed by native
+    /// `LevelInitMisc(1)` after [`Self::create_retail_core_objects`].
+    ///
+    /// Only six retail levels take an object-creating branch. The runtime
+    /// child has no lifecycle ZDAT, receives the current zone only as its
+    /// initialization environment, carries no arguments, and uses native's
+    /// reclaiming allocation flag. Ripper Roo additionally publishes the
+    /// controller through `ambiance_obj` (GOOL global eight). Repeated calls
+    /// on one mounted pair are idempotent, matching the one mount-time call in
+    /// `CoreObjectsCreate`; same-level restarts use `LevelInitMisc(0)` and do
+    /// not create another controller.
+    pub fn create_retail_level_misc_object<H: ProgramHost>(
+        &mut self,
+        current_zone: Eid,
+        host: &mut H,
+    ) -> Result<Option<RuntimeObjectHandle>, RuntimeError<H::Error>> {
+        if let RetailLevelMiscObjectState::Initialized(object) = self.level_misc_object {
+            return Ok(object);
+        }
+        let Some(level) = self.level else {
+            self.level_misc_object = RetailLevelMiscObjectState::Initialized(None);
+            return Ok(None);
+        };
+        let (executable, subtype, publish_ambiance) = match level.get() {
+            0x05 => (9, 4, false),
+            0x14 | 0x16 => (23, 6, false),
+            0x17 => (39, 4, true),
+            0x22 | 0x2e => (53, 13, false),
+            _ => {
+                self.level_misc_object = RetailLevelMiscObjectState::Initialized(None);
+                return Ok(None);
+            }
+        };
+
+        // Preflight Ripper Roo's pointer slot before allocation so a
+        // deliberately undersized checked VM cannot leak a root object.
+        if publish_ambiance {
+            self.machine
+                .global_word(AMBIANCE_OBJECT_GLOBAL)
+                .map_err(RuntimeError::Vm)?;
+        }
+        let object = self.create_root_program(
+            LEVEL_MISC_CONTROLLER_ROOT,
+            current_zone,
+            executable,
+            subtype,
+            &[],
+            true,
+            host,
+        )?;
+        if publish_ambiance {
+            self.machine
+                .set_global_word(
+                    AMBIANCE_OBJECT_GLOBAL,
+                    CollisionObjectReference::new(object.vm).to_word(),
+                )
+                .map_err(RuntimeError::Vm)?;
+        }
+        self.level_misc_object = RetailLevelMiscObjectState::Initialized(Some(object));
+        Ok(Some(object))
     }
 
     fn discard_unstarted_runtime_roots<E>(
@@ -3710,15 +3985,18 @@ impl RetailRuntime {
                         )
                         .map_err(RenderObjectsError::Vm)?
                     };
+                let animation_source = display_snapshot
+                    .animation_source
+                    .map_err(RenderObjectsError::Vm)?;
                 objects.push(RetailRenderObject {
                     object,
                     zone: spawned.zone(),
                     executable: origin.executable(),
                     subtype: origin.subtype(),
                     program: vm_object.program_identity(),
-                    animation_reference: display_snapshot
-                        .animation_reference
-                        .map_err(RenderObjectsError::Vm)?,
+                    animation_source,
+                    animation_reference: animation_source
+                        .and_then(AnimationSource::item_five_reference),
                     animation_frame: display_snapshot.animation_frame,
                     transform: display_snapshot.transform,
                     status_a: display_snapshot.status_a,
@@ -3854,6 +4132,22 @@ impl RetailRuntime {
         self.run_frame_with_traversal_hook(host, instruction_budget_per_object, |_, _, _| Ok(()))
     }
 
+    /// Executes one cooperative GOOL frame while deferring the display latch.
+    ///
+    /// Title hosts use this to insert source `TitleUpdate` work before calling
+    /// [`Self::finish_deferred_display_frame`].
+    pub fn run_frame_before_display<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        instruction_budget_per_object: usize,
+    ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>> {
+        self.run_frame_before_display_with_traversal_hook(
+            host,
+            instruction_budget_per_object,
+            |_, _, _| Ok(()),
+        )
+    }
+
     /// Executes one cooperative frame and invokes `hook` immediately before
     /// the live main/Crash object is updated.
     ///
@@ -3868,6 +4162,39 @@ impl RetailRuntime {
         &mut self,
         host: &mut H,
         instruction_budget_per_object: usize,
+        hook: F,
+    ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>>
+    where
+        H: ProgramHost,
+        F: FnMut(&mut Self, &mut H, RetailTraversalBoundary) -> Result<(), RuntimeError<H::Error>>,
+    {
+        self.run_frame_with_traversal_hook_inner(host, instruction_budget_per_object, true, hook)
+    }
+
+    /// Executes GOOL traversal but defers native `GLUpdate` so the platform can
+    /// run `TitleUpdate` and any synchronous screen load at the source boundary.
+    ///
+    /// The caller must complete a successful frame with
+    /// [`Self::finish_deferred_display_frame`]. Other callers should continue
+    /// using [`Self::run_frame_with_traversal_hook`].
+    pub fn run_frame_before_display_with_traversal_hook<H, F>(
+        &mut self,
+        host: &mut H,
+        instruction_budget_per_object: usize,
+        hook: F,
+    ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>>
+    where
+        H: ProgramHost,
+        F: FnMut(&mut Self, &mut H, RetailTraversalBoundary) -> Result<(), RuntimeError<H::Error>>,
+    {
+        self.run_frame_with_traversal_hook_inner(host, instruction_budget_per_object, false, hook)
+    }
+
+    fn run_frame_with_traversal_hook_inner<H, F>(
+        &mut self,
+        host: &mut H,
+        instruction_budget_per_object: usize,
+        finish_display: bool,
         mut hook: F,
     ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>>
     where
@@ -3945,7 +4272,7 @@ impl RetailRuntime {
 
         let frame_index = self.frame_index;
         self.frame_index = self.frame_index.wrapping_add(1);
-        if !self.machine.level_restart_requested() {
+        if finish_display && !self.machine.level_restart_requested() {
             self.finish_display_frame(paused)
                 .map_err(RuntimeError::Vm)?;
         }
@@ -4220,7 +4547,13 @@ impl RetailRuntime {
         };
         let (reference, frame_index, status_b, transform, original_colors) = {
             let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
-            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+            let Some(source) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
+                return Ok(None);
+            };
+            let AnimationSource::ItemFive(reference) = source else {
+                // BaraC's checked type-zero process descriptor reaches the
+                // native transform switch default and produces no color or
+                // geometry side effects.
                 return Ok(None);
             };
             (
@@ -4338,7 +4671,7 @@ impl RetailRuntime {
             vm_object
                 .program_identity()
                 .map(GoolProgramIdentity::category),
-            vm_object.animation_reference()?.is_some(),
+            vm_object.animation_source()?.is_some(),
         ))
     }
 
@@ -4871,7 +5204,7 @@ impl RetailRuntime {
                 .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
             (spawned.zone(), spawned.origin().executable())
         };
-        let (reference, frame_index, transform, status_a, cached_local_bound) = {
+        let (animation, frame_index, transform, status_a, cached_local_bound) = {
             let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
             let status_b = vm_object
                 .register(process_register::STATUS_B)
@@ -4879,11 +5212,11 @@ impl RetailRuntime {
             if status_b & COLLIDABLE_STATUS_B == 0 {
                 return Ok(false);
             }
-            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+            let Some(animation) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
                 return Ok(false);
             };
             (
-                reference,
+                animation,
                 vm_object.animation_frame() >> 8,
                 vm_object.retail_transform().map_err(RuntimeError::Vm)?,
                 vm_object
@@ -4892,17 +5225,23 @@ impl RetailRuntime {
                 vm_object.retail_local_bound(),
             )
         };
-        let Some(source) = host
-            .animation_bound_source(AnimationBoundBinding {
-                object,
-                zone,
-                executable,
-                reference,
-                frame_index,
-            })
-            .map_err(RuntimeError::Program)?
-        else {
-            return Ok(false);
+        let source = match animation {
+            AnimationSource::ItemFive(reference) => {
+                let Some(source) = host
+                    .animation_bound_source(AnimationBoundBinding {
+                        object,
+                        zone,
+                        executable,
+                        reference,
+                        frame_index,
+                    })
+                    .map_err(RuntimeError::Program)?
+                else {
+                    return Ok(false);
+                };
+                source
+            }
+            AnimationSource::Process(_) => AnimationBoundSource::NonVertex,
         };
 
         let scale = Vec3 {
@@ -6851,28 +7190,34 @@ impl RetailRuntime {
             }
         }
 
-        let (reference, frame_index, transform) = {
+        let (animation, frame_index, transform) = {
             let vm_object = machine.object(vm).map_err(RuntimeError::Vm)?;
-            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+            let Some(animation) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
                 return Ok(());
             };
             (
-                reference,
+                animation,
                 vm_object.animation_frame() >> 8,
                 vm_object.retail_transform().map_err(RuntimeError::Vm)?,
             )
         };
-        let Some(source) = host
-            .animation_bound_source(AnimationBoundBinding {
-                object,
-                zone: spawned.zone(),
-                executable: spawned.origin().executable(),
-                reference,
-                frame_index,
-            })
-            .map_err(RuntimeError::Program)?
-        else {
-            return Ok(());
+        let source = match animation {
+            AnimationSource::ItemFive(reference) => {
+                let Some(source) = host
+                    .animation_bound_source(AnimationBoundBinding {
+                        object,
+                        zone: spawned.zone(),
+                        executable: spawned.origin().executable(),
+                        reference,
+                        frame_index,
+                    })
+                    .map_err(RuntimeError::Program)?
+                else {
+                    return Ok(());
+                };
+                source
+            }
+            AnimationSource::Process(_) => AnimationBoundSource::NonVertex,
         };
         let scale = Vec3 {
             x: transform.scale[0],
@@ -8789,6 +9134,16 @@ mod tests {
     }
 
     #[test]
+    fn camera_gem_stamp_reads_the_live_authored_global() {
+        let mut runtime = RetailRuntime::new_for_level(256, LevelId::N_SANITY_BEACH);
+        assert_eq!(runtime.gem_stamp(), Ok(0));
+
+        runtime.set_global_word(GEM_STAMP_GLOBAL, 85).unwrap();
+
+        assert_eq!(runtime.gem_stamp(), Ok(85));
+    }
+
+    #[test]
     fn display_fade_publishes_retail_signed_sentinels_at_frame_end() {
         let mut runtime = RetailRuntime::new(FADE_STEP_GLOBAL + 1);
         runtime.set_global_word(FADE_STEP_GLOBAL, 32).unwrap();
@@ -8825,6 +9180,200 @@ mod tests {
         runtime.finish_display_frame(true).unwrap();
 
         assert_eq!(runtime.global_word(FADE_COUNTER_GLOBAL), Ok(0));
+    }
+
+    #[test]
+    fn title_update_runs_between_gool_request_and_gl_fade_latch() {
+        const IMAGE_LOAD: u32 = 0x22_3ff0;
+        const IMAGE_ACTIVE: u32 = IMAGE_LOAD | DISPLAY_OBJECTS | ANIMATE_OBJECTS;
+
+        let mut runtime = RetailRuntime::new_for_level(256, LevelId::TITLE);
+        runtime
+            .configure_retail_title(TitleScreen::PublisherFirst, true)
+            .unwrap();
+        runtime
+            .set_global_word(NEXT_DISPLAY_GLOBAL, IMAGE_LOAD)
+            .unwrap();
+
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        assert_eq!(runtime.global_word(NEXT_DISPLAY_GLOBAL), Ok(IMAGE_ACTIVE));
+        runtime.finish_retail_title_update().unwrap();
+        assert_eq!(
+            runtime.finish_deferred_display_frame(),
+            Ok(Some(IMAGE_ACTIVE))
+        );
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherFirst,
+                next_screen: TitleScreen::PublisherFirst,
+                phase: TitlePhase::FadingIn,
+                opaque_swap_overlay: false,
+                fade_counter: 256,
+            }))
+        );
+
+        runtime.set_global_word(FADE_COUNTER_GLOBAL, 0).unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation().unwrap().unwrap().phase,
+            TitlePhase::Ready
+        );
+
+        // Authored GOOL writes global 18 before TitleUpdate. The same boundary
+        // must seed global 106 to -256 before GLUpdate advances it to -224.
+        runtime
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::PublisherSecond.raw())
+            .unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        assert_eq!(
+            runtime.global_word(FADE_COUNTER_GLOBAL),
+            Ok((-256_i32) as u32)
+        );
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherFirst,
+                next_screen: TitleScreen::PublisherSecond,
+                phase: TitlePhase::FadingOut,
+                opaque_swap_overlay: false,
+                fade_counter: -224,
+            }))
+        );
+
+        runtime.set_global_word(FADE_COUNTER_GLOBAL, 0).unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        assert_eq!(runtime.global_word(NEXT_DISPLAY_GLOBAL), Ok(IMAGE_LOAD));
+        runtime.finish_retail_title_update().unwrap();
+        assert_eq!(
+            runtime.finish_deferred_display_frame(),
+            Ok(Some(IMAGE_LOAD))
+        );
+
+        // The following source frame reaches TitleLoadState. A controller
+        // spawned synchronously by that load is allowed to publish another
+        // request before TitleUpdate performs its final compare.
+        assert_eq!(
+            runtime.begin_retail_title_update(),
+            Ok(Some(RetailTitleAction::LoadScreen {
+                previous: TitleScreen::PublisherFirst,
+                screen: TitleScreen::PublisherSecond,
+            }))
+        );
+        runtime
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::NaughtyDog.raw())
+            .unwrap();
+        runtime.finish_retail_title_update().unwrap();
+        assert_eq!(
+            runtime.global_word(FADE_COUNTER_GLOBAL),
+            Ok((-256_i32) as u32)
+        );
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherSecond,
+                next_screen: TitleScreen::NaughtyDog,
+                phase: TitlePhase::FadingOut,
+                opaque_swap_overlay: true,
+                fade_counter: -224,
+            }))
+        );
+
+        // The direct TitleUpdate overlay is a source-frame latch, not a
+        // transition-phase alias. It clears at the next TitleUpdate while the
+        // newly requested fade continues normally.
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherSecond,
+                next_screen: TitleScreen::NaughtyDog,
+                phase: TitlePhase::FadingOut,
+                opaque_swap_overlay: false,
+                fade_counter: -192,
+            }))
+        );
+    }
+
+    #[test]
+    fn title_fade_completion_retains_opaque_overlay_across_same_frame_retarget() {
+        let mut runtime = RetailRuntime::new_for_level(256, LevelId::TITLE);
+        runtime
+            .configure_retail_title(TitleScreen::PublisherFirst, true)
+            .unwrap();
+
+        // Reach the ready source state, then begin an ordinary fade-out.
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        runtime.set_global_word(FADE_COUNTER_GLOBAL, 0).unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        runtime
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::PublisherSecond.raw())
+            .unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+
+        // Native draws opaque black when the fade reaches exact zero. GOOL
+        // may have retargeted global 18 in that same frame; the final compare
+        // starts another fade but cannot erase the already-submitted overlay.
+        runtime.set_global_word(FADE_COUNTER_GLOBAL, 0).unwrap();
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime
+            .set_global_word(TITLE_STATE_GLOBAL, TitleScreen::NaughtyDog.raw())
+            .unwrap();
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherFirst,
+                next_screen: TitleScreen::NaughtyDog,
+                phase: TitlePhase::FadingOut,
+                opaque_swap_overlay: true,
+                fade_counter: -224,
+            }))
+        );
+
+        assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+        runtime.finish_retail_title_update().unwrap();
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.retail_title_presentation(),
+            Ok(Some(RetailTitlePresentation {
+                screen: TitleScreen::PublisherFirst,
+                next_screen: TitleScreen::NaughtyDog,
+                phase: TitlePhase::FadingOut,
+                opaque_swap_overlay: false,
+                fade_counter: -192,
+            }))
+        );
+    }
+
+    #[test]
+    fn title_update_rejects_an_invalid_authored_state_word() {
+        let mut runtime = RetailRuntime::new_for_level(256, LevelId::TITLE);
+        runtime
+            .configure_retail_title(TitleScreen::PublisherFirst, true)
+            .unwrap();
+        runtime
+            .set_global_word(TITLE_STATE_GLOBAL, 0xffff_ffff)
+            .unwrap();
+
+        assert_eq!(
+            runtime.finish_retail_title_update(),
+            Err(RetailTitleError::InvalidTitleState(0xffff_ffff))
+        );
     }
 
     #[test]
@@ -12187,6 +12736,77 @@ mod tests {
         vm_object.set_retail_transform(transform).unwrap();
     }
 
+    #[test]
+    fn process_local_no_draw_animation_drives_presence_and_nonvertex_collision() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let descriptor = crate::gool::StorageReference::checked(
+            object.vm,
+            crate::gool::StorageRegion::Register,
+            65,
+        )
+        .unwrap();
+        let transform = RetailTransform {
+            translation: [100, 200, 300],
+            rotation_yxz: [0; 3],
+            scale: [0x1000; 3],
+        };
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object.set_register(65, 0).unwrap();
+        vm_object
+            .set_register(process_register::ANIMATION_SEQUENCE, descriptor.to_word())
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B)
+            .unwrap();
+        let status_a = vm_object.register(process_register::STATUS_A).unwrap();
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a | LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .unwrap();
+        vm_object.set_retail_transform(transform).unwrap();
+        let mut host = BoundHost::new(AnimationBoundSource::NonVertex);
+
+        assert!(runtime.register_animation_bound(object, &mut host).unwrap());
+        assert!(
+            host.calls.is_empty(),
+            "a process descriptor is consumed locally and never misread as an item-five offset"
+        );
+        assert_eq!(
+            runtime.machine.frame_bounds(),
+            [crate::object_bounds::FrameBound {
+                object: object.vm,
+                bound: Bounds3 {
+                    min: Vec3 {
+                        x: -51_100,
+                        y: -51_000,
+                        z: -50_900,
+                    },
+                    max: Vec3 {
+                        x: 51_300,
+                        y: 51_400,
+                        z: 51_500,
+                    },
+                },
+            }]
+        );
+
+        let render = runtime
+            .render_objects()
+            .unwrap()
+            .into_iter()
+            .find(|candidate| candidate.object == object)
+            .unwrap();
+        assert!(matches!(
+            render.animation_source,
+            Some(AnimationSource::Process(_))
+        ));
+        assert_eq!(render.animation_reference, None);
+        assert!(render.display_eligible);
+    }
+
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -14144,6 +14764,110 @@ mod tests {
             runtime
                 .arena
                 .preorder(TreeParent::Root(RootHandle::new(1).unwrap()))
+                .unwrap()
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn level_init_misc_one_creates_exact_root_four_controllers() {
+        let cases = [
+            (0x05, Some((9, 4, false))),
+            (0x0e, None),
+            (0x14, Some((23, 6, false))),
+            (0x16, Some((23, 6, false))),
+            (0x17, Some((39, 4, true))),
+            (0x22, Some((53, 13, false))),
+            (0x28, None),
+            (0x2a, None),
+            (0x2e, Some((53, 13, false))),
+            (0x09, None),
+        ];
+
+        for (level, expected) in cases {
+            let level = LevelId::new_const(level);
+            let mut runtime = RetailRuntime::new_for_level(119, level);
+            let mut host = CaptionHost::default();
+            let created = runtime
+                .create_retail_level_misc_object(ZONE, &mut host)
+                .unwrap();
+
+            if let Some((executable, subtype, publishes_ambiance)) = expected {
+                let object = created.expect("source branch creates one controller");
+                assert_eq!(host.bindings, [(ZONE, executable, subtype, Vec::new())]);
+                let spawned = runtime.arena.get(object.arena).unwrap();
+                assert_eq!(spawned.zone(), Eid::NONE);
+                assert_eq!(
+                    spawned.parent(),
+                    TreeParent::Root(RootHandle::new(LEVEL_MISC_CONTROLLER_ROOT).unwrap())
+                );
+                assert_eq!(
+                    (spawned.origin().executable(), spawned.origin().subtype()),
+                    (executable, subtype)
+                );
+                assert_eq!(
+                    runtime.global_word(AMBIANCE_OBJECT_GLOBAL),
+                    Ok(if publishes_ambiance {
+                        CollisionObjectReference::new(object.vm).to_word()
+                    } else {
+                        0
+                    })
+                );
+                assert_eq!(
+                    runtime
+                        .arena
+                        .preorder(TreeParent::Root(
+                            RootHandle::new(LEVEL_MISC_CONTROLLER_ROOT).unwrap()
+                        ))
+                        .unwrap()
+                        .collect::<Vec<_>>(),
+                    [object.arena]
+                );
+            } else {
+                assert_eq!(created, None);
+                assert!(host.bindings.is_empty());
+                assert!(
+                    runtime
+                        .arena
+                        .preorder(TreeParent::Root(
+                            RootHandle::new(LEVEL_MISC_CONTROLLER_ROOT).unwrap()
+                        ))
+                        .unwrap()
+                        .next()
+                        .is_none()
+                );
+                assert_eq!(runtime.global_word(AMBIANCE_OBJECT_GLOBAL), Ok(0));
+            }
+
+            assert_eq!(
+                runtime.create_retail_level_misc_object(ZONE_B, &mut host),
+                Ok(created),
+                "mount-time controller creation must be idempotent for {level}"
+            );
+            assert_eq!(host.bindings.len(), usize::from(expected.is_some()));
+        }
+    }
+
+    #[test]
+    fn ripper_misc_controller_preflight_keeps_an_undersized_vm_empty() {
+        let mut runtime =
+            RetailRuntime::new_for_level(AMBIANCE_OBJECT_GLOBAL, LevelId::new_const(0x17));
+        let mut host = CaptionHost::default();
+
+        assert_eq!(
+            runtime.create_retail_level_misc_object(ZONE, &mut host),
+            Err(RuntimeError::Vm(VmError::InvalidRegister(
+                AMBIANCE_OBJECT_GLOBAL
+            )))
+        );
+        assert!(host.bindings.is_empty());
+        assert!(
+            runtime
+                .arena
+                .preorder(TreeParent::Root(
+                    RootHandle::new(LEVEL_MISC_CONTROLLER_ROOT).unwrap()
+                ))
                 .unwrap()
                 .next()
                 .is_none()

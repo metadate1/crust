@@ -2854,6 +2854,62 @@ mod tests {
     }
 
     #[test]
+    fn retail_follow_gem_stamp_opens_timed_neighbor_for_fifteen_frames() {
+        let graph = single_zone_graph(
+            0,
+            vec![
+                follow_path(
+                    &[[0, 0, 41], [0, 0, 0]],
+                    [0, 0, -4_096],
+                    40,
+                    // Goal bit four is the source's gem-timed camera gate;
+                    // bit one keeps the neighbor's entrance at its start.
+                    Some((2, 0, 1, 5)),
+                ),
+                follow_path(&[[0, 0, -41], [0, 0, -82]], [0, 0, -4_096], 40, None),
+            ],
+        );
+        let input = |gem_stamp| RetailCameraFollowInput {
+            player_translation: Vec3 {
+                x: 449 << 8,
+                y: 0,
+                z: -1_483 << 8,
+            },
+            frames_elapsed: 100,
+            gem_stamp,
+            ..RetailCameraFollowInput::default()
+        };
+
+        let mut expired =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0x100, GAME_STATE_PLAYING)
+                .unwrap();
+        let expired_step = expired.update_follow(&graph, input(84)).unwrap();
+        assert_eq!(expired_step.after.path, graph.spawn_path());
+        assert!(matches!(
+            expired_step.outcome,
+            RetailCameraOutcome::FollowEvaluated {
+                candidate_count: 1,
+                crossed_path: false,
+                ..
+            }
+        ));
+
+        let mut active =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0x100, GAME_STATE_PLAYING)
+                .unwrap();
+        let active_step = active.update_follow(&graph, input(85)).unwrap();
+        assert_eq!(active_step.after.path.index, 1);
+        assert!(matches!(
+            active_step.outcome,
+            RetailCameraOutcome::FollowEvaluated {
+                candidate_count: 2,
+                crossed_path: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn retail_follow_failure_is_typed_and_transactional() {
         let graph = single_zone_graph(
             0,

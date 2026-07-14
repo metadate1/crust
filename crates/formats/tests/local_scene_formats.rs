@@ -4,8 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crust_formats::disc::{DiscImage, DiscStreamSet};
 use crust_formats::stream::{
-    KNOWN_LEVELS, PolygonId, SlstDirection, SlstItem, StreamKind, StreamName, WorldGeometry,
-    ZoneHeader, ZonePath, ZoneRect, parse_nsd, parse_nsf, parse_world_geometry,
+    KNOWN_LEVELS, LevelId, PolygonId, SlstDirection, SlstItem, StreamKind, StreamName,
+    WorldGeometry, WorldMapPathList, WorldMapPathRecord, ZoneHeader, ZonePath, ZoneRect, parse_nsd,
+    parse_nsf, parse_world_geometry,
 };
 
 const WGEO_ENTRY_TYPE: u32 = 3;
@@ -65,6 +66,95 @@ fn validate_polygon_references(
             world.polygons.len()
         );
     }
+}
+
+/// Characterizes the four authored title-map ZDATs without copying any
+/// proprietary bytes into the repository. This also proves that item three's
+/// unusual `len + type-as-record-zero` layout consumes the legal 0x19 corpus.
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn title_island_map_wgeo_groups_match_the_safe_item_three_contract() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let nsd_bytes = read_stream(
+        Some(&root),
+        None,
+        StreamName::new(LevelId::TITLE, StreamKind::Nsd),
+    );
+    let nsf_bytes = read_stream(
+        Some(&root),
+        None,
+        StreamName::new(LevelId::TITLE, StreamKind::Nsf),
+    );
+    let nsd = parse_nsd(&nsd_bytes, LevelId::TITLE).expect("invalid title NSD");
+    let nsf = parse_nsf(&nsf_bytes, &nsd).expect("invalid title NSF");
+
+    let mut item_count = 0_usize;
+    let mut group_records = 0_usize;
+    let mut polygon_records = 0_usize;
+    let mut fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+    for zone_name in ["1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ"] {
+        let zone_eid = crust_formats::binary::Eid::from_name(zone_name).unwrap();
+        let zone_entry = nsf.resolve_entry(&nsd, zone_eid).unwrap();
+        assert_eq!(zone_entry.entry_type, ZDAT_ENTRY_TYPE);
+        let zone = ZoneHeader::parse(zone_entry.item(0).unwrap().bytes(&nsf_bytes).unwrap())
+            .unwrap_or_else(|error| panic!("title map ZDAT {zone_name}: {error}"));
+        let mut active_group = 0_u16;
+        for (world_index, world) in zone.worlds.iter().enumerate() {
+            let wgeo = nsf.resolve_entry(&nsd, world.geometry).unwrap();
+            assert_eq!(wgeo.entry_type, WGEO_ENTRY_TYPE);
+            if wgeo.items.len() < 4 {
+                continue;
+            }
+            let geometry = parse_world_geometry(
+                wgeo.item(0).unwrap().bytes(&nsf_bytes).unwrap(),
+                wgeo.item(1).unwrap().bytes(&nsf_bytes).unwrap(),
+                wgeo.item(2).unwrap().bytes(&nsf_bytes).unwrap(),
+            )
+            .unwrap_or_else(|error| panic!("title map WGEO {}: {error}", wgeo.eid));
+            let paths = WorldMapPathList::parse(wgeo.item(3).unwrap().bytes(&nsf_bytes).unwrap())
+                .unwrap_or_else(|error| panic!("title map WGEO {} item three: {error}", wgeo.eid));
+            let overrides = paths
+                .mask_overrides(
+                    geometry.polygons.len(),
+                    &mut active_group,
+                    u32::MAX,
+                    u32::MAX,
+                )
+                .unwrap_or_else(|error| panic!("title map WGEO {} groups: {error}", wgeo.eid));
+            assert!(overrides.iter().all(|entry| entry.animation_mask == 7));
+            item_count += 1;
+            mix_fingerprint(
+                &mut fingerprint,
+                u32::try_from(world_index).expect("retail world index fits u32"),
+            );
+            for record in paths.records() {
+                let (tag, index) = match *record {
+                    WorldMapPathRecord::Group(index) => {
+                        group_records += 1;
+                        (1_u32, index)
+                    }
+                    WorldMapPathRecord::Polygon(index) => {
+                        polygon_records += 1;
+                        (0_u32, index)
+                    }
+                };
+                mix_fingerprint(&mut fingerprint, tag);
+                mix_fingerprint(&mut fingerprint, u32::from(index));
+            }
+        }
+    }
+
+    eprintln!(
+        "title map item-three golden: {item_count} items, {group_records} group records, \
+         {polygon_records} polygon records, fingerprint {fingerprint:016x}"
+    );
+    assert_eq!(item_count, 4);
+    assert_eq!(group_records, 42);
+    assert_eq!(polygon_records, 368);
+    assert_eq!(fingerprint, 0x1c1c_2ddf_b2c7_c7ab);
 }
 
 /// Parses every retail ZDAT, SLST and WGEO entry from all 44 pairs without

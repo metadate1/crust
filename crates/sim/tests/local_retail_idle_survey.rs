@@ -1582,6 +1582,9 @@ fn survey_pair_with_runtime(
     runtime
         .create_retail_core_objects(camera.location().path.zone, &mut host)
         .map_err(|error| format!("core object creation: {error:?}"))?;
+    runtime
+        .create_retail_level_misc_object(camera.location().path.zone, &mut host)
+        .map_err(|error| format!("level-misc object creation: {error:?}"))?;
     let mut survey = LevelSurvey::new(level, name, input_profile);
     let mut input_controller = SurveyInputController::new(input_profile);
     let mut empty_frames = 0_u32;

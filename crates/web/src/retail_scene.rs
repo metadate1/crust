@@ -9,9 +9,9 @@ use crust_formats::stream::structs::ZonePathPoint;
 use crust_formats::stream::{
     Entry, GoolAnimationDescriptor, GoolFontAnimation, GoolFragmentAnimation, GoolSpriteAnimation,
     GoolTextAnimation, GoolTextureInfo, GoolVertexAnimation, Nsd, Nsf, NsfPage, ObjectMaterial,
-    ObjectModelFrame, ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader,
-    ZonePath, ZoneRect, load_object_model_frame, parse_gool_animation_descriptor,
-    parse_object_frame, parse_world_geometry,
+    ObjectModelFrame, ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry,
+    WorldMapPathList, ZoneHeader, ZonePath, ZoneRect, load_object_model_frame,
+    parse_gool_animation_descriptor, parse_object_frame, parse_world_geometry,
 };
 use crust_renderer::cache::{TextureCache, TextureHandle};
 use crust_renderer::command::{
@@ -35,6 +35,7 @@ use crust_renderer::{
     project_object_model,
 };
 use crust_sim::Angle12;
+use crust_sim::gool::AnimationSource;
 use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
@@ -119,6 +120,19 @@ pub struct RetailSceneProgressLocation {
     pub draw_count: u32,
 }
 
+/// Pre-GOOL island-map path flags consumed by native `GfxLoadWorlds`.
+///
+/// The scene builder additionally verifies that the mounted pair is title
+/// level 0x19 and that `title_state` is exactly 15 before applying these
+/// values. Keeping the state beside the flags makes accidental animation on a
+/// different title screen or retail level impossible at this boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailMapPathAnimation {
+    pub title_state: u32,
+    pub map_level_links: u32,
+    pub map_key_links: u32,
+}
+
 /// Controlled failure while following the retail LDAT scene graph.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetailSceneError(String);
@@ -145,6 +159,14 @@ struct CachedSceneGraph {
     path: ZonePath,
     visibility: Option<SlstCursor>,
     worlds: Vec<WorldGeometry>,
+    map_paths_parsed: bool,
+    world_map_paths: Vec<Option<WorldMapPathList>>,
+    /// Last masks written by `GfxAnimMapPaths` for this active graph.
+    ///
+    /// Native writes into the resident WGEO entry, so those values survive a
+    /// title-state change until the graph is replaced. Keeping the writes in a
+    /// sidecar preserves that lifetime without mutating parsed source data.
+    world_map_path_masks: Vec<Vec<Option<u8>>>,
 }
 
 /// Cumulative evidence that immutable retail scene data is reused.
@@ -300,6 +322,7 @@ impl RetailSceneBuilder {
             None,
             RETAIL_INITIAL_DISPLAY_FLAGS,
             None,
+            None,
         )
     }
 
@@ -370,6 +393,7 @@ impl RetailSceneBuilder {
             main_object,
             world_display_mask,
             None,
+            None,
         )
     }
 
@@ -396,6 +420,7 @@ impl RetailSceneBuilder {
         main_object: Option<RuntimeObjectHandle>,
         world_display_mask: u32,
         field_of_view: u32,
+        map_path_animation: Option<RetailMapPathAnimation>,
     ) -> Result<RetailScene, RetailSceneError> {
         build_retail_scene_cached(
             self,
@@ -407,6 +432,7 @@ impl RetailSceneBuilder {
             main_object,
             world_display_mask,
             Some(field_of_view),
+            map_path_animation,
         )
     }
 }
@@ -495,6 +521,7 @@ fn build_retail_scene_cached(
     main_object: Option<RuntimeObjectHandle>,
     world_display_mask: u32,
     field_of_view_override: Option<u32>,
+    map_path_animation: Option<RetailMapPathAnimation>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -505,14 +532,25 @@ fn build_retail_scene_cached(
         .ok_or_else(|| scene_error("signed path progress cannot be i32::MIN"))?;
     let path_point_index = usize::try_from(path_progress >> 8)
         .map_err(|_| scene_error("active path point index does not fit the host"))?;
+    let map_path_animation = active_map_path_animation(nsd.level(), map_path_animation);
     let key = RetailSceneCacheKey {
         zone: location.zone,
         path_index: location.path_index,
     };
-    if builder.active_graph.as_ref().map(|graph| graph.key) == Some(key) {
+    let needs_map_paths = map_path_animation.is_some();
+    let graph_reusable = scene_graph_cache_matches(
+        builder.active_graph.as_ref().map(|graph| graph.key),
+        builder
+            .active_graph
+            .as_ref()
+            .is_some_and(|graph| graph.map_paths_parsed),
+        key,
+        needs_map_paths,
+    );
+    if graph_reusable {
         builder.diagnostics.graph_reuses = builder.diagnostics.graph_reuses.saturating_add(1);
     } else {
-        let graph = parse_scene_graph(nsd, nsf, nsf_bytes, key, path_point_index)?;
+        let graph = parse_scene_graph(nsd, nsf, nsf_bytes, key, path_point_index, needs_map_paths)?;
         builder.active_graph = Some(graph);
         builder.texture_cache = TextureCache::default();
         builder.texture_pages = [None; RETAIL_TEXTURE_PAGE_SLOTS];
@@ -553,6 +591,8 @@ fn build_retail_scene_cached(
         }
     };
     validate_visibility(&visible_polygons, &graph.worlds)?;
+    update_persistent_world_map_path_masks(graph, map_path_animation)?;
+    let world_map_path_masks = graph.world_map_path_masks.clone();
 
     let camera = sample_camera(
         nsd,
@@ -595,7 +635,13 @@ fn build_retail_scene_cached(
     let mut page_ids = BTreeSet::new();
     for polygon_id in &visible_polygons {
         let geometry = &graph.worlds[usize::from(polygon_id.world_index)];
-        let polygon = geometry.polygons[usize::from(polygon_id.polygon_index)];
+        let polygon_index = usize::from(polygon_id.polygon_index);
+        let animation_mask = world_map_path_masks
+            .get(usize::from(polygon_id.world_index))
+            .and_then(|world| world.get(polygon_index))
+            .copied()
+            .flatten();
+        let polygon = polygon_with_map_path_mask(geometry.polygons[polygon_index], animation_mask);
         if let Some(texture) = geometry
             .texture_for_polygon(polygon, draw_count)
             .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?
@@ -675,7 +721,12 @@ fn build_retail_scene_cached(
         let world_index = usize::from(polygon_id.world_index);
         let geometry = &graph.worlds[world_index];
         let polygon_index = usize::from(polygon_id.polygon_index);
-        let polygon = geometry.polygons[polygon_index];
+        let animation_mask = world_map_path_masks
+            .get(world_index)
+            .and_then(|world| world.get(polygon_index))
+            .copied()
+            .flatten();
+        let polygon = polygon_with_map_path_mask(geometry.polygons[polygon_index], animation_mask);
         let mut screens = [crust_renderer::command::ScreenPoint::default(); 3];
         let mut colors = [Rgba8::default(); 3];
         for vertex_index in 0..3 {
@@ -1033,7 +1084,14 @@ fn prepare_objects(
             prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
             continue;
         };
-        let Some(animation_reference) = object.animation_reference else {
+        let Some(animation_source) = object.animation_source else {
+            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+            continue;
+        };
+        let AnimationSource::ItemFive(animation_reference) = animation_source else {
+            // The only authored process-local descriptor is BaraC type zero.
+            // Native reaches the transform switch default: it remains live
+            // for collision/presence but emits no render primitives.
             prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
             continue;
         };
@@ -1598,6 +1656,7 @@ fn parse_scene_graph(
     nsf_bytes: &[u8],
     key: RetailSceneCacheKey,
     path_point_index: usize,
+    parse_map_paths: bool,
 ) -> Result<CachedSceneGraph, RetailSceneError> {
     let zone_entry = typed_entry(nsf, nsd, key.zone, ZDAT_ENTRY_TYPE, "active ZDAT")?;
     let zone_header = ZoneHeader::parse(entry_item(zone_entry, nsf_bytes, 0, "ZDAT header")?)
@@ -1630,6 +1689,9 @@ fn parse_scene_graph(
             path,
             visibility: None,
             worlds: Vec::new(),
+            map_paths_parsed: parse_map_paths,
+            world_map_paths: Vec::new(),
+            world_map_path_masks: Vec::new(),
         });
     }
 
@@ -1667,6 +1729,7 @@ fn parse_scene_graph(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut worlds = Vec::with_capacity(zone_header.worlds.len());
+    let mut world_map_paths = Vec::with_capacity(zone_header.worlds.len());
     for (world_index, world) in zone_header.worlds.iter().enumerate() {
         let entry = typed_entry(nsf, nsd, world.geometry, WGEO_ENTRY_TYPE, "spawn WGEO")?;
         let geometry = parse_world_geometry(
@@ -1675,12 +1738,24 @@ fn parse_scene_graph(
             entry_item(entry, nsf_bytes, 2, "WGEO vertices")?,
         )
         .map_err(|error| scene_error(format!("spawn WGEO {world_index}: {error}")))?;
+        let map_paths = if parse_map_paths && entry.items.len() >= 4 {
+            Some(
+                WorldMapPathList::parse(entry_item(entry, nsf_bytes, 3, "WGEO map paths")?)
+                    .map_err(|error| {
+                        scene_error(format!("spawn WGEO {world_index} map paths: {error}"))
+                    })?,
+            )
+        } else {
+            None
+        };
         worlds.push(geometry);
+        world_map_paths.push(map_paths);
     }
     let world_polygon_counts = worlds
         .iter()
         .map(|world| world.polygons.len())
         .collect::<Vec<_>>();
+    let world_map_path_masks = empty_world_map_path_masks(&world_polygon_counts);
     let visibility = SlstCursor::new(&slst_items, &world_polygon_counts, path_point_index)
         .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
 
@@ -1691,7 +1766,118 @@ fn parse_scene_graph(
         path,
         visibility: Some(visibility),
         worlds,
+        map_paths_parsed: parse_map_paths,
+        world_map_paths,
+        world_map_path_masks,
     })
+}
+
+fn update_persistent_world_map_path_masks(
+    graph: &mut CachedSceneGraph,
+    animation: Option<RetailMapPathAnimation>,
+) -> Result<(), RetailSceneError> {
+    let polygon_counts = graph
+        .worlds
+        .iter()
+        .map(|world| world.polygons.len())
+        .collect::<Vec<_>>();
+    update_persistent_world_map_path_masks_for_counts(
+        &mut graph.world_map_path_masks,
+        &polygon_counts,
+        &graph.world_map_paths,
+        animation,
+    )
+}
+
+fn active_map_path_animation(
+    level: crust_formats::stream::LevelId,
+    animation: Option<RetailMapPathAnimation>,
+) -> Option<RetailMapPathAnimation> {
+    animation.filter(|animation| {
+        level == crust_formats::stream::LevelId::TITLE && animation.title_state == 15
+    })
+}
+
+fn scene_graph_cache_matches(
+    cached_key: Option<RetailSceneCacheKey>,
+    cached_map_paths_parsed: bool,
+    requested_key: RetailSceneCacheKey,
+    needs_map_paths: bool,
+) -> bool {
+    cached_key == Some(requested_key) && (!needs_map_paths || cached_map_paths_parsed)
+}
+
+fn empty_world_map_path_masks(polygon_counts: &[usize]) -> Vec<Vec<Option<u8>>> {
+    polygon_counts
+        .iter()
+        .map(|polygon_count| vec![None; *polygon_count])
+        .collect()
+}
+
+fn update_persistent_world_map_path_masks_for_counts(
+    persistent_masks: &mut Vec<Vec<Option<u8>>>,
+    polygon_counts: &[usize],
+    world_map_paths: &[Option<WorldMapPathList>],
+    animation: Option<RetailMapPathAnimation>,
+) -> Result<(), RetailSceneError> {
+    if polygon_counts.len() != world_map_paths.len() {
+        return Err(scene_error(
+            "WGEO map-path list count does not match the active world count",
+        ));
+    }
+    if persistent_masks.len() != polygon_counts.len()
+        || persistent_masks
+            .iter()
+            .zip(polygon_counts)
+            .any(|(masks, polygon_count)| masks.len() != *polygon_count)
+    {
+        return Err(scene_error(
+            "WGEO map-path mask sidecar does not match the active world layout",
+        ));
+    }
+    let Some(animation) = animation.filter(|animation| animation.title_state == 15) else {
+        // Native does not restore serialized WGEO masks when title state 15
+        // ends. Retain the last sidecar writes until this graph is replaced.
+        return Ok(());
+    };
+
+    let mut masks = empty_world_map_path_masks(polygon_counts);
+
+    let mut active_group = 0_u16;
+    for (world_index, ((polygon_count, map_paths), world_masks)) in polygon_counts
+        .iter()
+        .zip(world_map_paths)
+        .zip(&mut masks)
+        .enumerate()
+    {
+        let Some(map_paths) = map_paths else {
+            continue;
+        };
+        let overrides = map_paths
+            .mask_overrides(
+                *polygon_count,
+                &mut active_group,
+                animation.map_level_links,
+                animation.map_key_links,
+            )
+            .map_err(|error| scene_error(format!("spawn WGEO {world_index} map paths: {error}")))?;
+        for path_override in overrides {
+            world_masks[usize::from(path_override.polygon_index)] =
+                Some(path_override.animation_mask);
+        }
+    }
+    *persistent_masks = masks;
+    Ok(())
+}
+
+fn polygon_with_map_path_mask(
+    mut polygon: crust_formats::stream::WorldPolygon,
+    animation_mask: Option<u8>,
+) -> crust_formats::stream::WorldPolygon {
+    if let Some(animation_mask) = animation_mask {
+        polygon.animation_mask = animation_mask;
+    }
+    polygon
 }
 
 fn install_missing_texture_pages(
@@ -2300,6 +2486,129 @@ mod tests {
         assert_eq!(projection_distance(60).unwrap(), 460);
         assert_eq!(projection_distance(90).unwrap(), 288);
         assert!(projection_distance(45).is_err());
+    }
+
+    #[test]
+    fn island_map_exit_retains_last_masks_without_mutating_wgeo() {
+        let paths = [
+            Some(WorldMapPathList::parse(&[2, 0, 0x21, 0x80, 1, 0]).unwrap()),
+            Some(WorldMapPathList::parse(&[3, 0, 0, 0, 2, 0x80, 1, 0]).unwrap()),
+        ];
+        let polygon_counts = [2, 2];
+        let mut persistent_masks = empty_world_map_path_masks(&polygon_counts);
+        let animation = RetailMapPathAnimation {
+            title_state: 15,
+            map_level_links: 1 << 2,
+            map_key_links: 1 << 1,
+        };
+        update_persistent_world_map_path_masks_for_counts(
+            &mut persistent_masks,
+            &polygon_counts,
+            &paths,
+            Some(animation),
+        )
+        .unwrap();
+        assert_eq!(
+            persistent_masks,
+            [vec![None, Some(7)], vec![Some(7), Some(7)]]
+        );
+
+        // GOOL can request the next title state while the map graph remains
+        // resident for its fade. Native no longer calls GfxAnimMapPaths, but
+        // its prior writes remain in WGEO memory. The sidecar must do likewise.
+        let masks_before_exit = persistent_masks.clone();
+        let wrong_title_state = RetailMapPathAnimation {
+            title_state: 14,
+            ..animation
+        };
+        update_persistent_world_map_path_masks_for_counts(
+            &mut persistent_masks,
+            &polygon_counts,
+            &paths,
+            Some(wrong_title_state),
+        )
+        .unwrap();
+        assert_eq!(persistent_masks, masks_before_exit);
+        update_persistent_world_map_path_masks_for_counts(
+            &mut persistent_masks,
+            &polygon_counts,
+            &paths,
+            None,
+        )
+        .unwrap();
+        assert_eq!(persistent_masks, masks_before_exit);
+        let map_graph = RetailSceneCacheKey {
+            zone: Eid::from_raw(0x1234_5679),
+            path_index: 2,
+        };
+        assert!(scene_graph_cache_matches(
+            Some(map_graph),
+            true,
+            map_graph,
+            false,
+        ));
+        assert!(!scene_graph_cache_matches(
+            Some(map_graph),
+            false,
+            map_graph,
+            true,
+        ));
+
+        // Replacing the active graph constructs a fresh sidecar, just as
+        // unloading the native WGEO discards its mutated resident copy.
+        assert_eq!(
+            empty_world_map_path_masks(&polygon_counts),
+            [vec![None, None], vec![None, None]]
+        );
+        assert!(!scene_graph_cache_matches(
+            Some(map_graph),
+            true,
+            RetailSceneCacheKey {
+                path_index: 3,
+                ..map_graph
+            },
+            false,
+        ));
+
+        let original = crust_formats::stream::WorldPolygon {
+            vertex_indices: [0, 1, 2],
+            texture_info_word_index: 0,
+            texture_page_index: 0,
+            animation_period: 0,
+            animation_mask: 9,
+            animation_phase: 0,
+            reserved: false,
+        };
+        let effective = polygon_with_map_path_mask(original, Some(7));
+        assert_eq!(original.animation_mask, 9);
+        assert_eq!(effective.animation_mask, 7);
+        assert_eq!(original.animation_frame(16), 16);
+        assert_eq!(effective.animation_frame(16), 0);
+
+        assert_eq!(
+            active_map_path_animation(LevelId::TITLE, Some(animation)),
+            Some(animation)
+        );
+        assert_eq!(
+            active_map_path_animation(LevelId::N_SANITY_BEACH, Some(animation)),
+            None
+        );
+    }
+
+    #[test]
+    fn island_map_mask_resolution_reports_world_list_mismatch() {
+        let mut persistent_masks = vec![vec![None]];
+        assert!(
+            update_persistent_world_map_path_masks_for_counts(
+                &mut persistent_masks,
+                &[1],
+                &[],
+                None,
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("does not match")
+        );
     }
 
     #[test]

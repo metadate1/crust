@@ -342,11 +342,23 @@ The final checks below were run against this change set on 2026-07-14:
 - `cargo fmt --all -- --check` passed.
 - locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
   `crust-web` Clippy pass both completed with warnings denied.
-- the locked asset-free workspace suite passed all 736 default tests across 33 targets. Another 54
-  legally local tests remain ignored by default, for 790 listed tests across all targets.
+- the locked asset-free workspace suite passed all 749 default tests across 33 targets. Another 57
+  legally local tests remain ignored by default, for 806 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. All 54 selected tests passed with zero failures, including every
+  streams in place. All 57 selected tests passed with zero failures, including every
   raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
+- the exact island-map WGEO item-three golden passed against title pair `0x19`: four lists contain
+  42 group records and 368 polygon records with fingerprint `1c1c2ddfb2c7c7ab`. Focused scene
+  tests prove groups carry across worlds, globals 73/75 select the 64 masks, the source WGEO remains
+  immutable, and the last effective masks persist through map fade-out until the graph changes.
+- title-runtime tests preserve `GOOL → TitleUpdate → TitleLoadState → GLUpdate` with a passive
+  browser flow mirror. An explicit immediate-draw latch proves native's opaque overlay remains
+  black both when fade-out reaches exact zero and when a newly loaded screen synchronously requests
+  another fade-out in the same update.
+- GOOL `0x14` tests and the legally local Toxic Waste `BaraC` golden prove input-before-output LEA
+  translation and a checked same-object type-zero no-draw animation with its non-vertex collision
+  bound. Opcode `0x81` is covered as the native interpreter's one-cycle no-op, and a 1,200-frame
+  Ripper Roo run exercises its mount-time executable-39/subtype-four controller without faults.
 - executable-`0x22` crate coverage now checks the native strict adjacency boundary, checked
   bidirectional misc-A links, skipped-lower-crate Y compaction, activation/restart reset, stagger
   calculation and stale-reference cleanup before VM-handle reuse. The opt-in local golden confirms
@@ -396,8 +408,8 @@ The final checks below were run against this change set on 2026-07-14:
   proves GOOL `frames_elapsed` advances while texture `draw_count` is frozen; scene locations carry
   both values so hidden/loading frames cannot desynchronize shading from geometry.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,234,412 bytes with SHA-256
-  `28acb47b304456f613dc15c2a4843384cf67839d719bde48d9b35f80d1c578a3`.
+  web release. The Wasm payload is 1,243,981 bytes with SHA-256
+  `ed8d36dd0229ed44312980dea7f418495a6eaa3af5f05c6c992f0b213e48b2f4`.
 - the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
   the route and pause integration was loaded in the visible in-app browser. Because that browser
   cannot automate a native file picker,
@@ -443,8 +455,9 @@ The final checks below were run against this change set on 2026-07-14:
   N. Sanity scene. Keyboard, physical gamepad, fullscreen and touch presentation were not repeated
   in this pass.
 
-  The authoritative-save and inline-invincibility-event artifact identified by the current hash
-  above was then exercised through the same local-only bridge. The supplied BIN again resolved 88
+  The authoritative-save and inline-invincibility-event artifact identified by SHA-256
+  `28acb47b304456f613dc15c2a4843384cf67839d719bde48d9b35f80d1c578a3` was then exercised through
+  the same local-only bridge. The supplied BIN again resolved 88
   streams, 44/44 pairs and 219 MiB of selected extents. Title `0x19` rendered its authored scene at
   30.00 Hz with synthesized audio active; a fresh direct `0x09` mount rendered N. Sanity Beach's
   world, Crash and crate geometry. UI pause and mute each changed telemetry and were restored to
@@ -454,6 +467,18 @@ The final checks below were run against this change set on 2026-07-14:
   on the in-memory N. Sanity scene. No game bytes entered Git, browser persistence or the repository
   working tree; keyboard, physical gamepad, fullscreen and touch presentation were not repeated in
   this pass.
+
+  The source-ordered title/controller/LEA/island-map artifact identified by the current hash above
+  was loaded in a fresh visible in-app-browser tab. The supplied 632,083,536-byte raw BIN again
+  resolved 88 streams, all 44 pairs and 219 MiB of selected extents. Title `0x19` rendered its
+  authored tent/island scene at 30.00 Hz with synthesized audio; the source runtime subsequently
+  entered Intro while idling. A fresh direct `0x09` mount rendered N. Sanity Beach's world, Crash
+  and crate geometry. UI mute/unmute and native pause/resume changed telemetry and were restored to
+  `SYNTH ACTIVE` and `RUNNING`. The warning/error console log was empty. The loopback-only test
+  bridge was stopped and deleted, the normal no-store server was restored, root returned HTTP 200,
+  and both temporary routes returned HTTP 404. The visible tab retains the in-memory local `File`
+  and running N. Sanity scene. Keyboard, physical gamepad, fullscreen, and touch presentation were
+  not repeated in this pass; no game bytes entered Git, browser persistence, or the repository.
 
 ## Reproducible commands
 

@@ -155,6 +155,82 @@ fn n_sanity_a3_authored_crate_pair_has_native_bidirectional_links() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn ripper_roo_mount_creates_authored_root_controller_before_zone_scan() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::new_const(0x17);
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let ldat = nsd.ldat().unwrap();
+    assert_eq!(ldat.executable_map[39].name().as_deref(), Some("RooOC"));
+
+    // This controller is not serialized as a zone entity. It exists only
+    // because CoreObjectsCreate calls LevelInitMisc(1) at each stream mount.
+    let mut serialized_controller_entities = Vec::new();
+    for node in graph.zones() {
+        let entry = nsf.resolve_entry(&nsd, node.eid).unwrap();
+        let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+        for entity_index in 0..header.entity_count {
+            let item_index =
+                usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+            let entity =
+                ZoneEntity::parse(entry.item(item_index).unwrap().bytes(&nsf_bytes).unwrap())
+                    .unwrap();
+            if (entity.executable, entity.subtype) == (39, 4) {
+                serialized_controller_entities.push((node.eid, entity.id));
+            }
+        }
+    }
+    assert!(serialized_controller_entities.is_empty());
+
+    let mut runtime = RetailRuntime::new_for_level(256, level);
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let controller = runtime
+        .create_retail_level_misc_object(graph.spawn_path().zone, &mut host)
+        .expect("Ripper Roo LevelInitMisc(1) controller must bind")
+        .expect("Ripper Roo must create one root-four controller");
+    let spawned = runtime.arena().get(controller.arena()).unwrap();
+    assert_eq!(spawned.zone(), Eid::NONE);
+    assert_eq!(spawned.parent(), TreeParent::Root(ENEMY_OBJECT_ROOT));
+    assert_eq!(
+        spawned.origin(),
+        ObjectOrigin::Runtime {
+            executable: 39,
+            subtype: 4,
+        }
+    );
+    assert_eq!(
+        CollisionObjectReference::from_word(runtime.global_word(8).unwrap())
+            .map(CollisionObjectReference::object),
+        Some(controller.vm()),
+        "Ripper Roo publishes the controller through ambiance_obj"
+    );
+    assert_eq!(
+        runtime
+            .arena()
+            .preorder(TreeParent::Root(ENEMY_OBJECT_ROOT))
+            .unwrap()
+            .collect::<Vec<_>>(),
+        [controller.arena()]
+    );
+
+    runtime.set_frame_timing(34, 34);
+    let frame = runtime.run_frame(&mut host, 1_024).unwrap();
+    assert_eq!(frame.executions.len(), 1);
+    assert_eq!(frame.executions[0].object, controller);
+    assert!(frame.executions[0].result.is_ok());
+    assert_eq!(runtime.faulted_object_count(), 0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn n_sanity_zone_lifecycle_matches_local_retail_band_and_transition_goldens() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")

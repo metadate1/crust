@@ -10,8 +10,9 @@ use crust_formats::stream::{
     parse_nsf, structs::GoolState,
 };
 use crust_sim::gool::{
-    AnimationReference, CodeAddress, CodeSegment, Execution, HaltReason, Machine, ObjectHandle,
-    VmEffect, VmObject, VmStateProgram,
+    AnimationReference, AnimationSource, CodeAddress, CodeSegment, Execution, HaltReason, Machine,
+    ObjectHandle, ProcessAnimationKind, StorageReference, StorageRegion, VmEffect, VmObject,
+    VmStateProgram, process_register,
 };
 
 fn words(bytes: &[u8]) -> Vec<u32> {
@@ -20,6 +21,102 @@ fn words(bytes: &[u8]) -> Vec<u32> {
         .chunks_exact(4)
         .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
         .collect()
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn toxic_waste_barrel_lea_installs_and_resolves_its_process_animation() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x07);
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let metadata = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+    let barrel_eid = metadata.ldat().unwrap().executable_map[0x10];
+    assert_eq!(barrel_eid, Eid::from_name("BaraC").unwrap());
+    let program = load_gool_program(&metadata, &nsf, &nsf_bytes, barrel_eid, 0).unwrap();
+    assert_eq!(program.code()[0x9f], 0x14b7_ce2a);
+
+    let handle = ObjectHandle::new(0).unwrap();
+    let mut object = VmObject::from_gool_program(handle, &program).unwrap();
+    object.initialize_retail_process(0, 0).unwrap();
+    let expected_index = object
+        .initial_stack_pointer()
+        .checked_sub(4)
+        .expect("BaraC frame has the authored fp[-4] cell");
+    let mut machine = Machine::new(0);
+    machine.insert_object(object).unwrap();
+
+    // BaraC's init code writes process memory word two (fp[-4]) as exact
+    // type zero and word three as its authored X displacement. State three
+    // later aliases those live words instead of selecting global item five.
+    machine.object_mut(handle).unwrap().restart(0).unwrap();
+    assert_eq!(
+        machine.run(handle, 6),
+        Ok(Execution {
+            reason: HaltReason::BudgetExhausted,
+            steps: 6,
+        })
+    );
+    assert_eq!(
+        machine
+            .object(handle)
+            .unwrap()
+            .register(expected_index as usize),
+        Ok(0)
+    );
+    assert_eq!(
+        machine
+            .object(handle)
+            .unwrap()
+            .register(expected_index as usize + 1),
+        Ok(0x600)
+    );
+
+    machine.object_mut(handle).unwrap().restart(0x98).unwrap();
+    assert_eq!(
+        machine.run(handle, 8),
+        Ok(Execution {
+            reason: HaltReason::BudgetExhausted,
+            steps: 8,
+        })
+    );
+    let word = machine
+        .object(handle)
+        .unwrap()
+        .register(process_register::ANIMATION_SEQUENCE)
+        .unwrap();
+    let reference = StorageReference::from_word(word).unwrap();
+    assert_eq!(reference.object(), handle);
+    assert_eq!(reference.region(), StorageRegion::Register);
+    assert_eq!(u32::from(reference.index()), expected_index);
+    assert_eq!(machine.read_storage_reference(reference), Ok(0));
+    let source = machine
+        .object(handle)
+        .unwrap()
+        .animation_source()
+        .unwrap()
+        .expect("BaraC's non-null process descriptor is a live animation source");
+    let AnimationSource::Process(process) = source else {
+        panic!("BaraC must retain the LEA process address, not an item-five offset");
+    };
+    assert_eq!(process.storage(), reference);
+    assert_eq!(process.kind(), ProcessAnimationKind::NoDraw);
+    assert_eq!(
+        machine
+            .object(handle)
+            .unwrap()
+            .retail_transform()
+            .unwrap()
+            .translation,
+        [0x600, 0, 0],
+        "the descriptor's following process words remain the authored state-three displacement inputs"
+    );
 }
 
 #[test]

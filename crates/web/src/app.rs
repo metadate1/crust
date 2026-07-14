@@ -39,12 +39,12 @@ use crust_sim::card::{
 };
 use crust_sim::demo::DemoEnd;
 use crust_sim::flow::{
-    FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, TitlePhase, TitleScreen,
+    FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, TitleScreen,
 };
 use crust_sim::gool::{
-    AudioHostRequest, AudioHostResponse, CURRENT_DISPLAY_GLOBAL, CURRENT_MAP_LEVEL_GLOBAL,
-    CardHostRequest, GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL,
-    KEY_COUNT_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL, MUSIC_VOLUME_GLOBAL,
+    AudioHostRequest, AudioHostResponse, CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest,
+    GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL, KEY_COUNT_GLOBAL,
+    LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL, MUSIC_VOLUME_GLOBAL,
     ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment,
     RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject,
     VmStateProgram, process_register,
@@ -57,9 +57,9 @@ use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
     RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
-    RetailSaveStateOutcome, RetailSessionCarry, RetailTraversalBoundary, RetailZoneEnvironment,
-    RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding,
-    ZoneTerminationMode,
+    RetailSaveStateOutcome, RetailSessionCarry, RetailTitleAction, RetailTraversalBoundary,
+    RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle,
+    StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -82,20 +82,18 @@ use crate::dom::{Dom, window};
 use crate::pbak_runtime::{
     PbakFrameTiming, RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak,
 };
-use crate::retail_scene::{RetailSceneBuilder, RetailSceneProgressLocation};
+use crate::retail_scene::{
+    RetailMapPathAnimation, RetailSceneBuilder, RetailSceneProgressLocation,
+};
 use crate::storage::StorageState;
 use crate::title_runtime::{
     RETAIL_CAMERA_UPDATE, RETAIL_ZONE_OBJECTS_ACTIVE, RetailTitleScreenProfile,
-    RetailTitleScreenType, retail_title_display_update, retail_title_mdat_binding,
-    retail_title_overlay_alpha, retail_title_screen_profile, title_mdat_entity_is_unlocked,
-    title_state_number_uses_image,
+    RetailTitleScreenType, retail_title_mdat_binding, retail_title_overlay_alpha,
+    retail_title_screen_profile, title_mdat_entity_is_unlocked, title_state_number_uses_image,
 };
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
-use crate::{
-    BrowserFlowMirrorAdvance, authoritative_save_or_last, browser_flow_mirror_advance,
-    initial_retail_level_state,
-};
+use crate::{authoritative_save_or_last, initial_retail_level_state};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
@@ -104,6 +102,8 @@ const RETAIL_INSTRUCTION_BUDGET: usize = 67;
 const BOX_COUNT_GLOBAL: usize = 62;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
+const MAP_LEVEL_LINKS_GLOBAL: usize = 73;
+const MAP_KEY_LINKS_GLOBAL: usize = 75;
 const PBAK_STATE_GLOBAL: usize = 105;
 const TITLE_DIRECT_ZONE_NAMES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
@@ -858,6 +858,11 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
+            &mut retail_objects,
+            &pair,
+            retail_camera.location().path.zone,
+        )?;
         let title_seen = pair.level == FormatLevelId::TITLE;
         let mut runtime = Self {
             flow,
@@ -900,8 +905,9 @@ impl Runtime {
             muted: false,
             last_gl_error: 0,
         };
-        runtime.seed_title_state_global()?;
+        runtime.configure_retail_title_authority(true)?;
         log_retail_core_objects(dom, retail_core_objects);
+        log_retail_level_misc_object(dom, retail_level_misc_object);
         runtime.sync_title_card(dom)?;
         let initial_zone = runtime.retail_camera.location().path.zone;
         let initial_music = runtime
@@ -1091,6 +1097,11 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        let retail_level_misc_object = create_retail_level_misc_object_for_pair(
+            &mut retail_objects,
+            &pair,
+            retail_camera.location().path.zone,
+        )?;
         let destination_authoritative_save = retail_objects.card_save_data().map_err(|error| {
             JsValue::from_str(&format!(
                 "could not snapshot destination retail save globals: {error:?}"
@@ -1123,6 +1134,7 @@ impl Runtime {
         } else {
             RetailFrameState::ready(retail_point_count, 0)
         };
+        let first_title_boot = flow_level == LevelId::TITLE && !self.title_seen;
         self.flow
             .mount_retail_level(flow_level, title_screen)
             .map_err(|error| {
@@ -1143,7 +1155,7 @@ impl Runtime {
         self.retail_zone_lifecycle = retail_zone_lifecycle;
         self.retail_zone_pager = retail_zone_pager;
         self.retail_pbak = prepared_pbak.map(RetailPbakPlayback::new);
-        self.seed_title_state_global()?;
+        self.configure_retail_title_authority(first_title_boot)?;
         self.retail_tick_state = RetailTickState::NeedsSpawn;
         self.retail_metrics = RetailRuntimeMetrics::default();
         self.retail_runtime_error = None;
@@ -1153,6 +1165,7 @@ impl Runtime {
             .set_sfx_volume(self.flow.options.sfx_volume);
         self.last_title_state = None;
         log_retail_core_objects(dom, retail_core_objects);
+        log_retail_level_misc_object(dom, retail_level_misc_object);
         self.sync_title_card(dom)?;
         self.apply_prepared_retail_music(destination_music, true, destination_zone, dom)
             .map_err(|error| JsValue::from_str(&error))?;
@@ -1241,18 +1254,25 @@ impl Runtime {
     }
 
     fn title_screen_profile(&self) -> Option<RetailTitleScreenProfile> {
-        matches!(self.flow.state(), FlowState::Title).then(|| {
-            retail_title_screen_profile(
-                self.flow.title().screen(),
-                self.flow.progress.current_map_level,
-            )
-        })
+        if !matches!(self.flow.state(), FlowState::Title) {
+            return None;
+        }
+        self.retail_objects
+            .retail_title_presentation()
+            .ok()
+            .flatten()
+            .map(|title| {
+                retail_title_screen_profile(title.screen, self.flow.progress.current_map_level)
+            })
     }
 
     fn authored_title_runtime_active(&self) -> bool {
         matches!(self.flow.state(), FlowState::Title)
             && self.level_assets.level == FormatLevelId::TITLE
-            && !self.retail_objects.arena().is_empty()
+            && self
+                .retail_objects
+                .retail_title_presentation()
+                .is_ok_and(|title| title.is_some())
     }
 
     fn authored_scene_runtime_active(&self) -> bool {
@@ -1263,7 +1283,16 @@ impl Runtime {
 
     fn title_screen_for_mount(&self, mount: &RetailPairMount) -> Result<TitleScreen, JsValue> {
         if !mount.core_transition && matches!(self.flow.state(), FlowState::Title) {
-            return Ok(self.flow.title().next_screen());
+            return self
+                .retail_objects
+                .retail_title_presentation()
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not read mounted retail title state: {error:?}"
+                    ))
+                })?
+                .map(|title| title.next_screen)
+                .ok_or_else(|| JsValue::from_str("mounted title runtime is not configured"));
         }
         if !self.title_seen {
             return Ok(TitleScreen::PublisherFirst);
@@ -1293,108 +1322,40 @@ impl Runtime {
         }
     }
 
-    fn seed_title_state_global(&mut self) -> Result<(), JsValue> {
+    fn configure_retail_title_authority(&mut self, first_boot: bool) -> Result<(), JsValue> {
         if !matches!(self.flow.state(), FlowState::Title)
             || self.level_assets.level != FormatLevelId::TITLE
         {
             return Ok(());
         }
+        let screen = self.flow.title().screen();
         self.retail_objects
-            .set_global_word(TITLE_STATE_GLOBAL, self.flow.title().next_screen().raw())
+            .configure_retail_title(screen, first_boot)
             .map_err(|error| {
                 JsValue::from_str(&format!(
-                    "could not seed retail title-state global: {error:?}"
-                ))
-            })
-    }
-
-    fn consume_authored_title_state(&mut self, dom: &Dom) -> Result<bool, JsValue> {
-        if !self.authored_title_runtime_active() {
-            return Ok(false);
-        }
-        let raw = self
-            .retail_objects
-            .global_word(TITLE_STATE_GLOBAL)
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not read authored retail title state: {error:?}"
+                    "could not configure retail title authority: {error:?}"
                 ))
             })?;
-        let changed = self
-            .flow
-            .request_authored_title_state(raw)
+        self.flow
+            .mirror_retail_title_screen(screen)
             .map_err(|error| {
                 JsValue::from_str(&format!(
-                    "authored retail title state {raw:#x} is invalid: {error:?}"
+                    "could not initialize passive title flow mirror: {error:?}"
                 ))
             })?;
-        if changed {
-            dom.log(&format!("Retail GOOL requested title state {raw}."), false);
-        }
-        Ok(true)
-    }
-
-    fn publish_title_state_global(&mut self) -> Result<(), JsValue> {
-        if !matches!(self.flow.state(), FlowState::Title)
-            || self.level_assets.level != FormatLevelId::TITLE
-        {
-            return Ok(());
-        }
-        self.retail_objects
-            .set_global_word(TITLE_STATE_GLOBAL, self.flow.title().next_screen().raw())
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not publish retail title-state global: {error:?}"
-                ))
-            })
-    }
-
-    fn apply_retail_title_display_update(
-        &mut self,
-        previous_phase: TitlePhase,
-    ) -> Result<(), JsValue> {
-        if !matches!(self.flow.state(), FlowState::Title)
-            || self.level_assets.level != FormatLevelId::TITLE
-        {
-            return Ok(());
-        }
-        let current_phase = self.flow.title().phase();
-        let Some(update) = retail_title_display_update(previous_phase, current_phase) else {
-            return Ok(());
-        };
-        let display_mask = self
-            .retail_objects
-            .global_word(NEXT_DISPLAY_GLOBAL)
-            .map(|display_mask| update.apply(display_mask))
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not read the retail title display word: {error:?}"
-                ))
-            })?;
-        // RetailRuntime completes its GLUpdate latch at the end of GOOL,
-        // while native TitleUpdate runs between GOOL and GLUpdate. Mirroring
-        // the exact two-bit mutation into both words here restores the source
-        // order without replacing any unrelated GOOL-authored display bits.
-        self.retail_objects
-            .set_global_word(NEXT_DISPLAY_GLOBAL, display_mask)
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not update the retail title display word: {error:?}"
-                ))
-            })?;
-        self.retail_objects
-            .set_global_word(CURRENT_DISPLAY_GLOBAL, display_mask)
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not latch the retail title display word: {error:?}"
-                ))
-            })
+        Ok(())
     }
 
     fn live_title_mdat_eid(&self) -> Option<Eid> {
         self.title_screen_profile()
             .filter(|profile| profile.uses_image())
-            .and_then(|_| title_mdat_eid(self.flow.title().screen() as u8).ok())
+            .and_then(|_| {
+                self.retail_objects
+                    .retail_title_presentation()
+                    .ok()
+                    .flatten()
+            })
+            .and_then(|title| title_mdat_eid(title.screen as u8).ok())
     }
 
     fn effective_retail_display_mask(&self) -> u32 {
@@ -1402,6 +1363,29 @@ impl Runtime {
         // but subsequent GOOL writes and the one-frame GLUpdate latch remain
         // authoritative just as they are in gameplay.
         self.retail_objects.current_display_mask()
+    }
+
+    fn pre_gool_retail_map_path_animation(&self) -> Result<Option<RetailMapPathAnimation>, String> {
+        if self.level_assets.level != FormatLevelId::TITLE {
+            return Ok(None);
+        }
+        let title_state = self
+            .retail_objects
+            .global_word(TITLE_STATE_GLOBAL)
+            .map_err(|error| format!("retail title-state global is unavailable: {error:?}"))?;
+        if title_state != TitleScreen::Map.raw() {
+            return Ok(None);
+        }
+        let read = |index| {
+            self.retail_objects.global_word(index).map_err(|error| {
+                format!("retail map-path global {index} is unavailable: {error:?}")
+            })
+        };
+        Ok(Some(RetailMapPathAnimation {
+            title_state,
+            map_level_links: read(MAP_LEVEL_LINKS_GLOBAL)?,
+            map_key_links: read(MAP_KEY_LINKS_GLOBAL)?,
+        }))
     }
 
     fn effective_retail_field_of_view(&self) -> Result<u32, String> {
@@ -1672,6 +1656,16 @@ impl Runtime {
                 // separately from the per-object values latched later during
                 // the live preorder traversal.
                 let world_display_mask = self.effective_retail_display_mask();
+                let map_path_animation = match self.pre_gool_retail_map_path_animation() {
+                    Ok(animation) => animation,
+                    Err(error) => {
+                        let message = format!("retail map-path state failed: {error}");
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = RetailTickState::Paused;
+                        None
+                    }
+                };
                 let frame_draw_count = self.retail_objects.draw_count();
                 let frame_stamp = self.retail_objects.next_frame_stamp();
                 if !native_paused && let Err(error) = self.retail_objects.advance_level_shader() {
@@ -1717,16 +1711,23 @@ impl Runtime {
                             frame_draw_count,
                             frame_stamp,
                             world_display_mask,
+                            map_path_animation,
                         ));
                     }
                 }
-                if let Some((camera_location, draw_count, frame_stamp, world_display_mask)) =
-                    scene_location
+                if let Some((
+                    camera_location,
+                    draw_count,
+                    frame_stamp,
+                    world_display_mask,
+                    map_path_animation,
+                )) = scene_location
                     && let Err(error) = self.update_retail_scene(
                         camera_location,
                         draw_count,
                         frame_stamp,
                         world_display_mask,
+                        map_path_animation,
                         dom,
                     )
                 {
@@ -1748,28 +1749,9 @@ impl Runtime {
             }
 
             if !transition_queued {
-                let authored_title = self.authored_title_runtime_active();
-                let mirror_advance = browser_flow_mirror_advance(self.flow.state(), authored_title);
                 self.handle_events(dom)?;
                 if self.pending_mount.is_none() {
-                    let previous_title_phase =
-                        matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle)
-                            .then(|| self.flow.title().phase());
-                    if matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle) {
-                        self.flow.tick_authored_title().map_err(|error| {
-                            JsValue::from_str(&format!(
-                                "authored title presentation failed: {error:?}"
-                            ))
-                        })?;
-                    }
-                    if let Some(previous_title_phase) = previous_title_phase {
-                        self.apply_retail_title_display_update(previous_title_phase)?;
-                    }
-                    if matches!(mirror_advance, BrowserFlowMirrorAdvance::TickAuthoredTitle) {
-                        self.consume_authored_title_state(dom)?;
-                    }
                     self.handle_events(dom)?;
-                    self.publish_title_state_global()?;
                 }
                 if let Some(audio) = &mut self.audio {
                     audio.tick_30_hz();
@@ -1793,15 +1775,22 @@ impl Runtime {
         let assets_stalled = self.assets_stalled();
         let show_title_image = !assets_stalled
             && matches!(self.flow.state(), FlowState::Title)
-            && title_state_uses_image(self.flow.title().screen());
+            && self
+                .title_screen_profile()
+                .is_some_and(RetailTitleScreenProfile::uses_image);
         let show_title_objects = self
             .title_screen_profile()
             .is_some_and(|profile| profile.screen_type == RetailTitleScreenType::ImageAndObjects);
-        let title_overlay_alpha = matches!(self.flow.state(), FlowState::Title)
-            .then(|| {
+        let title_overlay_alpha = self
+            .retail_objects
+            .retail_title_presentation()
+            .ok()
+            .flatten()
+            .map(|title| {
                 retail_title_overlay_alpha(
-                    self.flow.title().phase(),
-                    self.flow.title().fade_counter(),
+                    title.phase,
+                    title.fade_counter,
+                    title.opaque_swap_overlay,
                 )
             })
             .unwrap_or_default();
@@ -1937,6 +1926,7 @@ impl Runtime {
         physical_held: u16,
         demo_override: Option<u32>,
     ) {
+        let authored_title = self.authored_title_runtime_active();
         let title_mdat = self.live_title_mdat_eid();
         let mut pbak_finish = None;
         let mut pbak_finish_effects_applied = false;
@@ -1964,75 +1954,82 @@ impl Runtime {
             if let Some(boundary) = pbak_boundary {
                 let playback = &mut self.retail_pbak;
                 let pad = &mut self.pad;
-                self.retail_objects.run_frame_with_traversal_hook(
-                    &mut host,
-                    RETAIL_INSTRUCTION_BUDGET,
-                    |runtime, host, point| {
-                        let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
-                        let released_return = playback
-                            .as_ref()
-                            .is_some_and(RetailPbakPlayback::is_returning)
-                            && runtime
-                                .global_word(PBAK_STATE_GLOBAL)
-                                .map_err(RuntimeError::Vm)?
-                                != 3;
-                        if released_return {
-                            *playback = None;
-                            pad.update(boundary.physical_held, 0, None);
+                self.retail_objects
+                    .run_frame_before_display_with_traversal_hook(
+                        &mut host,
+                        RETAIL_INSTRUCTION_BUDGET,
+                        |runtime, host, point| {
+                            let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                            let released_return = playback
+                                .as_ref()
+                                .is_some_and(RetailPbakPlayback::is_returning)
+                                && runtime
+                                    .global_word(PBAK_STATE_GLOBAL)
+                                    .map_err(RuntimeError::Vm)?
+                                    != 3;
+                            if released_return {
+                                *playback = None;
+                                pad.update(boundary.physical_held, 0, None);
+                                runtime
+                                    .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
+                                    .map_err(RuntimeError::Vm)?;
+                                return Ok(());
+                            }
+                            let Some(playback) = playback.as_mut() else {
+                                return Ok(());
+                            };
+                            let (input, end) =
+                                playback.advance_pad_boundary(boundary.physical_held);
+                            debug_assert!(
+                                input.ticks_per_frame.is_none()
+                                    || input.ticks_per_frame == Some(boundary.timing.crash.period),
+                                "pre-Crash timing must match the frame consumed by PadUpdatePbak"
+                            );
+                            runtime.set_frame_timing(
+                                boundary.timing.crash.current,
+                                boundary.timing.crash.period,
+                            );
+                            let previous_pad = pad.snapshot();
+                            pad.update(boundary.physical_held, 0, Some(input.held));
+                            let updated_pad = pad.snapshot();
+                            if let Some(reason) = end {
+                                runtime
+                                    .set_pad_snapshot(
+                                        0,
+                                        pbak_event_pad_snapshot(
+                                            retail_pad_snapshot(previous_pad),
+                                            retail_pad_snapshot(updated_pad),
+                                        ),
+                                    )
+                                    .map_err(RuntimeError::Vm)?;
+                                pbak_finish = Some((reason, runtime.finish_retail_demo(host)?));
+                            }
                             runtime
-                                .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
+                                .set_pad_snapshot(0, retail_pad_snapshot(updated_pad))
                                 .map_err(RuntimeError::Vm)?;
-                            return Ok(());
-                        }
-                        let Some(playback) = playback.as_mut() else {
-                            return Ok(());
-                        };
-                        let (input, end) = playback.advance_pad_boundary(boundary.physical_held);
-                        debug_assert!(
-                            input.ticks_per_frame.is_none()
-                                || input.ticks_per_frame == Some(boundary.timing.crash.period),
-                            "pre-Crash timing must match the frame consumed by PadUpdatePbak"
-                        );
-                        runtime.set_frame_timing(
-                            boundary.timing.crash.current,
-                            boundary.timing.crash.period,
-                        );
-                        let previous_pad = pad.snapshot();
-                        pad.update(boundary.physical_held, 0, Some(input.held));
-                        let updated_pad = pad.snapshot();
-                        if let Some(reason) = end {
-                            runtime
-                                .set_pad_snapshot(
-                                    0,
-                                    pbak_event_pad_snapshot(
-                                        retail_pad_snapshot(previous_pad),
-                                        retail_pad_snapshot(updated_pad),
-                                    ),
-                                )
-                                .map_err(RuntimeError::Vm)?;
-                            pbak_finish = Some((reason, runtime.finish_retail_demo(host)?));
-                        }
-                        runtime
-                            .set_pad_snapshot(0, retail_pad_snapshot(updated_pad))
-                            .map_err(RuntimeError::Vm)?;
-                        Ok(())
-                    },
-                )
+                            Ok(())
+                        },
+                    )
             } else {
                 let pad = &mut self.pad;
-                self.retail_objects.run_frame_with_traversal_hook(
-                    &mut host,
-                    RETAIL_INSTRUCTION_BUDGET,
-                    |runtime, _host, point| {
-                        let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
-                        pad.update(physical_held, 0, demo_override);
-                        runtime
-                            .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
-                            .map_err(RuntimeError::Vm)
-                    },
-                )
+                self.retail_objects
+                    .run_frame_before_display_with_traversal_hook(
+                        &mut host,
+                        RETAIL_INSTRUCTION_BUDGET,
+                        |runtime, _host, point| {
+                            let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                            pad.update(physical_held, 0, demo_override);
+                            runtime
+                                .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
+                                .map_err(RuntimeError::Vm)
+                        },
+                    )
             }
         };
+        let boundary_error = result
+            .as_ref()
+            .ok()
+            .and_then(|_| self.complete_retail_source_frame(dom, authored_title).err());
         self.drain_retail_reclaim_diagnostics(dom);
         match result {
             Ok(frame) => {
@@ -2070,15 +2067,22 @@ impl Runtime {
                         frame_execution_errors != 0,
                     );
                 }
-                match self.apply_retail_gool_level_effects(&frame.effects, dom) {
-                    Ok(()) => {
-                        pbak_finish_effects_applied = pbak_finish.is_some();
-                    }
-                    Err(error) => {
-                        let message = format!("retail save/restart effect failed: {error}");
-                        dom.log(&message, true);
-                        self.retail_runtime_error = Some(message);
-                        self.retail_tick_state = RetailTickState::Paused;
+                if let Some(error) = boundary_error {
+                    let message = format!("retail title/display boundary failed: {error}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = RetailTickState::Paused;
+                } else {
+                    match self.apply_retail_gool_level_effects(&frame.effects, dom) {
+                        Ok(()) => {
+                            pbak_finish_effects_applied = pbak_finish.is_some();
+                        }
+                        Err(error) => {
+                            let message = format!("retail save/restart effect failed: {error}");
+                            dom.log(&message, true);
+                            self.retail_runtime_error = Some(message);
+                            self.retail_tick_state = RetailTickState::Paused;
+                        }
                     }
                 }
             }
@@ -2117,6 +2121,52 @@ impl Runtime {
             self.retail_runtime_error = Some(error);
             self.retail_tick_state = RetailTickState::Paused;
         }
+    }
+
+    fn complete_retail_source_frame(
+        &mut self,
+        dom: &Dom,
+        authored_title: bool,
+    ) -> Result<(), String> {
+        if authored_title {
+            let previous = self
+                .retail_objects
+                .retail_title_presentation()
+                .map_err(|error| format!("could not read title state: {error:?}"))?
+                .ok_or_else(|| "authored title runtime is not configured".to_owned())?;
+            let action = self
+                .retail_objects
+                .begin_retail_title_update()
+                .map_err(|error| format!("TitleUpdate start failed: {error:?}"))?;
+            if let Some(RetailTitleAction::LoadScreen { screen, .. }) = action {
+                self.flow
+                    .mirror_retail_title_screen(screen)
+                    .map_err(|error| format!("passive title mirror failed: {error:?}"))?;
+                self.sync_title_card(dom)
+                    .map_err(|error| format!("TitleLoadState failed: {}", js_message(&error)))?;
+            }
+            self.retail_objects
+                .finish_retail_title_update()
+                .map_err(|error| format!("TitleUpdate request compare failed: {error:?}"))?;
+            let current = self
+                .retail_objects
+                .retail_title_presentation()
+                .map_err(|error| format!("could not read updated title state: {error:?}"))?
+                .ok_or_else(|| "authored title runtime disappeared".to_owned())?;
+            if current.next_screen != previous.next_screen {
+                dom.log(
+                    &format!(
+                        "Retail GOOL requested title state {}.",
+                        current.next_screen.raw()
+                    ),
+                    false,
+                );
+            }
+        }
+        self.retail_objects
+            .finish_deferred_display_frame()
+            .map_err(|error| format!("GLUpdate failed: {error:?}"))?;
+        Ok(())
     }
 
     fn sync_completed_card_load(&mut self, dom: &Dom) {
@@ -2543,6 +2593,7 @@ impl Runtime {
         draw_count: u32,
         frame_stamp: u32,
         world_display_mask: u32,
+        map_path_animation: Option<RetailMapPathAnimation>,
         dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
@@ -2591,6 +2642,7 @@ impl Runtime {
                 main_object,
                 world_display_mask,
                 field_of_view,
+                map_path_animation,
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
@@ -2902,9 +2954,10 @@ impl Runtime {
             // CamUpdate precedes GoolUpdate, so it observes the stamp installed
             // by the previous retail object frame.
             frames_elapsed: machine.frames_elapsed(),
-            // Gem events are still a typed host boundary. Zero is the exact
-            // LevelInit value and remains correct until that event is hosted.
-            gem_stamp: 0,
+            gem_stamp: self
+                .retail_objects
+                .gem_stamp()
+                .map_err(|error| format!("retail gem stamp is unavailable: {error:?}"))?,
         }))
     }
 
@@ -2929,7 +2982,16 @@ impl Runtime {
         {
             return Ok(());
         }
-        let screen = self.flow.title().screen();
+        let screen = self
+            .retail_objects
+            .retail_title_presentation()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not read authoritative retail title screen: {error:?}"
+                ))
+            })?
+            .map(|title| title.screen)
+            .ok_or_else(|| JsValue::from_str("retail title runtime is not configured"))?;
         let state = screen as u8;
         if self.last_title_state == Some(state) {
             return Ok(());
@@ -3978,6 +4040,12 @@ fn retail_pad_snapshot(snapshot: PlatformPadSnapshot) -> RetailPadSnapshot {
 
 fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Result<(), JsValue> {
     let level = current_level(&runtime.flow);
+    let title_state = runtime
+        .retail_objects
+        .retail_title_presentation()
+        .ok()
+        .flatten()
+        .map_or(runtime.flow.title().screen(), |title| title.screen);
     Reflect::set(
         debug,
         &JsValue::from_str("frame"),
@@ -3991,7 +4059,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     Reflect::set(
         debug,
         &JsValue::from_str("titleState"),
-        &JsValue::from_f64(f64::from(runtime.flow.title().screen() as u8)),
+        &JsValue::from_f64(f64::from(title_state as u8)),
     )?;
     Reflect::set(
         debug,
@@ -4710,6 +4778,30 @@ fn log_retail_core_objects(dom: &Dom, created: Option<RetailCoreObjects>) {
                 "Created retail life, fruit, and pickup HUD roots: {:?}, {:?}, {:?}.",
                 objects.life, objects.fruit, objects.pickup
             ),
+            false,
+        );
+    }
+}
+
+fn create_retail_level_misc_object_for_pair(
+    runtime: &mut RetailRuntime,
+    pair: &ValidatedPair,
+    current_zone: Eid,
+) -> Result<Option<RuntimeObjectHandle>, JsValue> {
+    let mut host = NsfProgramHost::new(&pair.nsd, &pair.nsf, &pair.nsf_bytes);
+    runtime
+        .create_retail_level_misc_object(current_zone, &mut host)
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not create retail level-misc controller: {error:?}"
+            ))
+        })
+}
+
+fn log_retail_level_misc_object(dom: &Dom, created: Option<RuntimeObjectHandle>) {
+    if let Some(object) = created {
+        dom.log(
+            &format!("Created retail LevelInitMisc root controller: {object:?}."),
             false,
         );
     }

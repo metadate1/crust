@@ -4,6 +4,131 @@ use crate::binary::{Eid, FormatError, Reader, checked_slice};
 
 use super::structs::{ColorInfo, RegionInfo, WorldGeometryHeader};
 
+/// Number of path-animation groups addressable by the island map's two
+/// 32-bit GOOL globals.
+pub const WORLD_MAP_PATH_GROUP_COUNT: u16 = 64;
+
+/// One record from WGEO item three on the island map.
+///
+/// The serialized item reuses the 16-bit `poly_id` bit layout. A set flag
+/// changes the active group; an unset flag assigns one polygon in this WGEO
+/// to that group. The three `world_idx` bits are deliberately ignored here,
+/// matching `GfxAnimMapPaths`, which reads only `flag` and `poly_idx`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorldMapPathRecord {
+    Group(u16),
+    Polygon(u16),
+}
+
+/// A validated effective animation-mask write for one WGEO polygon.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WorldMapPathMaskOverride {
+    pub polygon_index: u16,
+    pub animation_mask: u8,
+}
+
+/// Bounds-checked WGEO item-three map-path program.
+///
+/// Native casts this item to `poly_id_list`, then intentionally reads
+/// `ids[ii - 1]`. Since `ids` begins after the two-word list header, record
+/// zero is the serialized `type` halfword at byte two. Consequently the
+/// exact wire layout is one little-endian `len` followed by `len` packed
+/// 16-bit records, not a four-byte header followed by `len` records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorldMapPathList {
+    records: Vec<WorldMapPathRecord>,
+}
+
+impl WorldMapPathList {
+    /// Parses one complete WGEO item-three path list.
+    pub fn parse(bytes: &[u8]) -> Result<Self, FormatError> {
+        let mut reader = Reader::new(bytes);
+        let record_count = usize::from(reader.u16_le()?);
+        let record_bytes = record_count
+            .checked_mul(2)
+            .ok_or_else(|| FormatError::at(0, "WGEO map-path record byte count overflows"))?;
+        let expected_len = 2_usize
+            .checked_add(record_bytes)
+            .ok_or_else(|| FormatError::at(0, "WGEO map-path item length overflows"))?;
+        require_exact_len(bytes, expected_len, "WGEO map-path item")?;
+
+        let mut records = Vec::with_capacity(record_count);
+        for _ in 0..record_count {
+            let raw = reader.u16_le()?;
+            let polygon_id = super::slst::PolygonId::from_raw(raw);
+            records.push(if polygon_id.flag {
+                WorldMapPathRecord::Group(polygon_id.polygon_index)
+            } else {
+                WorldMapPathRecord::Polygon(polygon_id.polygon_index)
+            });
+        }
+        Ok(Self { records })
+    }
+
+    /// Ordered source records, including group changes.
+    #[must_use]
+    pub fn records(&self) -> &[WorldMapPathRecord] {
+        &self.records
+    }
+
+    /// Resolves this world's non-mutating polygon-mask writes.
+    ///
+    /// `active_group` is shared by every world in ZDAT order because native
+    /// initializes `poly_idx2` once outside its WGEO loop. Groups 0..31 read
+    /// `map_level_links`; groups 32..63 read `map_key_links`. Enabled groups
+    /// force mask seven and disabled groups force zero. Duplicate polygon
+    /// records remain ordered so a caller can preserve native's last write.
+    pub fn mask_overrides(
+        &self,
+        polygon_count: usize,
+        active_group: &mut u16,
+        map_level_links: u32,
+        map_key_links: u32,
+    ) -> Result<Vec<WorldMapPathMaskOverride>, FormatError> {
+        let mut overrides = Vec::new();
+        for (record_index, record) in self.records.iter().copied().enumerate() {
+            let record_offset = 2 + record_index * 2;
+            match record {
+                WorldMapPathRecord::Group(group) => {
+                    if group >= WORLD_MAP_PATH_GROUP_COUNT {
+                        return Err(FormatError::at(
+                            record_offset,
+                            "WGEO map-path group is outside the 64 authored groups",
+                        ));
+                    }
+                    *active_group = group;
+                }
+                WorldMapPathRecord::Polygon(polygon_index) => {
+                    if usize::from(polygon_index) >= polygon_count {
+                        return Err(FormatError::at(
+                            record_offset,
+                            "WGEO map-path record references a polygon outside item one",
+                        ));
+                    }
+                    if *active_group >= WORLD_MAP_PATH_GROUP_COUNT {
+                        return Err(FormatError::at(
+                            record_offset,
+                            "WGEO map-path active group is outside the 64 authored groups",
+                        ));
+                    }
+                    let bit_index = u32::from(*active_group % 32);
+                    let mask = 1_u32 << bit_index;
+                    let enabled = if *active_group < 32 {
+                        map_level_links & mask != 0
+                    } else {
+                        map_key_links & mask != 0
+                    };
+                    overrides.push(WorldMapPathMaskOverride {
+                        polygon_index,
+                        animation_mask: if enabled { 7 } else { 0 },
+                    });
+                }
+            }
+        }
+        Ok(overrides)
+    }
+}
+
 /// One eight-byte world polygon in its decoded field order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WorldPolygon {
@@ -299,6 +424,10 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
+        bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+    }
+
     fn put_u32(bytes: &mut [u8], offset: usize, value: u32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -358,6 +487,93 @@ mod tests {
             expected
         );
         assert_eq!(expected.animation_frame(0), 0x11 & 0x13);
+    }
+
+    #[test]
+    fn map_path_item_includes_the_type_halfword_as_record_zero() {
+        let mut bytes = vec![0_u8; 10];
+        put_u16(&mut bytes, 0, 4);
+        put_u16(&mut bytes, 2, 0x8002); // group 2 in the C `type` field
+        put_u16(&mut bytes, 4, 0x5003); // ignored world bits, polygon 3
+        put_u16(&mut bytes, 6, 0x8021); // group 33
+        put_u16(&mut bytes, 8, 4); // polygon 4
+
+        let list = WorldMapPathList::parse(&bytes).unwrap();
+        assert_eq!(
+            list.records(),
+            [
+                WorldMapPathRecord::Group(2),
+                WorldMapPathRecord::Polygon(3),
+                WorldMapPathRecord::Group(33),
+                WorldMapPathRecord::Polygon(4),
+            ]
+        );
+        let mut active_group = 0;
+        assert_eq!(
+            list.mask_overrides(5, &mut active_group, 1 << 2, 1 << 1)
+                .unwrap(),
+            [
+                WorldMapPathMaskOverride {
+                    polygon_index: 3,
+                    animation_mask: 7,
+                },
+                WorldMapPathMaskOverride {
+                    polygon_index: 4,
+                    animation_mask: 7,
+                },
+            ]
+        );
+        assert_eq!(active_group, 33);
+
+        let mut active_group = 0;
+        assert_eq!(
+            list.mask_overrides(5, &mut active_group, 0, 0).unwrap(),
+            [
+                WorldMapPathMaskOverride {
+                    polygon_index: 3,
+                    animation_mask: 0,
+                },
+                WorldMapPathMaskOverride {
+                    polygon_index: 4,
+                    animation_mask: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn map_path_group_state_carries_between_world_items() {
+        let first = WorldMapPathList::parse(&[1, 0, 0x25, 0x80]).unwrap();
+        let second = WorldMapPathList::parse(&[1, 0, 3, 0]).unwrap();
+        let mut active_group = 0;
+        assert!(
+            first
+                .mask_overrides(4, &mut active_group, 0, 1 << 5)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(active_group, 37);
+        assert_eq!(
+            second
+                .mask_overrides(4, &mut active_group, 0, 1 << 5)
+                .unwrap(),
+            [WorldMapPathMaskOverride {
+                polygon_index: 3,
+                animation_mask: 7,
+            }]
+        );
+    }
+
+    #[test]
+    fn map_path_parser_rejects_bad_lengths_groups_and_polygon_indices() {
+        assert!(WorldMapPathList::parse(&[]).is_err());
+        assert!(WorldMapPathList::parse(&[1, 0]).is_err());
+        assert!(WorldMapPathList::parse(&[0, 0, 0, 0]).is_err());
+
+        let group_64 = WorldMapPathList::parse(&[1, 0, 0x40, 0x80]).unwrap();
+        assert!(group_64.mask_overrides(1, &mut 0, 0, 0).is_err());
+        let polygon_4 = WorldMapPathList::parse(&[1, 0, 4, 0]).unwrap();
+        assert!(polygon_4.mask_overrides(4, &mut 0, 0, 0).is_err());
     }
 
     #[test]
@@ -438,6 +654,13 @@ mod tests {
             vertices in proptest::collection::vec(any::<u8>(), 0..512),
         ) {
             let _ = parse_world_geometry(&header, &polygons, &vertices);
+        }
+
+        #[test]
+        fn malformed_map_path_list_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
+            if let Ok(list) = WorldMapPathList::parse(&bytes) {
+                let _ = list.mask_overrides(4_096, &mut 0, u32::MAX, u32::MAX);
+            }
         }
     }
 }

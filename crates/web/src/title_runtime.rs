@@ -5,7 +5,7 @@
 //! small values are selected explicitly and passed to simulation/render hosts.
 
 use crust_formats::{binary::Eid, stream::ZoneEntity};
-use crust_sim::flow::{TITLE_FADE_STEP, TitlePhase, TitleScreen};
+use crust_sim::flow::{TitlePhase, TitleScreen};
 
 pub(crate) const RETAIL_ZONE_OBJECTS_ACTIVE: u32 = 0x0002;
 pub(crate) const RETAIL_CAMERA_UPDATE: u32 = 0x0002;
@@ -43,25 +43,28 @@ const fn retail_overlay_alpha(brightness: i32) -> u8 {
     RETAIL_FADE_ALPHA[band as usize]
 }
 
-/// Returns the black-overlay alpha drawn by native `GLUpdate` for the title
-/// presentation represented by `TitleMachine`.
+/// Returns the black-overlay alpha drawn by native `GLUpdate` for the live
+/// retail title presentation.
 ///
-/// The flow counter is the value immediately before the native GL fade step,
-/// so fading in subtracts one step before quantization and fading out adds one
-/// step before converting the signed `-256..=0` counter to brightness. Native
-/// `TitleUpdate` also draws opaque black while swapping title states.
+/// The counter is authoritative global 106 after the native GL fade step.
+/// Fading in uses that value directly; fading out converts its signed
+/// `-256..=0` representation to brightness. Native `TitleUpdate` also draws
+/// opaque black while swapping title states.
 #[must_use]
-pub(crate) const fn retail_title_overlay_alpha(phase: TitlePhase, fade_counter: i32) -> u8 {
+pub(crate) const fn retail_title_overlay_alpha(
+    phase: TitlePhase,
+    fade_counter: i32,
+    opaque_swap_overlay: bool,
+) -> u8 {
+    if opaque_swap_overlay {
+        return u8::MAX;
+    }
     match phase {
         TitlePhase::Start | TitlePhase::Blank | TitlePhase::FinishedFadingOut => u8::MAX,
-        TitlePhase::FadingIn => retail_overlay_alpha(clamp_retail_brightness(
-            fade_counter.saturating_sub(TITLE_FADE_STEP),
-        )),
-        TitlePhase::FadingOut => retail_overlay_alpha(clamp_retail_brightness(
-            fade_counter
-                .saturating_add(TITLE_FADE_STEP)
-                .saturating_add(256),
-        )),
+        TitlePhase::FadingIn => retail_overlay_alpha(clamp_retail_brightness(fade_counter)),
+        TitlePhase::FadingOut => {
+            retail_overlay_alpha(clamp_retail_brightness(fade_counter.saturating_add(256)))
+        }
         TitlePhase::Ready => 0,
     }
 }
@@ -87,7 +90,6 @@ pub(crate) const fn retail_title_mdat_binding(
 }
 
 const RETAIL_DISPLAY_WORLDS: u32 = 0x0001;
-const RETAIL_DISPLAY_AND_ANIMATE: u32 = 0x000c;
 const RETAIL_PRESERVED_OBJECT_CATEGORIES: u32 = 0x3ff0;
 const RETAIL_DISPLAY_ANIMATE_OBJECTS: u32 = 0xfffc;
 const RETAIL_DISPLAY_IMAGES: u32 = 0x2_0000;
@@ -142,45 +144,6 @@ impl RetailTitleScreenProfile {
             }
         };
         type_mask | RETAIL_TITLE_LOADED
-    }
-}
-
-/// The only display-word mutations performed by native `TitleUpdate`.
-///
-/// Keeping these as operations over the live word is important: authored
-/// GOOL may change unrelated bits between title-state loads.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RetailTitleDisplayUpdate {
-    EnableDisplayAndAnimate,
-    DisableDisplayAndAnimate,
-}
-
-impl RetailTitleDisplayUpdate {
-    pub(crate) const fn apply(self, display_mask: u32) -> u32 {
-        match self {
-            Self::EnableDisplayAndAnimate => display_mask | RETAIL_DISPLAY_AND_ANIMATE,
-            Self::DisableDisplayAndAnimate => display_mask & !RETAIL_DISPLAY_AND_ANIMATE,
-        }
-    }
-}
-
-/// Returns the source-ordered display mutation caused by one title tick.
-///
-/// `TitleMachine` exposes the phase on either side of its tick, so the browser
-/// can reproduce the native start/blank and completed-fade branches without
-/// replacing any other display flags.
-pub(crate) const fn retail_title_display_update(
-    before: TitlePhase,
-    after: TitlePhase,
-) -> Option<RetailTitleDisplayUpdate> {
-    match (before, after) {
-        (TitlePhase::Start | TitlePhase::Blank, TitlePhase::FadingIn) => {
-            Some(RetailTitleDisplayUpdate::EnableDisplayAndAnimate)
-        }
-        (TitlePhase::FadingOut, TitlePhase::FinishedFadingOut) => {
-            Some(RetailTitleDisplayUpdate::DisableDisplayAndAnimate)
-        }
-        _ => None,
     }
 }
 
@@ -313,71 +276,46 @@ mod tests {
     }
 
     #[test]
-    fn title_update_mutates_only_display_and_animate_at_source_phase_boundaries() {
-        let base = retail_title_screen_profile(TitleScreen::PublisherFirst, 0).display_mask();
-        assert_eq!(base, 0x22_3ff0);
-
-        let enable = retail_title_display_update(TitlePhase::Start, TitlePhase::FadingIn)
-            .expect("start must enable presentation");
-        assert_eq!(enable.apply(base), 0x22_3ffc);
-        assert_eq!(enable.apply(0x8000_0001), 0x8000_000d);
-        assert_eq!(
-            retail_title_display_update(TitlePhase::Blank, TitlePhase::FadingIn),
-            Some(RetailTitleDisplayUpdate::EnableDisplayAndAnimate)
-        );
-
-        let disable =
-            retail_title_display_update(TitlePhase::FadingOut, TitlePhase::FinishedFadingOut)
-                .expect("a completed fade must blank object presentation");
-        assert_eq!(disable.apply(enable.apply(base)), base);
-        assert_eq!(disable.apply(0x8000_000d), 0x8000_0001);
-        assert_eq!(
-            retail_title_display_update(TitlePhase::FadingIn, TitlePhase::Ready),
-            None
-        );
-        assert_eq!(
-            retail_title_display_update(TitlePhase::FinishedFadingOut, TitlePhase::Blank),
-            None
-        );
-    }
-
-    #[test]
     fn title_overlay_matches_native_post_step_alpha_curve() {
-        let fade_in_counters = [288, 256, 224, 192, 160, 128, 96, 64, 32, 0];
+        let fade_in_counters = [256, 224, 192, 160, 128, 96, 64, 32, 0];
         let fade_in_alpha = fade_in_counters
-            .map(|counter| retail_title_overlay_alpha(TitlePhase::FadingIn, counter));
-        assert_eq!(
-            fade_in_alpha,
-            [u8::MAX, 203, 167, 135, 105, 77, 51, 25, 0, 0]
-        );
+            .map(|counter| retail_title_overlay_alpha(TitlePhase::FadingIn, counter, false));
+        assert_eq!(fade_in_alpha, [u8::MAX, 203, 167, 135, 105, 77, 51, 25, 0]);
 
-        let fade_out_counters = [-256, -224, -192, -160, -128, -96, -64, -32, 0];
+        let fade_out_counters = [-224, -192, -160, -128, -96, -64, -32, 0];
         let fade_out_alpha = fade_out_counters
-            .map(|counter| retail_title_overlay_alpha(TitlePhase::FadingOut, counter));
-        assert_eq!(
-            fade_out_alpha,
-            [25, 51, 77, 105, 135, 167, 203, u8::MAX, u8::MAX]
-        );
+            .map(|counter| retail_title_overlay_alpha(TitlePhase::FadingOut, counter, false));
+        assert_eq!(fade_out_alpha, [25, 51, 77, 105, 135, 167, 203, u8::MAX]);
     }
 
     #[test]
-    fn title_overlay_is_opaque_across_swap_phases_and_absent_when_ready() {
+    fn title_overlay_preserves_immediate_native_draw_across_phase_retargets() {
         for phase in [
             TitlePhase::Start,
             TitlePhase::Blank,
             TitlePhase::FinishedFadingOut,
         ] {
-            assert_eq!(retail_title_overlay_alpha(phase, 0), u8::MAX);
+            assert_eq!(retail_title_overlay_alpha(phase, 0, false), u8::MAX);
         }
-        assert_eq!(retail_title_overlay_alpha(TitlePhase::Ready, 288), 0);
+        assert_eq!(
+            retail_title_overlay_alpha(TitlePhase::FadingOut, -224, true),
+            u8::MAX,
+            "an exact-zero or TitleLoadState overlay survives a same-frame fade-out retarget"
+        );
+        assert_eq!(
+            retail_title_overlay_alpha(TitlePhase::FadingOut, -224, false),
+            25,
+            "the following source frame resumes the ordinary fade curve"
+        );
+        assert_eq!(retail_title_overlay_alpha(TitlePhase::Ready, 288, false), 0);
 
         // Malformed counters cannot wrap into an invalid alpha-table index.
         assert_eq!(
-            retail_title_overlay_alpha(TitlePhase::FadingIn, i32::MAX),
+            retail_title_overlay_alpha(TitlePhase::FadingIn, i32::MAX, false),
             u8::MAX
         );
         assert_eq!(
-            retail_title_overlay_alpha(TitlePhase::FadingOut, i32::MIN),
+            retail_title_overlay_alpha(TitlePhase::FadingOut, i32::MIN, false),
             0
         );
     }

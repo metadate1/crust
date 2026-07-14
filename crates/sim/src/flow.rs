@@ -247,6 +247,22 @@ impl TitleMachine {
         }
     }
 
+    /// Creates a non-authoritative title mirror for a mounted retail runtime.
+    ///
+    /// The browser uses this only for high-level flow/progress reporting. The
+    /// source-ordered fade, pending screen, and swap boundary live in
+    /// `RetailRuntime`, so keeping this mirror ready prevents a future caller
+    /// from accidentally advancing a second transition clock.
+    #[must_use]
+    pub const fn passive(screen: TitleScreen) -> Self {
+        Self {
+            screen,
+            next_screen: screen,
+            phase: TitlePhase::Ready,
+            fade_counter: 0,
+        }
+    }
+
     #[must_use]
     pub const fn screen(self) -> TitleScreen {
         self.screen
@@ -411,7 +427,6 @@ pub enum FlowCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowError {
     InvalidState,
-    InvalidTitleScreen(u32),
     NotPlayable(LevelId),
     ExpectedBonus(LevelId),
     ExpectedBoss(LevelId),
@@ -508,40 +523,22 @@ impl GameFlow {
         self.demo = demo;
     }
 
-    /// Latches a title-state word written by retail GOOL.
+    /// Mirrors a screen that the mounted retail title runtime already loaded.
     ///
-    /// The native title update compares the authored global with its pending
-    /// `next_state` once per frame. Mirroring that comparison here is
-    /// important: blindly requesting the same target again would reset the
-    /// fade counter every frame and prevent the transition from completing.
-    /// The screen-change event remains deferred until [`Self::tick`] performs
-    /// the actual finished-fade screen swap.
-    pub fn request_authored_title_state(&mut self, raw: u32) -> Result<bool, FlowError> {
+    /// This deliberately emits no [`FlowEvent::TitleChanged`]: native title
+    /// teardown/load has already happened at the source `TitleUpdate`
+    /// boundary, so an event-driven browser load would execute it twice.
+    pub fn mirror_retail_title_screen(&mut self, screen: TitleScreen) -> Result<bool, FlowError> {
         if !matches!(self.state, FlowState::Title) {
             return Err(FlowError::InvalidState);
         }
-        let screen = TitleScreen::from_raw(raw).ok_or(FlowError::InvalidTitleScreen(raw))?;
-        if self.title.next_screen() == screen {
-            return Ok(false);
+        let changed = self.title.screen() != screen;
+        self.title = TitleMachine::passive(screen);
+        if changed {
+            self.state_frames = 0;
+            self.title_idle_frames = 0;
         }
-        self.title.request(screen);
-        self.title_idle_frames = 0;
-        Ok(true)
-    }
-
-    /// Advances only the presentation half of the title state machine.
-    ///
-    /// Stream-backed title screens receive navigation and idle behavior from
-    /// their authored GOOL objects. They still need the native fade/swap
-    /// boundary represented by [`TitleMachine`], but running [`Self::tick`]
-    /// would also execute the synthetic fallback publisher/menu timers and
-    /// could race the value written to the retail `title_state` global.
-    pub fn tick_authored_title(&mut self) -> Result<(), FlowError> {
-        if !matches!(self.state, FlowState::Title) {
-            return Err(FlowError::InvalidState);
-        }
-        self.state_frames = self.state_frames.wrapping_add(1);
-        self.advance_title_transition()
+        Ok(changed)
     }
 
     /// Mirrors a stream that has already passed platform validation and been
@@ -994,94 +991,22 @@ mod tests {
     }
 
     #[test]
-    fn repeated_authored_request_does_not_restart_the_pending_fade() {
+    fn retail_title_mirror_is_passive_and_emits_no_duplicate_load_event() {
         let mut flow = ready_main_menu();
-
         assert_eq!(
-            flow.request_authored_title_state(TitleScreen::Options.raw()),
+            flow.mirror_retail_title_screen(TitleScreen::Options),
             Ok(true)
         );
+        assert_eq!(flow.title().screen(), TitleScreen::Options);
         assert_eq!(flow.title().next_screen(), TitleScreen::Options);
-        assert_eq!(flow.title().fade_counter(), -256);
-
-        flow.tick(PadState::default()).unwrap();
-        assert_eq!(flow.title().fade_counter(), -224);
+        assert_eq!(flow.title().phase(), TitlePhase::Ready);
+        assert_eq!(flow.title().fade_counter(), 0);
+        assert!(flow.events().is_empty());
         assert_eq!(
-            flow.request_authored_title_state(TitleScreen::Options.raw()),
+            flow.mirror_retail_title_screen(TitleScreen::Options),
             Ok(false)
         );
-        assert_eq!(flow.title().fade_counter(), -224);
         assert!(flow.events().is_empty());
-    }
-
-    #[test]
-    fn authored_main_menu_requests_latch_each_retail_destination() {
-        for destination in [
-            TitleScreen::Options,
-            TitleScreen::Password,
-            TitleScreen::Load,
-            TitleScreen::Map,
-        ] {
-            let mut flow = ready_main_menu();
-
-            assert_eq!(
-                flow.request_authored_title_state(destination.raw()),
-                Ok(true)
-            );
-            assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
-            assert_eq!(flow.title().next_screen(), destination);
-            assert_eq!(flow.title().phase(), TitlePhase::FadingOut);
-            assert!(flow.events().is_empty());
-        }
-    }
-
-    #[test]
-    fn authored_title_change_emits_only_when_the_fade_swaps_screens() {
-        let mut flow = ready_main_menu();
-        flow.request_authored_title_state(TitleScreen::Options.raw())
-            .unwrap();
-
-        for _ in 0..8 {
-            flow.tick(PadState::default()).unwrap();
-        }
-        assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
-        assert_eq!(flow.title().phase(), TitlePhase::FinishedFadingOut);
-        assert!(flow.events().is_empty());
-
-        flow.tick(PadState::default()).unwrap();
-        assert_eq!(flow.title().screen(), TitleScreen::Options);
-        assert_eq!(flow.title().phase(), TitlePhase::Blank);
-        assert_eq!(
-            flow.take_events(),
-            vec![FlowEvent::TitleChanged(TitleScreen::Options)]
-        );
-
-        tick_until_ready(&mut flow);
-        assert_eq!(flow.title().screen(), TitleScreen::Options);
-        assert!(flow.events().is_empty());
-    }
-
-    #[test]
-    fn authored_title_ticks_advance_fades_without_synthetic_idle_navigation() {
-        let mut flow = ready_main_menu();
-
-        for _ in 0..=TITLE_IDLE_INTRO_FRAMES {
-            flow.tick_authored_title().unwrap();
-        }
-        assert_eq!(flow.state(), &FlowState::Title);
-        assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
-        assert!(flow.events().is_empty());
-
-        flow.request_authored_title_state(TitleScreen::Options.raw())
-            .unwrap();
-        for _ in 0..9 {
-            flow.tick_authored_title().unwrap();
-        }
-        assert_eq!(flow.title().screen(), TitleScreen::Options);
-        assert_eq!(
-            flow.take_events(),
-            vec![FlowEvent::TitleChanged(TitleScreen::Options)]
-        );
     }
 
     #[test]

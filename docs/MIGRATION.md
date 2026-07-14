@@ -39,7 +39,9 @@ An external `git archive` copy produced these results:
   return frames are explicit values; global calls remove their validated argument span on return.
   Child-spawn opcodes stop at a synchronous host boundary, then continue in the same hosted
   interpreter invocation before the next instruction. They pop arguments for every signed count
-  and expose `0x91`'s bounded reclaim permission rather than an alternate parent.
+  and expose `0x91`'s bounded reclaim permission rather than an alternate parent. Opcode `0x14`
+  preserves native input-before-output address translation while storing a checked process-local
+  handle rather than a pointer; opcode `0x81` preserves the native switch's one-cycle no-op.
 - Retail GOOL animation item five is retained as owned bytes. All five descriptor families are
   bounds-checked at unaligned byte offsets, and vertex descriptors resolve TGEO plus exact
   SVTX/CVTX frames through the mounted pair only. Type-three fonts always consume the source
@@ -47,9 +49,18 @@ An external `git archive` copy produced these results:
   metadata and is not reused as an array count. State-change yields resolve the requested state
   through NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping
   frame/draw stamps; serialized state PCs and animation offsets never become native pointers.
+  Toxic Waste's LEA-created `BaraC` type-zero descriptor is decoded from the live same-object
+  process words, draws no geometry, and retains native's standard non-vertex collision bound.
+  Process-local descriptor types one through five are rejected until their complete variable
+  payload and rendering behavior are represented.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
   SLST polygon IDs and WGEO word/vertex indices remain validated offsets and values; the Rust scene
   builder never writes host addresses back into source bytes.
+- The island-map WGEO item-three list preserves the source's unusual aliasing contract explicitly:
+  its `type` halfword is record zero, the group cursor spans worlds, and globals 73/75 resolve all
+  64 link groups. Per-frame polygon copies receive the resulting animation masks instead of
+  reproducing the C runtime's mutation of mounted WGEO memory; a scene sidecar retains the last
+  writes until the graph or mounted pair changes.
 - ZDAT entities retain the exact 20-byte header and six-byte signed path points. The 304 entity
   spawn flags, 96 ordinary objects, dedicated main slot and eight roots are fixed-size Rust state;
   generations reject stale object references after despawn.
@@ -67,8 +78,11 @@ An external `git archive` copy produced these results:
   zone. After the title `LevelUpdate`, the browser mirrors `GoolObjectSpawn` by assigning native
   `cur_zone` as the arena/VM zone and resolving origin and colors from that ZDAT. This also makes
   those objects visible to current-header neighbor TERM traversal. The mounted retail object graph
-  owns title/menu/gameplay progression; when it cannot present an authored screen, the browser shows
-  loading/error diagnostics and does not run a data-independent fallback flow.
+  owns title/menu/gameplay progression. Browser title frames preserve
+  `GOOL → TitleUpdate → TitleLoadState → GLUpdate`; `RetailRuntime` owns the fade and screen swap,
+  while `GameFlow` passively mirrors the loaded screen. When the authored graph cannot present a
+  screen, the browser shows loading/error diagnostics and does not run a data-independent fallback
+  flow.
 - Misc 12/7 retains the source's distinct forward current-header walk with no display filter,
   sorting or deduplication. Each listed EID drives a live roots-zero-through-seven postorder TERM
   traversal, so handler mutations, immunity flags, migrations and non-title Crash survival remain
@@ -121,6 +135,11 @@ An external `git archive` copy produced these results:
   procedural sine fallback. Effects remain data rather than unchecked host pointers; exact SPU
   synthesis, complete collision response, dynamic rendering effects and full progression are not
   implied.
+- The mount-time `LevelInitMisc(1)` transaction creates source-mapped root-four controllers for
+  levels `0x05`, `0x14`, `0x16`, `0x17`, `0x22`, and `0x2e`. Ripper Roo's 39/4 controller publishes
+  a checked tagged `ambiance_obj` reference in global 8. Same-level `LevelInitMisc(0)` does not
+  duplicate it. `CamFollow` also reads the live authored global-65 `gem_stamp` for the
+  `frames_elapsed - gem_stamp <= 15` neighbor gate rather than substituting a host constant.
 
 ## Deliberate corrections
 

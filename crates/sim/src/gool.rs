@@ -349,6 +349,65 @@ impl AnimationReference {
     }
 }
 
+/// Descriptor kind read through a checked process-local animation pointer.
+///
+/// Retail GOOL can use opcode `0x14` (LEA) to point `anim_seq` at words in
+/// the object's process image instead of global item five. Toxic Waste's
+/// `BaraC` deliberately builds a type-zero descriptor this way: it draws no
+/// geometry, but its non-null pointer selects native's standard non-vertex
+/// collision bound. Other local descriptor types are rejected until their
+/// complete variable payload and render path are represented; treating only
+/// their header as non-vertex would silently suppress authored geometry.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessAnimationKind {
+    /// Native's type-zero switch default: a non-null animation that draws no
+    /// primitives and uses the standard non-vertex collision box.
+    NoDraw,
+}
+
+/// One live, bounds-checked animation descriptor in an object's process
+/// words. The storage token preserves the exact same-object register alias
+/// selected by LEA without exposing a native pointer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessAnimationReference {
+    storage: StorageReference,
+    kind: ProcessAnimationKind,
+}
+
+impl ProcessAnimationReference {
+    #[must_use]
+    pub const fn storage(self) -> StorageReference {
+        self.storage
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> ProcessAnimationKind {
+        self.kind
+    }
+}
+
+/// Checked replacement for retail's `gool_anim *` union of pointer sources.
+///
+/// Item-five descriptors retain their compact byte offset. LEA-created
+/// process descriptors retain a same-object [`StorageReference`] plus the
+/// source words needed by downstream simulation. Both variants fit in owned
+/// render snapshots and neither can outlive or dereference native memory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnimationSource {
+    ItemFive(AnimationReference),
+    Process(ProcessAnimationReference),
+}
+
+impl AnimationSource {
+    #[must_use]
+    pub const fn item_five_reference(self) -> Option<AnimationReference> {
+        match self {
+            Self::ItemFive(reference) => Some(reference),
+            Self::Process(_) => None,
+        }
+    }
+}
+
 /// Immutable identity of the global GOOL program that owns an object's
 /// animation item and retail display category.
 ///
@@ -405,7 +464,11 @@ pub struct StorageReference {
 }
 
 impl StorageReference {
-    fn checked(object: ObjectHandle, region: StorageRegion, index: usize) -> Result<Self, VmError> {
+    pub fn checked(
+        object: ObjectHandle,
+        region: StorageRegion,
+        index: usize,
+    ) -> Result<Self, VmError> {
         if index > STORAGE_REFERENCE_INDEX_BITS as usize {
             return Err(VmError::InvalidStorageReference(STORAGE_REFERENCE_TAG));
         }
@@ -3491,17 +3554,60 @@ impl VmObject {
         Ok(&self.animation_data[offset..])
     }
 
-    /// Current checked byte reference into the owning global GOOL animation
-    /// item. Zero is retail's null animation pointer.
-    pub fn animation_reference(&self) -> Result<Option<AnimationReference>, VmError> {
+    /// Current checked replacement for retail's `gool_anim *`.
+    ///
+    /// Opcode `0x27` and animation opcodes select a descriptor in global item
+    /// five. Opcode `0x14` may instead install a same-object process-word
+    /// address. The latter is decoded from the live aliased words on every
+    /// call, matching native's pointer semantics when GOOL mutates the local
+    /// descriptor after installing it.
+    pub fn animation_source(&self) -> Result<Option<AnimationSource>, VmError> {
         let word = self.register(process_register::ANIMATION_SEQUENCE)?;
         if word == 0 {
             return Ok(None);
         }
-        let reference =
-            AnimationReference::from_word(word).ok_or(VmError::InvalidAnimationReference(word))?;
-        let _validated_data = self.animation_data(reference)?;
-        Ok(Some(reference))
+        if let Some(reference) = AnimationReference::from_word(word) {
+            let _validated_data = self.animation_data(reference)?;
+            return Ok(Some(AnimationSource::ItemFive(reference)));
+        }
+
+        let storage = StorageReference::from_word(word)
+            .filter(|reference| {
+                reference.object() == self.handle && reference.region() == StorageRegion::Register
+            })
+            .ok_or(VmError::InvalidAnimationReference(word))?;
+        let index = usize::from(storage.index());
+        let header_word = self
+            .registers
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidAnimationReference(word))?;
+        let raw_type = header_word.to_le_bytes()[0];
+        let kind = if raw_type == 0 {
+            ProcessAnimationKind::NoDraw
+        } else {
+            // Item-five types one through five have descriptor-specific
+            // payloads. Accepting only their header here would silently turn
+            // a local sprite/text/fragment (or vertex) into no-draw state.
+            // No such LEA source exists in the retail corpus; reject it until
+            // its full payload and renderer contract are represented.
+            return Err(VmError::InvalidAnimationReference(word));
+        };
+        Ok(Some(AnimationSource::Process(ProcessAnimationReference {
+            storage,
+            kind,
+        })))
+    }
+
+    /// Current item-five animation reference, when that is the active source.
+    ///
+    /// Prefer [`Self::animation_source`] for display, collision, or any other
+    /// pointer-presence decision. This compatibility view intentionally
+    /// returns `None` for a valid LEA-created process descriptor.
+    pub fn animation_reference(&self) -> Result<Option<AnimationReference>, VmError> {
+        Ok(self
+            .animation_source()?
+            .and_then(AnimationSource::item_five_reference))
     }
 
     #[must_use]
@@ -7352,6 +7458,21 @@ impl Machine {
                     self.push(handle, absolute_progress as u32)?;
                 }
             }
+            0x14 => {
+                // Native LEA translates A through the input cursor before it
+                // translates B through the independent output cursor, then
+                // stores A's address rather than the value behind it. A null
+                // source is therefore a literal null word; a null destination
+                // still preserves every A-side stack/constant side effect.
+                let source = self.input_reference(handle, a)?;
+                let destination = self.output_reference(handle, b)?;
+                if let Some(destination) = destination {
+                    self.write_storage_reference(
+                        destination,
+                        source.map_or(0, StorageReference::to_word),
+                    )?;
+                }
+            }
             0x15 => {
                 let shift = self.read_operand(handle, a)? as i32;
                 let value = self.read_operand(handle, b)? as i32;
@@ -7550,10 +7671,10 @@ impl Machine {
                     })?;
                 }
             }
-            0x80 => {
-                // Authored boss programs contain the exact word 0x80000000.
-                // Retail's interpreter has no switch case or default for it,
-                // so the fetched word is an intentional one-cycle no-op.
+            0x80 | 0x81 => {
+                // Retail's interpreter has neither switch case nor a default,
+                // so both fetched opcodes are intentional one-cycle no-ops.
+                // Authored programs contain 0x80000000 as well as 0x81 words.
             }
             0x82 => {
                 return self.control_flow(handle, word, condition);
@@ -7762,16 +7883,26 @@ impl Machine {
                                 link: link_index,
                             },
                         )?;
-                        let Some(reference) = self.object(link)?.animation_reference()? else {
+                        let Some(source) = self.object(link)?.animation_source()? else {
                             return Ok(None);
                         };
-                        let descriptor = parse_gool_animation_descriptor(
-                            &self.object(link)?.animation_data,
-                            reference.offset() as usize,
-                        )
-                        .map_err(|_| VmError::InvalidAnimationReference(reference.to_word()))?;
-                        let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
-                            return Ok(None);
+                        let model_eid = match source {
+                            AnimationSource::ItemFive(reference) => {
+                                let descriptor = parse_gool_animation_descriptor(
+                                    &self.object(link)?.animation_data,
+                                    reference.offset() as usize,
+                                )
+                                .map_err(|_| {
+                                    VmError::InvalidAnimationReference(reference.to_word())
+                                })?;
+                                let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
+                                    return Ok(None);
+                                };
+                                vertex.model_eid
+                            }
+                            AnimationSource::Process(reference) => match reference.kind() {
+                                ProcessAnimationKind::NoDraw => return Ok(None),
+                            },
                         };
                         let frame_index = self.object(link)?.animation_frame() >> 8;
                         self.emit(VmEffect::TransformModelVertex {
@@ -7781,7 +7912,7 @@ impl Machine {
                             // destination occupies bits 12..14 (`trans_idx` in
                             // the shared decode), not bits 15..17.
                             output_vector: input_vector,
-                            model_eid: vertex.model_eid,
+                            model_eid,
                             frame_index,
                             vertex_index,
                         })?;
@@ -10004,24 +10135,28 @@ mod tests {
     }
 
     #[test]
-    fn authored_opcode_80_word_is_a_retail_noop() {
+    fn authored_opcodes_80_and_81_are_retail_noops() {
         let h = handle(0);
         let mut machine = Machine::new(0);
         machine
             .insert_object(
                 VmObject::new(
                     h,
-                    vec![0x8000_0000, Instruction::encode(0x11, 0x0805, 0x0e08)],
+                    vec![
+                        0x8000_0000,
+                        0x8100_0000,
+                        Instruction::encode(0x11, 0x0805, 0x0e08),
+                    ],
                 )
                 .unwrap(),
             )
             .unwrap();
 
         assert_eq!(
-            machine.run(h, 2),
+            machine.run(h, 3),
             Ok(Execution {
                 reason: HaltReason::BudgetExhausted,
-                steps: 2,
+                steps: 3,
             })
         );
         assert_eq!(machine.object(h).unwrap().register(8), Ok(0x500));
@@ -10471,6 +10606,59 @@ mod tests {
             object.animation_reference(),
             Err(VmError::InvalidAnimationReference(0x1234_5678))
         );
+    }
+
+    #[test]
+    fn lea_created_type_zero_process_animation_is_live_aliased_and_checked() {
+        let h = handle(0);
+        let descriptor_index = 65;
+        let descriptor =
+            StorageReference::checked(h, StorageRegion::Register, descriptor_index).unwrap();
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+        object.set_register(descriptor_index, 0).unwrap();
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, descriptor.to_word())
+            .unwrap();
+
+        assert_eq!(
+            object.animation_source(),
+            Ok(Some(AnimationSource::Process(ProcessAnimationReference {
+                storage: descriptor,
+                kind: ProcessAnimationKind::NoDraw,
+            })))
+        );
+        assert_eq!(
+            object.animation_reference(),
+            Ok(None),
+            "the compatibility item-five view must not mislabel process words as an asset offset"
+        );
+
+        object.set_register(descriptor_index, 1).unwrap();
+        assert_eq!(
+            object.animation_source(),
+            Err(VmError::InvalidAnimationReference(descriptor.to_word())),
+            "a live mutation to an unsupported local payload is revalidated instead of silently hidden"
+        );
+    }
+
+    #[test]
+    fn process_animation_rejects_foreign_and_non_register_storage_tokens() {
+        let h = handle(0);
+        let foreign = handle(1);
+        let foreign_reference =
+            StorageReference::checked(foreign, StorageRegion::Register, 65).unwrap();
+        let table_reference = StorageReference::checked(h, StorageRegion::Internal, 65).unwrap();
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+
+        for invalid in [foreign_reference, table_reference] {
+            object
+                .set_register(process_register::ANIMATION_SEQUENCE, invalid.to_word())
+                .unwrap();
+            assert_eq!(
+                object.animation_source(),
+                Err(VmError::InvalidAnimationReference(invalid.to_word()))
+            );
+        }
     }
 
     #[test]
@@ -15641,6 +15829,73 @@ mod tests {
         assert_eq!(destination.index(), 0x04c);
         assert_eq!(source.index(), 0x04d);
         assert_eq!(machine.read_storage_reference(destination), Ok(0));
+    }
+
+    #[test]
+    fn lea_stores_a_checked_address_after_source_then_destination_translation() {
+        let h = handle(0);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x00, REG0, REG1),
+                Instruction::encode(0x14, STACK, STACK),
+            ],
+        )
+        .unwrap();
+        object.set_register(0, 2).unwrap();
+        object.set_register(1, 3).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 2).unwrap();
+
+        let stack = machine.object(h).unwrap().stack();
+        assert_eq!(stack.len(), 1);
+        let reference = StorageReference::from_word(stack[0]).unwrap();
+        assert_eq!(reference.object(), h);
+        assert_eq!(reference.region(), StorageRegion::Register);
+        assert_eq!(reference.index(), SYNTHETIC_STACK_POINTER as u16);
+        assert_eq!(
+            machine.read_storage_reference(reference),
+            Ok(reference.to_word()),
+            "input pop must precede output push, so LEA can point at its reoccupied stack cell"
+        );
+    }
+
+    #[test]
+    fn lea_preserves_null_and_missing_pool_pointer_semantics() {
+        let h = handle(0);
+        let missing_link_two_register_zero = 0x0c80;
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x14, 0x0be0, REG0),
+                Instruction::encode(0x00, REG1, REG2),
+                Instruction::encode(0x14, STACK, missing_link_two_register_zero),
+                Instruction::encode(0x14, missing_link_two_register_zero, 0x0e03),
+            ],
+        )
+        .unwrap();
+        object.set_register(0, 0xdead_beef).unwrap();
+        object.set_register(1, 4).unwrap();
+        object.set_register(2, 5).unwrap();
+        object.set_register(3, 0xdead_beef).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 4).unwrap();
+
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.register(0), Ok(0), "null A stores a null word");
+        assert_eq!(
+            object.register(3),
+            Ok(0),
+            "a missing input link translates to a null source address"
+        );
+        assert!(
+            object.stack().is_empty(),
+            "A's stack pop remains observable when missing B has no output address"
+        );
     }
 
     #[test]

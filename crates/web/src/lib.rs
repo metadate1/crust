@@ -5,7 +5,7 @@
 use wasm_bindgen::prelude::*;
 
 #[cfg(any(target_arch = "wasm32", test))]
-use crust_sim::{card::SaveData, flow::FlowState};
+use crust_sim::card::SaveData;
 
 #[cfg(target_arch = "wasm32")]
 mod app;
@@ -73,28 +73,6 @@ pub(crate) fn authoritative_save_or_last<E>(
     current.unwrap_or(last)
 }
 
-/// The browser may advance the high-level flow mirror only for the authored
-/// title presentation. Gameplay, completion, bonus, boss, intro, and ending
-/// progression are owned exclusively by the mounted retail runtime.
-#[cfg(any(target_arch = "wasm32", test))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BrowserFlowMirrorAdvance {
-    HoldForRetailRuntime,
-    TickAuthoredTitle,
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-pub(crate) const fn browser_flow_mirror_advance(
-    state: &FlowState,
-    authored_title_runtime_active: bool,
-) -> BrowserFlowMirrorAdvance {
-    if matches!(state, FlowState::Title) && authored_title_runtime_active {
-        BrowserFlowMirrorAdvance::TickAuthoredTitle
-    } else {
-        BrowserFlowMirrorAdvance::HoldForRetailRuntime
-    }
-}
-
 #[wasm_bindgen]
 /// Starts the browser application after the generated Wasm module is initialized.
 ///
@@ -114,7 +92,6 @@ pub fn boot() -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crust_sim::flow::LevelId;
 
     #[test]
     fn initial_presentation_clamps_one_point_title_and_transition_paths() {
@@ -167,41 +144,6 @@ mod tests {
             authoritative_save_or_last::<()>(Err(()), last),
             last,
             "an unreadable VM must retain the last exact retail payload"
-        );
-    }
-
-    #[test]
-    fn browser_flow_mirror_has_no_synthetic_gameplay_or_title_fallback() {
-        let level = LevelId::new(0x03).unwrap();
-        let states = [
-            FlowState::Boot,
-            FlowState::Gameplay(level),
-            FlowState::Bonus(level),
-            FlowState::Boss(level),
-            FlowState::LevelComplete {
-                source: level,
-                missed_boxes: 7,
-            },
-            FlowState::Intro,
-            FlowState::Ending,
-        ];
-        for state in states {
-            assert_eq!(
-                browser_flow_mirror_advance(&state, false),
-                BrowserFlowMirrorAdvance::HoldForRetailRuntime
-            );
-            assert_eq!(
-                browser_flow_mirror_advance(&state, true),
-                BrowserFlowMirrorAdvance::HoldForRetailRuntime
-            );
-        }
-        assert_eq!(
-            browser_flow_mirror_advance(&FlowState::Title, false),
-            BrowserFlowMirrorAdvance::HoldForRetailRuntime
-        );
-        assert_eq!(
-            browser_flow_mirror_advance(&FlowState::Title, true),
-            BrowserFlowMirrorAdvance::TickAuthoredTitle
         );
     }
 }

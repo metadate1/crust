@@ -24,14 +24,18 @@ gameplay path.
   state but continue rebuilding and presenting world/object snapshots while draw count stays fixed.
 - Source-derived camera modes 0/1/3, tapped auto-camera skipping and path/zone crossing drive the
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
-  prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing.
+  prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing. The
+  authored global-65 `gem_stamp` now drives the exact `frames_elapsed - gem_stamp <= 15` neighbor
+  gate instead of a browser constant.
 - Displayed current-zone neighbors are decoded into owned ZDAT entity descriptors when a pair is
   mounted. In title, gameplay, bonus, boss, level-complete, intro and ending flow states, the
   browser spawns their group-three entities into the checked retail arena and executes that arena
   at the cooperative 30 Hz boundary. Before the first zone scan, every gameplay, boss, bonus, and
   map mount creates native executable-four life, fruit, and pickup roots beneath logical root one
   and publishes their checked references to globals 7, 6, and 14. The four native exclusions—title,
-  level complete, intro, and ending—create none.
+  level complete, intro, and ending—create none. Mount-time `LevelInitMisc(1)` also creates the
+  applicable native root-four controller for levels `0x05`, `0x14`, `0x16`, `0x17`, `0x22`, and
+  `0x2e`; Ripper Roo's executable-39/subtype-four controller is published to global 8.
 - The NSF program host binds initial and requested GOOL states, synchronously applies characterized
   child-spawn effects, maintains typed arena/VM links, and advances the implemented state-change
   and animation-select/wait path using frame/draw counters. Animation host effects `0x83` and `0x84`
@@ -47,7 +51,10 @@ gameplay path.
   object's zone only on a match. Normal, once, transition, event-service and interrupt code all
   complete typed audio calls synchronously before the following instruction. Execution,
   checked-error and quarantined-object counts are exposed through the engineering log/debug
-  surface.
+  surface. Opcode `0x14` (LEA) keeps native input-before-output address translation and represents
+  the observed process-local `BaraC` type-zero animation with a checked same-object handle, no draw,
+  and the standard non-vertex bound. Process-local animation types one through five remain rejected
+  until their full payload/render contracts exist. Opcode `0x81` is the native one-cycle no-op.
 - Static solid queries are refreshed from the current camera/native `cur_zone` neighborhood before
   object execution rather than remaining attached to each object's spawn zone. The per-object zone
   identity remains separately typed for object colors and zone migration. When that object zone is
@@ -60,7 +67,11 @@ gameplay path.
   same-level restarts at frames 179 and 356.
 - Authored title MDAT entities bind to the same arena/VM host as level objects. Their retail
   `title_state` word drives publisher, menu, options, password/load, map and game-over changes
-  through the native fade boundary. The final WebGL pass uses the source's 16-level nonlinear
+  through the native fade boundary. Each browser frame preserves
+  `GOOL → TitleUpdate → TitleLoadState → GLUpdate`; the runtime performs any screen load before
+  the final authored title-state comparison, and the browser `GameFlow` is only a passive screen
+  mirror. A swap-frame latch retains native's opaque `GLDrawOverlay(255)` if newly loaded GOOL
+  synchronously requests another fade. The final WebGL pass uses the source's 16-level nonlinear
   black-overlay alpha table and exact pre-quantization counter step; blank and state-swap phases
   stay opaque without affecting gameplay rendering. Type-zero loads preserve the source's `0x3ff0`
   object-category tail (`0x22_3ff0`) and the following start/blank tick enables only the display and
@@ -70,6 +81,11 @@ gameplay path.
   ZDAT exactly like the source's type-17 rewrite, keeping it in current-neighbor TERM scope. An
   authored arena owns the 4:3 canvas. Before it is available the browser presents only loading/error
   diagnostics and external status; it does not advance a synthetic title, menu or gameplay flow.
+- Island-map state 15 consumes each WGEO item-three path list with the source's
+  `len + type-as-record-zero` layout. The active group carries across worlds, globals 73/75 control
+  the 64 group bits, and effective mask-seven/mask-zero writes are applied to frame-local polygon
+  copies. A graph-scoped sidecar preserves the last masks through fade-out, while the parsed user
+  stream remains immutable.
 - Camera `LevelUpdate` effects drive a source-ordered zone lifecycle. Departed active zones receive
   TERM in postorder, migrated objects survive, released subtrees clear typed VM/link/audio state,
   old load lists close before new lists open, newly adjacent zones activate, and their objects scan
@@ -197,7 +213,9 @@ gameplay path.
   source branch's uninitialized C locals. The current Crash-stamp pre/post-physics schedule and
   same-stamp collision tail pass the legally local corpus suite. All `0x85` and `0x8e` selectors
   have checked source-defined behavior; broader object behavior, collision response, dynamic
-  lighting and full level progression remain incomplete.
+  lighting and full level progression remain incomplete. LEA-created process animations are
+  complete only for the legally observed type-zero `BaraC` contract; process-local descriptor types
+  one through five are intentionally rejected rather than being misread as no-draw objects.
 - Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
   monotonic object incarnation. If a TERM handler kills the active requester and synchronously
   reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or

@@ -49,7 +49,10 @@ pub use pbak::{
     load_pbak_entry, parse_pbak_header,
 };
 pub use slst::{PolygonId, SlstCursor, SlstDelta, SlstDirection, SlstItem};
-pub use wgeo::{WorldGeometry, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry};
+pub use wgeo::{
+    WORLD_MAP_PATH_GROUP_COUNT, WorldGeometry, WorldMapPathList, WorldMapPathMaskOverride,
+    WorldMapPathRecord, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry,
+};
 pub use zdat::{
     ZoneColors, ZoneEntity, ZoneEntityPathPoint, ZoneGraphics, ZoneHeader, ZoneLoadList,
     ZoneNeighborPath, ZonePath, ZoneRect, ZoneWorld,

@@ -19,8 +19,10 @@ retail objects are unavailable. The live browser host retains and remounts each 
 destination stream pair, decodes retail LDAT loading
 images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
 renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
-latches display/animate at the authored boundary and draws the native 16-level nonlinear black
-overlay. The 4:3 output is authored-scene only: until mounted retail objects produce a scene, it
+latches display/animate through the source `GOOL → TitleUpdate → TitleLoadState → GLUpdate`
+transaction and draws the native 16-level nonlinear black overlay. `RetailRuntime` owns that
+transition; `GameFlow` is a passive screen mirror and cannot advance a second fade clock. The 4:3
+output is authored-scene only: until mounted retail objects produce a scene, it
 shows a loading/error diagnostic with no synthetic menu, password/options UI, or gameplay geometry.
 For the 40 world-bearing playable starts, gameplay presents bounds-checked
 ZDAT/SLST/WGEO path snapshots with decoded TPAG textures and retail camera/depth math. The
@@ -30,7 +32,14 @@ boundary. After that gate, `RetailCameraRuntime` owns the exact zone, path and s
 used to rebuild SLST visibility, camera projection and animated texture selection. Source-derived
 automatic modes 0/1/3, tapped transition skipping and path/zone crossings are live. Modes 5/6 feed
 the hosted main object's typed transform, camera zoom, held pad and frame stamp into the checked
-`CamFollow` projection/neighbor/smoothing path whenever that object is available.
+`CamFollow` projection/neighbor/smoothing path whenever that object is available. Its gem-path
+neighbor gate reads the live authored `gem_stamp` global and retains the source
+`frames_elapsed - gem_stamp <= 15` window.
+On the island-map title state, WGEO item three is parsed with its unusual serialized
+`len + type-as-record-zero` layout. The renderer carries the active path group across worlds and
+applies globals 73/75 as non-mutating per-frame animation-mask overrides, matching
+`GfxAnimMapPaths` without writing into user-supplied stream bytes. The last effective masks persist
+through the map's fade-out, matching the native resident-WGEO write lifetime.
 
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
@@ -42,7 +51,9 @@ matrix and typed parent/player links; runtime children inherit their parent's tr
 Every gameplay, boss, bonus, and map mount also creates the native executable-four life, fruit,
 and pickup HUD roots before the first zone scan and publishes their checked tagged references to
 the exact GOOL globals used by pickups, saves, and bonus routing. Title, level-complete, intro, and
-ending mounts retain the source's no-HUD branch.
+ending mounts retain the source's no-HUD branch. The mount then runs the object-creating half of
+`LevelInitMisc(1)`: its six applicable levels receive the native root-four controller, including
+Ripper Roo's executable-39/subtype-four controller and checked `ambiance_obj` global-eight link.
 State changes rebind at the synchronous host boundary: a captured once block runs before the state
 stamp, then the target transition block runs after it, including nested calls and hosted spawns;
 normal updates continue into newly bound state code in that same native update. Initial/call frames
@@ -53,6 +64,11 @@ five-word pad history, camera-relative movement, gravity, rotation, every source
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
+GOOL `0x14` (LEA) preserves input-before-output address translation and represents Toxic Waste's
+process-local `BaraC` type-zero animation as a checked same-object handle: it draws nothing but
+retains the standard non-vertex collision bound. Process-local descriptor types one through five
+are rejected until their complete payload/render contracts are implemented. Opcode `0x81` retains
+the native interpreter's intentional one-cycle no-op behavior.
 `GoolObjectColors` now delivers Crash's category-`0x300` invincibility-hit event `0x0a00`
 synchronously before the same object's physics, so authored enemy handlers can change that frame's
 motion or state. The source's `argc=1`/null-argument quirk is represented by one checked zero word

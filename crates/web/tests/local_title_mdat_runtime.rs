@@ -9,9 +9,10 @@ use crust_formats::stream::{
     load_title_mdat, parse_nsd, parse_nsf,
 };
 use crust_sim::camera::RetailCameraLocation;
+use crust_sim::flow::{TitlePhase, TitleScreen};
 use crust_sim::gool::{
-    CURRENT_DISPLAY_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot,
-    RetailSolidEnvironment, TITLE_STATE_GLOBAL, VmEffect, VmObject, VmStateProgram,
+    ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment,
+    TITLE_STATE_GLOBAL, VmEffect, VmObject, VmStateProgram,
 };
 use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_bounds::AnimationBoundSource;
@@ -19,8 +20,8 @@ use crust_sim::player::PAD_START;
 use crust_sim::retail_frame::PathProgress;
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, ModelVertexBinding, NsfProgramError, NsfProgramHost, ProgramBinding,
-    ProgramHost, ProgramOrigin, RetailLevelStateContext, RetailRuntime, RetailZoneEnvironment,
-    StateProgramBinding,
+    ProgramHost, ProgramOrigin, RetailLevelStateContext, RetailRuntime, RetailTitleAction,
+    RetailZoneEnvironment, StateProgramBinding,
 };
 
 const RETAIL_GLOBAL_WORDS: usize = 256;
@@ -227,8 +228,8 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
         runtime.set_level_state_context(title_level_context(current_zone, &current_header));
         if state == 10 {
             runtime
-                .set_global_word(TITLE_STATE_GLOBAL, u32::from(state))
-                .expect("title-state global must exist");
+                .configure_retail_title(TitleScreen::PublisherFirst, true)
+                .expect("title runtime must be configurable");
             runtime
                 .set_global_word(NEXT_DISPLAY_GLOBAL, IMAGE_ONLY_TITLE_LOAD_MASK)
                 .expect("next-display global must exist");
@@ -311,10 +312,21 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
 
         let frame = {
             let mut host = TitleMdatHost::new(&nsd, &nsf, &nsf_bytes, mdat.eid);
-            runtime
-                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
-                .unwrap_or_else(|error| panic!("title state {state} frame: {error:?}"))
+            if state == 10 {
+                runtime
+                    .run_frame_before_display(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                    .unwrap_or_else(|error| panic!("title state {state} frame: {error:?}"))
+            } else {
+                runtime
+                    .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                    .unwrap_or_else(|error| panic!("title state {state} frame: {error:?}"))
+            }
         };
+        if state == 10 {
+            assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+            runtime.finish_retail_title_update().unwrap();
+            runtime.finish_deferred_display_frame().unwrap();
+        }
         assert_eq!(
             frame.executions.len(),
             expected_spawnable,
@@ -331,25 +343,16 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
 
         if state == 10 {
             assert_eq!(
-                runtime.current_display_mask(),
-                IMAGE_ONLY_TITLE_LOAD_MASK,
-                "the type-zero load must retain every object-category bit while blank"
-            );
-            assert_eq!(
                 runtime.global_word(TITLE_STATE_GLOBAL),
                 Ok(u32::from(state)),
                 "the controller must not skip the first card without input"
             );
 
-            // The browser runs its Rust TitleUpdate after RetailRuntime has
-            // completed GLUpdate, so it mirrors this exact two-bit addition
-            // into both display words at the source boundary.
-            runtime
-                .set_global_word(NEXT_DISPLAY_GLOBAL, IMAGE_ONLY_TITLE_ACTIVE_MASK)
-                .expect("next-display global must exist");
-            runtime
-                .set_global_word(CURRENT_DISPLAY_GLOBAL, IMAGE_ONLY_TITLE_ACTIVE_MASK)
-                .expect("current-display global must exist");
+            assert_eq!(
+                runtime.current_display_mask(),
+                IMAGE_ONLY_TITLE_ACTIVE_MASK,
+                "TitleUpdate must add display/animate before GLUpdate latches the word"
+            );
 
             // State ten opens its authored skip gate on frame 64. Opcode
             // 0x1a's two-frame tapped mode must therefore retain the coherent
@@ -372,11 +375,14 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
                 let input_frame = {
                     let mut host = TitleMdatHost::new(&nsd, &nsf, &nsf_bytes, mdat.eid);
                     runtime
-                        .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                        .run_frame_before_display(&mut host, RETAIL_INSTRUCTION_BUDGET)
                         .unwrap_or_else(|error| {
                             panic!("title state {state} input frame {frame}: {error:?}")
                         })
                 };
+                assert_eq!(runtime.begin_retail_title_update(), Ok(None));
+                runtime.finish_retail_title_update().unwrap();
+                runtime.finish_deferred_display_frame().unwrap();
                 assert!(
                     input_frame
                         .executions
@@ -394,6 +400,52 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
                 transition_frame,
                 Some(64),
                 "the authored state-ten controller must consume the preceding Start edge through its two-frame tapped-button gate"
+            );
+            assert_eq!(
+                runtime.retail_title_presentation().unwrap().unwrap(),
+                crust_sim::retail_runtime::RetailTitlePresentation {
+                    screen: TitleScreen::PublisherFirst,
+                    next_screen: TitleScreen::PublisherSecond,
+                    phase: TitlePhase::FadingOut,
+                    opaque_swap_overlay: false,
+                    fade_counter: -224,
+                },
+                "the authored request must seed global fade before the same frame's GLUpdate"
+            );
+
+            let mut load_action = None;
+            for frame in 1..=10 {
+                let transition = {
+                    let mut host = TitleMdatHost::new(&nsd, &nsf, &nsf_bytes, mdat.eid);
+                    runtime
+                        .run_frame_before_display(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                        .unwrap_or_else(|error| {
+                            panic!("title state {state} fade frame {frame}: {error:?}")
+                        })
+                };
+                assert!(
+                    transition
+                        .executions
+                        .iter()
+                        .all(|execution| execution.result.is_ok()),
+                    "title state {state} fade frame {frame}: {:?}",
+                    transition.executions
+                );
+                let action = runtime.begin_retail_title_update().unwrap();
+                runtime.finish_retail_title_update().unwrap();
+                runtime.finish_deferred_display_frame().unwrap();
+                if action.is_some() {
+                    load_action = action;
+                    break;
+                }
+            }
+            assert_eq!(
+                load_action,
+                Some(RetailTitleAction::LoadScreen {
+                    previous: TitleScreen::PublisherFirst,
+                    screen: TitleScreen::PublisherSecond,
+                }),
+                "the legal publisher controller must reach the source TitleLoadState boundary"
             );
         }
     }

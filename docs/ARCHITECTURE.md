@@ -38,10 +38,13 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    layouts before its snapshot or pad frames can reach simulation.
 5. The browser schedules mounted retail-object execution and presentation cooperatively at 30 Hz
    and drops excessive lag instead of replaying an unbounded catch-up burst. Its high-level flow
-   value is a mount/presentation mirror: only an active authored title runtime advances the title
-   presentation mirror, while gameplay, completion, bonus, boss, intro and ending progression remain
-   owned by mounted retail GOOL. Each tick publishes card and pad state, consumes any prior-frame
-   level request, then performs spawn, camera and GOOL in source order. A presented gameplay tick
+   value is a passive mount/presentation mirror; gameplay, title, completion, bonus, boss, intro and
+   ending progression remain owned by mounted retail GOOL. Each tick publishes card and pad state,
+   consumes any prior-frame level request, then performs spawn, camera and GOOL in source order. A
+   title tick continues through `TitleUpdate`, any synchronous `TitleLoadState`, and `GLUpdate`
+   before the passive mirror observes the loaded screen. A one-frame swap latch preserves native's
+   immediate opaque overlay even when the loaded GOOL requests another fade in that same update.
+   A presented gameplay tick
    selects the exact `RetailCameraRuntime`
    zone/path/progress, executes GOOL, snapshots the live
    arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
@@ -85,12 +88,17 @@ two-tick gate keeps the loading image visible until the first gameplay presentat
 overlay no longer uses a browser-frame timeout.
 
 The same builder consumes immutable post-GOOL `RetailRenderObject` snapshots. It resolves unaligned
-animation references only through the mounted pair's GOOL item five, accepts the 3D SVTX/CVTX
+renderable animation references through the mounted pair's GOOL item five, accepts the 3D SVTX/CVTX
 vertex path, loads the exact TGEO/frame variant, and applies retail object-local YXZ rotation,
 scale, lighting, face culling and depth. World and object texture requests are collected before a
 single cache freeze and filtered through the current ZDAT load list. Commands share one texture
 manifest, and reversed object insertion is placed ahead of the already compensated world stream to
-preserve the source's head-insert ordering-table behavior. Type-two sprites and type-five fragments
+preserve the source's head-insert ordering-table behavior. On title level `0x19`, state 15 enables
+a checked WGEO item-three path program. Its group cursor persists across ZDAT world order, globals
+73 and 75 select groups 0–31 and 32–63, and frame-local polygon copies receive the effective
+animation masks so mounted stream storage remains immutable. A graph-scoped sidecar retains the
+last native-equivalent writes during map fade-out and is replaced at the zone/path or pair boundary.
+Type-two sprites and type-five fragments
 share the checked ZXY sprite matrix. Type-four text safely formats bounded negative-stack
 arguments, resolves default or dynamic fixed-63 type-three fonts, and emits ordered
 glyph/backdrop quads; standalone type-three fonts remain resource-only. Status-B `0x200` CVTX uses
@@ -139,8 +147,11 @@ synthetic title, menu or gameplay scene.
 
 The hosted presentation path records the 30 Hz order `card/pad → pending level transition → spawn
 → camera → GOOL → combined world/object scene → presentation` plus draw-skip and draw-count
-timing. `RetailCameraRuntime` owns the live path handle, signed-8.8 progress and persistent follow
-offsets/zoom/speed. ZDAT entities decode into owned
+timing. Title frames insert the authoritative `TitleUpdate → TitleLoadState → GLUpdate` boundary
+after GOOL; the high-level `GameFlow` value only mirrors the screen loaded there. `RetailCameraRuntime`
+owns the live path handle, signed-8.8 progress and persistent follow offsets/zoom/speed. Its follow
+input reads GOOL global 65 directly for the source `frames_elapsed - gem_stamp <= 15` neighbor gate.
+ZDAT entities decode into owned
 descriptors and signed path points. A fixed 96-slot object pool, dedicated main-object slot, eight
 logical roots, 304 active spawn words and generational handles reproduce the bounded spawn-tree
 shape without host pointers. A separate 3,592-halfword process-lifetime registry retains
@@ -172,6 +183,12 @@ host effects. The complete `0x85` selector family covers path orientation, persp
 aiming, source no-op case three, scaled/unscaled object transforms, checked model-vertex lookup and
 the camera-relative audio transform. The complete `0x8e` family covers static/object solid
 response, all directional surface variants, entity-color scaling and source no-op case seven.
+Opcode `0x14` (LEA) translates its input address before its output address, preserves null and stack
+side effects, and stores a checked process-local handle rather than a pointer. The observed Toxic
+Waste `BaraC` use selects a same-object type-zero animation that emits no primitives and supplies
+the standard non-vertex collision bound. Local descriptor types one through five are rejected
+because their variable payloads and rendering contracts are not represented. Opcode `0x81` follows
+the native switch's missing-case behavior as an intentional one-cycle no-op.
 `SZON` uses a typed host effect: it scans the current ZDAT header's neighbors in reverse serialized
 order, tests inclusive Q24.8 rectangles with explicit wrapping arithmetic, and changes the linked
 object's zone only when a match exists. Misc 12/7 deliberately uses the other header order: it
@@ -248,6 +265,12 @@ execution failure quarantines that exact generational object identity, preventin
 program counter from resuming past an unsupported operation while healthy siblings continue.
 Box special cases, some host effects, full progression and several dynamic object-rendering modes
 remain outside this bridge.
+
+After the mount-time life/fruit/pickup roots, the bridge applies the object-creating
+`LevelInitMisc(1)` branches under logical root four: level `0x05` uses executable 9/subtype 4,
+`0x14` and `0x16` use 23/6, Ripper Roo (`0x17`) uses 39/4, and `0x22`/`0x2e` use 53/13. The Ripper
+controller is also published as a generation-checked tagged reference in `ambiance_obj` (global 8).
+Other levels create no controller; same-level `LevelInitMisc(0)` does not duplicate one.
 
 `LevelResetGlobals(1)` is a preflighted synchronous transaction over the source's documented
 scalar words and the encountered-object registry. It deliberately preserves live objects, the

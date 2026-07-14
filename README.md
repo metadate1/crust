@@ -53,6 +53,11 @@ five-word pad history, camera-relative movement, gravity, rotation, every source
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
+`GoolObjectColors` now delivers Crash's category-`0x300` invincibility-hit event `0x0a00`
+synchronously before the same object's physics, so authored enemy handlers can change that frame's
+motion or state. The source's `argc=1`/null-argument quirk is represented by one checked zero word
+instead of dereferencing null; sender/recipient generations are validated, the hosted path emits no
+duplicate queued event, and ignored native handler failures remain available as typed diagnostics.
 The WebGL stage transactionally replaces the camera/path scene while reusing shared
 immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
 TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
@@ -81,11 +86,18 @@ former b5/b6 stop came from missing route actions in the test controller at auth
 the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
 actions required no camera or collision runtime change. `docs/VERIFICATION.md` records the exact
 invocation and boundaries.
+An opt-in legally local vertical-flow test now keeps the native process session intact across the
+whole first completion loop. N. Sanity emits `Transition(0x2d)` at frame 1,906, its checked
+`LEVEL_END` phase exports `RetailSessionCarry`, Level Complete imports that carry and emits
+`Transition(0x19)` at frame 513, and Title imports the second carry with its graph, zones, and
+host-owned MDAT boundary intact. Both outgoing `LEVEL_END` broadcasts complete without a checked
+handler failure. This is a deterministic simulation integration test, not a claim that a complete
+browser playthrough or later retail progression is certified.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
-The current native schedule includes one deterministic authored level completion; this is not a
-full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
+The current native schedule includes one deterministic authored level-completion loop; this is not
+a full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
 operations, dynamic rendering effects and later
 same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now

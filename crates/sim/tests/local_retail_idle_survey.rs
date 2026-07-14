@@ -6,6 +6,8 @@
 //! first level. The separate N. Sanity progression test drives an observable
 //! camera/player-state route using only retail directional, jump, and spin pad
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
+//! A separate vertical-flow test retains the authored session carry across
+//! N. Sanity Beach, Level Complete, and Title without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -42,12 +44,15 @@ use crust_sim::{
     retail_frame::RetailFrameState,
     retail_runtime::{
         NsfProgramError, NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome,
-        RetailRuntime, RuntimeError, RuntimeObjectHandle, ZoneTerminationMode,
+        RetailRuntime, RetailSessionCarry, RuntimeError, RuntimeObjectHandle, ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
 
 const GLOBAL_WORDS: usize = 256;
+const BOX_COUNT_GLOBAL: usize = 62;
+const CHECKPOINT_ID_GLOBAL: usize = 69;
+const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const INSTRUCTION_BUDGET: usize = 67;
 const DEFAULT_SURVEY_FRAMES: u32 = 360;
 const DEFAULT_PROGRESSION_FRAMES: u32 = 18_000;
@@ -77,7 +82,14 @@ fn progression_frame_count() -> u32 {
 enum SurveyInputProfile {
     Idle,
     DirectionAndButtonSweep,
+    DirectionAndButtonSweepToTransition,
     ForwardWithActions,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LevelContextSource {
+    FreshBoot,
+    SessionGlobals,
 }
 
 impl SurveyInputProfile {
@@ -85,12 +97,16 @@ impl SurveyInputProfile {
         match self {
             Self::Idle => "idle",
             Self::DirectionAndButtonSweep => "direction-and-button-sweep",
+            Self::DirectionAndButtonSweepToTransition => "direction-and-button-sweep-to-transition",
             Self::ForwardWithActions => "forward-with-actions",
         }
     }
 
     const fn stops_at_transition(self) -> bool {
-        matches!(self, Self::ForwardWithActions)
+        matches!(
+            self,
+            Self::DirectionAndButtonSweepToTransition | Self::ForwardWithActions
+        )
     }
 }
 
@@ -709,7 +725,8 @@ impl SurveyInputController {
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
-            SurveyInputProfile::DirectionAndButtonSweep => active_survey_held(frame),
+            SurveyInputProfile::DirectionAndButtonSweep
+            | SurveyInputProfile::DirectionAndButtonSweepToTransition => active_survey_held(frame),
             SurveyInputProfile::ForwardWithActions => self.n_sanity.held(camera, player),
         }
     }
@@ -1089,6 +1106,38 @@ fn refresh_level_context(
             .as_ref()
             .map_or([0; 3], |state| state.checkpoint_translation),
         first_spawn: old.as_ref().is_some_and(|state| state.first_spawn),
+        active_neighbor_zones: lifecycle.active_neighbor_zones(),
+    });
+    Ok(())
+}
+
+fn seed_mounted_level_context_from_globals(
+    runtime: &mut RetailRuntime,
+    graph: &RetailZoneGraph,
+    lifecycle: &ZoneLifecycle,
+    location: RetailCameraLocation,
+) -> Result<(), String> {
+    let graphics_flags = graph
+        .zone(location.path.zone)
+        .ok_or_else(|| format!("camera zone {} is absent", location.path.zone))?
+        .graphics_flags;
+    let read = |index| {
+        runtime
+            .global_word(index)
+            .map(u32::cast_signed)
+            .map_err(|error| format!("mounted retail global {index}: {error:?}"))
+    };
+    runtime.set_level_state_context(RetailLevelStateContext {
+        location,
+        graphics_flags,
+        box_count: read(BOX_COUNT_GLOBAL)?,
+        checkpoint_id: read(CHECKPOINT_ID_GLOBAL)?,
+        checkpoint_translation: [
+            read(CHECKPOINT_TRANSLATION_GLOBALS[0])?,
+            read(CHECKPOINT_TRANSLATION_GLOBALS[1])?,
+            read(CHECKPOINT_TRANSLATION_GLOBALS[2])?,
+        ],
+        first_spawn: false,
         active_neighbor_zones: lifecycle.active_neighbor_zones(),
     });
     Ok(())
@@ -1498,15 +1547,17 @@ fn fault_context(
     )
 }
 
-fn survey_pair(
+fn survey_pair_with_runtime(
     name: &'static str,
     level: LevelId,
     nsd: &Nsd,
     nsf: &Nsf,
     nsf_bytes: &[u8],
+    mut runtime: RetailRuntime,
+    context_source: LevelContextSource,
     input_profile: SurveyInputProfile,
     survey_frames: u32,
-) -> Result<LevelSurvey, String> {
+) -> Result<(LevelSurvey, RetailRuntime), String> {
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let mut camera = RetailCameraRuntime::new(&graph).map_err(|error| error.to_string())?;
@@ -1516,8 +1567,17 @@ fn survey_pair(
         .and_then(NonZeroU16::new)
         .ok_or_else(|| "spawn camera path has no representable points".to_owned())?;
     let mut frame_state = RetailFrameState::ready(spawn_points, 0);
-    let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, level);
-    refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
+    match context_source {
+        LevelContextSource::FreshBoot => {
+            refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
+        }
+        LevelContextSource::SessionGlobals => seed_mounted_level_context_from_globals(
+            &mut runtime,
+            &graph,
+            &lifecycle,
+            camera.location(),
+        )?,
+    }
     let mut host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
     runtime
         .create_retail_core_objects(camera.location().path.zone, &mut host)
@@ -1718,7 +1778,30 @@ fn survey_pair(
             .fault_contexts
             .insert(fault_context(&runtime, nsd, nsf, nsf_bytes, object));
     }
-    Ok(survey)
+    Ok((survey, runtime))
+}
+
+fn survey_pair(
+    name: &'static str,
+    level: LevelId,
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    input_profile: SurveyInputProfile,
+    survey_frames: u32,
+) -> Result<LevelSurvey, String> {
+    survey_pair_with_runtime(
+        name,
+        level,
+        nsd,
+        nsf,
+        nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        input_profile,
+        survey_frames,
+    )
+    .map(|(survey, _)| survey)
 }
 
 fn read_pair(root: &Path, level: LevelId) -> Result<(Vec<u8>, Vec<u8>), String> {
@@ -1729,6 +1812,13 @@ fn read_pair(root: &Path, level: LevelId) -> Result<(Vec<u8>, Vec<u8>), String> 
     let nsf =
         std::fs::read(&nsf_path).map_err(|error| format!("{}: {error}", nsf_path.display()))?;
     Ok((nsd, nsf))
+}
+
+fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), String> {
+    let (nsd_bytes, nsf_bytes) = read_pair(root, level)?;
+    let nsd = parse_nsd(&nsd_bytes, level).map_err(|error| error.to_string())?;
+    let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
+    Ok((nsd, nsf, nsf_bytes))
 }
 
 fn requested_survey_level() -> Option<LevelId> {
@@ -1937,6 +2027,172 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         survey.is_clean(),
         "goal-directed progression reached a checked runtime boundary: {}",
         survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
+    const N_SANITY_FRAMES: u32 = 2_100;
+    const COMPLETION_FRAMES: u32 = 600;
+
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let known_name = |level| {
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("vertical-flow level is present in the retail catalog")
+    };
+
+    let n_sanity = LevelId::N_SANITY_BEACH;
+    let (n_sanity_nsd, n_sanity_nsf, n_sanity_nsf_bytes) =
+        parse_local_pair(&root, n_sanity).expect("N. Sanity pair must parse");
+    let (n_sanity_survey, mut n_sanity_runtime) = survey_pair_with_runtime(
+        known_name(n_sanity),
+        n_sanity,
+        &n_sanity_nsd,
+        &n_sanity_nsf,
+        &n_sanity_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, n_sanity),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::ForwardWithActions,
+        N_SANITY_FRAMES,
+    )
+    .expect("N. Sanity authored route must execute");
+    assert_eq!(
+        n_sanity_survey.next_lid.map(|(_, level)| level),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "N. Sanity's authored end warp must request Level Complete: {}",
+        n_sanity_survey.summary()
+    );
+    assert_eq!(
+        n_sanity_survey.restarts,
+        0,
+        "the authored route must not require a restart: {}",
+        n_sanity_survey.summary()
+    );
+    assert!(
+        n_sanity_survey.is_clean(),
+        "N. Sanity reached a checked runtime boundary: {}",
+        n_sanity_survey.summary()
+    );
+
+    let completion_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&n_sanity_nsd, &n_sanity_nsf, &n_sanity_nsf_bytes);
+        let report = n_sanity_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+            )
+            .expect("N. Sanity LEVEL_END must export a session carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "N. Sanity LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+        assert!(!report.resolved.bonus_return);
+        report.carry
+    };
+
+    let completion = LevelId::LEVEL_COMPLETE;
+    let (completion_nsd, completion_nsf, completion_nsf_bytes) =
+        parse_local_pair(&root, completion).expect("Level Complete pair must parse");
+    let completion_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, completion, completion_carry)
+            .expect("Level Complete must import N. Sanity's session carry");
+    let (completion_survey, mut completion_runtime) = survey_pair_with_runtime(
+        known_name(completion),
+        completion,
+        &completion_nsd,
+        &completion_nsf,
+        &completion_nsf_bytes,
+        completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        COMPLETION_FRAMES,
+    )
+    .expect("Level Complete authored runtime must execute");
+    assert_eq!(
+        completion_survey.next_lid.map(|(_, level)| level),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "authored completion input must request Title: {}",
+        completion_survey.summary()
+    );
+    assert!(
+        completion_survey.is_clean(),
+        "Level Complete reached a checked runtime boundary: {}",
+        completion_survey.summary()
+    );
+
+    let title_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+        let report = completion_runtime
+            .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+            .expect("Level Complete LEVEL_END must export a session carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.resolved.level, LevelId::TITLE);
+        assert!(!report.resolved.bonus_return);
+        report.carry
+    };
+
+    let title = LevelId::TITLE;
+    let (title_nsd, title_nsf, title_nsf_bytes) =
+        parse_local_pair(&root, title).expect("Title pair must parse");
+    let mut title_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, title, title_carry)
+        .expect("Title must import Level Complete's session carry");
+    let title_graph = graph_for_pair(title, &title_nsd, &title_nsf, &title_nsf_bytes)
+        .expect("Title graph must parse");
+    let (_, title_lifecycle) = zone_catalog(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        &title_graph,
+        title,
+    )
+    .expect("Title zone catalog must parse");
+    let title_camera =
+        RetailCameraRuntime::new(&title_graph).expect("Title camera runtime must initialize");
+    seed_mounted_level_context_from_globals(
+        &mut title_runtime,
+        &title_graph,
+        &title_lifecycle,
+        title_camera.location(),
+    )
+    .expect("Title mount context must use the carried retail globals");
+    let mut title_host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+    let title_core = title_runtime
+        .create_retail_core_objects(title_camera.location().path.zone, &mut title_host)
+        .expect("Title core runtime must boot cleanly");
+    assert_eq!(
+        title_core, None,
+        "Title intentionally has no gameplay HUD/core roots; its MDAT objects are host-owned"
+    );
+    title_runtime.set_frame_timing(34, 34);
+    title_runtime
+        .set_pad_snapshot(0, RetailPadSnapshot::default())
+        .expect("Title must accept an idle retail pad snapshot");
+    let title_frame = title_runtime
+        .run_frame(&mut title_host, INSTRUCTION_BUDGET)
+        .expect("Title's empty core frame must remain a valid runtime frame");
+    assert_eq!(title_runtime.level(), Some(title));
+    assert!(title_runtime.level_state_context().is_some());
+    assert!(title_runtime.arena().is_empty());
+    assert!(title_frame.executions.is_empty());
+    assert!(title_frame.effects.is_empty());
+    assert_eq!(title_runtime.faulted_object_count(), 0);
+    eprintln!(
+        "vertical-flow: N. Sanity -> Level Complete at frame {}; Level Complete -> Title at frame {}; Title core mounted cleanly",
+        n_sanity_survey.next_lid.unwrap().0,
+        completion_survey.next_lid.unwrap().0,
     );
 }
 

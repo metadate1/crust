@@ -1481,6 +1481,18 @@ pub struct RuntimeSolidEventFault {
     pub reason: SolidEventReason,
 }
 
+/// One invincibility-hit event whose checked GOOL handler faulted.
+///
+/// `GoolObjectColors` discards `GoolSendEvent`'s return value and continues
+/// into its cyclic-color and physics tail. This diagnostic preserves the
+/// exact sender, recipient, and event without changing that native ordering.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeInvincibilityEventFault {
+    pub sender: RuntimeObjectHandle,
+    pub recipient: RuntimeObjectHandle,
+    pub event: u32,
+}
+
 /// Deterministic result of terminating all eligible objects from one zone.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ZoneTerminationEventFailure<E> {
@@ -1923,6 +1935,7 @@ pub struct RetailRuntime {
     reclaim_event_faults: Vec<RuntimeReclaimEventFault>,
     pause_event_faults: Vec<RuntimePauseEventFault>,
     solid_event_faults: Vec<RuntimeSolidEventFault>,
+    invincibility_event_faults: Vec<RuntimeInvincibilityEventFault>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
     displayed_objects: BTreeMap<RuntimeObjectHandle, RetailDisplaySnapshot>,
     level: Option<LevelId>,
@@ -1966,6 +1979,7 @@ impl RetailRuntime {
             reclaim_event_faults: Vec::new(),
             pause_event_faults: Vec::new(),
             solid_event_faults: Vec::new(),
+            invincibility_event_faults: Vec::new(),
             faulted_objects: BTreeSet::new(),
             displayed_objects: BTreeMap::new(),
             level: None,
@@ -3331,6 +3345,13 @@ impl RetailRuntime {
         std::mem::take(&mut self.solid_event_faults)
     }
 
+    /// Drains invincibility-hit deliveries whose GOOL handlers faulted.
+    /// Native ignores these return codes and continues through colors and
+    /// physics; the ordered queue makes checked Rust failures observable.
+    pub fn take_invincibility_event_faults(&mut self) -> Vec<RuntimeInvincibilityEventFault> {
+        std::mem::take(&mut self.invincibility_event_faults)
+    }
+
     /// Completes native `CoreFrame`'s pre-remount level transition phase.
     ///
     /// `requested_lid` is the signed value retained before event delivery.
@@ -4363,6 +4384,9 @@ impl RetailRuntime {
         host: &mut H,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
+        if !self.handles.is_live_pair(object) {
+            return Ok(());
+        }
         let mut hook_error = None;
         let mut candidate_generations = BTreeMap::new();
         let mut candidate_generations_captured = false;
@@ -4375,14 +4399,73 @@ impl RetailRuntime {
                 pending_cleanup_actions,
                 reclaim_event_faults,
                 solid_event_faults,
+                invincibility_event_faults,
                 level,
                 level_state_context,
                 saved_level_state,
                 transition_zone_context,
                 ..
             } = self;
+            let colors_completed = machine
+                .run_retail_object_colors_with_event_handler(
+                    object.vm,
+                    |machine, sender_vm, recipient_vm, event| {
+                        let Some(sender) = handles.for_vm(sender_vm) else {
+                            hook_error = Some(RuntimeError::UnknownVmObject(sender_vm));
+                            return;
+                        };
+                        let Some(recipient) = handles.for_vm(recipient_vm) else {
+                            hook_error = Some(RuntimeError::UnknownVmObject(recipient_vm));
+                            return;
+                        };
+                        if sender != object || !handles.is_live_pair(sender) {
+                            hook_error = Some(RuntimeError::UnknownVmObject(sender_vm));
+                            return;
+                        }
+                        if !handles.is_live_pair(recipient) {
+                            hook_error = Some(RuntimeError::UnknownVmObject(recipient_vm));
+                            return;
+                        }
+                        // Source passes argc=1 with a null argv pointer here.
+                        // Preserve the observable zero word without reproducing
+                        // that undefined C dereference in the checked VM.
+                        let dispatch = Self::dispatch_event_parts_current(
+                            arena,
+                            handles,
+                            machine,
+                            pending_states,
+                            pending_cleanup_actions,
+                            reclaim_event_faults,
+                            *level,
+                            level_state_context.as_ref(),
+                            saved_level_state,
+                            *transition_zone_context,
+                            host,
+                            Some(object.vm),
+                            Some(sender),
+                            Some(recipient),
+                            event,
+                            Some(&[0]),
+                            spawned_children,
+                        );
+                        if dispatch.is_err() {
+                            invincibility_event_faults.push(RuntimeInvincibilityEventFault {
+                                sender,
+                                recipient,
+                                event,
+                            });
+                        }
+                    },
+                )
+                .map_err(RuntimeError::Vm)?;
+            if let Some(error) = hook_error.take() {
+                return Err(error);
+            }
+            if !colors_completed || !handles.is_live_pair(object) {
+                return Ok(());
+            }
             let physics = machine
-                .run_retail_object_physics_with_solid_event_handler(
+                .run_retail_object_physics_after_colors_with_solid_event_handler(
                     object.vm,
                     |machine, _moving_vm, candidates, effect| {
                         if !candidate_generations_captured {
@@ -10852,6 +10935,164 @@ mod tests {
         assert!(!candidates[0].active);
         assert_eq!(candidates[0].translation, sentinel_translation);
         assert_ne!(candidates[0].status_b, u32::MAX);
+    }
+
+    #[test]
+    fn invincibility_hit_interrupt_runs_before_physics_with_checked_zero_argument() {
+        const HIT_INVINCIBLE_EVENT: u32 = 0x0a00;
+        const SENDER_VELOCITY_X: u16 = 0x0c00 | (7_u16 << 6) | process_register::MISC_A_X as u16;
+
+        let mut runtime = RetailRuntime::new(0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 0x95, 2, 0);
+        let collider = spawn_test_object(&mut runtime, ZONE, 0x96, 2, 0);
+        {
+            let sender_object = runtime.machine.object_mut(sender.vm).unwrap();
+            sender_object
+                .set_register(process_register::INVINCIBILITY_STATE, 4)
+                .unwrap();
+            sender_object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION,
+                )
+                .unwrap();
+            sender_object
+                .set_register(process_register::TRANSLATION_X, 0)
+                .unwrap();
+            sender_object
+                .set_register(process_register::MISC_A_X, 0)
+                .unwrap();
+            sender_object.set_link(6, Some(collider.vm)).unwrap();
+        }
+        {
+            let collider_object = runtime.machine.object_mut(collider.vm).unwrap();
+            collider_object.configure_test_program_identity(0x300);
+            collider_object
+                .set_register(process_register::ACK, 0xfeed_beef)
+                .unwrap();
+            collider_object
+                .configure_test_event_interrupt(
+                    HIT_INVINCIBLE_EVENT,
+                    vec![
+                        // fp[-1] is the one checked replacement word for the
+                        // source's argc=1/null-argv call.
+                        Instruction::encode(0x11, 0x0b7f, 0x0e00 | process_register::ACK as u16),
+                        Instruction::encode(0x11, 0x0840, SENDER_VELOCITY_X),
+                        0x8280_0000,
+                    ],
+                )
+                .unwrap();
+        }
+        let _discarded_spawn_effects = runtime.machine.take_effects();
+
+        runtime
+            .finish_native_object_update(sender, &mut SnapshotHost, &mut Vec::new())
+            .unwrap();
+
+        let sender_object = runtime.machine.object(sender.vm).unwrap();
+        assert_eq!(
+            sender_object.register(process_register::MISC_A_X),
+            Ok(0x4000)
+        );
+        assert_eq!(
+            sender_object.register(process_register::TRANSLATION_X),
+            Ok(544),
+            "the interrupt velocity must be visible to the same update's 34-tick physics pass"
+        );
+        let collider_object = runtime.machine.object(collider.vm).unwrap();
+        assert_eq!(collider_object.register(process_register::ACK), Ok(0));
+        assert_eq!(
+            collider_object.register(process_register::EVENT),
+            Ok(HIT_INVINCIBLE_EVENT)
+        );
+        assert!(runtime.machine.effects().is_empty());
+        assert!(runtime.take_invincibility_event_faults().is_empty());
+    }
+
+    #[test]
+    fn invincibility_hit_fault_is_diagnostic_and_physics_still_finishes() {
+        const HIT_INVINCIBLE_EVENT: u32 = 0x0a00;
+
+        let mut runtime = RetailRuntime::new(0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 0x97, 2, 0);
+        let collider = spawn_test_object(&mut runtime, ZONE, 0x98, 2, 0);
+        {
+            let sender_object = runtime.machine.object_mut(sender.vm).unwrap();
+            sender_object
+                .set_register(process_register::INVINCIBILITY_STATE, 4)
+                .unwrap();
+            sender_object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION,
+                )
+                .unwrap();
+            sender_object
+                .set_register(process_register::MISC_A_X, 1_024)
+                .unwrap();
+            sender_object.set_link(6, Some(collider.vm)).unwrap();
+        }
+        {
+            let collider_object = runtime.machine.object_mut(collider.vm).unwrap();
+            collider_object.configure_test_program_identity(0x300);
+            collider_object
+                .configure_test_event_interrupt(HIT_INVINCIBLE_EVENT, vec![0xff00_0000])
+                .unwrap();
+        }
+        let _discarded_spawn_effects = runtime.machine.take_effects();
+
+        runtime
+            .finish_native_object_update(sender, &mut SnapshotHost, &mut Vec::new())
+            .unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(sender.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_X),
+            Ok(34)
+        );
+        assert_eq!(
+            runtime.take_invincibility_event_faults(),
+            [RuntimeInvincibilityEventFault {
+                sender,
+                recipient: collider,
+                event: HIT_INVINCIBLE_EVENT,
+            }]
+        );
+        assert!(runtime.machine.effects().is_empty());
+    }
+
+    #[test]
+    fn native_finish_rejects_a_reused_vm_slot_from_a_stale_arena_generation() {
+        let mut runtime = RetailRuntime::new(0);
+        let original = spawn_test_object(&mut runtime, ZONE, 0x99, 2, 0);
+        runtime
+            .reclaim_runtime_subtree(original.arena, &mut SnapshotHost, &mut Vec::new())
+            .unwrap();
+        let replacement = spawn_test_object(&mut runtime, ZONE, 0x9a, 2, 0);
+        assert_eq!(replacement.vm, original.vm);
+        assert_ne!(replacement.arena, original.arena);
+        let replacement_colors = [0x0333; COLOR_COUNT];
+        {
+            let replacement_object = runtime.machine.object_mut(replacement.vm).unwrap();
+            replacement_object.set_retail_colors(replacement_colors);
+            replacement_object
+                .set_register(process_register::INVINCIBILITY_STATE, 2)
+                .unwrap();
+        }
+
+        runtime
+            .finish_native_object_update(original, &mut SnapshotHost, &mut Vec::new())
+            .unwrap();
+
+        let replacement_object = runtime.machine.object(replacement.vm).unwrap();
+        assert_eq!(replacement_object.retail_colors(), &replacement_colors);
+        assert_eq!(
+            replacement_object.register(process_register::INVINCIBILITY_STATE),
+            Ok(2)
+        );
     }
 
     #[test]

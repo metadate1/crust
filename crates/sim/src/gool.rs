@@ -4525,10 +4525,34 @@ impl Machine {
     /// Executes source `GoolObjectColors` for one live object.
     ///
     /// This preserves the intentional switch fallthrough for invincibility
-    /// states two through five. The category-`0x300` collider interrupt stays
-    /// represented by the VM's checked event effect until synchronous event
-    /// services are hosted by the runtime.
+    /// states two through five. The runtime-facing variant below additionally
+    /// hosts the category-`0x300` collider interrupt at its source call site.
     pub fn run_retail_object_colors(&mut self, handle: ObjectHandle) -> Result<(), VmError> {
+        self.run_retail_object_colors_impl(handle, true, |_, _, _, _| {})?;
+        Ok(())
+    }
+
+    /// Executes retail object colors while synchronously hosting the
+    /// invincibility-hit event at the exact point of source dispatch.
+    ///
+    /// The returned flag is false when nested delivery removes or reuses the
+    /// sender's VM slot. In that case the old pass must not write cyclic color
+    /// intensity into the replacement object or continue into physics.
+    pub(crate) fn run_retail_object_colors_with_event_handler(
+        &mut self,
+        handle: ObjectHandle,
+        event_handler: impl FnMut(&mut Self, ObjectHandle, ObjectHandle, u32),
+    ) -> Result<bool, VmError> {
+        self.run_retail_object_colors_impl(handle, false, event_handler)
+    }
+
+    fn run_retail_object_colors_impl(
+        &mut self,
+        handle: ObjectHandle,
+        emit_event_effect: bool,
+        mut event_handler: impl FnMut(&mut Self, ObjectHandle, ObjectHandle, u32),
+    ) -> Result<bool, VmError> {
+        let incarnation = self.object_incarnation(handle)?;
         let (
             invincibility_state,
             invincibility_stamp,
@@ -4573,11 +4597,17 @@ impl Machine {
                         .program_identity
                         .is_some_and(|identity| identity.category() == 0x300)
                 {
-                    self.emit(VmEffect::Event {
-                        sender: handle,
-                        recipient: Some(collider),
-                        event: HIT_INVINCIBLE_EVENT,
-                    })?;
+                    if emit_event_effect {
+                        self.emit(VmEffect::Event {
+                            sender: handle,
+                            recipient: Some(collider),
+                            event: HIT_INVINCIBLE_EVENT,
+                        })?;
+                    }
+                    event_handler(self, handle, collider, HIT_INVINCIBLE_EVENT);
+                    if !self.incarnation_is_live(handle, incarnation) {
+                        return Ok(false);
+                    }
                 }
 
                 let modulus = (self.draw_count % 4) << 8;
@@ -4615,7 +4645,7 @@ impl Machine {
                 }
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Executes the native post-interpreter color and physics phases for one
@@ -4641,7 +4671,7 @@ impl Machine {
     pub fn run_retail_object_physics_with_solid_event_handler(
         &mut self,
         handle: ObjectHandle,
-        mut solid_event_handler: impl FnMut(
+        solid_event_handler: impl FnMut(
             &mut Self,
             ObjectHandle,
             &mut [SolidObjectCandidate],
@@ -4649,6 +4679,24 @@ impl Machine {
         ) -> bool,
     ) -> Result<RetailPhysicsResult, VmError> {
         self.run_retail_object_colors(handle)?;
+        self.run_retail_object_physics_after_colors_with_solid_event_handler(
+            handle,
+            solid_event_handler,
+        )
+    }
+
+    /// Executes the physics portion of the native post-interpreter pass after
+    /// its caller has completed the source-ordered color phase.
+    pub(crate) fn run_retail_object_physics_after_colors_with_solid_event_handler(
+        &mut self,
+        handle: ObjectHandle,
+        mut solid_event_handler: impl FnMut(
+            &mut Self,
+            ObjectHandle,
+            &mut [SolidObjectCandidate],
+            SolidEffect,
+        ) -> bool,
+    ) -> Result<RetailPhysicsResult, VmError> {
         let object_type = self
             .object(handle)?
             .program_identity
@@ -16392,6 +16440,61 @@ mod tests {
                 .register(process_register::INVINCIBILITY_STATE),
             Ok(0)
         );
+    }
+
+    #[test]
+    fn hosted_invincibility_hit_stops_before_writing_a_reused_sender_slot() {
+        let sender = handle(0);
+        let collider = handle(1);
+        let mut sender_object = VmObject::new(sender, Vec::new()).unwrap();
+        sender_object
+            .set_register(process_register::INVINCIBILITY_STATE, 4)
+            .unwrap();
+        sender_object.set_link(6, Some(collider)).unwrap();
+        let mut collider_object = VmObject::new(collider, Vec::new()).unwrap();
+        collider_object.configure_test_program_identity(0x300);
+        let mut machine = Machine::new(0);
+        machine.insert_object(sender_object).unwrap();
+        machine.insert_object(collider_object).unwrap();
+        machine.set_draw_count(2);
+        let original_incarnation = machine.object_incarnation(sender).unwrap();
+        let replacement_colors = [0x0555; COLOR_COUNT];
+        let mut handled = false;
+
+        let completed = machine
+            .run_retail_object_colors_with_event_handler(
+                sender,
+                |machine, callback_sender, callback_recipient, event| {
+                    handled = true;
+                    assert_eq!(callback_sender, sender);
+                    assert_eq!(callback_recipient, collider);
+                    assert_eq!(event, HIT_INVINCIBLE_EVENT);
+                    machine
+                        .remove_object_for_host_termination(callback_sender)
+                        .unwrap();
+                    let mut replacement = VmObject::new(callback_sender, Vec::new()).unwrap();
+                    replacement.set_retail_colors(replacement_colors);
+                    replacement
+                        .set_register(process_register::INVINCIBILITY_STATE, 0xfeed)
+                        .unwrap();
+                    machine.insert_object(replacement).unwrap();
+                },
+            )
+            .unwrap();
+
+        assert!(handled);
+        assert!(!completed);
+        assert_ne!(
+            machine.object_incarnation(sender).unwrap(),
+            original_incarnation
+        );
+        let replacement = machine.object(sender).unwrap();
+        assert_eq!(replacement.retail_colors(), &replacement_colors);
+        assert_eq!(
+            replacement.register(process_register::INVINCIBILITY_STATE),
+            Ok(0xfeed)
+        );
+        assert!(machine.effects().is_empty());
     }
 
     #[test]

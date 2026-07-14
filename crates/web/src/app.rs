@@ -2215,6 +2215,19 @@ impl Runtime {
             dom.log(&message, true);
             self.retail_runtime_warning = Some(message);
         }
+        let invincibility_faults = self.retail_objects.take_invincibility_event_faults();
+        if !invincibility_faults.is_empty() {
+            let first = invincibility_faults[0];
+            let message = format!(
+                "Native invincibility collision ignored {} faulted GOOL handler(s); first sender: {:?}, recipient: {:?}, event: 0x{:X}.",
+                invincibility_faults.len(),
+                first.sender,
+                first.recipient,
+                first.event,
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
         let solid_faults = self.retail_objects.take_solid_event_faults();
         if !solid_faults.is_empty() {
             let first = solid_faults[0];

@@ -82,6 +82,12 @@ copy any disc or stream bytes into the repository:
   state stamp, then runs the target external transition block after the stamp. Nested calls/returns,
   animation selection and hosted child spawns preserve this order; target state code resumes on a
   later object execution.
+- Focused native tests prove `GoolObjectColors` delivers the category-`0x300` collider's authored
+  `0x0a00` hit synchronously before physics. An event interrupt changes Crash's X velocity and the
+  same 34-tick update moves him to X=544; its frame-relative argument is the checked zero word used
+  in place of the source's `argc=1`/null pointer. The hosted path leaves no duplicate queued effect,
+  malformed handlers enter `RuntimeInvincibilityEventFault` while physics still completes, and VM
+  slot plus arena-generation reuse cannot mutate a replacement object.
 - Paging opcode `0x8b` cases one through six reproduce the checked reference-count/query behavior
   with explicit page/entry metadata. Opcode `0x1a` reads the same five-word pad history installed by
   the browser. The legal trace also crossed `0x85` suboperation zero path orientation, `0x8e`
@@ -336,10 +342,10 @@ The final checks below were run against this change set on 2026-07-14:
 - `cargo fmt --all -- --check` passed.
 - locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
   `crust-web` Clippy pass both completed with warnings denied.
-- the locked asset-free workspace suite passed all 730 default tests across 33 targets. Another 53
-  legally local tests remain ignored by default, for 783 listed tests across all targets.
+- the locked asset-free workspace suite passed all 736 default tests across 33 targets. Another 54
+  legally local tests remain ignored by default, for 790 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. All 53 selected tests passed with zero failures, including every
+  streams in place. All 54 selected tests passed with zero failures, including every
   raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
 - executable-`0x22` crate coverage now checks the native strict adjacency boundary, checked
   bidirectional misc-A links, skipped-lower-crate Y compaction, activation/restart reset, stagger
@@ -353,6 +359,14 @@ The final checks below were run against this change set on 2026-07-14:
   actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
   lane. Correcting those inputs required no camera or collision runtime change. This deterministic
   local test is not a browser playthrough or a claim of full retail parity.
+- `authored_n_sanity_completion_title_vertical_flow_preserves_session_carry` passes against the
+  legally local stream directory. It reaches N. Sanity's authored `Transition(0x2d)` at frame
+  1,906, finishes the outgoing `LEVEL_END`, imports the resulting `RetailSessionCarry` into Level
+  Complete, reaches that pair's authored `Transition(0x19)` at frame 513, finishes the second
+  `LEVEL_END`, and imports its carry into Title. The destination contexts are seeded from carried
+  globals 62, 69, and 102–104; both broadcasts report zero checked handler failures, and Title's
+  intentionally empty gameplay-core frame completes with no effect or fault. This proves the
+  simulation's first three-pair completion handoff, not an end-user browser playthrough.
 - the legal Jungle Rollers PBAK scene test passed after pinning the first source-correct `FruiC`
   incarnation: synchronous `0x83`/`0x84` local-bound refresh moves its first shrink-four frame to
   wall frame 190/pad boundary 191, followed by the exact raw/effective shift checkpoints through
@@ -382,8 +396,8 @@ The final checks below were run against this change set on 2026-07-14:
   proves GOOL `frames_elapsed` advances while texture `draw_count` is frozen; scene locations carry
   both values so hidden/loading frames cannot desynchronize shading from geometry.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,231,524 bytes with SHA-256
-  `58cd4200db4980117625048c2fa6e5e444d73b4624ecc4996c2a23951ae1260d`.
+  web release. The Wasm payload is 1,234,412 bytes with SHA-256
+  `28acb47b304456f613dc15c2a4843384cf67839d719bde48d9b35f80d1c578a3`.
 - the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
   the route and pause integration was loaded in the visible in-app browser. Because that browser
   cannot automate a native file picker,
@@ -429,6 +443,18 @@ The final checks below were run against this change set on 2026-07-14:
   N. Sanity scene. Keyboard, physical gamepad, fullscreen and touch presentation were not repeated
   in this pass.
 
+  The authoritative-save and inline-invincibility-event artifact identified by the current hash
+  above was then exercised through the same local-only bridge. The supplied BIN again resolved 88
+  streams, 44/44 pairs and 219 MiB of selected extents. Title `0x19` rendered its authored scene at
+  30.00 Hz with synthesized audio active; a fresh direct `0x09` mount rendered N. Sanity Beach's
+  world, Crash and crate geometry. UI pause and mute each changed telemetry and were restored to
+  `RUNNING` and `SYNTH ACTIVE`. The browser warning/error log was empty. After the tab retained its
+  local `File`, the bridge was stopped and deleted, the ordinary no-store server was restored, its
+  root returned HTTP 200, and both temporary route names returned HTTP 404. The visible tab remains
+  on the in-memory N. Sanity scene. No game bytes entered Git, browser persistence or the repository
+  working tree; keyboard, physical gamepad, fullscreen and touch presentation were not repeated in
+  this pass.
+
 ## Reproducible commands
 
 ```bash
@@ -449,6 +475,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  authored_n_sanity_completion_title_vertical_flow_preserves_session_carry \
+  -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \
   n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact

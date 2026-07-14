@@ -266,7 +266,12 @@ gameplay path.
   errors or faulted objects. The intermediate b5/b6 stop was caused by missing test-controller route
   actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
   lane. Correcting those route actions required no camera or collision runtime change. This
-  deterministic route does not establish a browser playthrough or full retail parity.
+  deterministic route now feeds a separate legally local cross-pair test: N. Sanity's checked
+  `LEVEL_END` exports a session carry, Level Complete imports it and reaches its authored
+  `Transition(0x19)` at frame 513, and Title imports the second carry with a valid graph, zone
+  context, and intentionally empty gameplay-core frame. Both outgoing level-end broadcasts are
+  clean. This deterministic first completion loop does not establish a browser playthrough or full
+  retail parity.
   Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
   open. Hog Wild's previously
   recorded checked 360-frame idle trace delivered the authored fall-kill event to state 22,
@@ -277,6 +282,10 @@ gameplay path.
   ceiling, outside-zone, water and final-surface events now dispatch synchronously at their native
   `solid.c` call sites. Ordered status/link effects and the mover's current process fields are live
   before each nested handler; handler mutations are refreshed before the remaining collision work.
+  Crash's state-four invincibility collision now likewise dispatches `0x0a00` synchronously from
+  `GoolObjectColors` before physics. The checked host supplies a zero word for the source's
+  `argc=1`/null-argv quirk, guards VM incarnations and runtime-handle generations, suppresses the old
+  queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
 - With a complete retail title stream, password input and validation belong to the mounted

@@ -8,8 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crust_formats::binary::{Eid, PageIndex};
 use crust_formats::stream::{
-    GOOL_PC_NONE, GoolAnimationDescriptor, GoolProgram, LevelId, ZoneEntity, ZoneEntityPathPoint,
-    parse_gool_animation_descriptor, structs::GoolState,
+    GOOL_PC_NONE, GoolAnimationDescriptor, GoolAnimationHeader, GoolFragmentAnimation, GoolProgram,
+    GoolSpriteAnimation, GoolVertexAnimation, LevelId, ZoneEntity, ZoneEntityPathPoint,
+    parse_gool_animation_descriptor, parse_gool_animation_header, structs::GoolState,
 };
 
 use crate::card::{CARD_SLOT_COUNT, CardPublishedState, SaveData};
@@ -349,26 +350,47 @@ impl AnimationReference {
     }
 }
 
-/// Descriptor kind read through a checked process-local animation pointer.
+/// A checked type-four descriptor stored outside global animation item five.
+///
+/// Native permits LEA to point `anim_seq` into any object-owned word region.
+/// Text still resolves its font word offset against global item five, but its
+/// NUL-delimited terms remain in the aliased region represented here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessTextAnimation {
+    pub header: GoolAnimationHeader,
+    pub unknown_word: u32,
+    pub font_word_offset: u32,
+    pub terms: Vec<Vec<u8>>,
+}
+
+/// Descriptor kind read through a checked LEA-created animation pointer.
 ///
 /// Retail GOOL can use opcode `0x14` (LEA) to point `anim_seq` at words in
-/// the object's process image instead of global item five. Toxic Waste's
-/// `BaraC` deliberately builds a type-zero descriptor this way: it draws no
-/// geometry, but its non-null pointer selects native's standard non-vertex
-/// collision bound. Other local descriptor types are rejected until their
-/// complete variable payload and render path are represented; treating only
-/// their header as non-vertex would silently suppress authored geometry.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// the object's internal table or process image instead of global item five.
+/// Known types retain their fully validated owned payload so a render
+/// snapshot cannot observe later linked-register mutation. Native's transform
+/// switch has no default body, so every other type byte is an intentional
+/// no-draw descriptor with the standard non-vertex collision bound.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProcessAnimationKind {
-    /// Native's type-zero switch default: a non-null animation that draws no
-    /// primitives and uses the standard non-vertex collision box.
+    /// Native's transform-switch default: a non-null animation that draws no
+    /// primitives and uses the standard non-vertex collision box. This covers
+    /// type zero plus unknown bytes used by retail timer/data aliases.
     NoDraw,
+    Vertex(GoolVertexAnimation),
+    Sprite(GoolSpriteAnimation),
+    /// Type three is itself a packed font resource. Selecting it as the live
+    /// animation emits no primitives, so only the consumed common header must
+    /// be present in the aliased region.
+    Font(GoolAnimationHeader),
+    Text(ProcessTextAnimation),
+    Fragment(GoolFragmentAnimation),
 }
 
 /// One live, bounds-checked animation descriptor in an object's process
-/// words. The storage token preserves the exact same-object register alias
-/// selected by LEA without exposing a native pointer.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// words. The storage token preserves the exact same-object internal/register
+/// alias selected by LEA without exposing a native pointer.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessAnimationReference {
     storage: StorageReference,
     kind: ProcessAnimationKind,
@@ -376,13 +398,13 @@ pub struct ProcessAnimationReference {
 
 impl ProcessAnimationReference {
     #[must_use]
-    pub const fn storage(self) -> StorageReference {
+    pub const fn storage(&self) -> StorageReference {
         self.storage
     }
 
     #[must_use]
-    pub const fn kind(self) -> ProcessAnimationKind {
-        self.kind
+    pub const fn kind(&self) -> &ProcessAnimationKind {
+        &self.kind
     }
 }
 
@@ -392,7 +414,7 @@ impl ProcessAnimationReference {
 /// process descriptors retain a same-object [`StorageReference`] plus the
 /// source words needed by downstream simulation. Both variants fit in owned
 /// render snapshots and neither can outlive or dereference native memory.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AnimationSource {
     ItemFive(AnimationReference),
     Process(ProcessAnimationReference),
@@ -400,12 +422,45 @@ pub enum AnimationSource {
 
 impl AnimationSource {
     #[must_use]
-    pub const fn item_five_reference(self) -> Option<AnimationReference> {
+    pub const fn item_five_reference(&self) -> Option<AnimationReference> {
         match self {
-            Self::ItemFive(reference) => Some(reference),
+            Self::ItemFive(reference) => Some(*reference),
             Self::Process(_) => None,
         }
     }
+}
+
+fn animation_words_as_bytes(words: &[u32]) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(words.len().saturating_mul(4));
+    for word in words {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+fn parse_process_text_animation(words: &[u32]) -> Result<ProcessTextAnimation, ()> {
+    let bytes = animation_words_as_bytes(words);
+    let header = parse_gool_animation_header(&bytes, 0).map_err(|_| ())?;
+    if bytes.len() < 12 {
+        return Err(());
+    }
+    let unknown_word = u32::from_le_bytes(bytes[4..8].try_into().map_err(|_| ())?);
+    let font_word_offset = u32::from_le_bytes(bytes[8..12].try_into().map_err(|_| ())?);
+    let mut cursor = 12_usize;
+    let mut terms = Vec::with_capacity(usize::from(header.length));
+    for _ in 0..header.length {
+        let remaining = bytes.get(cursor..).ok_or(())?;
+        let length = remaining.iter().position(|byte| *byte == 0).ok_or(())?;
+        let end = cursor.checked_add(length).ok_or(())?;
+        terms.push(bytes.get(cursor..end).ok_or(())?.to_vec());
+        cursor = end.checked_add(1).ok_or(())?;
+    }
+    Ok(ProcessTextAnimation {
+        header,
+        unknown_word,
+        font_word_offset,
+        terms,
+    })
 }
 
 /// Immutable identity of the global GOOL program that owns an object's
@@ -2592,6 +2647,10 @@ pub enum VmError {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HaltReason {
     Halted,
+    /// Retail attempted to return through its initial stack frame, whose
+    /// saved frame pointer is zero. Native reports `ERROR_INVALID_RETURN` so
+    /// preorder traversal can reclaim the object without sending TERM.
+    InvalidInitialReturn,
     /// A synchronous host effect must be applied before interpretation resumes.
     HostEffect,
     /// The synchronous host effect removed the object whose invocation emitted
@@ -2684,6 +2743,7 @@ struct AnimationWait {
 pub struct VmObject {
     handle: ObjectHandle,
     program_identity: Option<GoolProgramIdentity>,
+    retail_initial_frame_return_is_invalid: bool,
     event_map: Vec<u16>,
     global_code: Vec<u32>,
     code: Vec<u32>,
@@ -2732,6 +2792,7 @@ impl VmObject {
         Ok(Self {
             handle,
             program_identity: None,
+            retail_initial_frame_return_is_invalid: false,
             event_map: Vec::new(),
             global_code: Vec::new(),
             code,
@@ -2801,6 +2862,7 @@ impl VmObject {
             object_type: program.header().object_type,
             category: program.header().category,
         });
+        object.retail_initial_frame_return_is_invalid = true;
         object.event_map = program.event_map().to_vec();
         object.global_code = program.global_code().to_vec();
         object.initial_stack_pointer = initial_stack_pointer;
@@ -3572,31 +3634,66 @@ impl VmObject {
         }
 
         let storage = StorageReference::from_word(word)
-            .filter(|reference| {
-                reference.object() == self.handle && reference.region() == StorageRegion::Register
-            })
+            .filter(|reference| reference.object() == self.handle)
             .ok_or(VmError::InvalidAnimationReference(word))?;
-        let index = usize::from(storage.index());
-        let header_word = self
-            .registers
-            .get(index)
+        let words = self
+            .animation_storage_words(storage)
+            .ok_or(VmError::InvalidAnimationReference(word))?;
+        let header_word = words
+            .first()
             .copied()
             .ok_or(VmError::InvalidAnimationReference(word))?;
         let raw_type = header_word.to_le_bytes()[0];
-        let kind = if raw_type == 0 {
-            ProcessAnimationKind::NoDraw
-        } else {
-            // Item-five types one through five have descriptor-specific
-            // payloads. Accepting only their header here would silently turn
-            // a local sprite/text/fragment (or vertex) into no-draw state.
-            // No such LEA source exists in the retail corpus; reject it until
-            // its full payload and renderer contract are represented.
-            return Err(VmError::InvalidAnimationReference(word));
+        let kind = match raw_type {
+            1 | 2 | 5 => {
+                let bytes = animation_words_as_bytes(words);
+                match parse_gool_animation_descriptor(&bytes, 0)
+                    .map_err(|_| VmError::InvalidAnimationReference(word))?
+                {
+                    GoolAnimationDescriptor::Vertex(value) => ProcessAnimationKind::Vertex(value),
+                    GoolAnimationDescriptor::Sprite(value) => ProcessAnimationKind::Sprite(value),
+                    GoolAnimationDescriptor::Fragment(value) => {
+                        ProcessAnimationKind::Fragment(value)
+                    }
+                    GoolAnimationDescriptor::Font(_) | GoolAnimationDescriptor::Text(_) => {
+                        return Err(VmError::InvalidAnimationReference(word));
+                    }
+                }
+            }
+            3 => {
+                let bytes = header_word.to_le_bytes();
+                let header = parse_gool_animation_header(&bytes, 0)
+                    .map_err(|_| VmError::InvalidAnimationReference(word))?;
+                ProcessAnimationKind::Font(header)
+            }
+            4 => ProcessAnimationKind::Text(
+                parse_process_text_animation(words)
+                    .map_err(|()| VmError::InvalidAnimationReference(word))?,
+            ),
+            // Native's transform switch has no default body. Its local-bound
+            // path tests only `type == 1`, so every other byte is a live,
+            // non-vertex, no-draw animation rather than malformed input.
+            _ => ProcessAnimationKind::NoDraw,
         };
         Ok(Some(AnimationSource::Process(ProcessAnimationReference {
             storage,
             kind,
         })))
+    }
+
+    fn animation_storage_words(&self, storage: StorageReference) -> Option<&[u32]> {
+        let index = usize::from(storage.index());
+        match storage.region() {
+            StorageRegion::Internal => self.internal.get(index..),
+            StorageRegion::Register => self.registers.get(index..),
+            // State changes replace the current external entry while a native
+            // LEA pointer retains the prior entry's identity. The serialized
+            // token has no generation for that backing, so retargeting it to
+            // the new external table would be wrong. Immediate operands have
+            // the analogous problem with Machine's rotating constant buffer.
+            // Reject both until their distinct lifetimes are represented.
+            StorageRegion::External | StorageRegion::Constant => None,
+        }
     }
 
     /// Current item-five animation reference, when that is the active source.
@@ -3607,6 +3704,7 @@ impl VmObject {
     pub fn animation_reference(&self) -> Result<Option<AnimationReference>, VmError> {
         Ok(self
             .animation_source()?
+            .as_ref()
             .and_then(AnimationSource::item_five_reference))
     }
 
@@ -3815,6 +3913,11 @@ impl VmObject {
             object_type,
             category,
         });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_retail_initial_frame_return(&mut self) {
+        self.retail_initial_frame_return_is_invalid = true;
     }
 
     pub fn restart(&mut self, pc: usize) -> Result<(), VmError> {
@@ -7901,7 +8004,12 @@ impl Machine {
                                 vertex.model_eid
                             }
                             AnimationSource::Process(reference) => match reference.kind() {
-                                ProcessAnimationKind::NoDraw => return Ok(None),
+                                ProcessAnimationKind::Vertex(vertex) => vertex.model_eid,
+                                ProcessAnimationKind::NoDraw
+                                | ProcessAnimationKind::Sprite(_)
+                                | ProcessAnimationKind::Font(_)
+                                | ProcessAnimationKind::Text(_)
+                                | ProcessAnimationKind::Fragment(_) => return Ok(None),
                             },
                         };
                         let frame_index = self.object(link)?.animation_frame() >> 8;
@@ -9931,7 +10039,11 @@ impl Machine {
 
     fn return_from_call(&mut self, handle: ObjectHandle) -> Result<Option<HaltReason>, VmError> {
         let Some(frame) = self.object_mut(handle)?.call_stack.pop() else {
-            self.object_mut(handle)?.halted = true;
+            let object = self.object_mut(handle)?;
+            if object.retail_initial_frame_return_is_invalid {
+                return Ok(Some(HaltReason::InvalidInitialReturn));
+            }
+            object.halted = true;
             return Ok(Some(HaltReason::Halted));
         };
         let object = self.object_mut(handle)?;
@@ -10055,6 +10167,30 @@ mod tests {
 
     fn handle(index: u16) -> ObjectHandle {
         ObjectHandle::new(index).unwrap()
+    }
+
+    fn write_animation_bytes(
+        object: &mut VmObject,
+        region: StorageRegion,
+        index: usize,
+        bytes: &[u8],
+    ) {
+        let mut padded = bytes.to_vec();
+        let padded_len = padded.len().next_multiple_of(4);
+        padded.resize(padded_len, 0);
+        for (offset, bytes) in padded.chunks_exact(4).enumerate() {
+            let value = u32::from_le_bytes(bytes.try_into().unwrap());
+            match region {
+                StorageRegion::Internal => object.set_internal(index + offset, value).unwrap(),
+                StorageRegion::External => object.set_external(index + offset, value).unwrap(),
+                StorageRegion::Register => object.set_register(index + offset, value).unwrap(),
+                StorageRegion::Constant => panic!("constants are machine-owned"),
+            }
+        }
+        let reference = StorageReference::checked(object.handle(), region, index).unwrap();
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, reference.to_word())
+            .unwrap();
     }
 
     fn control_flow(
@@ -10637,20 +10773,124 @@ mod tests {
         assert_eq!(
             object.animation_source(),
             Err(VmError::InvalidAnimationReference(descriptor.to_word())),
-            "a live mutation to an unsupported local payload is revalidated instead of silently hidden"
+            "a live mutation to a malformed known payload is revalidated instead of silently hidden"
         );
     }
 
     #[test]
-    fn process_animation_rejects_foreign_and_non_register_storage_tokens() {
+    fn lea_created_known_process_animations_retain_complete_bounded_payloads() {
+        let h = handle(0);
+        let page = Eid::from_name("pageT").unwrap();
+        let model = Eid::from_name("model").unwrap();
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+
+        let mut vertex = vec![1, 0x12, 7, 0x34];
+        vertex.extend_from_slice(&model.raw().to_le_bytes());
+        write_animation_bytes(&mut object, StorageRegion::Internal, 80, &vertex);
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected process vertex animation");
+        };
+        let ProcessAnimationKind::Vertex(animation) = source.kind() else {
+            panic!("expected type-one descriptor");
+        };
+        assert_eq!(animation.header.length, 7);
+        assert_eq!(animation.model_eid, model);
+
+        let mut sprite = vec![2, 0, 2, 0];
+        sprite.extend_from_slice(&page.raw().to_le_bytes());
+        for raw in [0x1111_0001_u32, 0x2222_0002, 0x3333_0003, 0x4444_0004] {
+            sprite.extend_from_slice(&raw.to_le_bytes());
+        }
+        write_animation_bytes(&mut object, StorageRegion::Internal, 90, &sprite);
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected process sprite animation");
+        };
+        let ProcessAnimationKind::Sprite(animation) = source.kind() else {
+            panic!("expected type-two descriptor");
+        };
+        assert_eq!(animation.texture_page, page);
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(animation.frames[1].color.raw(), 0x3333_0003);
+        assert_eq!(animation.frames[1].region.raw(), 0x4444_0004);
+
+        write_animation_bytes(
+            &mut object,
+            StorageRegion::Register,
+            100,
+            &[3, 0xaa, 95, 0xbb],
+        );
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected process font animation");
+        };
+        let ProcessAnimationKind::Font(header) = source.kind() else {
+            panic!("expected type-three descriptor");
+        };
+        assert_eq!(header.length, 95);
+        assert_eq!(header.reserved_1, 0xaa);
+        assert_eq!(header.reserved_3, 0xbb);
+
+        let mut text = vec![4, 1, 2, 3];
+        text.extend_from_slice(&0x1234_5678_u32.to_le_bytes());
+        text.extend_from_slice(&7_u32.to_le_bytes());
+        text.extend_from_slice(b"ONE\0TWO\0");
+        write_animation_bytes(&mut object, StorageRegion::Register, 120, &text);
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected process text animation");
+        };
+        let ProcessAnimationKind::Text(animation) = source.kind() else {
+            panic!("expected type-four descriptor");
+        };
+        assert_eq!(animation.unknown_word, 0x1234_5678);
+        assert_eq!(animation.font_word_offset, 7);
+        assert_eq!(animation.terms, [b"ONE".to_vec(), b"TWO".to_vec()]);
+
+        let mut fragments = vec![5, 0, 2, 0];
+        fragments.extend_from_slice(&page.raw().to_le_bytes());
+        fragments.extend_from_slice(&1_u32.to_le_bytes());
+        for frame in 0..2_u32 {
+            fragments.extend_from_slice(&(0x0102_0000 | frame).to_le_bytes());
+            fragments.extend_from_slice(&(0x0304_0000 | frame).to_le_bytes());
+            for bound in [-(frame as i16) - 1, 2, 3, 4] {
+                fragments.extend_from_slice(&bound.to_le_bytes());
+            }
+        }
+        write_animation_bytes(&mut object, StorageRegion::Register, 140, &fragments);
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected process fragment animation");
+        };
+        let ProcessAnimationKind::Fragment(animation) = source.kind() else {
+            panic!("expected type-five descriptor");
+        };
+        assert_eq!(animation.texture_page, page);
+        assert_eq!(animation.fragments_per_frame, 1);
+        assert_eq!(animation.frame(1).unwrap()[0].bounds, [-2, 2, 3, 4]);
+    }
+
+    #[test]
+    fn process_animation_accepts_owned_tables_and_rejects_unstable_aliases() {
         let h = handle(0);
         let foreign = handle(1);
         let foreign_reference =
             StorageReference::checked(foreign, StorageRegion::Register, 65).unwrap();
         let table_reference = StorageReference::checked(h, StorageRegion::Internal, 65).unwrap();
+        let external_reference = StorageReference::checked(h, StorageRegion::External, 65).unwrap();
+        let constant_reference = StorageReference::checked(h, StorageRegion::Constant, 0).unwrap();
         let mut object = VmObject::new(h, vec![0]).unwrap();
 
-        for invalid in [foreign_reference, table_reference] {
+        object.set_internal(65, 0x4ac8_2073).unwrap();
+        object
+            .set_register(
+                process_register::ANIMATION_SEQUENCE,
+                table_reference.to_word(),
+            )
+            .unwrap();
+        let AnimationSource::Process(source) = object.animation_source().unwrap().unwrap() else {
+            panic!("expected owned internal-table animation");
+        };
+        assert_eq!(source.storage(), table_reference);
+        assert_eq!(*source.kind(), ProcessAnimationKind::NoDraw);
+
+        for invalid in [foreign_reference, external_reference, constant_reference] {
             object
                 .set_register(process_register::ANIMATION_SEQUENCE, invalid.to_word())
                 .unwrap();

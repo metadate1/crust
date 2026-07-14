@@ -1591,7 +1591,6 @@ fn survey_pair_with_runtime(
     let mut held_previous = 0_u32;
     let mut held_previous_2 = 0_u32;
     let mut tapped_previous = 0_u32;
-
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);

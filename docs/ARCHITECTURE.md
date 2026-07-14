@@ -55,7 +55,8 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    asynchronous validated remount freezes the remaining tick. During attract playback, the PBAK
    adapter installs its checked player/camera snapshot, RNG, bounds and spawn words, then replaces
    live controller input with each recorded 32-bit pad word and following-frame tick cadence.
-   Full progression and exact SPU synthesis remain later host boundaries.
+   Full progression and the remaining SPU effects/voice-arbitration behavior remain later host
+   boundaries.
 6. User game bytes are released on reload and are never serialized. Only checksummed 128-byte
    progression/options records enter `localStorage`.
 
@@ -123,6 +124,14 @@ For zones with graphics flag `0x1000`, a fixed Q24.8 camera with the 128-frame t
 fixed pitch is substituted only for object projection; the ordinary world camera is unchanged.
 Simulation and WebGL use the same fixed-point matrix and GOOL `frames_elapsed` stamp, carried
 separately from texture-animation `draw_count` while authored display frames are hidden.
+Worlds whose ZDAT graphics flags include `0x100` take a separate source-faithful ripple path.
+Before the world matrix, only WGEO vertices marked as effects add one of 16 wave magnitudes selected
+by `((x + y) / 8) & 0xf`. The wave reconstructs `ShaderParamsUpdateRipple`'s signed seed, per-frame
+advance, positive-period wrap and absolute-value publication; Upstream/Ripper Roo/Up the Creek use
+speed 10 and period 127, Tawna bonus rooms one/two use speed 4 and period 127, and the default is
+speed 1 and period 23. The builder owns pair-scoped mutable wave state and advances it only for an
+unpaused, nonempty ripple-world submission. Pause and hidden/empty display gaps therefore freeze
+the wave independently of texture `draw_count`.
 
 `GlStage` can transactionally update an installed retail scene. It validates command texture
 references, compares immutable decoded-texture allocation identities, prepares all new/replacement
@@ -184,11 +193,26 @@ aiming, source no-op case three, scaled/unscaled object transforms, checked mode
 the camera-relative audio transform. The complete `0x8e` family covers static/object solid
 response, all directional surface variants, entity-color scaling and source no-op case seven.
 Opcode `0x14` (LEA) translates its input address before its output address, preserves null and stack
-side effects, and stores a checked process-local handle rather than a pointer. The observed Toxic
-Waste `BaraC` use selects a same-object type-zero animation that emits no primitives and supplies
-the standard non-vertex collision bound. Local descriptor types one through five are rejected
-because their variable payloads and rendering contracts are not represented. Opcode `0x81` follows
-the native switch's missing-case behavior as an intentional one-cycle no-op.
+side effects, and stores a checked process-local handle rather than a pointer. Same-object internal
+and register aliases are decoded from their live words on each VM read, then copied as a fully
+owned, bounded descriptor into the display snapshot. Type one carries its model EID into the
+pair-scoped vertex/bound resolver; types two, four, and five use the existing sprite, text, and
+fragment paths; type three consumes its header but remains a resource-only no-draw selection.
+Process text retains local NUL-delimited terms while resolving its font word offset against global
+item five. Type zero and unknown bytes follow the native transform-switch default with no draw and
+the standard non-vertex bound, including the observed Toxic Waste `BaraC` use. A foreign-object
+storage reference, an external-state-table alias, and the VM's rotating constant region are rejected
+because their backing identity/lifetimes cannot yet be represented without retargeting the native
+pointer. Opcode `0x81` follows the native switch's missing-case behavior as an intentional one-cycle
+no-op.
+
+A `RETURN` with no call frame remains a normal halt for synthetic `VmObject::new` fixtures. A
+program parsed from retail GOOL instead reports `InvalidInitialReturn`, matching the zero saved
+frame pointer in the native initial frame. The preorder host consumes that signal before display or
+child traversal and releases the complete subtree through the no-signal kill path: no TERM handler
+runs, typed links/audio state are cleared, and the dedicated main object retains its non-Title
+protection. This distinction prevents state-level returns such as Ending's credits children from
+parking indefinitely while preserving the small synthetic-VM API's historical halt contract.
 `SZON` uses a typed host effect: it scans the current ZDAT header's neighbors in reverse serialized
 order, tests inclusive Q24.8 rectangles with explicit wrapping arithmetic, and changes the linked
 object's zone only when a match exists. Misc 12/7 deliberately uses the other header order: it
@@ -300,8 +324,15 @@ SFX/music volume plus mono are independent. Zone MIDI EIDs resolve checked type-
 VAB waves become owned PCM sample banks and SEP events drive two independent sequencers. A
 browser-independent owner applies source-timed thirty-tick zone fades, defers transitions while
 GOOL selects the second track, and drops both banks at a level boundary. The WebAudio master gain
-also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Exact SPU ADSR,
-vibrato/portamento, generic controllers and reverb remain future work. There is no procedural sine
+also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Each sampled VAB voice decodes its
+two ADSR register words into a fixed-point Q15 generator advanced once per 44.1 kHz sample. Attack,
+decay, sustain, release, linear/exponential modes, slowdown strictly above the `0x6000` attack
+threshold, rate counters,
+all-one frozen rates, key-on/off, and phase targets follow the hardware integer rules; conversion to
+floating-point happens only at the final mix gain. Remaining gaps include Gaussian interpolation,
+SPU reverb/effects, noise and FM/modulation, vibrato/portamento, pressure and unsupported generic
+controllers, and hardware-equivalent priority across one shared 24-voice SFX/music pool. The music
+sequencer currently owns a separate bounded software-voice pool. There is no procedural sine
 fallback: browser sound comes only from mounted ADIO SFX and the mounted retail music synthesizer.
 
 ## Persistence

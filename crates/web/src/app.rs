@@ -1710,6 +1710,7 @@ impl Runtime {
                             camera_location,
                             frame_draw_count,
                             frame_stamp,
+                            !native_paused,
                             world_display_mask,
                             map_path_animation,
                         ));
@@ -1719,6 +1720,7 @@ impl Runtime {
                     camera_location,
                     draw_count,
                     frame_stamp,
+                    advance_world_ripple,
                     world_display_mask,
                     map_path_animation,
                 )) = scene_location
@@ -1726,6 +1728,7 @@ impl Runtime {
                         camera_location,
                         draw_count,
                         frame_stamp,
+                        advance_world_ripple,
                         world_display_mask,
                         map_path_animation,
                         dom,
@@ -2587,11 +2590,13 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn update_retail_scene(
         &mut self,
         location: RetailCameraLocation,
         draw_count: u32,
         frame_stamp: u32,
+        advance_world_ripple: bool,
         world_display_mask: u32,
         map_path_animation: Option<RetailMapPathAnimation>,
         dom: &Dom,
@@ -2638,6 +2643,7 @@ impl Runtime {
                     frame_stamp,
                     draw_count,
                 },
+                advance_world_ripple,
                 &objects,
                 main_object,
                 world_display_mask,

@@ -401,7 +401,7 @@ fn great_hall_runtime_spawns_and_displays_authored_dynamic_font_text() {
     let creation_objects = runtime
         .render_objects()
         .expect("creation render objects must snapshot");
-    let hidden = *win_text_object(&runtime, &creation_objects, win)
+    let hidden = win_text_object(&runtime, &creation_objects, win)
         .expect("WinGC state nine must select Papu Papu text in its creation frame");
     assert_eq!(hidden.status_b, 0x700);
     assert_eq!(hidden.animation_frame, TEXT_FRAME);
@@ -424,7 +424,7 @@ fn great_hall_runtime_spawns_and_displays_authored_dynamic_font_text() {
     let visibility_objects = runtime
         .render_objects()
         .expect("visibility render objects must snapshot");
-    let object = *win_text_object(&runtime, &visibility_objects, win)
+    let object = win_text_object(&runtime, &visibility_objects, win)
         .expect("WinGC state nine must remain live after clearing invisible");
     let vm = runtime
         .machine()

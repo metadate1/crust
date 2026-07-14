@@ -35,7 +35,7 @@ use crust_renderer::{
     project_object_model,
 };
 use crust_sim::Angle12;
-use crust_sim::gool::AnimationSource;
+use crust_sim::gool::{AnimationSource, ProcessAnimationKind, ProcessTextAnimation};
 use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
@@ -43,6 +43,7 @@ const SLST_ENTRY_TYPE: u32 = 4;
 const WGEO_ENTRY_TYPE: u32 = 3;
 const RETAIL_TEXTURE_PAGE_SLOTS: usize = 8;
 const RETAIL_OBJECT_MODEL_CACHE_FRAMES: usize = 256;
+const ZONE_FLAG_RIPPLE: u32 = 0x100;
 // `LdatInit` initializes the global current/next GOOL display masks to
 // DISPLAY_WORLDS | DISPANIM_OBJECTS | CAM_UPDATE. The ZDAT field with the
 // same C-era name is a separate neighbor-zone lifecycle mask.
@@ -183,6 +184,43 @@ pub struct RetailSceneCacheDiagnostics {
     pub texture_misses: u64,
 }
 
+/// Pair-scoped state of native's 16-cell `tri_wave` buffer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetailRippleState {
+    level: crust_formats::stream::LevelId,
+    speed: i32,
+    period: i32,
+    cells: [i32; 16],
+}
+
+impl RetailRippleState {
+    fn new(level: crust_formats::stream::LevelId) -> Self {
+        let (speed, period) = retail_ripple_rate(level);
+        let stride = (period + 1) / 8;
+        Self {
+            level,
+            speed,
+            period,
+            cells: std::array::from_fn(|index| {
+                let index = i32::try_from(index).expect("a 16-cell wave index fits i32");
+                -(period - index * stride)
+            }),
+        }
+    }
+
+    fn magnitudes(&mut self, advance: bool) -> [i32; 16] {
+        if advance {
+            for cell in &mut self.cells {
+                *cell += self.speed;
+                if *cell > self.period {
+                    *cell = -(self.period - 1);
+                }
+            }
+        }
+        self.cells.map(i32::abs)
+    }
+}
+
 /// Pair-scoped owner of parsed ZDAT/SLST/WGEO data and decoded textures.
 ///
 /// The active graph is keyed by the exact zone/path pair. Moving to another
@@ -196,6 +234,7 @@ pub struct RetailSceneBuilder {
     object_model_lru: VecDeque<(Eid, u16)>,
     texture_cache: TextureCache,
     texture_pages: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    ripple: Option<RetailRippleState>,
     diagnostics: RetailSceneCacheDiagnostics,
 }
 
@@ -207,6 +246,7 @@ impl Default for RetailSceneBuilder {
             object_model_lru: VecDeque::new(),
             texture_cache: TextureCache::default(),
             texture_pages: [None; RETAIL_TEXTURE_PAGE_SLOTS],
+            ripple: None,
             diagnostics: RetailSceneCacheDiagnostics::default(),
         }
     }
@@ -318,6 +358,7 @@ impl RetailSceneBuilder {
             nsf,
             nsf_bytes,
             location,
+            true,
             &[],
             None,
             RETAIL_INITIAL_DISPLAY_FLAGS,
@@ -389,6 +430,7 @@ impl RetailSceneBuilder {
             nsf,
             nsf_bytes,
             location,
+            true,
             objects,
             main_object,
             world_display_mask,
@@ -416,6 +458,7 @@ impl RetailSceneBuilder {
         nsf: &Nsf,
         nsf_bytes: &[u8],
         location: RetailSceneProgressLocation,
+        advance_world_ripple: bool,
         objects: &[RetailRenderObject],
         main_object: Option<RuntimeObjectHandle>,
         world_display_mask: u32,
@@ -428,6 +471,7 @@ impl RetailSceneBuilder {
             nsf,
             nsf_bytes,
             location,
+            advance_world_ripple,
             objects,
             main_object,
             world_display_mask,
@@ -517,6 +561,7 @@ fn build_retail_scene_cached(
     nsf: &Nsf,
     nsf_bytes: &[u8],
     location: RetailSceneProgressLocation,
+    advance_world_ripple: bool,
     render_objects: &[RetailRenderObject],
     main_object: Option<RuntimeObjectHandle>,
     world_display_mask: u32,
@@ -617,6 +662,24 @@ fn build_retail_scene_cached(
     let object_camera_matrix = adjusted_camera_matrix(raw_object_camera_matrix);
     let projection_distance =
         projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
+    let ripple_wave = if graph.zone_header.graphics.flags & ZONE_FLAG_RIPPLE != 0 {
+        if builder
+            .ripple
+            .as_ref()
+            .is_none_or(|ripple| ripple.level != nsd.level())
+        {
+            builder.ripple = Some(RetailRippleState::new(nsd.level()));
+        }
+        Some(
+            builder
+                .ripple
+                .as_mut()
+                .expect("a ripple world installs pair-scoped wave state")
+                .magnitudes(advance_world_ripple && !visible_polygons.is_empty()),
+        )
+    } else {
+        None
+    };
     let prepared_objects = prepare_objects(
         nsd,
         nsf,
@@ -731,7 +794,18 @@ fn build_retail_scene_cached(
         let mut colors = [Rgba8::default(); 3];
         for vertex_index in 0..3 {
             let vertex = geometry.vertices[usize::from(polygon.vertex_indices[vertex_index])];
-            let [x, y, z] = vertex.expanded_position();
+            let [x, mut y, z] = vertex.expanded_position();
+            if vertex.effect
+                && let Some(wave) = ripple_wave.as_ref()
+            {
+                // `SwRippleShader` runs before the world transform. WGEO
+                // coordinates have already received their factor-of-eight
+                // expansion, so this is the source's exact
+                // `((x + y) / 8) & 0xf` wave-cell selection.
+                let wave_index = usize::try_from(((x + y) / 8) & 0x0f)
+                    .expect("a masked ripple-wave index fits usize");
+                y = y.saturating_add(wave[wave_index]);
+            }
             let projected = project(
                 Vec3i { x, y, z },
                 world_translations[world_index],
@@ -1084,75 +1158,124 @@ fn prepare_objects(
             prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
             continue;
         };
-        let Some(animation_source) = object.animation_source else {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        };
-        let AnimationSource::ItemFive(animation_reference) = animation_source else {
-            // The only authored process-local descriptor is BaraC type zero.
-            // Native reaches the transform switch default: it remains live
-            // for collision/presence but emits no render primitives.
+        let Some(animation_source) = object.animation_source.as_ref() else {
             prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
             continue;
         };
         let global = typed_entry(nsf, nsd, program.global_eid(), 11, "GOOL object program")?;
         let animations = entry_item(global, nsf_bytes, 5, "GOOL object animations")?;
-        let descriptor = parse_gool_animation_descriptor(
-            animations,
-            usize::try_from(animation_reference.offset())
-                .map_err(|_| scene_error("GOOL animation offset does not fit the host"))?,
-        )
-        .map_err(|error| scene_error(format!("GOOL object animation: {error}")))?;
-        match descriptor {
-            GoolAnimationDescriptor::Vertex(animation) => prepare_vertex_animation(
-                nsd,
-                nsf,
-                nsf_bytes,
-                model_cache,
-                model_lru,
-                zone_header,
-                object,
-                main_object,
-                camera,
-                raw_camera_matrix,
-                adjusted_camera_matrix,
-                projection_distance,
-                animation,
-                render_index,
-                &mut prepared,
-            )?,
-            GoolAnimationDescriptor::Sprite(animation) => prepare_sprite_animation(
-                object,
-                camera,
-                adjusted_camera_matrix,
-                projection_distance,
-                &animation,
-                render_index,
-                &mut prepared,
-            )?,
-            GoolAnimationDescriptor::Fragment(animation) => prepare_fragment_animation(
-                object,
-                camera,
-                adjusted_camera_matrix,
-                projection_distance,
-                &animation,
-                render_index,
-                &mut prepared,
-            )?,
-            GoolAnimationDescriptor::Text(animation) => prepare_text_animation(
-                animations,
-                object,
-                camera,
-                adjusted_camera_matrix,
-                projection_distance,
-                &animation,
-                render_index,
-                &mut prepared,
-            )?,
-            // Fonts are packed resources selected by type-four descriptors.
-            GoolAnimationDescriptor::Font(_) => {
-                prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        match animation_source {
+            AnimationSource::ItemFive(animation_reference) => {
+                let descriptor = parse_gool_animation_descriptor(
+                    animations,
+                    usize::try_from(animation_reference.offset())
+                        .map_err(|_| scene_error("GOOL animation offset does not fit the host"))?,
+                )
+                .map_err(|error| scene_error(format!("GOOL object animation: {error}")))?;
+                match descriptor {
+                    GoolAnimationDescriptor::Vertex(animation) => prepare_vertex_animation(
+                        nsd,
+                        nsf,
+                        nsf_bytes,
+                        model_cache,
+                        model_lru,
+                        zone_header,
+                        object,
+                        main_object,
+                        camera,
+                        raw_camera_matrix,
+                        adjusted_camera_matrix,
+                        projection_distance,
+                        animation,
+                        render_index,
+                        &mut prepared,
+                    )?,
+                    GoolAnimationDescriptor::Sprite(animation) => prepare_sprite_animation(
+                        object,
+                        camera,
+                        adjusted_camera_matrix,
+                        projection_distance,
+                        &animation,
+                        render_index,
+                        &mut prepared,
+                    )?,
+                    GoolAnimationDescriptor::Fragment(animation) => prepare_fragment_animation(
+                        object,
+                        camera,
+                        adjusted_camera_matrix,
+                        projection_distance,
+                        &animation,
+                        render_index,
+                        &mut prepared,
+                    )?,
+                    GoolAnimationDescriptor::Text(animation) => prepare_text_animation(
+                        animations,
+                        object,
+                        camera,
+                        adjusted_camera_matrix,
+                        projection_distance,
+                        &animation,
+                        render_index,
+                        &mut prepared,
+                    )?,
+                    // Fonts are packed resources selected by type-four descriptors.
+                    GoolAnimationDescriptor::Font(_) => {
+                        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+                    }
+                }
             }
+            AnimationSource::Process(process) => match process.kind() {
+                ProcessAnimationKind::Vertex(animation) => prepare_vertex_animation(
+                    nsd,
+                    nsf,
+                    nsf_bytes,
+                    model_cache,
+                    model_lru,
+                    zone_header,
+                    object,
+                    main_object,
+                    camera,
+                    raw_camera_matrix,
+                    adjusted_camera_matrix,
+                    projection_distance,
+                    *animation,
+                    render_index,
+                    &mut prepared,
+                )?,
+                ProcessAnimationKind::Sprite(animation) => prepare_sprite_animation(
+                    object,
+                    camera,
+                    adjusted_camera_matrix,
+                    projection_distance,
+                    animation,
+                    render_index,
+                    &mut prepared,
+                )?,
+                ProcessAnimationKind::Fragment(animation) => prepare_fragment_animation(
+                    object,
+                    camera,
+                    adjusted_camera_matrix,
+                    projection_distance,
+                    animation,
+                    render_index,
+                    &mut prepared,
+                )?,
+                ProcessAnimationKind::Text(animation) => prepare_process_text_animation(
+                    animations,
+                    object,
+                    camera,
+                    adjusted_camera_matrix,
+                    projection_distance,
+                    animation,
+                    render_index,
+                    &mut prepared,
+                )?,
+                // Native's type-three transform case is empty. Unknown/type-
+                // zero aliases reach the switch default and are also no-draw.
+                ProcessAnimationKind::Font(_) | ProcessAnimationKind::NoDraw => {
+                    prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+                }
+            },
         }
     }
     Ok(prepared)
@@ -1453,9 +1576,64 @@ fn prepare_text_animation(
         prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
         return Ok(());
     };
+    prepare_text_term(
+        animations,
+        object,
+        camera,
+        camera_matrix,
+        projection_distance,
+        animation.font_word_offset,
+        term,
+        render_index,
+        prepared,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_process_text_animation(
+    animations: &[u8],
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    animation: &ProcessTextAnimation,
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
+    let term_index = usize::try_from(object.animation_frame >> 8)
+        .map_err(|_| scene_error("GOOL process text term index does not fit the host"))?;
+    let Some(term) = animation.terms.get(term_index) else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+    prepare_text_term(
+        animations,
+        object,
+        camera,
+        camera_matrix,
+        projection_distance,
+        animation.font_word_offset,
+        term,
+        render_index,
+        prepared,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_term(
+    animations: &[u8],
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    font_word_offset: u32,
+    term: &[u8],
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
     let font = resolve_text_font(
         animations,
-        animation.font_word_offset,
+        font_word_offset,
         object.text_font_override_word_offset,
     )?;
     let shrink = retail_sprite_shrink(object.transform.scale[0])
@@ -2172,6 +2350,16 @@ fn projection_distance(field_of_view: u32) -> Result<u32, RetailSceneError> {
     }
 }
 
+fn retail_ripple_rate(level: crust_formats::stream::LevelId) -> (i32, i32) {
+    match level.get() {
+        // Upstream, Ripper Roo and Up the Creek.
+        0x0f | 0x17 | 0x18 => (10, 127),
+        // Tawna bonus rooms one and two.
+        0x24 | 0x33 => (4, 127),
+        _ => (1, 23),
+    }
+}
+
 fn blend_mode(raw: u8) -> BlendMode {
     match raw & 3 {
         0 => BlendMode::Average,
@@ -2486,6 +2674,44 @@ mod tests {
         assert_eq!(projection_distance(60).unwrap(), 460);
         assert_eq!(projection_distance(90).unwrap(), 288);
         assert!(projection_distance(45).is_err());
+    }
+
+    #[test]
+    fn ripple_state_matches_source_seed_advance_wrap_pause_and_level_rates() {
+        for (level, speed, period) in [
+            (LevelId::new_const(0x0f), 10_i32, 127_i32),
+            (LevelId::new_const(0x24), 4, 127),
+            (LevelId::new_const(0x26), 1, 23),
+        ] {
+            let mut state = RetailRippleState::new(level);
+            let stride = (period + 1) / 8;
+            let mut iterative = std::array::from_fn(|index| {
+                let index = i32::try_from(index).unwrap();
+                -(period - index * stride)
+            });
+            assert_eq!(state.magnitudes(false), iterative.map(i32::abs));
+            assert_eq!(
+                state.magnitudes(false),
+                iterative.map(i32::abs),
+                "pause/hidden submissions retain the exact seeded cells"
+            );
+
+            for step in 1..=2_048 {
+                for cell in &mut iterative {
+                    *cell += speed;
+                    if *cell > period {
+                        *cell = -(period - 1);
+                    }
+                }
+                let expected = iterative.map(i32::abs);
+                assert_eq!(state.magnitudes(true), expected, "step {step}");
+                assert_eq!(
+                    state.magnitudes(false),
+                    expected,
+                    "a paused/hidden frame after step {step} must not advance"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2929,6 +3155,217 @@ mod tests {
         let diagnostics = builder.diagnostics();
         assert_eq!(diagnostics.graph_builds, 5);
         assert_eq!(diagnostics.graph_reuses, 187);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn upstream_ripple_moves_visible_effect_vertices_from_the_retail_wgeo() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        let level = LevelId::new_const(0x0f);
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let camera = RetailCameraRuntime::new(&graph).unwrap();
+        let location = camera.location();
+        assert_ne!(
+            graph.zone(location.path.zone).unwrap().graphics_flags & ZONE_FLAG_RIPPLE,
+            0,
+            "Upstream's initial authored world must select GfxTransformWorldsRipple"
+        );
+
+        let mut builder = RetailSceneBuilder::new();
+        let scene_at_zero = builder
+            .build_at_progress(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneProgressLocation {
+                    zone: location.path.zone,
+                    path_index: location.path.index,
+                    path_progress: location.progress.raw(),
+                    frame_stamp: 0,
+                    draw_count: 0,
+                },
+            )
+            .unwrap();
+        let scene_at_one = builder
+            .build_at_progress(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneProgressLocation {
+                    zone: location.path.zone,
+                    path_index: location.path.index,
+                    path_progress: location.progress.raw(),
+                    frame_stamp: 1,
+                    draw_count: 1,
+                },
+            )
+            .unwrap();
+
+        let base_location = RetailSceneProgressLocation {
+            zone: location.path.zone,
+            path_index: location.path.index,
+            path_progress: location.progress.raw(),
+            frame_stamp: 0,
+            draw_count: 0,
+        };
+        let field_of_view = nsd.ldat().unwrap().field_of_view;
+        let mut paused_builder = RetailSceneBuilder::new();
+        let paused_first = paused_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                false,
+                &[],
+                None,
+                RETAIL_INITIAL_DISPLAY_FLAGS,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+        let paused_hold = paused_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                false,
+                &[],
+                None,
+                RETAIL_INITIAL_DISPLAY_FLAGS,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+        let resumed = paused_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                true,
+                &[],
+                None,
+                RETAIL_INITIAL_DISPLAY_FLAGS,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+
+        let mut hidden_gap_builder = RetailSceneBuilder::new();
+        let hidden = hidden_gap_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                true,
+                &[],
+                None,
+                0,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+        assert_eq!(hidden.stats.visible_polygons, 0);
+        let after_hidden_gap = hidden_gap_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                true,
+                &[],
+                None,
+                RETAIL_INITIAL_DISPLAY_FLAGS,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+        let mut direct_builder = RetailSceneBuilder::new();
+        let direct_first = direct_builder
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                base_location,
+                true,
+                &[],
+                None,
+                RETAIL_INITIAL_DISPLAY_FLAGS,
+                field_of_view,
+                None,
+            )
+            .unwrap();
+
+        let positions = |scene: &RetailScene| {
+            scene
+                .commands
+                .iter()
+                .filter_map(|command| {
+                    let CommandSource::World { polygon, .. } = command.source else {
+                        return None;
+                    };
+                    let points = match &command.primitive {
+                        PrimitiveCommand::ColoredTriangle(triangle) => {
+                            triangle.vertices.map(|vertex| vertex.position)
+                        }
+                        PrimitiveCommand::TexturedTriangle(triangle) => {
+                            triangle.vertices.map(|vertex| vertex.position)
+                        }
+                        _ => return None,
+                    };
+                    Some((polygon, points))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let zero_positions = positions(&scene_at_zero);
+        let one_positions = positions(&scene_at_one);
+        let paused_first_positions = positions(&paused_first);
+        assert_eq!(paused_first_positions, positions(&paused_hold));
+        assert_ne!(
+            paused_first_positions,
+            positions(&resumed),
+            "the first unpaused nonempty ripple submission advances the seeded wave"
+        );
+        assert_eq!(
+            positions(&after_hidden_gap),
+            positions(&direct_first),
+            "a hidden-world build must not consume a ripple advance"
+        );
+        assert_eq!(
+            zero_positions.keys().collect::<Vec<_>>(),
+            one_positions.keys().collect::<Vec<_>>()
+        );
+        let changed = zero_positions
+            .iter()
+            .filter(|(polygon, points)| {
+                one_positions
+                    .get(polygon)
+                    .is_some_and(|next| next != *points)
+            })
+            .count();
+        let unchanged = zero_positions.len().saturating_sub(changed);
+        assert!(
+            changed > 0,
+            "visible effect-flagged retail vertices must ripple"
+        );
+        assert!(
+            unchanged > 0,
+            "ordinary visible retail vertices must remain stable"
+        );
     }
 
     #[test]

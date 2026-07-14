@@ -27,10 +27,10 @@ use crate::{
         CardHostRequest, CollisionObjectReference, EventDispatchOutcome, EventStateChange,
         Execution, GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
         ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
-        ObjectHandle as VmObjectHandle, RETAIL_LEVEL_SPAWN_CAPACITY, RetailPadSnapshot,
-        RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
-        SendEventRequest, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmError, VmHostRequest,
-        VmObject, VmStateProgram, process_register,
+        ObjectHandle as VmObjectHandle, ProcessAnimationKind, RETAIL_LEVEL_SPAWN_CAPACITY,
+        RetailPadSnapshot, RetailSolidEnvironment, RetailSolidZone, RetailTransform,
+        RetailTransformVectorsCamera, SendEventRequest, SendEventTarget, TITLE_STATE_GLOBAL,
+        VmEffect, VmError, VmHostRequest, VmObject, VmStateProgram, process_register,
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
@@ -374,7 +374,7 @@ impl RuntimeObjectHandle {
 /// is copied at native's post-update/pre-child display boundary. A descendant
 /// may subsequently mutate its parent through a linked register without
 /// retroactively changing the parent's already-consumed render state.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetailRenderObject {
     pub object: RuntimeObjectHandle,
     pub zone: Eid,
@@ -476,13 +476,38 @@ pub struct StateProgramBinding {
 
 /// Typed request for one live object's current animation-derived bound source.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AnimationBoundReference {
+    /// Descriptor selected from the object's global item five.
+    ItemFive(AnimationReference),
+    /// Type-one descriptor read through a checked LEA-created storage alias.
+    Model(Eid),
+}
+
+/// Typed request for one live object's current animation-derived bound source.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AnimationBoundBinding {
     pub object: RuntimeObjectHandle,
     pub zone: Eid,
     pub executable: u8,
-    pub reference: AnimationReference,
+    pub reference: AnimationBoundReference,
     /// Integer frame selected by the process's 24.8 animation counter.
     pub frame_index: u32,
+}
+
+fn animation_vertex_reference(source: &AnimationSource) -> Option<AnimationBoundReference> {
+    match source {
+        AnimationSource::ItemFive(reference) => Some(AnimationBoundReference::ItemFive(*reference)),
+        AnimationSource::Process(reference) => match reference.kind() {
+            ProcessAnimationKind::Vertex(vertex) => {
+                Some(AnimationBoundReference::Model(vertex.model_eid))
+            }
+            ProcessAnimationKind::NoDraw
+            | ProcessAnimationKind::Sprite(_)
+            | ProcessAnimationKind::Font(_)
+            | ProcessAnimationKind::Text(_)
+            | ProcessAnimationKind::Fragment(_) => None,
+        },
+    }
 }
 
 /// Typed asset request emitted by transform-vectors suboperation six.
@@ -1001,31 +1026,36 @@ impl ProgramHost for NsfProgramHost<'_> {
         &mut self,
         binding: AnimationBoundBinding,
     ) -> Result<Option<AnimationBoundSource>, Self::Error> {
-        let global_eid = self.global_eid(binding.executable)?;
-        let global = self
-            .nsf
-            .resolve_entry(self.metadata, global_eid)
-            .map_err(NsfProgramError::Format)?;
-        let animation_item = global.item(5).ok_or_else(|| {
-            NsfProgramError::Format(FormatError::global(format!(
-                "global GOOL {global_eid} has no animation item five"
-            )))
-        })?;
-        let animation_bytes = animation_item
-            .bytes(self.nsf_bytes)
-            .map_err(NsfProgramError::Format)?;
-        let descriptor = parse_gool_animation_descriptor(
-            animation_bytes,
-            usize::try_from(binding.reference.offset()).map_err(|_| {
-                NsfProgramError::Format(FormatError::global(
-                    "GOOL animation offset does not fit the host",
-                ))
-            })?,
-        )
-        .map_err(NsfProgramError::Format)?;
-
-        let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
-            return Ok(Some(AnimationBoundSource::NonVertex));
+        let model_eid = match binding.reference {
+            AnimationBoundReference::ItemFive(reference) => {
+                let global_eid = self.global_eid(binding.executable)?;
+                let global = self
+                    .nsf
+                    .resolve_entry(self.metadata, global_eid)
+                    .map_err(NsfProgramError::Format)?;
+                let animation_item = global.item(5).ok_or_else(|| {
+                    NsfProgramError::Format(FormatError::global(format!(
+                        "global GOOL {global_eid} has no animation item five"
+                    )))
+                })?;
+                let animation_bytes = animation_item
+                    .bytes(self.nsf_bytes)
+                    .map_err(NsfProgramError::Format)?;
+                let descriptor = parse_gool_animation_descriptor(
+                    animation_bytes,
+                    usize::try_from(reference.offset()).map_err(|_| {
+                        NsfProgramError::Format(FormatError::global(
+                            "GOOL animation offset does not fit the host",
+                        ))
+                    })?,
+                )
+                .map_err(NsfProgramError::Format)?;
+                let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
+                    return Ok(Some(AnimationBoundSource::NonVertex));
+                };
+                vertex.model_eid
+            }
+            AnimationBoundReference::Model(model_eid) => model_eid,
         };
         let Ok(frame_index) = u16::try_from(binding.frame_index) else {
             return Ok(None);
@@ -1035,12 +1065,12 @@ impl ProgramHost for NsfProgramHost<'_> {
         // A single-pair host cannot page that dormant reference, so absence
         // from this NSD is controlled `None`; a present but malformed
         // declaration remains a format error.
-        if self.metadata.pte(vertex.model_eid).is_none() {
+        if self.metadata.pte(model_eid).is_none() {
             return Ok(None);
         }
         let vertex_entry = self
             .nsf
-            .resolve_entry(self.metadata, vertex.model_eid)
+            .resolve_entry(self.metadata, model_eid)
             .map_err(NsfProgramError::Format)?;
         let vertex_kind = ObjectVertexKind::from_entry_type(vertex_entry.entry_type)
             .map_err(NsfProgramError::Format)?;
@@ -1888,7 +1918,7 @@ impl RetailDarkShaderState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RetailDisplaySnapshot {
     /// Live global nine consumed by this object's display/transform path.
     display_mask: u32,
@@ -3962,7 +3992,7 @@ impl RetailRuntime {
                 }
                 let origin = spawned.origin();
                 let display_snapshot =
-                    if let Some(snapshot) = self.displayed_objects.get(&object).copied() {
+                    if let Some(snapshot) = self.displayed_objects.get(&object).cloned() {
                         snapshot
                     } else {
                         // Before the first simulated frame (and in deliberately
@@ -3988,6 +4018,9 @@ impl RetailRuntime {
                 let animation_source = display_snapshot
                     .animation_source
                     .map_err(RenderObjectsError::Vm)?;
+                let animation_reference = animation_source
+                    .as_ref()
+                    .and_then(AnimationSource::item_five_reference);
                 objects.push(RetailRenderObject {
                     object,
                     zone: spawned.zone(),
@@ -3995,8 +4028,7 @@ impl RetailRuntime {
                     subtype: origin.subtype(),
                     program: vm_object.program_identity(),
                     animation_source,
-                    animation_reference: animation_source
-                        .and_then(AnimationSource::item_five_reference),
+                    animation_reference,
                     animation_frame: display_snapshot.animation_frame,
                     transform: display_snapshot.transform,
                     status_a: display_snapshot.status_a,
@@ -4342,6 +4374,7 @@ impl RetailRuntime {
                             )?;
                             if !self.machine.level_restart_requested()
                                 && self.handles.is_live_pair(object)
+                                && execution.reason != HaltReason::InvalidInitialReturn
                             {
                                 self.finish_native_object_update(
                                     object,
@@ -4363,6 +4396,22 @@ impl RetailRuntime {
                 // skip, so quarantine the exact object identity permanently.
                 self.pending_states.remove(&object.vm);
                 self.faulted_objects.insert(object);
+            }
+            let invalid_initial_return = matches!(
+                &result,
+                Ok(Execution {
+                    reason: HaltReason::InvalidInitialReturn,
+                    ..
+                })
+            );
+            if invalid_initial_return {
+                // `GoolObjectTraverseTreePreorder` consumes
+                // `ERROR_INVALID_RETURN` immediately as `GoolObjectKill(0)`.
+                // This is not a VM fault and must happen before display or
+                // child traversal, without dispatching TERM.
+                self.kill_invalid_initial_return(object, host, &mut work.spawned_children)?;
+                work.executions.push(RuntimeExecution { object, result });
+                return Ok(());
             }
             if let Ok(vm_object) = self.machine.object(object.vm)
                 && self.arena.get(arena_handle).is_some()
@@ -4444,6 +4493,57 @@ impl RetailRuntime {
                 return Ok(());
             }
             child = sibling;
+        }
+        Ok(())
+    }
+
+    fn kill_invalid_initial_return<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        // `GoolObjectKill` protects the dedicated Crash/main allocation in
+        // every level except Title, even when traversal requested a no-signal
+        // kill after an invalid initial-frame return.
+        if object.arena.is_dedicated_main() && self.level != Some(LevelId::TITLE) {
+            return Ok(());
+        }
+        if !self.handles.is_live_pair(object) {
+            return Ok(());
+        }
+
+        let mut report = ZoneTerminationReport::new();
+        {
+            let Self {
+                arena,
+                machine,
+                handles,
+                pending_states,
+                pending_cleanup_actions,
+                ..
+            } = self;
+            Self::kill_runtime_subtree_with_host_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                host,
+                object.arena,
+                spawned_children,
+                true,
+                &mut report,
+            )?;
+            Self::refresh_tree_links(arena, handles, machine)?;
+        }
+        self.faulted_objects
+            .retain(|candidate| self.handles.is_live_pair(*candidate));
+        self.displayed_objects
+            .retain(|candidate, _| self.handles.is_live_pair(*candidate));
+        self.clear_stale_retail_box_links()?;
+        if self.pause.controller == Some(object) {
+            self.pause.controller = None;
         }
         Ok(())
     }
@@ -4550,10 +4650,9 @@ impl RetailRuntime {
             let Some(source) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
                 return Ok(None);
             };
-            let AnimationSource::ItemFive(reference) = source else {
-                // BaraC's checked type-zero process descriptor reaches the
-                // native transform switch default and produces no color or
-                // geometry side effects.
+            let Some(reference) = animation_vertex_reference(&source) else {
+                // Non-vertex and native no-draw process descriptors have no
+                // vertex color or geometry side effects.
                 return Ok(None);
             };
             (
@@ -5225,8 +5324,8 @@ impl RetailRuntime {
                 vm_object.retail_local_bound(),
             )
         };
-        let source = match animation {
-            AnimationSource::ItemFive(reference) => {
+        let source = match animation_vertex_reference(&animation) {
+            Some(reference) => {
                 let Some(source) = host
                     .animation_bound_source(AnimationBoundBinding {
                         object,
@@ -5241,7 +5340,7 @@ impl RetailRuntime {
                 };
                 source
             }
-            AnimationSource::Process(_) => AnimationBoundSource::NonVertex,
+            None => AnimationBoundSource::NonVertex,
         };
 
         let scale = Vec3 {
@@ -7201,8 +7300,8 @@ impl RetailRuntime {
                 vm_object.retail_transform().map_err(RuntimeError::Vm)?,
             )
         };
-        let source = match animation {
-            AnimationSource::ItemFive(reference) => {
+        let source = match animation_vertex_reference(&animation) {
+            Some(reference) => {
                 let Some(source) = host
                     .animation_bound_source(AnimationBoundBinding {
                         object,
@@ -7217,7 +7316,7 @@ impl RetailRuntime {
                 };
                 source
             }
-            AnimationSource::Process(_) => AnimationBoundSource::NonVertex,
+            None => AnimationBoundSource::NonVertex,
         };
         let scale = Vec3 {
             x: transform.scale[0],
@@ -8193,6 +8292,34 @@ mod tests {
     }
 
     #[test]
+    fn invalid_initial_return_skips_colors_and_physics_before_no_term_reclaim() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let returned = spawn_test_object(&mut runtime, ZONE, 9, 2, 0);
+        let missing_collider = VmObjectHandle::new(95).unwrap();
+        let vm_object = runtime.machine.object_mut(returned.vm).unwrap();
+        vm_object.configure_test_retail_initial_frame_return();
+        vm_object
+            .set_register(process_register::INVINCIBILITY_STATE, 4)
+            .unwrap();
+        vm_object.set_link(6, Some(missing_collider)).unwrap();
+
+        // If the post-interpreter color phase runs, invincibility case four
+        // resolves link six and faults on this deliberately absent collider.
+        // Native returns to preorder traversal first and reclaims the object
+        // through GoolObjectKill(0), so that lookup must never occur.
+        let frame = runtime.run_frame(&mut SnapshotHost, 4).unwrap();
+        assert_eq!(frame.executions.len(), 1);
+        assert_eq!(
+            frame.executions[0].result.as_ref().unwrap().reason,
+            HaltReason::InvalidInitialReturn
+        );
+        assert!(runtime.arena().get(returned.arena).is_none());
+        assert!(runtime.object_for_vm(returned.vm).is_none());
+        assert_eq!(runtime.faulted_object_count(), 0);
+        assert!(runtime.take_invincibility_event_faults().is_empty());
+    }
+
+    #[test]
     fn initial_level_mount_publishes_native_fade_words_before_entity_code() {
         let runtime = RetailRuntime::new_for_level(FADE_STEP_GLOBAL + 1, LevelId::N_SANITY_BEACH);
 
@@ -8950,6 +9077,7 @@ mod tests {
         assert!(paused_frame.executions.is_empty());
         assert_eq!(runtime.frame_index(), 1);
         assert_eq!(runtime.draw_count(), 0);
+        assert_eq!(runtime.next_frame_stamp(), 1);
 
         assert_eq!(
             runtime.update_retail_pause(false, ZONE, &mut host),
@@ -12807,6 +12935,90 @@ mod tests {
         assert!(render.display_eligible);
     }
 
+    #[test]
+    fn process_local_vertex_animation_uses_its_model_for_bounds() {
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 10, 2, 1);
+        let descriptor = crate::gool::StorageReference::checked(
+            object.vm,
+            crate::gool::StorageRegion::Register,
+            65,
+        )
+        .unwrap();
+        let model = Eid::from_name("model").unwrap();
+        let transform = RetailTransform {
+            translation: [100, 200, 300],
+            rotation_yxz: [0; 3],
+            scale: [0x1000; 3],
+        };
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object.set_register(65, 0x0001_0001).unwrap();
+        vm_object.set_register(66, model.raw()).unwrap();
+        vm_object
+            .set_register(process_register::ANIMATION_SEQUENCE, descriptor.to_word())
+            .unwrap();
+        vm_object
+            .set_register(process_register::ANIMATION_FRAME, 0x300)
+            .unwrap();
+        vm_object
+            .set_register(process_register::STATUS_B, COLLIDABLE_STATUS_B)
+            .unwrap();
+        let status_a = vm_object.register(process_register::STATUS_A).unwrap();
+        vm_object
+            .set_register(
+                process_register::STATUS_A,
+                status_a | LOCAL_BOUND_INVALID_STATUS_A,
+            )
+            .unwrap();
+        vm_object.set_retail_transform(transform).unwrap();
+        let bound_source = AnimationBoundSource::Vertex {
+            vertex_kind: ObjectVertexKind::Lit,
+            serialized_bound: Bounds3 {
+                min: Vec3 {
+                    x: -0x1000,
+                    y: -0x2000,
+                    z: -0x3000,
+                },
+                max: Vec3 {
+                    x: 0x4000,
+                    y: 0x5000,
+                    z: 0x6000,
+                },
+            },
+            collision_center: Vec3 {
+                x: 0x700,
+                y: -0x800,
+                z: 0x900,
+            },
+        };
+        let mut host = BoundHost::new(bound_source);
+
+        assert!(runtime.register_animation_bound(object, &mut host).unwrap());
+        assert_eq!(host.calls.len(), 1);
+        assert_eq!(
+            host.calls[0].reference,
+            AnimationBoundReference::Model(model)
+        );
+        assert_eq!(host.calls[0].frame_index, 3);
+        assert_eq!(runtime.machine.frame_bounds().len(), 1);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_local_bound(),
+            calculate_local_bound(
+                bound_source,
+                Vec3 {
+                    x: 0x1000,
+                    y: 0x1000,
+                    z: 0x1000,
+                },
+                false,
+            )
+        );
+    }
+
     fn put_u16(bytes: &mut [u8], offset: usize, value: u16) {
         bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
     }
@@ -14336,7 +14548,12 @@ mod tests {
                 .map(|call| (
                     call.zone,
                     call.executable,
-                    call.reference.offset(),
+                    match call.reference {
+                        AnimationBoundReference::ItemFive(reference) => reference.offset(),
+                        AnimationBoundReference::Model(model) => {
+                            panic!("unexpected process model {model}")
+                        }
+                    },
                     call.frame_index
                 ))
                 .collect::<Vec<_>>(),
@@ -14538,7 +14755,9 @@ mod tests {
             object,
             zone: ZONE,
             executable: 2,
-            reference: AnimationReference::from_word(0xa700_0001).unwrap(),
+            reference: AnimationBoundReference::ItemFive(
+                AnimationReference::from_word(0xa700_0001).unwrap(),
+            ),
             frame_index: 0,
         };
 
@@ -14569,6 +14788,16 @@ mod tests {
                 },
             })
         );
+        assert!(matches!(
+            host.animation_bound_source(AnimationBoundBinding {
+                reference: AnimationBoundReference::Model(Eid::from_name("model").unwrap()),
+                ..binding
+            }),
+            Ok(Some(AnimationBoundSource::Vertex {
+                vertex_kind: ObjectVertexKind::Lit,
+                ..
+            }))
+        ));
         assert_eq!(
             host.animation_bound_source(AnimationBoundBinding {
                 frame_index: 1,

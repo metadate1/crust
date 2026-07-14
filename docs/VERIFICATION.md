@@ -2,8 +2,9 @@
 
 This file records observed checks for the initial private rewrite delivery on 2026-07-12, the
 stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13,
-and the title-overlay, PBAK, object-shader and current-zone collision slices on 2026-07-14. It does
-not turn subsystem tests into a claim of retail gameplay parity.
+the title-overlay, PBAK, object-shader and current-zone collision slices on 2026-07-14, and the
+later ADSR, world-ripple, process-animation and initial-return lifecycle slices on 2026-07-15. It
+does not turn subsystem tests into a claim of retail gameplay parity.
 
 ## Reference characterization
 
@@ -296,7 +297,7 @@ After the pre-animation-bound core-object/dark-shader build, the release files w
 `127.0.0.1:4174` local server and reloaded in the visible Codex in-app browser. The mount UI reached
 `Awaiting local media` with the expected 43-target selector and no captured browser warning or
 error. The BIN was not reselected in this final reload, so the foreground Chrome run above remains
-the latest claimed end-to-end local-disc browser exercise.
+that checkpoint's latest claimed end-to-end local-disc browser exercise.
 
 The authored-only browser-flow and mounted-data-only audio changes, together with the revised
 Crash-stamp bound/collision schedule, were rebuilt and reloaded in the visible in-app browser on
@@ -335,7 +336,7 @@ not as current-change-set counts or hashes.
 - generated web release: passed; Wasm payload was 1,216,158 bytes (SHA-256
   `4c45cd45e9af827fa4d252d67fffbcfb9db7713e88e2b0492414db45cfbaa6ea`).
 
-## Current change-set verification
+## 2026-07-14 change-set verification
 
 The final checks below were run against this change set on 2026-07-14:
 
@@ -468,8 +469,9 @@ The final checks below were run against this change set on 2026-07-14:
   working tree; keyboard, physical gamepad, fullscreen and touch presentation were not repeated in
   this pass.
 
-  The source-ordered title/controller/LEA/island-map artifact identified by the current hash above
-  was loaded in a fresh visible in-app-browser tab. The supplied 632,083,536-byte raw BIN again
+  The source-ordered title/controller/LEA/island-map artifact identified by SHA-256
+  `ed8d36dd0229ed44312980dea7f418495a6eaa3af5f05c6c992f0b213e48b2f4` was loaded in a fresh visible
+  in-app-browser tab. The supplied 632,083,536-byte raw BIN again
   resolved 88 streams, all 44 pairs and 219 MiB of selected extents. Title `0x19` rendered its
   authored tent/island scene at 30.00 Hz with synthesized audio; the source runtime subsequently
   entered Intro while idling. A fresh direct `0x09` mount rendered N. Sanity Beach's world, Crash
@@ -479,6 +481,69 @@ The final checks below were run against this change set on 2026-07-14:
   and both temporary routes returned HTTP 404. The visible tab retains the in-memory local `File`
   and running N. Sanity scene. Keyboard, physical gamepad, fullscreen, and touch presentation were
   not repeated in this pass; no game bytes entered Git, browser persistence, or the repository.
+
+## 2026-07-15 ADSR/ripple/process-animation/lifecycle checkpoint verification
+
+The release gate completed against the current source without copying legally local game data into
+the repository:
+
+- the locked default workspace suite passed 766 tests with zero failures and 62 opt-in tests
+  ignored; the separate full legally local run executed all 62 ignored tests with zero failures;
+- workspace Clippy passed with warnings denied across all native targets, and `crust-web` Clippy
+  passed with warnings denied for `wasm32-unknown-unknown`;
+- locked optimized native and `wasm32-unknown-unknown` builds passed, as did `npm run build`;
+- the generated Wasm is 1,254,281 bytes with SHA-256
+  `c3884d74194da8f429aa879d6ac3f4b3166d51a260b2103a33ead68b1f62bdce`; the generated loader is
+  46,236 bytes.
+
+The focused checks below were also completed:
+
+- Fixed-point SPU ADSR unit goldens passed for attack/decay target transitions, sustain direction,
+  linear and exponential modes, slowdown strictly above the `0x6000` exponential-attack threshold,
+  the minimum nonzero high-rate counter increment, all-one frozen rates, key-off/release, and Q15
+  bounds. The sampled-voice integration test proves ADSR gain is applied
+  before each mix sample and that note-off enters the hardware release phase. The legally local
+  VAB/SEP bank and raw-disc audio checks also passed. This is ADSR evidence, not proof of Gaussian
+  interpolation, reverb, modulation, or shared 24-voice SFX/music arbitration.
+- Process-local animation tests passed for complete bounded type-one through type-five payloads in
+  same-object internal and register storage, plus type-zero/unknown native no-draw
+  behavior. Truncation cases and a 256-case arbitrary-word property test produced checked results
+  without panics. The legally local corpus preserved one descriptor of each defined type through a
+  register alias. Its direct-LEA census found 31 authored writes to `anim_seq`: 18 static type
+  `0x73`, 12 static type `0xef`, and Toxic Waste's one dynamic type-zero `BaraC` source. It found no
+  naturally selected process-local type-one-through-five route, so their browser render wiring is
+  compile- and model-covered rather than claimed as an observed playthrough. External-state-table,
+  rotating-constant, and foreign-object aliases are checked failures instead of being retargeted
+  across an unrepresented backing lifetime.
+- The ripple-state test matched an iterative source model for all 16 signed cells over 2,048
+  advances at each of the three speed/period combinations and proved no-advance calls preserve the
+  exact state. The legally local Upstream regression confirmed its initial world carries graphics
+  flag `0x100`; with the camera held constant, one unpaused submission moved visible effect-marked
+  WGEO geometry while ordinary visible geometry stayed fixed, repeated paused submissions stayed
+  fixed, and a hidden-world gap consumed no wave advance. No fresh fog or lightning parity claim
+  follows from this check.
+- The parsed-retail unit fixture executes raw RETURN word `0x82894000` through its initial frame and
+  reports `InvalidInitialReturn`; the synthetic `VmObject::new` compatibility case still reports
+  `Halted`. The legally local Ending regression then ran the browser-ordered spawn/camera/GOOL loop
+  for 1,800 frames. It anchored `WinGC` executable 61/subtype 3, state 1 at external PC 53, observed
+  at least 64 credits-child spawns, reclaimed the first returned child, reused arena generations,
+  and had zero faulted objects. Live population peaked at 82, below the regression bound of 89;
+  before the fix, returned children remained at PC 54 and filled all 97 slots at frame 1,437. This
+  verifies no-TERM return reclamation and bounded credits spawning, not a completed ending.
+
+The generated release was loaded in a fresh visible in-app-browser tab. An ephemeral same-origin,
+loopback-only route wrapped the supplied 632,083,536-byte raw BIN in a browser `File` and dispatched
+the ordinary local-input event because the browser harness cannot automate a native file picker.
+The importer recognized 88 streams, all 44 pairs, and 219 MiB of selected extents. Title `0x19`
+rendered the Universal publisher screen at 30.00 Hz with synthesized audio; mute/unmute changed and
+restored live telemetry. A fresh direct `0x09` mount rendered N. Sanity Beach's world, Crash, and
+crate geometry, and the native pause controller changed `RUNNING → PAUSED → RUNNING`. The visible
+engineering/runtime log contained no warning or error entry. After the tab retained its in-memory
+local `File`, the bridge was stopped and deleted and the ordinary no-store server was restored.
+Root returns HTTP 200, both temporary routes return HTTP 404, and the served Wasm hash matches the
+release hash above. The visible tab remains on live N. Sanity gameplay. Keyboard, physical gamepad,
+fullscreen, and touch presentation were not repeated in this pass; no game bytes entered Git,
+browser persistence, or the repository working tree.
 
 ## Reproducible commands
 
@@ -527,8 +592,17 @@ C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   n_sanity_authored_pause_panel_blinks_five_willt_fragment_quads -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  upstream_ripple_moves_visible_effect_vertices_from_the_retail_wgeo -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --test local_great_hall_dynamic_font --locked -- \
   --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_gool --locked \
+  retail_payloads_of_all_five_kinds_survive_a_process_storage_alias -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_ending_return_reclaim --locked \
+  -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture

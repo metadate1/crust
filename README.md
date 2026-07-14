@@ -64,11 +64,15 @@ five-word pad history, camera-relative movement, gravity, rotation, every source
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
-GOOL `0x14` (LEA) preserves input-before-output address translation and represents Toxic Waste's
-process-local `BaraC` type-zero animation as a checked same-object handle: it draws nothing but
-retains the standard non-vertex collision bound. Process-local descriptor types one through five
-are rejected until their complete payload/render contracts are implemented. Opcode `0x81` retains
-the native interpreter's intentional one-cycle no-op behavior.
+GOOL `0x14` (LEA) preserves input-before-output address translation and represents process-local
+animations as checked same-object handles. Descriptors in internal or register storage are
+revalidated from the live aliased words: type one supplies its model to both bounds and vertex
+rendering, types two/four/five use the sprite, text, and fragment paths, and type three remains a
+resource-only no-draw selection. Type zero and unknown type bytes follow the native switch default
+with no draw and the standard non-vertex collision bound, including Toxic Waste's observed `BaraC`
+case. Foreign-object, external-state-table, and rotating-constant-buffer aliases are rejected
+because their backing lifetimes cannot yet be represented without silently retargeting a native
+pointer. Opcode `0x81` retains the native interpreter's intentional one-cycle no-op behavior.
 `GoolObjectColors` now delivers Crash's category-`0x300` invincibility-hit event `0x0a00`
 synchronously before the same object's physics, so authored enemy handlers can change that frame's
 motion or state. The source's `argc=1`/null-argument quirk is represented by one checked zero word
@@ -88,6 +92,11 @@ transformed frame bound before GOOL and physics and execute the same-stamp Crash
 collision-link/hotspot tail; objects visited before Crash register after physics when they remain
 inside the exact `±0x7d000/±0xaf000/±0x7d000` box. Opcodes `0x83` and `0x84` synchronously refresh
 only the persistent local bound at their source call site.
+WGEO zones with graphics flag `0x100` now apply the source ripple transform to effect-marked world
+vertices before the ordinary world matrix. The independent 16-cell signed wave uses the native
+seed, advance, wrap, absolute-value conversion, and level-specific speed/period table. Pair-scoped
+wave state advances only for an unpaused, nonempty ripple-world submission, so pause and
+hidden/empty display gaps freeze it without coupling it to TPAG texture animation.
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
@@ -119,7 +128,9 @@ same-level restart edge cases remain incomplete. Source-ordered zone lifetime/pa
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
 connected. Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
-fades, the native all-bus master fade and GOOL-controlled alternate tracks. Authored `next_lid`
+fades, the native all-bus master fade and GOOL-controlled alternate tracks. Sampled VAB voices
+apply the two retail ADSR register words through an exact fixed-point 44.1 kHz attack, decay,
+sustain, and release generator before mixing. Authored `next_lid`
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
 fresh destination runtime, and restore bonus returns from the saved zone/path/progress. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
@@ -163,6 +174,13 @@ the completion event and input-lock rebind are synchronous, and Crash plus later
 new pad/controller state in that same frame. Caption objects retain their intentional null lifecycle
 zone; spawned caption children consult the current camera ZDAT only for the environment/colors that
 native `GoolObjectCreate` obtains through `cur_zone`.
+Parsed retail objects that execute `RETURN` through their initial frame now produce the native
+invalid-return lifecycle signal. Preorder traversal reclaims that subtree immediately, without a
+TERM event and before display or child traversal, while retaining the source protection for the
+dedicated main object outside Title. This fixes the Ending credits-object leak that previously
+filled all 97 arena slots at frame 1,437; the legally local 1,800-frame regression now peaks at 82
+live objects and proves returned slots are reused without a VM fault. This bounded lifecycle check
+does not certify the complete ending flow.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 
@@ -241,8 +259,8 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
   projection/lighting/culling, safe GOOL sprite/fragment/text layout and projection, ordering,
   zone shader modes, object-only fixed-camera substitution, clipping, blend passes, title
   composition and WebGL2-ready commands.
-- `crust-audio` — SPU ADPCM, retail 24-voice SFX control/cache/mixer, sequence events and a
-  44.1 kHz software synth.
+- `crust-audio` — SPU ADPCM, retail 24-voice SFX control/cache/mixer, sequence events, exact
+  fixed-point sampled-voice ADSR, and a 44.1 kHz software synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
 - `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the
   cooperative application loop.

@@ -22,6 +22,10 @@ gameplay path.
   Subsequent frames use the validated camera graph's exact zone/path/signed-8.8 progress and the
   retail-frame pre-increment texture-animation count. Paused frames retain the camera and shader
   state but continue rebuilding and presenting world/object snapshots while draw count stays fixed.
+  Graphics-flag `0x100` worlds apply the source's pre-transform ripple only to effect-marked WGEO
+  vertices. Its 16-cell wave uses the native seed/advance/wrap/absolute-value rules and the exact
+  level-specific rates. Pair-scoped state advances only for unpaused, nonempty ripple-world
+  submissions, so pause and hidden/empty display gaps freeze it independently of texture animation.
 - Source-derived camera modes 0/1/3, tapped auto-camera skipping and path/zone crossing drive the
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
   prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing. The
@@ -52,9 +56,14 @@ gameplay path.
   complete typed audio calls synchronously before the following instruction. Execution,
   checked-error and quarantined-object counts are exposed through the engineering log/debug
   surface. Opcode `0x14` (LEA) keeps native input-before-output address translation and represents
-  the observed process-local `BaraC` type-zero animation with a checked same-object handle, no draw,
-  and the standard non-vertex bound. Process-local animation types one through five remain rejected
-  until their full payload/render contracts exist. Opcode `0x81` is the native one-cycle no-op.
+  process-local animations with checked same-object handles. Internal and register aliases support
+  complete bounded descriptors for type-one vertex models, type-two sprites,
+  type-four local text terms, and type-five fragments; type one also supplies its model to the local
+  collision-bound path. Type-three font selections, type zero, and unknown type bytes retain their
+  native no-draw behavior, with non-vertex bounds where applicable. Process text still resolves its
+  font offset against global animation item five. Foreign-object aliases, external-state-table
+  aliases, and the rotating constant region are rejected because their backing identity/lifetime is
+  not represented by the current checked token. Opcode `0x81` is the native one-cycle no-op.
 - Static solid queries are refreshed from the current camera/native `cur_zone` neighborhood before
   object execution rather than remaining attached to each object's spawn zone. The per-object zone
   identity remains separately typed for object colors and zone migration. When that object zone is
@@ -98,6 +107,11 @@ gameplay path.
   flags remain authoritative until their VM mirror is refreshed at the next frame boundary. A null
   current zone is a no-op; duplicate EIDs are retained and later entries rescan the mutated live
   tree.
+- Parsed retail `RETURN` at the initial frame is a lifecycle result rather than a permanent halted
+  object or a VM fault. The preorder runtime releases that subtree before display/child traversal
+  through the native no-signal path, so TERM is not dispatched; main-object protection outside
+  Title is unchanged. Synthetic VM fixtures retain their ordinary top-level `Halted` result. This
+  distinction keeps Ending's recurring credits objects bounded instead of exhausting the arena.
 - Pair-scoped GOOL item-five descriptors and TGEO/SVTX/CVTX frames feed the live renderer. Current
   3D vertex objects use retail fixed-point transforms, lighting, culling and ordering and share one
   resident load-list-filtered TPAG cache/manifest with the world. Collidable animations populate
@@ -171,7 +185,9 @@ gameplay path.
   samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
   WebAudio. ZDAT MIDI references resolve mounted type-13 MIDI and type-14 INST entries; decoded VAB
   programs and SEP tracks use the software synth, thirty-tick zone fades and GOOL's secondary-track
-  toggle without retaining proprietary bytes. No procedural oscillator fallback is present.
+  toggle without retaining proprietary bytes. Sampled VAB tones now apply their retail ADSR1/ADSR2
+  words through the exact fixed-point 44.1 kHz attack/decay/sustain/release state machine before
+  mixing. No procedural oscillator fallback is present.
 - Retail `next_lid` writes are consumed at the following 30 Hz boundary before spawn/camera/GOOL.
   The runtime broadcasts `LEVEL_END` to all eight roots in child-before-parent order, retains the
   requested destination unless a final `-2` selects the saved level, carries process-lifetime
@@ -213,9 +229,16 @@ gameplay path.
   source branch's uninitialized C locals. The current Crash-stamp pre/post-physics schedule and
   same-stamp collision tail pass the legally local corpus suite. All `0x85` and `0x8e` selectors
   have checked source-defined behavior; broader object behavior, collision response, dynamic
-  lighting and full level progression remain incomplete. LEA-created process animations are
-  complete only for the legally observed type-zero `BaraC` contract; process-local descriptor types
-  one through five are intentionally rejected rather than being misread as no-draw objects.
+  lighting and full level progression remain incomplete. LEA-created process animation descriptors
+  of all five defined types are now parsed: vertex, sprite, text, and fragment descriptors use the
+  ordinary checked bound/render paths, while font selections remain resource-only no-draw objects.
+  Only same-object internal and register aliases have representable lifetimes. External-state,
+  immediate-constant, and foreign-object aliases remain checked failures. The all-pair direct-LEA
+  census found 30 static no-draw data aliases (18 type `0x73`, 12 type `0xef`) and one dynamic
+  type-zero `BaraC` alias; it
+  found no naturally selected process-local type-one-through-five descriptor. Those five paths are
+  therefore covered with copied retail descriptors and malformed-input tests, not claimed as an
+  observed retail progression route.
 - Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
   monotonic object incarnation. If a TERM handler kills the active requester and synchronously
   reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or
@@ -239,8 +262,10 @@ gameplay path.
   are coupled to the same ordered command/texture path. Mid-frame paging-driven texture changes are
   not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown and the
   current display mask.
-  Twenty-two starts use fog/ripple/lightning/dark variants whose world-level dynamic vertex/color
-  effects remain incomplete. Object shader modes two and three and their source far-object
+  Twenty-two starts use fog/ripple/lightning/dark variants. The source ripple displacement is live
+  for graphics-flag `0x100` worlds, including its effect-vertex selection and submission-driven
+  wave state; fog, lightning, and remaining world-level dynamic color effects are incomplete. Object
+  shader modes two and three and their source far-object
   rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
   at the native display boundary with source-order player/pause selection and `dark_dist`; a legal
   all-pair boot trace exercised 1,800 mode-four vertex displays, rendered 2,880 object primitives,
@@ -267,9 +292,13 @@ gameplay path.
   control state machine, sequence events and a software synth. GOOL SFX now resolve type-12 ADIO
   entries from the mounted local NSF and reach WebAudio with owner cleanup. Retail INST/VAB/SEP/MIDI
   music is connected, including volume, pan, expression, sustain, pitch bend, program selection,
-  zone fades and dual-track toggles. Exact SPU ADSR timing, vibrato, portamento, pressure/generic
-  controllers, spatial reverb and hardware-identical voice priority remain gaps. The newest music
-  path was compile-, model- and legally-local-disc tested but not yet manually auditioned.
+  zone fades and dual-track toggles. Sampled voices now use exact fixed-point SPU ADSR timing for
+  attack, decay, sustain, release, key-off, and linear/exponential rate modes. Remaining gaps are
+  Gaussian interpolation (the synth currently interpolates linearly), vibrato, portamento,
+  pressure and unsupported generic controllers, spatial reverb/effects, SPU noise/FM, and
+  hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
+  sequencer currently has a separate 64-voice software limit. The newest music path was compile-,
+  model- and legally-local-disc tested but not yet manually auditioned.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
@@ -291,7 +320,10 @@ gameplay path.
   clean. This deterministic first completion loop does not establish a browser playthrough or full
   retail parity.
   Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
-  open. Hog Wild's previously
+  open. A legally local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
+  credits children, reaches at least 64 authored credits-child spawns, reuses arena generations,
+  peaks at 82 live objects, and reports no VM fault; this replaces the broken 97-slot saturation at
+  frame 1,437 but does not complete or certify the ending. Hog Wild's previously
   recorded checked 360-frame idle trace delivered the authored fall-kill event to state 22,
   advanced `fade_counter` through the native `-2`/`-1` sentinels, emitted `LoadState`, and completed
   two same-level restarts with no VM error, faulted
@@ -315,8 +347,8 @@ gameplay path.
   result globals. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
 - One deterministic retail-authored N. Sanity route now reaches its real end warp and requests
-  Level Complete. No boss, complete bonus round trip, ending, broad death/checkpoint sequence,
-  long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
+  Level Complete. No boss, complete bonus round trip, complete ending, broad death/checkpoint
+  sequence, long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
 
 ## Automated coverage
 
@@ -330,8 +362,10 @@ endpoint/cursor/rollback behavior, WGEO scene graphs, all SLST delta/swap forms,
 arena/spawn tree and frame bounds, signed packed vertices, retail TPAG/CLUT/UV references, world and
 object fixed-point projection/lighting/culling, presentation order, scheduling, paging, GOOL execution,
 collision, camera, title transitions, bonus returns, demo frames, card operations,
-storage envelopes, input, texture formats/cache/projection/blends, ADPCM, sample mixing and software
-synthesis. Property tests exercise parser/state-machine invariants where arbitrary input is useful.
+storage envelopes, input, texture formats/cache/projection/blends, process-local animation payloads,
+world-ripple timing, invalid-initial-return reclamation, ADPCM, fixed-point ADSR, sample mixing and
+software synthesis. Property tests exercise parser/state-machine invariants where arbitrary input
+is useful.
 
 Browser checks and the exact exercised flows are recorded in [VERIFICATION.md](VERIFICATION.md).
 A passing native suite is never described as browser or retail parity.

@@ -47,6 +47,12 @@ fn entry(eid: Eid, items: &[Vec<u8>]) -> Vec<u8> {
 }
 
 fn fixture() -> (Vec<u8>, Vec<u8>, Eid) {
+    let add = Instruction::encode(0x00, 1, 0x400);
+    let branch = (0x82_u32 << 24) | (1 << 10) | 1;
+    fixture_with_code(&[add, add, branch, 0xff00_0000, add])
+}
+
+fn fixture_with_code(code_words: &[u32]) -> (Vec<u8>, Vec<u8>, Eid) {
     let global_eid = Eid::from_name("glob1").unwrap();
     let external_eid = Eid::from_name("code1").unwrap();
     let ldat_offset = MODERN_HEADER_SIZE + 16;
@@ -82,10 +88,8 @@ fn fixture() -> (Vec<u8>, Vec<u8>, Eid) {
     push_u16(&mut states, 0);
     let global = entry(global_eid, &[header, shared_code, internal, maps, states]);
 
-    let add = Instruction::encode(0x00, 1, 0x400);
-    let branch = (0x82_u32 << 24) | (1 << 10) | 1;
     let mut code = Vec::new();
-    for word in [add, add, branch, 0xff00_0000, add] {
+    for &word in code_words {
         push_u32(&mut code, word);
     }
     let mut external_data = Vec::new();
@@ -107,6 +111,27 @@ fn fixture() -> (Vec<u8>, Vec<u8>, Eid) {
     nsf_bytes[global_start..external_start].copy_from_slice(&global);
     nsf_bytes[external_start..end].copy_from_slice(&external);
     (nsd_bytes, nsf_bytes, global_eid)
+}
+
+#[test]
+fn parsed_retail_initial_frame_return_is_a_native_teardown_boundary() {
+    let (nsd_bytes, nsf_bytes, global_eid) =
+        fixture_with_code(&[0x8289_4000, 0, 0, 0, 0x8289_4000]);
+    let metadata = parse_nsd(&nsd_bytes, LevelId::TITLE).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+    let program = load_gool_program(&metadata, &nsf, &nsf_bytes, global_eid, 2).unwrap();
+    let handle = ObjectHandle::new(0).unwrap();
+    let object = VmObject::from_gool_program(handle, &program).unwrap();
+    let mut machine = Machine::new(0);
+    machine.insert_object(object).unwrap();
+
+    assert_eq!(
+        machine.run(handle, 1),
+        Ok(crust_sim::gool::Execution {
+            reason: HaltReason::InvalidInitialReturn,
+            steps: 1,
+        })
+    );
 }
 
 #[test]

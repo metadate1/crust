@@ -2,7 +2,10 @@
 
 use std::f32::consts::TAU;
 
-use crate::mixer::{SAMPLE_RATE, Sample};
+use crate::{
+    mixer::{SAMPLE_RATE, Sample},
+    spu_envelope::SpuAdsrEnvelope,
+};
 
 pub const SYNTH_VOICES: usize = 64;
 const MIDI_CHANNELS: u8 = 16;
@@ -115,9 +118,8 @@ impl Sequence {
 
 /// One decoded VAB tone ready for allocation by the software sequencer.
 ///
-/// Modulation and ADSR fields are retained even where this playback slice
-/// does not model the corresponding SPU behavior yet. This makes later
-/// fidelity work independent of the serialized VAB bytes.
+/// Modulation fields are retained for later fidelity work. The two ADSR
+/// registers drive an exact fixed-point SPU envelope during playback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SampleTone {
     pub sample: Sample,
@@ -250,9 +252,11 @@ struct SynthVoice {
     priority: u8,
     bend_down_cents: u16,
     bend_up_cents: u16,
+    spu_adsr: Option<SpuAdsrEnvelope>,
     release_factor: f32,
     release: bool,
     key_released: bool,
+    finished: bool,
     age: u64,
 }
 
@@ -370,11 +374,14 @@ impl Sequencer {
                 let channel = self.channels[usize::from(voice.channel)];
                 let Some(source_value) = next_voice_sample(&mut voice.source, channel.waveform)
                 else {
-                    voice.amplitude = 0.0;
+                    voice.finished = true;
                     continue;
                 };
-                let value = source_value * voice.amplitude;
-                if voice.release {
+                let envelope_gain = voice.spu_adsr.as_ref().map_or(1.0, SpuAdsrEnvelope::gain);
+                let value = source_value * voice.amplitude * envelope_gain;
+                if let Some(envelope) = &mut voice.spu_adsr {
+                    envelope.tick();
+                } else if voice.release {
                     voice.amplitude *= voice.release_factor;
                 }
                 let pan = (channel.pan + voice.pan).clamp(-1.0, 1.0);
@@ -384,7 +391,13 @@ impl Sequencer {
                 left += value * controller_gain * left_gain;
                 right += value * controller_gain * right_gain;
             }
-            self.voices.retain(|voice| voice.amplitude > 0.0005);
+            self.voices.retain(|voice| {
+                !voice.finished
+                    && voice
+                        .spu_adsr
+                        .as_ref()
+                        .map_or_else(|| voice.amplitude > 0.0005, |envelope| !envelope.is_off())
+            });
             destination[frame * 2] = left.clamp(-1.0, 1.0);
             destination[frame * 2 + 1] = right.clamp(-1.0, 1.0);
             self.sample_clock = self.sample_clock.saturating_add(1);
@@ -542,9 +555,11 @@ impl Sequencer {
             priority: 64,
             bend_down_cents: 200,
             bend_up_cents: 200,
+            spu_adsr: None,
             release_factor: 0.9992,
             release: false,
             key_released: false,
+            finished: false,
             age: self.age_clock,
         });
     }
@@ -594,9 +609,11 @@ impl Sequencer {
                     priority: tone.priority,
                     bend_down_cents,
                     bend_up_cents,
-                    release_factor: release_factor(tone.adsr2),
+                    spu_adsr: Some(SpuAdsrEnvelope::new(tone.adsr1, tone.adsr2)),
+                    release_factor: 1.0,
                     release: false,
                     key_released: false,
+                    finished: false,
                     age,
                 }
             })
@@ -629,7 +646,7 @@ impl Sequencer {
             if voice.channel == channel && voice.note == note {
                 voice.key_released = true;
                 if !sustained {
-                    voice.release = true;
+                    begin_release(voice);
                 }
             }
         }
@@ -642,7 +659,7 @@ impl Sequencer {
         if was_enabled && !enabled {
             for voice in &mut self.voices {
                 if voice.channel == channel && voice.key_released {
-                    voice.release = true;
+                    begin_release(voice);
                 }
             }
         }
@@ -654,7 +671,7 @@ impl Sequencer {
             if voice.channel == channel {
                 voice.key_released = true;
                 if !sustained {
-                    voice.release = true;
+                    begin_release(voice);
                 }
             }
         }
@@ -663,7 +680,7 @@ impl Sequencer {
     fn release_all(&mut self) {
         for voice in &mut self.voices {
             voice.key_released = true;
-            voice.release = true;
+            begin_release(voice);
         }
     }
 
@@ -679,7 +696,7 @@ impl Sequencer {
         self.set_pitch_bend(channel, 8_192);
         for voice in &mut self.voices {
             if voice.channel == channel && voice.key_released {
-                voice.release = true;
+                begin_release(voice);
             }
         }
     }
@@ -819,9 +836,11 @@ fn pitch_ratio_f32(cents: i32) -> f32 {
     (pitch_ratio_q32(cents) as f64 / 4_294_967_296.0) as f32
 }
 
-fn release_factor(adsr2: u16) -> f32 {
-    let rate = u8::try_from(adsr2 & 0x1f).expect("five masked ADSR bits fit u8");
-    (0.999_95 - f32::from(rate) * 0.000_1).clamp(0.99, 0.999_95)
+fn begin_release(voice: &mut SynthVoice) {
+    voice.release = true;
+    if let Some(envelope) = &mut voice.spu_adsr {
+        envelope.key_off();
+    }
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -1022,5 +1041,93 @@ mod tests {
         assert!(!sequencer.voices[0].release);
         sequencer.set_sustain(0, false);
         assert!(sequencer.voices[0].release);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "a zero hardware envelope must produce an exact silent sample"
+    )]
+    fn sampled_voice_applies_spu_adsr_before_mixing_each_frame() {
+        let mut bank = SampleBank::new(127, 64);
+        assert!(bank.set_program(
+            0,
+            SampleProgram {
+                volume: 127,
+                priority: 64,
+                mode: 0,
+                pan: 64,
+                attribute: 0,
+                tones: vec![SampleTone {
+                    sample: Sample::new(vec![i16::MAX; 8], Some(0)),
+                    priority: 64,
+                    mode: 0,
+                    volume: 127,
+                    pan: 64,
+                    center_note: 60,
+                    pitch_shift: 0,
+                    note_min: 0,
+                    note_max: 127,
+                    vibrato_width: 0,
+                    vibrato_time: 0,
+                    portamento_width: 0,
+                    portamento_time: 0,
+                    pitch_bend_min: 0,
+                    pitch_bend_max: 0,
+                    // Fast linear attack, fast exponential decay to 0x800,
+                    // and fast linear release.
+                    adsr1: 0,
+                    adsr2: 0,
+                }],
+            }
+        ));
+
+        let mut sequencer = Sequencer::new();
+        sequencer.set_sample_bank(Some(bank));
+        sequencer.load(Sequence::new(
+            60,
+            vec![SequenceEvent {
+                tick: 0,
+                kind: EventKind::NoteOn {
+                    channel: 0,
+                    note: 60,
+                    velocity: 127,
+                },
+            }],
+        ));
+        sequencer.set_playing(true);
+
+        let mut left = Vec::new();
+        let mut levels = Vec::new();
+        for _ in 0..4 {
+            let mut frame = [f32::NAN; 2];
+            sequencer.render(&mut frame);
+            left.push(frame[0]);
+            levels.push(
+                sequencer.voices[0]
+                    .spu_adsr
+                    .as_ref()
+                    .expect("sampled voice has an ADSR envelope")
+                    .level(),
+            );
+        }
+
+        assert_eq!(left[0], 0.0, "key-on begins at a zero Q15 envelope");
+        assert!(left[1] > left[0]);
+        assert!(left[2] > left[1]);
+        assert!(left[3] > left[2]);
+        assert_eq!(levels, [14_336, 28_672, 32_767, 16_383]);
+
+        sequencer.note_off(0, 60);
+        assert_eq!(
+            sequencer.voices[0]
+                .spu_adsr
+                .as_ref()
+                .expect("sampled voice has an ADSR envelope")
+                .phase(),
+            crate::spu_envelope::SpuAdsrPhase::Release
+        );
+        sequencer.render(&mut [0.0; 2]);
+        assert_eq!(sequencer.active_voice_count(), 0);
     }
 }

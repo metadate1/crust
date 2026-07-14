@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
     KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, parse_nsd,
     parse_nsf,
@@ -12,6 +13,77 @@ use crust_sim::camera::{
     RetailCameraRuntime,
 };
 use crust_sim::retail_frame::PathProgress;
+
+#[test]
+#[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
+fn intro_terminal_automatic_camera_holds_the_authored_final_frame() {
+    let disc_path = PathBuf::from(
+        std::env::var_os("C1_DISC_IMAGE")
+            .expect("C1_DISC_IMAGE must name a legally local NTSC-U raw BIN"),
+    );
+    let disc_bytes = std::fs::read(&disc_path)
+        .unwrap_or_else(|error| panic!("could not read {}: {error}", disc_path.display()));
+    let image = DiscImage::open(&disc_bytes).unwrap();
+    let streams = image.discover_streams().unwrap();
+    let level = LevelId::INTRO;
+    let nsd_bytes = image
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsd))
+                .unwrap(),
+        )
+        .unwrap();
+    let nsf_bytes = image
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsf))
+                .unwrap(),
+        )
+        .unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+
+    let terminal = (1..=5_000).find_map(|tick| {
+        let before = camera.location();
+        let path = graph.path(before.path).unwrap();
+        let is_terminal = matches!(path.camera_mode, 1 | 3)
+            && path.neighbors.is_empty()
+            && usize::from(before.progress.point_index()) + 1 >= path.points.len();
+        let step = camera
+            .update(&graph, RetailCameraInput::default())
+            .unwrap_or_else(|error| panic!("Intro camera tick {tick}: {error}"));
+        is_terminal.then_some((tick, before, step))
+    });
+    let (tick, location, step) = terminal.expect("Intro reaches an authored terminal auto path");
+
+    assert_eq!(step.before, location, "terminal tick {tick}");
+    assert_eq!(step.after, location, "terminal tick {tick}");
+    assert_eq!(camera.location(), location, "terminal tick {tick}");
+    assert_eq!(
+        step.outcome,
+        RetailCameraOutcome::AutoAdvanced {
+            skipped: false,
+            path_crossings: 0,
+        }
+    );
+    assert!(step.effects.is_empty());
+
+    let skipped = camera
+        .update(&graph, RetailCameraInput { tapped: 0xf0 })
+        .unwrap();
+    let skip_is_enabled = graph.zone(location.path.zone).unwrap().graphics_flags & 0x8_1000 == 0;
+    assert_eq!(skipped.before, location);
+    assert_eq!(skipped.after, location);
+    assert_eq!(
+        skipped.outcome,
+        RetailCameraOutcome::AutoAdvanced {
+            skipped: skip_is_enabled,
+            path_crossings: 0,
+        }
+    );
+}
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]

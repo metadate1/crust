@@ -541,6 +541,86 @@ impl ObjectArena {
         Ok(handle)
     }
 
+    /// Creates an object directly beneath one of retail's eight logical roots.
+    ///
+    /// Native host code uses `GoolObjectCreate(&handles[n], ...)` for HUD,
+    /// pause, and PBAK caption objects, while opcodes `0x8a`/`0x91` use an
+    /// ordinary object parent. Allocation and optional root-three reclamation
+    /// are otherwise identical to [`Self::create_child`].
+    pub fn create_root_object(
+        &mut self,
+        root: RootHandle,
+        zone: Eid,
+        executable: u8,
+        subtype: u8,
+        allow_reclaim: bool,
+    ) -> Result<ObjectHandle, RuntimeCreateError> {
+        let tree_parent = TreeParent::Root(root);
+
+        // `GoolObjectCreate` reuses the separately allocated player/Crash
+        // object for executable/subtype zero regardless of whether its parent
+        // is an object or a logical handle.
+        if executable == 0 && subtype == 0 {
+            let main = if let Some(main) = self.main_object() {
+                self.add_child(tree_parent, main)
+                    .map_err(RuntimeCreateError::BrokenTree)?;
+                let object = self
+                    .object_mut(main)
+                    .map_err(RuntimeCreateError::BrokenTree)?;
+                object.zone = zone;
+                object.origin = ObjectOrigin::Runtime {
+                    executable,
+                    subtype,
+                };
+                object.state_flags = 0;
+                main
+            } else {
+                let main = self
+                    .allocate(
+                        zone,
+                        ObjectOrigin::Runtime {
+                            executable,
+                            subtype,
+                        },
+                        ObjectAllocation::DedicatedMain,
+                        tree_parent,
+                    )
+                    .map_err(|_| RuntimeCreateError::MainObjectUnavailable)?;
+                self.insert_at_head(tree_parent, main);
+                main
+            };
+            return Ok(main);
+        }
+
+        if self.free_len == 0 {
+            if !allow_reclaim {
+                return Err(RuntimeCreateError::ObjectPoolFull);
+            }
+            let candidate = self
+                .first_reclaimable()
+                .map_err(RuntimeCreateError::BrokenTree)?
+                .ok_or(RuntimeCreateError::ObjectPoolFull)?;
+            return Err(RuntimeCreateError::ReclaimRequired(candidate));
+        }
+
+        let handle = self
+            .allocate(
+                zone,
+                ObjectOrigin::Runtime {
+                    executable,
+                    subtype,
+                },
+                ObjectAllocation::Pool,
+                tree_parent,
+            )
+            .map_err(|error| match error {
+                SpawnError::ObjectPoolFull => RuntimeCreateError::ObjectPoolFull,
+                _ => unreachable!("pool allocation has no entity validation"),
+            })?;
+        self.insert_at_head(tree_parent, handle);
+        Ok(handle)
+    }
+
     /// Synchronizes the VM state flags used by opcode `0x91` reclamation.
     pub fn set_state_flags(
         &mut self,
@@ -1387,6 +1467,26 @@ mod tests {
         assert_eq!(arena.spawn_table().flags(60), Some(1));
         arena.despawn_subtree(child).unwrap();
         assert_eq!(arena.spawn_table().flags(60), Some(1));
+    }
+
+    #[test]
+    fn host_created_objects_bind_directly_to_the_requested_retail_root() {
+        let mut arena = ObjectArena::new();
+        let root = RootHandle::new(1).unwrap();
+        let first = arena.create_root_object(root, ZONE_A, 4, 8, true).unwrap();
+        let second = arena.create_root_object(root, ZONE_A, 4, 2, true).unwrap();
+
+        assert_eq!(arena.get(first).unwrap().parent(), TreeParent::Root(root));
+        assert_eq!(arena.get(second).unwrap().parent(), TreeParent::Root(root));
+        assert_eq!(
+            arena
+                .preorder(TreeParent::Root(root))
+                .unwrap()
+                .collect::<Vec<_>>(),
+            [second, first],
+            "GoolObjectAddChild inserts host-created objects at the root head"
+        );
+        assert_eq!(arena.spawn_table().flags(0), Some(0));
     }
 
     #[test]

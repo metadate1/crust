@@ -37,6 +37,7 @@ use crust_sim::camera::{
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
 };
+use crust_sim::demo::DemoEnd;
 use crust_sim::flow::{
     FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, MenuChoice, TitlePhase,
     TitleScreen,
@@ -56,9 +57,10 @@ use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
-    ProgramBinding, ProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
-    RetailSaveStateOutcome, RetailSessionCarry, RetailZoneEnvironment, RuntimeCleanupAction,
-    RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
+    ProgramBinding, ProgramHost, RetailDemoFinishOutcome, RetailLevelStateContext,
+    RetailRestartOutcome, RetailRuntime, RetailSaveStateOutcome, RetailSessionCarry,
+    RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle,
+    StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -1391,6 +1393,25 @@ impl Runtime {
         }
         let eid = pbak.eid();
         let (snapshot, seed, crash_bound) = pbak.start_payload();
+        let caption = {
+            let current_zone = self.retail_camera.location().path.zone;
+            let mut host = BrowserProgramHost::new(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                &mut self.retail_audio,
+                &mut self.card,
+                &mut self.storage,
+            );
+            self.retail_objects
+                .create_retail_demo_caption(current_zone, &mut host)
+        }
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not create retail PBAK {eid} caption controller: {error:?}"
+            ))
+        })?;
+        self.drain_retail_reclaim_diagnostics(dom);
         self.retail_objects
             .install_retail_demo_start(snapshot, seed, crash_bound)
             .map_err(|error| {
@@ -1405,40 +1426,66 @@ impl Runtime {
             .mark_started();
         dom.log(
             &format!(
-                "Started retail PBAK {eid}; restored its checked camera/player snapshot and gameplay RNG."
+                "Started retail PBAK {eid}; created caption controller {caption:?} and restored its checked camera/player snapshot and gameplay RNG."
             ),
             false,
         );
         Ok(())
     }
 
-    fn finish_retail_pbak_frame(&mut self, dom: &Dom) -> Result<(), JsValue> {
-        let Some(reason) = self
-            .retail_pbak
-            .as_mut()
-            .and_then(RetailPbakPlayback::take_end)
-        else {
-            return Ok(());
-        };
-        self.retail_objects
-            .set_global_word(PBAK_STATE_GLOBAL, 3)
-            .and_then(|()| {
-                self.retail_objects
-                    .set_global_word(GAME_STATE_GLOBAL, 0x600)
-            })
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not finish retail PBAK title handoff: {error:?}"
-                ))
-            })?;
-        self.next_lid = i32::try_from(FormatLevelId::TITLE.get())
-            .expect("retail title level fits signed 32-bit");
-        dom.log(
-            &format!(
-                "Retail PBAK input ended ({reason:?}); queued the native attract-mode return to the main menu."
-            ),
-            false,
-        );
+    fn finish_retail_pbak_frame(&mut self, reason: DemoEnd, dom: &Dom) -> Result<(), JsValue> {
+        let outcome = {
+            let mut host = BrowserProgramHost::new(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                &mut self.retail_audio,
+                &mut self.card,
+                &mut self.storage,
+            );
+            self.retail_objects.finish_retail_demo(&mut host)
+        }
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not finish retail PBAK caption handoff: {error:?}"
+            ))
+        })?;
+        self.drain_retail_reclaim_diagnostics(dom);
+        match outcome {
+            RetailDemoFinishOutcome::Released => {
+                self.retail_pbak = None;
+                dom.log(
+                    &format!(
+                        "Retail PBAK input ended ({reason:?}); the zero island-camera target released physical input."
+                    ),
+                    false,
+                );
+            }
+            RetailDemoFinishOutcome::CaptionEvent {
+                recipient,
+                dispatch,
+                effects,
+            } => {
+                self.apply_retail_gool_level_effects(&effects, dom)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                dom.log(
+                    &format!(
+                        "Retail PBAK input ended ({reason:?}); caption {recipient:?} received event 0xE00 (acknowledged: {}) and retained the authored return lock.",
+                        dispatch.acknowledged,
+                    ),
+                    false,
+                );
+            }
+            RetailDemoFinishOutcome::CaptionEventFault { recipient, effects } => {
+                self.apply_retail_gool_level_effects(&effects, dom)
+                    .map_err(|error| JsValue::from_str(&error))?;
+                let message = format!(
+                    "Retail PBAK input ended ({reason:?}); native ignored caption {recipient:?}'s faulted event 0xE00 handler and retained the authored return lock."
+                );
+                dom.log(&message, true);
+                self.retail_runtime_warning = Some(message);
+            }
+        }
         Ok(())
     }
 
@@ -1450,21 +1497,35 @@ impl Runtime {
             });
             self.previous_step_us = Some(now_us);
             self.start_armed_retail_pbak(dom)?;
+            if self
+                .retail_pbak
+                .as_ref()
+                .is_some_and(RetailPbakPlayback::is_returning)
+                && self
+                    .retail_objects
+                    .global_word(PBAK_STATE_GLOBAL)
+                    .is_ok_and(|state| state != 3)
+            {
+                // Authored caption GOOL may release `pbak_state` without a
+                // stream transition. Drop the process adapter at the same
+                // following PadUpdate boundary so physical input resumes.
+                self.retail_pbak = None;
+            }
             let physical_held = held | self.pending_buttons;
             self.pending_buttons = 0;
-            let pbak_input = self
-                .retail_pbak
-                .as_mut()
-                .map(|pbak| pbak.advance_input(physical_held));
+            let (pbak_input, pbak_end) = self.retail_pbak.as_mut().map_or((None, None), |pbak| {
+                let (input, end) = pbak.advance_pad_boundary(physical_held);
+                (Some(input), end)
+            });
             let pbak_owned_input = pbak_input.is_some();
-            if pbak_input.is_some_and(|input| input.end.is_some()) {
-                self.retail_objects
-                    .set_global_word(PBAK_STATE_GLOBAL, 0)
-                    .map_err(|error| {
-                        JsValue::from_str(&format!(
-                            "could not release retail PBAK input: {error:?}"
-                        ))
-                    })?;
+            if let Some(reason) = pbak_end {
+                // Keep the state clear, synchronous caption event, and
+                // state-three latch atomic at the browser pad boundary. The
+                // native traversal reaches that boundary on Crash under root
+                // six, after ordinary root-one caption work; the browser's
+                // whole-frame pad sampling currently runs this handoff before
+                // the GOOL traversal (documented as a timing approximation).
+                self.finish_retail_pbak_frame(reason, dom)?;
             }
             let (ticks_current_frame, ticks_per_frame, demo_override) = pbak_input.map_or_else(
                 || {
@@ -1666,7 +1727,6 @@ impl Runtime {
                 if let Some(audio) = &mut self.audio {
                     audio.set_retail_master_gain(self.retail_master_fade.normalized_gain());
                 }
-                self.finish_retail_pbak_frame(dom)?;
                 if let Some(payload) = self.resume.update(self.save_data())
                     && let Some(storage) = &self.storage
                 {
@@ -1987,6 +2047,20 @@ impl Runtime {
                 "Native object-pool reclaim ignored {} faulted TERM handler(s); first object: {:?}.",
                 faults.len(),
                 faults[0].object,
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
+        let solid_faults = self.retail_objects.take_solid_event_faults();
+        if !solid_faults.is_empty() {
+            let first = solid_faults[0];
+            let message = format!(
+                "Native solid motion ignored {} faulted GOOL event handler(s); first mover: {:?}, recipient: {:?}, event: 0x{:X}, reason: {:?}.",
+                solid_faults.len(),
+                first.moving_object,
+                first.recipient,
+                first.event,
+                first.reason,
             );
             dom.log(&message, true);
             self.retail_runtime_warning = Some(message);

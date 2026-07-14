@@ -68,6 +68,11 @@ impl RetailPbakPlayback {
     }
 
     #[must_use]
+    pub const fn is_returning(&self) -> bool {
+        matches!(self.phase, PlaybackPhase::Returning)
+    }
+
+    #[must_use]
     pub fn start_payload(&self) -> (RetailLevelSnapshot, u32, Bounds3) {
         (
             self.prepared.snapshot.clone(),
@@ -117,7 +122,23 @@ impl RetailPbakPlayback {
         }
     }
 
-    pub fn take_end(&mut self) -> Option<DemoEnd> {
+    /// Advances and consumes an ending recording at one `PadUpdatePbak`
+    /// boundary.
+    ///
+    /// The native routine sends the caption event and latches its returning
+    /// state before tapped input, camera, or GOOL update work in that same
+    /// frame. Returning the end reason alongside the recorded input prevents
+    /// the browser host from deferring that synchronous handoff.
+    pub fn advance_pad_boundary(
+        &mut self,
+        physical_held: u16,
+    ) -> (PbakInputFrame, Option<DemoEnd>) {
+        let input = self.advance_input(physical_held);
+        let end = input.end.and_then(|_| self.take_end());
+        (input, end)
+    }
+
+    fn take_end(&mut self) -> Option<DemoEnd> {
         let PlaybackPhase::Ending(reason) = self.phase else {
             return None;
         };
@@ -509,14 +530,17 @@ mod tests {
         assert_eq!(seed, 0x1234_5678);
         playback.mark_started();
         assert_eq!(
-            playback.advance_input(0x0800),
-            PbakInputFrame {
-                held: 0x1000,
-                ticks_per_frame: Some(34),
-                end: Some(DemoEnd::Interrupted),
-            }
+            playback.advance_pad_boundary(0x0800),
+            (
+                PbakInputFrame {
+                    held: 0x1000,
+                    ticks_per_frame: Some(34),
+                    end: Some(DemoEnd::Interrupted),
+                },
+                Some(DemoEnd::Interrupted),
+            )
         );
-        assert_eq!(playback.take_end(), Some(DemoEnd::Interrupted));
+        assert!(playback.is_returning());
         assert_eq!(playback.take_end(), None);
         assert_eq!(
             playback.advance_input(0xffff),

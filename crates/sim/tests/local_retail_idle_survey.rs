@@ -3,10 +3,11 @@
 //! No game bytes or derived assets are written by these tests. The runtime
 //! survey mirrors the browser's spawn -> camera -> GOOL order for a bounded
 //! window and prints deterministic diagnostics instead of stopping at the
-//! first level. The separate N. Sanity progression test holds retail Up and
-//! periodically taps spin/jump for a default 18,000-frame window selected by
-//! `C1_PROGRESSION_FRAMES`. Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn characterized
-//! runtime boundary into a failing assertion. Set `C1_SURVEY_LEVEL` to a
+//! first level. The separate N. Sanity progression test drives an observable
+//! camera/player-state route using only retail directional, jump, and spin pad
+//! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
+//! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
+//! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
 //! one level's trace. `C1_SURVEY_FRAMES` selects a bounded 1..=108,000 frame
 //! window; the default remains 360 frames.
@@ -33,10 +34,11 @@ use crust_sim::{
         RetailCameraRuntime,
     },
     gool::{
-        CodeSegment, RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect, process_register,
+        CodeAddress, CodeSegment, GoolProgramIdentity, RetailPadSnapshot,
+        RetailTransformVectorsCamera, VmEffect, process_register,
     },
     object_arena::{NeighborZone, SpawnError},
-    player::{PAD_CROSS, PAD_SQUARE, PAD_UP},
+    player::{PAD_CROSS, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
         NsfProgramError, NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome,
@@ -87,24 +89,327 @@ impl SurveyInputProfile {
         }
     }
 
-    fn held(self, frame: u32) -> u32 {
-        match self {
-            Self::Idle => 0,
-            Self::DirectionAndButtonSweep => active_survey_held(frame),
-            Self::ForwardWithActions => {
-                // One cooperative frame per press produces the retail tapped
-                // edge while Up remains held. Jump every three seconds and
-                // spin halfway between jumps at the source's 30 Hz cadence.
-                let phase = (frame - 1) % 90;
-                PAD_UP
-                    | if phase == 30 { PAD_SQUARE } else { 0 }
-                    | if phase == 75 { PAD_CROSS } else { 0 }
+    const fn stops_at_transition(self) -> bool {
+        matches!(self, Self::ForwardWithActions)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RouteAction {
+    direction: u32,
+    direction_frames: u8,
+    button: u32,
+    button_start: u8,
+    button_frames: u8,
+}
+
+impl RouteAction {
+    fn total_frames(self) -> u8 {
+        self.direction_frames
+            .max(self.button_start.saturating_add(self.button_frames))
+    }
+
+    fn held(self, tick: u8) -> u32 {
+        let direction = if tick < self.direction_frames {
+            self.direction
+        } else {
+            0
+        };
+        let button = if tick >= self.button_start
+            && tick < self.button_start.saturating_add(self.button_frames)
+        {
+            self.button
+        } else {
+            0
+        };
+        direction | button
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct NSanityRouteController {
+    opening_stage: u8,
+    stage: u8,
+    active: Option<RouteAction>,
+    active_is_opening: bool,
+    action_tick: u8,
+}
+
+impl NSanityRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        if let Some(action) = self.active {
+            let held = action.held(self.action_tick);
+            self.action_tick = self.action_tick.saturating_add(1);
+            if self.action_tick >= action.total_frames() {
+                self.active = None;
+                self.action_tick = 0;
+                if self.active_is_opening {
+                    self.opening_stage = self.opening_stage.saturating_add(1);
+                    self.active_is_opening = false;
+                } else {
+                    self.stage = self.stage.saturating_add(1);
+                }
             }
+            return PAD_UP | held;
+        }
+
+        let Some(player) = player else {
+            return PAD_UP;
+        };
+        let a0 = Eid::from_name("a0_9Z").expect("fixed N. Sanity route EID is valid");
+        let a1 = Eid::from_name("a1_9Z").expect("fixed N. Sanity route EID is valid");
+        let a2 = Eid::from_name("a2_9Z").expect("fixed N. Sanity route EID is valid");
+        let a3 = Eid::from_name("a3_9Z").expect("fixed N. Sanity route EID is valid");
+        let a4 = Eid::from_name("a4_9Z").expect("fixed N. Sanity route EID is valid");
+        let a5 = Eid::from_name("a5_9Z").expect("fixed N. Sanity route EID is valid");
+        let progress = camera.progress.raw();
+        let grounded = player.status_a & 1 != 0;
+        if self.opening_stage < 2 {
+            let opening_action = match self.opening_stage {
+                0 if camera.path.zone == a0 && camera.path.index == 0 && progress >= 200 => {
+                    RouteAction {
+                        button: PAD_CROSS,
+                        button_start: 4,
+                        button_frames: 1,
+                        ..RouteAction::default()
+                    }
+                }
+                1 if camera.path.zone == a0 && camera.path.index == 1 && progress >= 5_000 => {
+                    RouteAction {
+                        button: PAD_SQUARE,
+                        button_start: 1,
+                        button_frames: 1,
+                        ..RouteAction::default()
+                    }
+                }
+                _ => return PAD_UP,
+            };
+            self.active = Some(opening_action);
+            self.active_is_opening = true;
+            self.action_tick = 0;
+            return self.held(camera, Some(player));
+        }
+        let action = match self.stage {
+            0 if camera.path.zone == a1 && camera.path.index == 0 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 6,
+                button: PAD_CROSS,
+                button_start: 6,
+                button_frames: 1,
+            },
+            1 if camera.path.zone == a1 && camera.path.index == 0 && progress >= 17_000 => {
+                RouteAction {
+                    button: PAD_SQUARE,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            2 if camera.path.zone == a1
+                && camera.path.index == 0
+                && progress >= 17_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            3 if camera.path.zone == a1 && camera.path.index == 1 && progress >= 16_000 => {
+                RouteAction {
+                    button: PAD_SQUARE,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            4 if camera.path.zone == a2 && progress >= 5_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            5 if camera.path.zone == a2 && progress >= 14_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            6 if camera.path.zone == a2 && progress >= 19_000 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            7 if camera.path.zone == a3 && camera.path.index == 0 && progress >= 3_500 => {
+                RouteAction {
+                    button: PAD_SQUARE,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            8 if camera.path.zone == a3
+                && camera.path.index == 0
+                && progress >= 7_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            9 if camera.path.zone == a3 && camera.path.index == 0 && progress >= 9_000 => {
+                RouteAction {
+                    button: PAD_SQUARE,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            10 if camera.path.zone == a3
+                && camera.path.index == 1
+                && progress >= 3_500
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 11,
+                    ..RouteAction::default()
+                }
+            }
+            11 if camera.path.zone == a3 && camera.path.index == 1 && progress >= 9_000 => {
+                RouteAction {
+                    button: PAD_SQUARE,
+                    button_frames: 1,
+                    ..RouteAction::default()
+                }
+            }
+            12 if camera.path.zone == a4 && progress <= 1_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            13 if camera.path.zone == a4 && progress >= 12_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            14 if camera.path.zone == a4 && progress >= 20_000 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            15 if camera.path.zone == a4 && progress >= 33_000 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            16 if camera.path.zone == a4 && progress >= 33_900 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            17 if camera.path.zone == a4 && progress >= 34_300 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            18 if camera.path.zone == a4 && player.zone == a5 && grounded => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            19 if camera.path.zone == a4 && player.zone == a5 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            20 if camera.path.zone == a5 && progress >= 1_000 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 11,
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            21 if camera.path.zone == a5 && progress >= 8_000 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            22 if camera.path.zone == a5 && progress >= 8_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            23 if camera.path.zone == a5 && progress >= 9_800 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            24 if camera.path.zone == a5 && progress >= 11_000 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            25 if camera.path.zone == a5 && progress >= 11_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            26 if camera.path.zone == a5 && progress >= 16_000 && grounded => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 11,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            27 if camera.path.zone == a5 && progress >= 20_000 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            28 if camera.path.zone == a5 && progress >= 20_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            _ => return PAD_UP,
+        };
+        self.active = Some(action);
+        self.action_tick = 0;
+        self.held(camera, Some(player))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SurveyInputController {
+    profile: SurveyInputProfile,
+    n_sanity: NSanityRouteController,
+}
+
+impl SurveyInputController {
+    const fn new(profile: SurveyInputProfile) -> Self {
+        Self {
+            profile,
+            n_sanity: NSanityRouteController {
+                opening_stage: 0,
+                stage: 0,
+                active: None,
+                active_is_opening: false,
+                action_tick: 0,
+            },
         }
     }
 
-    const fn stops_at_transition(self) -> bool {
-        matches!(self, Self::ForwardWithActions)
+    fn held(
+        &mut self,
+        frame: u32,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+    ) -> u32 {
+        match self.profile {
+            SurveyInputProfile::Idle => 0,
+            SurveyInputProfile::DirectionAndButtonSweep => active_survey_held(frame),
+            SurveyInputProfile::ForwardWithActions => self.n_sanity.held(camera, player),
+        }
     }
 }
 
@@ -118,6 +423,8 @@ struct CameraProgressRange {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PlayerTrace {
+    program: Option<GoolProgramIdentity>,
+    code_address: CodeAddress,
     zone: Eid,
     translation: [i32; 3],
     velocity: [i32; 3],
@@ -126,6 +433,14 @@ struct PlayerTrace {
     status_a: u32,
     status_b: u32,
     event: u32,
+    animation_stamp: u32,
+    state_stamp: u32,
+    animation_counter: u32,
+    animation_sequence: u32,
+    animation_frame: u32,
+    stack_len: usize,
+    stack_top: Option<u32>,
+    stack_tail: [Option<u32>; 8],
 }
 
 #[derive(Debug)]
@@ -544,6 +859,8 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
             .map_err(|error| format!("main register {index}: {error:?}"))
     };
     Ok(Some(PlayerTrace {
+        program: player.program_identity(),
+        code_address: player.code_address(),
         zone: runtime
             .arena()
             .get(arena)
@@ -564,6 +881,21 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
         status_a: register(process_register::STATUS_A)?,
         status_b: register(process_register::STATUS_B)?,
         event: register(process_register::EVENT)?,
+        animation_stamp: register(process_register::ANIMATION_STAMP)?,
+        state_stamp: register(process_register::STATE_STAMP)?,
+        animation_counter: register(process_register::ANIMATION_COUNTER)?,
+        animation_sequence: register(process_register::ANIMATION_SEQUENCE)?,
+        animation_frame: register(process_register::ANIMATION_FRAME)?,
+        stack_len: player.stack().len(),
+        stack_top: player.stack().last().copied(),
+        stack_tail: std::array::from_fn(|index| {
+            player
+                .stack()
+                .len()
+                .checked_sub(8 - index)
+                .and_then(|index| player.stack().get(index))
+                .copied()
+        }),
     }))
 }
 
@@ -812,6 +1144,16 @@ fn drain_reclaim_diagnostics(runtime: &mut RetailRuntime, survey: &mut LevelSurv
             format!("TERM fault while reclaiming {:?}", fault.object),
         );
     }
+    for fault in runtime.take_solid_event_faults() {
+        survey.record_issue(
+            "solid-event",
+            frame,
+            format!(
+                "mover {:?} recipient {:?} event {:#x} reason {:?}",
+                fault.moving_object, fault.recipient, fault.event, fault.reason
+            ),
+        );
+    }
 }
 
 fn fault_context(
@@ -876,6 +1218,7 @@ fn survey_pair(
     refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
     let mut host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
     let mut survey = LevelSurvey::new(level, name, input_profile);
+    let mut input_controller = SurveyInputController::new(input_profile);
     let mut empty_frames = 0_u32;
     let mut held_previous = 0_u32;
     let mut held_previous_2 = 0_u32;
@@ -884,7 +1227,7 @@ fn survey_pair(
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);
-        let held = input_profile.held(frame);
+        let held = input_controller.held(frame, camera.location(), player_trace(&runtime)?);
         let tapped = held & !held_previous;
         runtime
             .set_pad_snapshot(
@@ -984,8 +1327,25 @@ fn survey_pair(
         }
         drain_reclaim_diagnostics(&mut runtime, &mut survey, frame);
 
-        survey.observe_progress(frame, camera.location(), player_trace(&runtime)?);
-
+        let player = player_trace(&runtime)?;
+        survey.observe_progress(frame, camera.location(), player);
+        if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
+            && matches!(input_profile, SurveyInputProfile::ForwardWithActions)
+            && frame >= 300
+        {
+            eprintln!(
+                "route f{frame} held={held:#06x} camera={:?} player={player:?}",
+                camera.location()
+            );
+        }
+        if std::env::var_os("C1_SURVEY_HOG_TRACE").is_some() && (170..=200).contains(&frame) {
+            eprintln!(
+                "hog f{frame} held={held:#06x} camera={:?} globals106/107={:?}/{:?} player={player:?}",
+                camera.location(),
+                runtime.global_word(106),
+                runtime.global_word(107),
+            );
+        }
         if input_profile.stops_at_transition()
             && let Some((transition_frame, next_lid)) = survey.next_lid
         {
@@ -1131,6 +1491,19 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
             .all(|survey| survey.frames >= survey_frame_count() || survey.terminal.is_some()),
         "every pair must reach the bounded idle window or a recorded deterministic terminal"
     );
+    if requested_level == Some(LevelId::new_const(0x11)) && survey_frame_count() >= 190 {
+        let hog_wild = &surveys[0];
+        assert!(
+            hog_wild.restarts >= 1,
+            "Hog Wild idle must deliver its fall-kill event and complete the authored fade/load-state handshake: {}",
+            hog_wild.summary()
+        );
+        assert!(
+            hog_wild.first_terminal_fall.is_none(),
+            "Hog Wild must restart before retaining a terminal fall: {}",
+            hog_wild.summary()
+        );
+    }
     if std::env::var_os("C1_SURVEY_REQUIRE_CLEAN").is_some() {
         let dirty = surveys
             .iter()
@@ -1182,6 +1555,21 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         survey.initial_player_translation.is_some() && survey.final_player_translation.is_some(),
         "the real retail Crash object must become observable"
     );
+    assert!(
+        survey.first_below_zero.is_none() && survey.first_terminal_fall.is_none(),
+        "the authored route must not cross either observed fall boundary: {}",
+        survey.summary()
+    );
+    if frames >= 900 {
+        for zone_name in ["a1_9Z", "a2_9Z", "a3_9Z", "a4_9Z", "a5_9Z", "a6_9Z"] {
+            let zone = Eid::from_name(zone_name).unwrap();
+            assert!(
+                survey.camera_ranges.keys().any(|path| path.zone == zone),
+                "the authored controller did not reach {zone_name}: {}",
+                survey.summary()
+            );
+        }
+    }
     assert!(
         survey.is_clean(),
         "goal-directed progression reached a checked runtime boundary: {}",

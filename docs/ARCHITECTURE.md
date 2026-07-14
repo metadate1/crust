@@ -176,9 +176,14 @@ The PBAK runtime adapter accepts the ordinary 304-spawn-word snapshot and the on
 511-word layout only when its discarded tail is zero. It remaps serialized X/Y/Z rotation into the
 VM's Y/X/Z register order, restores camera/path/progress and Crash state, and preserves the recorded
 RNG, draw stamp, bounds and timing. `DemoPlayer` makes the final recorded pad word observable before
-the finished/physical-interrupt handoff; the browser performs the native restart and title-state
-global transitions around it. Caption-object event `0xE00` at the attract-mode end is still an
-explicit host gap.
+the finished/physical-interrupt handoff. Before the restart, the runtime creates the exact
+executable-four/subtype-eight controller under root one with its two caption arguments. Its typed
+null lifecycle zone survives zone termination while environment lookups use the checked current
+ZDAT fallback. At completion, a tagged live `caption_obj` handle receives synchronous event
+`0xE00` when `island_cam_rot_x` is nonzero; otherwise playback simply releases physical input. The
+browser currently samples pad/PBAK state once before its whole GOOL traversal; native code reaches
+that update between the root-one caption and root-six Crash updates, so this intra-frame placement
+remains an explicit compatibility boundary.
 
 `RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
 VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs

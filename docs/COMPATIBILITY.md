@@ -46,9 +46,10 @@ gameplay path.
   identity remains separately typed for object colors and zone migration. When that object zone is
   detached, its rectangle, graphics and water plane supply the source ceiling/zone fallback without
   adding its octree to current-neighbor geometry candidates. This separation carries the
-  characterized N. Sanity route across `e0_9Z`, `a0_9Z` and `a1_9Z` without a stale-zone fall; the
-  strict Hog Wild window crosses ten camera zones through `0n_hZ` while preserving Crash's detached
-  object-zone identity as `0c_hZ`.
+  characterized N. Sanity route from `e0_9Z` through `a0_9Z` and `a1_9Z`–`a6_9Z` without a
+  stale-zone fall. The strict Hog Wild window advances `0a_hZ → 0b_hZ → 0c_hZ`, preserves Crash's
+  detached object-zone identity as `0c_hZ`, and repeats that camera path across the authored
+  same-level restarts at frames 179 and 356.
 - Authored title MDAT entities bind to the same arena/VM host as level objects. Their retail
   `title_state` word drives publisher, menu, options, password/load, map and game-over changes
   through the native fade boundary. The final WebGL pass uses the source's 16-level nonlinear
@@ -99,8 +100,17 @@ gameplay path.
 - Mounted type-19 PBAK entries are parsed with exact 304- and 511-spawn-word layouts and adapted to
   the live browser runtime. Attract playback restores the recorded camera/player transform, scale,
   bounds, spawn words, RNG, draw/tick timing and full 32-bit pad word; physical input interrupts it,
-  and the final recorded pad frame remains observable before returning to title. All nine legal
-  recordings, totaling 10,966 frames, pass the opt-in local corpus test.
+  and the final recorded pad frame remains observable before the source completion handshake. The
+  executable-four/subtype-eight controller is created beneath root one with arguments 2,279 and
+  19,993 before `LevelRestart`; its null object-zone identity survives that restart. A nonzero
+  `island_cam_rot_x` then sends the checked caption object event `0xE00` with one zero argument and
+  retains native input-lock state three; a zero target releases physical input. All nine legal
+  recordings, totaling 10,966 frames, and all nine controller program bindings pass opt-in local
+  corpus tests. One sub-frame ordering gap remains: the browser samples its whole-frame pad state
+  before the GOOL traversal, while native code updates the root-one caption first and calls
+  `PadUpdatePbak` only when traversal reaches Crash beneath root six. Completion is atomic in the
+  browser, but its event-rebound caption can therefore receive one extra ordinary update in that
+  frame.
 - Live SFX/music volume and mono options applied independently. Mounted type-12 ADIO item-zero
   samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
   WebAudio. ZDAT MIDI references resolve mounted type-13 MIDI and type-14 INST entries; decoded VAB
@@ -187,16 +197,20 @@ gameplay path.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
-  used. A strict legally-local 18,000-frame forward-input trace moves the camera and Crash through
-  the opening three N. Sanity zones and reaches the valid `a1_9Z` path-zero solid wall with no VM
-  errors, faults or terminal fall. That is a real playable progression path, not a certified level
-  completion: late bound refresh, broader collision and later Crash, boss, box, checkpoint, enemy,
-  bonus and ending behavior remain open. Hog Wild's checked 360-frame trace also has no VM fault or
-  execution error, but its frame-179 terminal fall remains a gameplay outcome and is not presented
-  as level progression parity.
-- PBAK playback returns to the main-menu title state after the final frame, but the source also
-  spawns a caption object of subtype two and sends it event `0xE00` when `island_cam_rot_x` is
-  nonzero. That caption/end handshake is not yet connected.
+  used. A strict legally-local 18,000-frame authored-input trace moves the camera and Crash through
+  N. Sanity zones `a1_9Z` through `a6_9Z` by frame 759 with no VM errors, faults or terminal fall.
+  It then rests against the first `a6_9Z` ledge. That is a real playable progression path, not a
+  certified level completion: late bound refresh, broader collision and later Crash, boss, box,
+  checkpoint, enemy, bonus and ending behavior remain open. Hog Wild's checked 360-frame idle trace
+  now delivers the
+  authored fall-kill event to state 22, advances `fade_counter` through the native `-2`/`-1`
+  sentinels, emits `LoadState`, and completes two same-level restarts with no VM error, faulted
+  object, checked issue or retained terminal fall. This characterizes the idle death/restart loop;
+  it does not establish steering, enemy, bonus or level-completion parity. Collision-generated
+  events are currently collected from the pure solid solver and dispatched before the object frame
+  returns; native `solid.c` dispatches at each internal call site. The verified Hog fall-kill is an
+  end-of-solver branch, but ceiling, water and multiple-event paths can still observe different
+  intra-solver ordering until the solver exposes a synchronous callback boundary.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. The
   data-independent fallback UI still uses a local deterministic progression rule when that authored

@@ -58,11 +58,15 @@ to cross the former N. Sanity animation-bound boundary without emulating undefin
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A strict 18,000-frame
-forward-input trace carries both the camera and Crash from `e0_9Z` through `a0_9Z` into `a1_9Z`,
-reaches the valid path-zero solid wall, and reports no VM errors, faulted objects or terminal fall.
-This is a real data-backed progression path, but it does not certify a completed retail level or
-playthrough. Full progression, several GOOL host operations, dynamic rendering effects and the
-nested same-level restart continuation remain incomplete. Source-ordered zone lifetime/paging,
+state-aware input trace carries the camera and Crash from `e0_9Z` through `a0_9Z` and `a1_9Z`–
+`a6_9Z`, reaches the first authored `a6_9Z` ledge by frame 759, and reports no VM errors, faulted
+objects or terminal fall.
+The strict 360-frame Hog Wild idle characterization now delivers the authored `0x900` fall-kill
+event, advances the native signed display fade through `-2`/`-1`, performs two same-level
+load-state restarts, and retains no terminal fall or checked runtime issue.
+These are real data-backed runtime paths, but they do not certify a completed retail level or
+playthrough. Full progression, several GOOL host operations, dynamic rendering effects and later
+same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
 connected. Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
@@ -78,8 +82,9 @@ objects only. Mode four is implemented as a checked pure renderer operation but 
 until the runtime snapshot carries the live pause-object/player selection and `dark_dist` value.
 Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
 snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
-(10,966 frames) pass the adapter characterization; the final caption-object event `0xE00` handshake
-is the remaining attract-mode end gap.
+(10,966 frames) pass the adapter characterization. The checked caption controller now survives
+the demo restart beneath logical root one; a nonzero island-camera target dispatches its checked
+event `0xE00`, while a zero target releases physical input without inventing a title transition.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 
@@ -109,7 +114,7 @@ flags are instantiated into a checked 96-object arena and run by the live browse
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
 camera-selected world; Crash accepts retail pad input and has a clean 18,000-frame characterized
-route across the opening three N. Sanity zones, but no authored level completion has been
+route from `e0_9Z` through `a0_9Z` and `a1_9Z`–`a6_9Z`, but no authored level completion has been
 certified. Save/checkpoint behavior is not yet playthrough-certified, and a
 same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
 local scan of all 44 retail pairs found zero authored occurrences of that nested case.

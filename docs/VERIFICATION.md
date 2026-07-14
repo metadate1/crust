@@ -45,7 +45,9 @@ The type-19 PBAK census found exactly nine recordings and 10,966 controller fram
 304-spawn-word layout; the Upstream recording uses the observed 511-word layout and its extended
 frame offset. The checked browser adapter prepared all nine, validated each recorded level/path,
 accepted Upstream only because its extra active-spawn tail is zero, and preserved the one legal pad
-word containing a bit above the 16-bit physical-controller range.
+word containing a bit above the 16-bit physical-controller range. A separate raw-BIN corpus test
+also bound the native executable-four/subtype-eight caption controller in every one of those nine
+pairs, retained its null lifecycle zone, and rejected no program or environment lookup.
 
 The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
 verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
@@ -110,19 +112,21 @@ copy any disc or stream bytes into the repository:
   nonlinear overlay-alpha sequence, including opaque blank/swap phases and the pre-quantization
   counter step used by the WebGL pass.
 - The strict goal-directed N. Sanity survey completed its default 18,000 frames with
-  `terminal=None`, `next_lid=None`, 11 live objects (peak 16), 199,200 GOOL executions, zero VM
-  errors and zero faulted objects. It recorded 13 successful spawns from 143,842 attempts, zero
-  unexpected spawn failures, two zone transitions, ten camera-path changes, four save handshakes
-  and no restart. Straight Up with periodic jump/spin carried both the camera and Crash object zone
-  through `e0_9Z → a0_9Z → a1_9Z`; the trace settled at path-zero progress 16,384 against a
-  valid solid wall near frame 377 and recorded neither a below-zero player position nor the
-  terminal-fall velocity. This proves a clean authored progression window, not a completed level.
-- A separate strict 360-frame Hog Wild boundary trace completed with 1,175 GOOL executions, zero
-  execution errors, zero faulted objects and no checked issues while the camera crossed ten zones
-  through `0n_hZ`. Crash retained the typed detached object zone `0c_hZ`; its rectangle, graphics
-  and water fallback remained available without adding detached octree geometry. The trace still
-  entered a terminal fall at frame 179 and reached Y `-18,441,204` by frame 360, so this is evidence
-  for safe boundary semantics rather than playable Hog Wild parity.
+  `terminal=None`, `next_lid=None`, 16 live objects (peak 19), 286,888 GOOL executions, zero VM
+  errors and zero faulted objects. It recorded 33 successful spawns from 249,014 attempts, zero
+  unexpected spawn failures, seven zone transitions, 17 camera-path changes, four save handshakes
+  and no restart. State-aware forward/jump/spin/steering input carried Crash through
+  `e0_9Z → a0_9Z → a1_9Z → a2_9Z → a3_9Z → a4_9Z → a5_9Z → a6_9Z`; the trace reached `a6_9Z`
+  at frame 759, then remained safely at its first authored ledge through frame 18,000. It recorded
+  neither a below-zero player position nor terminal-fall velocity. This proves a clean authored
+  progression window, not a completed level.
+- A separate strict 360-frame Hog Wild idle trace completed with 713 GOOL executions, zero
+  execution errors, zero faulted objects and no checked issues. Crash retained the typed detached
+  object zone `0c_hZ`; its rectangle, graphics and water fallback remained available without
+  adding detached octree geometry. The authored solid event `0x900` entered death state 22, the
+  signed display fade reached `-2` then `-1`, and `LoadState` completed same-level restarts at
+  frames 179 and 356. No below-zero or terminal fall remained. This verifies the idle
+  death/restart loop, not steering or level-completion parity.
 - Focused renderer tests exercise mode-two dual color ramps and cutoff, mode-three SVTX fade and
   CVTX shift/cutoff, the checked pure mode-four lighting calculation and malformed-coordinate
   rejection. Web scene tests confirm modes two/three are gated into live object rendering and that
@@ -214,17 +218,27 @@ visible in-app browser; the loader reached its Rust-ready engineering-log state 
 returned HTTP 200 with `Cache-Control: no-store`. The operating-system chooser still required the
 user's click, so this newest retail-SFX build is not claimed as manually auditioned.
 
+The 2026-07-14 current runtime slice was rebuilt, served with `Cache-Control: no-store`, and loaded in
+a foreground Google Chrome session. The native chooser selected the user's supplied raw BIN in
+place; the page reported 88 files, all 44 pairs, 43 playable pairs and 219 MiB of logical local
+stream data. The Rust/Wasm runtime rendered the Naughty Dog card, the real main menu and Intro
+`0x38`. Intro advanced through its authored camera chain and held the terminal no-neighbor frame
+without the previous camera error while the monitor remained `RUNNING` at 30 Hz with synthesized
+audio active. Disc bytes remained local to the browser tab. DevTools network/console panes were not
+inspected in this foreground pass, so the visible engineering log and successful rendering are the
+only browser error evidence claimed here.
+
 ## Final automated results
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 644 asset-free tests passed, zero failed; 43 legally local tests
-  remain ignored by default (687 tests total across all targets).
+- locked native workspace suite: 655 asset-free tests passed, zero failed; 46 legally local tests
+  remain ignored by default (701 tests total across all targets).
 - post-fix legal-data gates passed against the supplied raw BIN and read-only extracted streams:
   88 exact streams/44 pairs and 229,312,048 extracted bytes; all nine PBAK recordings/10,966
   controller frames; the exact title-MDAT runtime check; all 43 bootable pairs for 360 strict
-  frames; N. Sanity for 17,000 strict idle frames and 18,000 goal-directed frames; and the focused
-  Hog Wild detached-zone trace.
+  frames; N. Sanity for 17,000 strict idle frames and 18,000 goal-directed frames; the focused Hog
+  Wild death/restart trace; and the Intro terminal-camera and all-nine PBAK caption bindings.
 - the previously recorded 24-test opt-in sweep passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`:
   raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
@@ -236,8 +250,8 @@ user's click, so this newest retail-SFX build is not claimed as manually auditio
   raw BIN alone in the earlier sweep.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 1,136,400 bytes (SHA-256
-  `4bf2d6bd59197e67ef008b57d1a065c1e8ef586b30d7fe9011115c024981887e`).
+- generated web release: passed; Wasm payload was 1,143,491 bytes (SHA-256
+  `6a4bd5b8893bcf287d557ac445adc526d79c510270070880a798a19c43495c8d`).
 
 ## Reproducible commands
 
@@ -264,7 +278,7 @@ C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
   every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
-C1_STREAM_DIR=/path/to/streams \
+C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_camera --locked -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \

@@ -1275,6 +1275,36 @@ impl RetailCameraRuntime {
                 ));
             }
 
+            // Retail asks `ZoneGetNeighborPath(..., 0)` at an automatic
+            // path's endpoint and returns success without moving when that
+            // lookup yields null. Some shipped cutscene paths (including the
+            // Intro's terminal `t1_UZ:0`) intentionally have no link zero.
+            // Check the validated slice before resolving it so the Rust port
+            // preserves that authored terminal hold without reproducing the
+            // C routine's preceding out-of-bounds neighbor-record read.
+            let has_next_path = !graph
+                .path(location.path)
+                .ok_or_else(|| {
+                    RetailCameraError::Graph(FormatError::global(format!(
+                        "camera path {}:{} is absent",
+                        location.path.zone, location.path.index
+                    )))
+                })?
+                .neighbors
+                .is_empty();
+            if !has_next_path {
+                self.location = location;
+                self.game_state = game_state;
+                return Ok(self.step(
+                    before,
+                    RetailCameraOutcome::AutoAdvanced {
+                        skipped,
+                        path_crossings,
+                    },
+                    effects,
+                ));
+            }
+
             let crossing_before = location;
             let (target_path, link) = graph.resolve_neighbor(location.path, 0)?;
             let target_count = retail_point_count(graph, target_path)?;
@@ -2998,14 +3028,26 @@ mod tests {
     }
 
     #[test]
-    fn retail_missing_auto_link_is_checked_without_partial_update() {
-        let graph = single_zone_graph(0, vec![retail_path(1, 1, None)]);
-        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
-        let before = camera;
-        let error = camera
-            .update(&graph, RetailCameraInput::default())
-            .unwrap_err();
-        assert!(matches!(error, RetailCameraError::Graph(_)));
-        assert_eq!(camera, before);
+    fn retail_terminal_automatic_path_holds_without_a_neighbor() {
+        for tapped in [0, AUTO_SKIP_BUTTON_MASK] {
+            let graph = single_zone_graph(0, vec![retail_path(1, 1, None)]);
+            let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+            let before = camera;
+            let step = camera.update(&graph, RetailCameraInput { tapped }).unwrap();
+
+            assert_eq!(step.before, before.location());
+            assert_eq!(step.after, before.location());
+            assert_eq!(camera.location(), before.location());
+            assert_eq!(step.game_state, GAME_STATE_CUTSCENE);
+            assert_eq!(camera.game_state(), GAME_STATE_CUTSCENE);
+            assert_eq!(
+                step.outcome,
+                RetailCameraOutcome::AutoAdvanced {
+                    skipped: tapped != 0,
+                    path_crossings: 0,
+                }
+            );
+            assert!(step.effects.is_empty());
+        }
     }
 }

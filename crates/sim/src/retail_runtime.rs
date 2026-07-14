@@ -39,7 +39,10 @@ use crate::{
     object_bounds::{
         AnimationBoundSource, BoundTransform, calculate_local_bound, calculate_world_bound,
     },
-    retail_solid_motion::{HOG_LAND_OFFSET, STANDARD_LAND_OFFSET, SolidLevelQuirks},
+    retail_solid_motion::{
+        HOG_LAND_OFFSET, STANDARD_LAND_OFFSET, SolidEffect, SolidEventReason, SolidEventTarget,
+        SolidLevelQuirks,
+    },
 };
 
 /// A malformed transition graph must not monopolize the browser's
@@ -102,6 +105,7 @@ const CHECKPOINT_ID_GLOBAL: usize = 69;
 const DEATH_COUNT_GLOBAL: usize = 108;
 const BOX_COUNT_GLOBAL: usize = 62;
 const BONUS_ROUND_GLOBAL: usize = 60;
+const ISLAND_CAMERA_ROTATION_GLOBAL: usize = 64;
 const GEM_STAMP_GLOBAL: usize = 65;
 const ISLAND_CAMERA_STATE_GLOBAL: usize = 66;
 const IS_FIRST_ZONE_GLOBAL: usize = 67;
@@ -110,6 +114,10 @@ const CAPTION_OBJECT_GLOBAL: usize = 76;
 const PBAK_STATE_GLOBAL: usize = 105;
 const FADE_COUNTER_GLOBAL: usize = 106;
 const FADE_STEP_GLOBAL: usize = 107;
+const PBAK_CAPTION_EVENT: u32 = 0x0e00;
+const PBAK_CAPTION_EXECUTABLE: u8 = 4;
+const PBAK_CAPTION_SUBTYPE: u8 = 8;
+const PBAK_CAPTION_ARGUMENTS: [u32; 2] = [2_279, 19_993];
 
 fn solid_level_quirks(level: LevelId) -> SolidLevelQuirks {
     let level = level.get();
@@ -1101,6 +1109,27 @@ pub enum RetailDemoStartError {
     Vm(VmError),
 }
 
+/// Source result after `PadUpdatePbak` exposes its final recorded pad word.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetailDemoFinishOutcome {
+    /// A non-island recording simply releases physical input ownership.
+    Released,
+    /// Island-camera recordings synchronously notify the live caption object
+    /// and retain the native `pbak_state == 3` input lock until its authored
+    /// GOOL flow requests the next level.
+    CaptionEvent {
+        recipient: RuntimeObjectHandle,
+        dispatch: EventDispatchOutcome,
+        effects: Vec<VmEffect>,
+    },
+    /// The caption handler was malformed, but native discards that event
+    /// status and still retains its `pbak_state == 3` input lock.
+    CaptionEventFault {
+        recipient: RuntimeObjectHandle,
+        effects: Vec<VmEffect>,
+    },
+}
+
 /// One failed source-order `RESPAWN` broadcast during `LevelRestart`.
 #[derive(Debug, Eq, PartialEq)]
 pub struct RetailRespawnEventFailure<E> {
@@ -1188,6 +1217,20 @@ pub struct RuntimeReclaimEventFault {
     pub object: RuntimeObjectHandle,
 }
 
+/// One collision-generated event whose checked GOOL handler faulted.
+///
+/// `TransSmoothStopAtSolid` and its object/water/outside-zone branches discard
+/// `GoolSendEvent`'s return value. Rust preserves that control flow while this
+/// queue keeps the exact mover, recipient, event, and native call site
+/// observable without retaining a generic host error in the runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeSolidEventFault {
+    pub moving_object: RuntimeObjectHandle,
+    pub recipient: RuntimeObjectHandle,
+    pub event: u32,
+    pub reason: SolidEventReason,
+}
+
 /// Deterministic result of terminating all eligible objects from one zone.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ZoneTerminationEventFailure<E> {
@@ -1242,6 +1285,11 @@ pub enum RuntimeError<E> {
         expected: VmObjectHandle,
         actual: VmObjectHandle,
     },
+    InvalidGlobalObjectReference {
+        global: usize,
+        value: u32,
+    },
+    MissingDemoCaptionObject,
     MissingTransitionZoneTarget,
     MissingLevelStateContext,
     MissingSavedLevelState,
@@ -1466,6 +1514,7 @@ pub struct RetailRuntime {
     pending_states: BTreeMap<VmObjectHandle, u16>,
     pending_cleanup_actions: Vec<RuntimeCleanupAction>,
     reclaim_event_faults: Vec<RuntimeReclaimEventFault>,
+    solid_event_faults: Vec<RuntimeSolidEventFault>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
     displayed_objects: BTreeMap<RuntimeObjectHandle, bool>,
     level: Option<LevelId>,
@@ -1502,6 +1551,7 @@ impl RetailRuntime {
             pending_states: BTreeMap::new(),
             pending_cleanup_actions: Vec::new(),
             reclaim_event_faults: Vec::new(),
+            solid_event_faults: Vec::new(),
             faulted_objects: BTreeSet::new(),
             displayed_objects: BTreeMap::new(),
             level: None,
@@ -1525,6 +1575,12 @@ impl RetailRuntime {
         let mut runtime = Self::new(global_words);
         runtime.level = Some(level);
         runtime.machine.initialize_retail_level_globals(level);
+        // The first browser mount has no session-carry constructor to run the
+        // source `LdatInit`/`LevelInitMisc` scalar boundary. Publish the same
+        // pointer clears, display words, counters, and fade step before the
+        // initial entity scan; remounts already take this path through
+        // `new_from_session`.
+        runtime.apply_stream_mount_globals(level);
         runtime
     }
 
@@ -1844,7 +1900,40 @@ impl RetailRuntime {
             self.draw_count = self.draw_count.wrapping_add(1);
         }
         self.machine.set_draw_count(self.draw_count);
+        self.advance_native_display_fade(display_mask)?;
         Ok(display_mask)
+    }
+
+    /// Advances the signed global brightness state at the same end-of-frame
+    /// boundary as native `GLUpdate`.
+    ///
+    /// GOOL owns both words and waits on the two negative terminal sentinels,
+    /// so this cannot be replaced by a renderer-only interpolation. The
+    /// renderer may consume the corresponding brightness independently; the
+    /// simulation must first publish the exact next value to authored code.
+    fn advance_native_display_fade(&mut self, display_mask: u32) -> Result<(), VmError> {
+        if self.machine.global_words().len() <= FADE_STEP_GLOBAL {
+            return Ok(());
+        }
+        let counter = self.machine.global_word(FADE_COUNTER_GLOBAL)? as i32;
+        if counter == 0 {
+            return Ok(());
+        }
+        let step = self.machine.global_word(FADE_STEP_GLOBAL)? as i32;
+        let next = if counter < -2 {
+            let advanced = counter.wrapping_add(step);
+            if advanced == 0 && display_mask & 0x20_0000 == 0 {
+                -2
+            } else {
+                advanced
+            }
+        } else if counter < 0 {
+            -1
+        } else {
+            counter.wrapping_sub(step)
+        };
+        self.machine
+            .set_global_word(FADE_COUNTER_GLOBAL, next as u32)
     }
 
     #[must_use]
@@ -1870,6 +1959,67 @@ impl RetailRuntime {
     #[must_use]
     pub const fn saved_level_state(&self) -> Option<&RetailLevelSnapshot> {
         self.saved_level_state.as_ref()
+    }
+
+    /// Creates the process-lifetime caption controller installed by native
+    /// `PbakPlay` before its same-level `LevelRestart`.
+    ///
+    /// The object is executable four, subtype eight, receives the exact two
+    /// caption arguments, and is inserted beneath logical root one with the
+    /// reclaiming `GoolObjectAlloc(1)` policy. Executable four clears its
+    /// native `obj->zone` pointer during initialization, so the arena retains
+    /// [`Eid::NONE`] for lifecycle decisions while the supplied current ZDAT
+    /// still provides its initial colors and solid environment.
+    pub fn create_retail_demo_caption<H: ProgramHost>(
+        &mut self,
+        current_zone: Eid,
+        host: &mut H,
+    ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
+        let root = RootHandle::new(1).ok_or(RuntimeError::InvalidRootIndex(1))?;
+        let arena_handle = loop {
+            match self.arena.create_root_object(
+                root,
+                Eid::NONE,
+                PBAK_CAPTION_EXECUTABLE,
+                PBAK_CAPTION_SUBTYPE,
+                true,
+            ) {
+                Ok(arena_handle) => break arena_handle,
+                Err(RuntimeCreateError::ReclaimRequired(candidate)) => {
+                    let mut spawned_children = Vec::new();
+                    self.reclaim_runtime_subtree(candidate, host, &mut spawned_children)?;
+                }
+                Err(error) => return Err(RuntimeError::Create(error)),
+            }
+        };
+
+        self.handles.prune_stale(&self.arena);
+        let object = match self.handles.reserve(arena_handle) {
+            Ok(object) => object,
+            Err(error) => {
+                self.arena
+                    .despawn_subtree(arena_handle)
+                    .map_err(RuntimeError::Tree)?;
+                return Err(error);
+            }
+        };
+        let binding = ProgramBinding {
+            object,
+            zone: current_zone,
+            executable: PBAK_CAPTION_EXECUTABLE,
+            subtype: PBAK_CAPTION_SUBTYPE,
+            origin: ProgramOrigin::RuntimeChild {
+                arguments: &PBAK_CAPTION_ARGUMENTS,
+            },
+        };
+        if let Err(error) = self.materialize(binding, host) {
+            self.handles.release(object);
+            self.arena
+                .despawn_subtree(arena_handle)
+                .map_err(RuntimeError::Tree)?;
+            return Err(error);
+        }
+        Ok(object)
     }
 
     /// Installs the process-lifetime state written by native `PbakStart`.
@@ -1929,6 +2079,68 @@ impl RetailRuntime {
         }
         self.machine.acknowledge_level_state_context();
         Ok(())
+    }
+
+    /// Completes native `PadUpdatePbak` after the final recorded word or a
+    /// physical interruption has already been made observable to GOOL.
+    ///
+    /// A zero island-camera target releases playback immediately. Otherwise
+    /// global `caption_obj` must decode to a live generational Rust handle;
+    /// event `0xE00` with one zero argument is delivered synchronously before
+    /// `pbak_state` is latched to three. Partial/native pointer corruption is
+    /// rejected rather than dereferenced.
+    pub fn finish_retail_demo<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+    ) -> Result<RetailDemoFinishOutcome, RuntimeError<H::Error>> {
+        let island_rotation = self
+            .machine
+            .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+            .map_err(RuntimeError::Vm)?;
+        self.machine
+            .set_global_word(PBAK_STATE_GLOBAL, 0)
+            .map_err(RuntimeError::Vm)?;
+        if island_rotation == 0 {
+            return Ok(RetailDemoFinishOutcome::Released);
+        }
+
+        let caption_word = self
+            .machine
+            .global_word(CAPTION_OBJECT_GLOBAL)
+            .map_err(RuntimeError::Vm)?;
+        if caption_word == 0 {
+            return Err(RuntimeError::MissingDemoCaptionObject);
+        }
+        let reference = CollisionObjectReference::from_word(caption_word).ok_or(
+            RuntimeError::InvalidGlobalObjectReference {
+                global: CAPTION_OBJECT_GLOBAL,
+                value: caption_word,
+            },
+        )?;
+        let recipient = self
+            .handles
+            .for_vm(reference.object())
+            .ok_or(RuntimeError::UnknownVmObject(reference.object()))?;
+        Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, recipient)?;
+
+        let effects_start = self.machine.effects().len();
+        let dispatch =
+            self.dispatch_event(host, None, Some(recipient), PBAK_CAPTION_EVENT, Some(&[0]));
+        // The source ignores GoolSendEvent's status and always enters state
+        // three after a nonzero island target. Preserve that latch even when
+        // checked Rust event execution reports a malformed program.
+        self.machine
+            .set_global_word(PBAK_STATE_GLOBAL, 3)
+            .map_err(RuntimeError::Vm)?;
+        let effects = self.machine.effects()[effects_start..].to_vec();
+        Ok(match dispatch {
+            Ok(dispatch) => RetailDemoFinishOutcome::CaptionEvent {
+                recipient,
+                dispatch,
+                effects,
+            },
+            Err(_) => RetailDemoFinishOutcome::CaptionEventFault { recipient, effects },
+        })
     }
 
     /// Mirrors the temporary `next_lid != -1` guard around Crash's initial
@@ -2372,6 +2584,13 @@ impl RetailRuntime {
     /// making every checked fault observable.
     pub fn take_reclaim_event_faults(&mut self) -> Vec<RuntimeReclaimEventFault> {
         std::mem::take(&mut self.reclaim_event_faults)
+    }
+
+    /// Drains collision-generated event deliveries whose GOOL handlers
+    /// faulted. Native ignores these return codes and continues the mover's
+    /// update; the ordered queue makes the checked Rust failures observable.
+    pub fn take_solid_event_faults(&mut self) -> Vec<RuntimeSolidEventFault> {
+        std::mem::take(&mut self.solid_event_faults)
     }
 
     /// Completes native `CoreFrame`'s pre-remount level transition phase.
@@ -2937,7 +3156,11 @@ impl RetailRuntime {
                             if !self.machine.level_restart_requested()
                                 && self.handles.is_live_pair(object)
                             {
-                                self.finish_native_object_update(object, host)?;
+                                self.finish_native_object_update(
+                                    object,
+                                    host,
+                                    &mut work.spawned_children,
+                                )?;
                             }
                             Ok(execution)
                         })
@@ -3072,11 +3295,94 @@ impl RetailRuntime {
         &mut self,
         object: RuntimeObjectHandle,
         host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
+        let effects_start = self.machine.effects().len();
         let _physics = self
             .machine
             .run_retail_object_physics(object.vm)
             .map_err(RuntimeError::Vm)?;
+        let solid_events = self.machine.effects()[effects_start..]
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::Solid {
+                    object: effect_object,
+                    effect:
+                        SolidEffect::SendEvent {
+                            target,
+                            event,
+                            argument,
+                            reason,
+                        },
+                } if *effect_object == object.vm => Some((*target, *event, *argument, *reason)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (target, event, argument, reason) in solid_events {
+            if !self.handles.is_live_pair(object) || self.machine.level_restart_requested() {
+                break;
+            }
+            let recipient = match target {
+                SolidEventTarget::MovingObject => object,
+                SolidEventTarget::Candidate(candidate) => {
+                    let index = u16::try_from(candidate)
+                        .map_err(|_| RuntimeError::Vm(VmError::ArithmeticOverflow))?;
+                    let vm = VmObjectHandle::new(index)
+                        .ok_or(RuntimeError::Vm(VmError::ArithmeticOverflow))?;
+                    self.handles
+                        .for_vm(vm)
+                        .ok_or(RuntimeError::UnknownVmObject(vm))?
+                }
+            };
+            let sender = matches!(reason, SolidEventReason::ObjectHitFromBelow).then_some(object);
+            let Self {
+                arena,
+                machine,
+                handles,
+                pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                solid_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
+                transition_zone_context,
+                ..
+            } = self;
+            let dispatch = Self::dispatch_event_parts_current(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                *level,
+                level_state_context.as_ref(),
+                saved_level_state,
+                *transition_zone_context,
+                host,
+                Some(object.vm),
+                sender,
+                Some(recipient),
+                event,
+                Some(&[argument]),
+                spawned_children,
+            );
+            // Every native solid caller discards `GoolSendEvent`'s status.
+            // Keep a checked diagnostic, but do not quarantine the mover or
+            // skip the remainder of its source-ordered update.
+            if dispatch.is_err() {
+                solid_event_faults.push(RuntimeSolidEventFault {
+                    moving_object: object,
+                    recipient,
+                    event,
+                    reason,
+                });
+            }
+        }
+        if !self.handles.is_live_pair(object) || self.machine.level_restart_requested() {
+            return Ok(());
+        }
         if let Some(zone) = self
             .machine
             .object(object.vm)
@@ -5224,6 +5530,20 @@ impl RetailRuntime {
             .get(parent.arena)
             .ok_or(RuntimeError::UnknownArenaObject(parent.arena))?
             .zone();
+        let binding_zone = if zone == Eid::NONE {
+            // Executables 4/5/29 deliberately clear native `obj->zone`.
+            // Their runtime children inherit that null pointer, while
+            // `GoolObjectCreate` still reads colors through global `cur_zone`.
+            // Keep the null lifecycle identity and resolve only the host
+            // environment through the checked current-camera context.
+            level_state_context
+                .ok_or(RuntimeError::MissingLevelStateContext)?
+                .location
+                .path
+                .zone
+        } else {
+            zone
+        };
 
         for _ in 0..*count {
             let arena_handle = loop {
@@ -5290,7 +5610,7 @@ impl RetailRuntime {
             };
             let binding = ProgramBinding {
                 object,
-                zone,
+                zone: binding_zone,
                 executable: *executable,
                 subtype: *subtype,
                 origin: ProgramOrigin::RuntimeChild { arguments },
@@ -5673,6 +5993,14 @@ mod tests {
                 .global_word(CURRENT_DISPLAY_GLOBAL)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn initial_level_mount_publishes_native_fade_words_before_entity_code() {
+        let runtime = RetailRuntime::new_for_level(FADE_STEP_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+
+        assert_eq!(runtime.global_word(FADE_COUNTER_GLOBAL), Ok(288));
+        assert_eq!(runtime.global_word(FADE_STEP_GLOBAL), Ok(32));
     }
 
     #[test]
@@ -6212,6 +6540,45 @@ mod tests {
 
         runtime.finish_display_frame(true).unwrap();
         assert_eq!(runtime.draw_count(), 1, "paused GLUpdate never increments");
+    }
+
+    #[test]
+    fn display_fade_publishes_retail_signed_sentinels_at_frame_end() {
+        let mut runtime = RetailRuntime::new(FADE_STEP_GLOBAL + 1);
+        runtime.set_global_word(FADE_STEP_GLOBAL, 32).unwrap();
+        runtime
+            .set_global_word(FADE_COUNTER_GLOBAL, (-256_i32) as u32)
+            .unwrap();
+
+        for expected in [-224_i32, -192, -160, -128, -96, -64, -32, -2, -1, -1] {
+            runtime.finish_display_frame(true).unwrap();
+            assert_eq!(
+                runtime.global_word(FADE_COUNTER_GLOBAL),
+                Ok(expected as u32)
+            );
+        }
+
+        runtime.set_global_word(FADE_COUNTER_GLOBAL, 288).unwrap();
+        for expected in [256_u32, 224, 192, 160, 128, 96, 64, 32, 0] {
+            runtime.finish_display_frame(false).unwrap();
+            assert_eq!(runtime.global_word(FADE_COUNTER_GLOBAL), Ok(expected));
+        }
+    }
+
+    #[test]
+    fn display_fade_preserves_zero_when_the_authored_hold_black_bit_is_set() {
+        let mut runtime = RetailRuntime::new(FADE_STEP_GLOBAL + 1);
+        runtime.set_global_word(FADE_STEP_GLOBAL, 32).unwrap();
+        runtime
+            .set_global_word(FADE_COUNTER_GLOBAL, (-32_i32) as u32)
+            .unwrap();
+        runtime
+            .set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK | 0x20_0000)
+            .unwrap();
+
+        runtime.finish_display_frame(true).unwrap();
+
+        assert_eq!(runtime.global_word(FADE_COUNTER_GLOBAL), Ok(0));
     }
 
     #[test]
@@ -7846,6 +8213,104 @@ mod tests {
         assert!(!runtime.faulted_objects.contains(&sender));
     }
 
+    #[test]
+    fn native_solid_surface_event_rebinds_current_object_before_frame_returns() {
+        const FALL_KILL_EVENT: u32 = 0x0900;
+
+        let zone = RetailSolidZone::new([0; 3], [100; 3], 0, [0; 3], vec![0; 36])
+            .unwrap()
+            .with_eid(ZONE)
+            .with_graphics(2, i32::MIN);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(ZONE), SolidLevelQuirks::default());
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 0x93, 2, 0);
+        let mut vm = VmObject::new(object.vm, vec![RETURN]).unwrap();
+        vm.bind_retail_solid_environment(environment);
+        vm.configure_test_event_state(FALL_KILL_EVENT, 7);
+        vm.set_register(
+            process_register::STATUS_B,
+            crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+        )
+        .unwrap();
+        vm.set_register(process_register::TRANSLATION_Y, 100)
+            .unwrap();
+        vm.set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+            .unwrap();
+        runtime.machine.upsert_object(vm).unwrap();
+        let mut host = AudioRecordingHost::new(Some(event_transition_state()));
+
+        let frame = runtime.run_frame(&mut host, 1).unwrap();
+
+        assert!(frame.executions[0].result.is_ok(), "{frame:?}");
+        let vm = runtime.machine.object(object.vm).unwrap();
+        assert_eq!(vm.state(), 7);
+        assert_eq!(vm.register(process_register::EVENT), Ok(FALL_KILL_EVENT));
+        assert_eq!(
+            vm.register(process_register::TRANSLATION_X),
+            Ok(0x500),
+            "the rebound state's transition must run while cur_obj is the mover"
+        );
+        assert!(frame.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                VmEffect::Solid {
+                    object: effect_object,
+                    effect: SolidEffect::SendEvent {
+                        target: SolidEventTarget::MovingObject,
+                        event: FALL_KILL_EVENT,
+                        argument: 0x6400,
+                        ..
+                    },
+                } if *effect_object == object.vm
+            )
+        }));
+    }
+
+    #[test]
+    fn malformed_solid_event_handler_is_reported_without_faulting_the_mover() {
+        const FALL_KILL_EVENT: u32 = 0x0900;
+
+        let zone = RetailSolidZone::new([0; 3], [100; 3], 0, [0; 3], vec![0; 36])
+            .unwrap()
+            .with_eid(ZONE)
+            .with_graphics(2, i32::MIN);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(ZONE), SolidLevelQuirks::default());
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 0x94, 2, 0);
+        let mut vm = VmObject::new(object.vm, vec![RETURN]).unwrap();
+        vm.bind_retail_solid_environment(environment);
+        vm.configure_test_event_interrupt(FALL_KILL_EVENT, vec![0xff00_0000])
+            .unwrap();
+        vm.set_register(
+            process_register::STATUS_B,
+            crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+        )
+        .unwrap();
+        vm.set_register(process_register::TRANSLATION_Y, 100)
+            .unwrap();
+        vm.set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+            .unwrap();
+        runtime.machine.upsert_object(vm).unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+
+        assert!(frame.executions[0].result.is_ok(), "{frame:?}");
+        assert!(!runtime.is_object_faulted(object));
+        assert_eq!(
+            runtime.take_solid_event_faults(),
+            [RuntimeSolidEventFault {
+                moving_object: object,
+                recipient: object,
+                event: FALL_KILL_EVENT,
+                reason: SolidEventReason::OutsideZone,
+            }]
+        );
+    }
+
     fn event_transition_state() -> VmStateProgram {
         VmStateProgram::new(
             7,
@@ -9104,6 +9569,179 @@ mod tests {
             spawn_words: std::array::from_fn(|index| u32::try_from(index).unwrap()),
             box_count: 0x900,
         }
+    }
+
+    #[derive(Default)]
+    struct CaptionHost {
+        bindings: Vec<(Eid, u8, u8, Vec<u32>)>,
+    }
+
+    impl ProgramHost for CaptionHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let arguments = match binding.origin {
+                ProgramOrigin::RuntimeChild { arguments } => arguments,
+                ProgramOrigin::Entity(_) => &[],
+            };
+            self.bindings.push((
+                binding.zone,
+                binding.executable,
+                binding.subtype,
+                arguments.to_vec(),
+            ));
+            let mut object = VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())?;
+            object.initialize_arguments(arguments).map_err(|_| ())?;
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    #[test]
+    fn retail_demo_caption_uses_root_one_exact_program_and_null_lifecycle_zone() {
+        let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
+        let mut host = CaptionHost::default();
+
+        let caption = runtime.create_retail_demo_caption(ZONE, &mut host).unwrap();
+
+        assert_eq!(
+            host.bindings,
+            [(
+                ZONE,
+                PBAK_CAPTION_EXECUTABLE,
+                PBAK_CAPTION_SUBTYPE,
+                PBAK_CAPTION_ARGUMENTS.to_vec(),
+            )]
+        );
+        let spawned = runtime.arena.get(caption.arena).unwrap();
+        assert_eq!(spawned.zone(), Eid::NONE);
+        assert_eq!(
+            spawned.parent(),
+            TreeParent::Root(RootHandle::new(1).unwrap())
+        );
+    }
+
+    #[test]
+    fn retail_demo_finish_releases_non_island_input_without_reading_caption() {
+        let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
+        runtime
+            .set_global_word(CAPTION_OBJECT_GLOBAL, 0xdead_beef)
+            .unwrap();
+
+        assert_eq!(
+            runtime.finish_retail_demo(&mut SnapshotHost),
+            Ok(RetailDemoFinishOutcome::Released)
+        );
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
+    }
+
+    #[test]
+    fn retail_demo_finish_dispatches_caption_event_then_latches_input_lock() {
+        let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
+        let caption = spawn_test_object(&mut runtime, ZONE, 7, 4, 2);
+        runtime
+            .machine
+            .object_mut(caption.vm)
+            .unwrap()
+            .configure_test_event_interrupt(PBAK_CAPTION_EVENT, vec![RETURN])
+            .unwrap();
+        runtime
+            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
+            .unwrap();
+        runtime
+            .set_global_word(
+                CAPTION_OBJECT_GLOBAL,
+                CollisionObjectReference::new(caption.vm).to_word(),
+            )
+            .unwrap();
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
+
+        assert_eq!(
+            runtime.finish_retail_demo(&mut SnapshotHost),
+            Ok(RetailDemoFinishOutcome::CaptionEvent {
+                recipient: caption,
+                dispatch: EventDispatchOutcome {
+                    acknowledged: true,
+                    state_change: None,
+                },
+                effects: Vec::new(),
+            })
+        );
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(3));
+        assert_eq!(
+            runtime
+                .machine
+                .object(caption.vm)
+                .unwrap()
+                .register(process_register::EVENT),
+            Ok(PBAK_CAPTION_EVENT)
+        );
+    }
+
+    #[test]
+    fn retail_demo_finish_contains_faulted_caption_handler_and_keeps_input_lock() {
+        let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
+        let caption = spawn_test_object(&mut runtime, ZONE, 8, 4, 2);
+        runtime
+            .machine
+            .object_mut(caption.vm)
+            .unwrap()
+            .configure_test_event_interrupt(PBAK_CAPTION_EVENT, vec![0xff00_0000])
+            .unwrap();
+        runtime
+            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
+            .unwrap();
+        runtime
+            .set_global_word(
+                CAPTION_OBJECT_GLOBAL,
+                CollisionObjectReference::new(caption.vm).to_word(),
+            )
+            .unwrap();
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
+
+        assert_eq!(
+            runtime.finish_retail_demo(&mut SnapshotHost),
+            Ok(RetailDemoFinishOutcome::CaptionEventFault {
+                recipient: caption,
+                effects: Vec::new(),
+            })
+        );
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(3));
+        assert_eq!(
+            runtime
+                .machine
+                .object(caption.vm)
+                .unwrap()
+                .register(process_register::EVENT),
+            Ok(PBAK_CAPTION_EVENT)
+        );
+    }
+
+    #[test]
+    fn retail_demo_finish_rejects_an_untyped_caption_global() {
+        let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
+        runtime
+            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0100)
+            .unwrap();
+        runtime
+            .set_global_word(CAPTION_OBJECT_GLOBAL, 0x1234_5678)
+            .unwrap();
+
+        assert_eq!(
+            runtime.finish_retail_demo(&mut SnapshotHost),
+            Err(RuntimeError::InvalidGlobalObjectReference {
+                global: CAPTION_OBJECT_GLOBAL,
+                value: 0x1234_5678,
+            })
+        );
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
     }
 
     #[test]

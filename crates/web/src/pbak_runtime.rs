@@ -10,6 +10,7 @@ use crust_formats::stream::{
 };
 use crust_sim::camera::{GAME_STATE_CUTSCENE, RetailCameraLocation, RetailCameraRuntime};
 use crust_sim::demo::{Demo, DemoEnd, DemoError, DemoFrame, DemoPlayer, DemoStep};
+use crust_sim::gool::RetailPadSnapshot;
 use crust_sim::math::{Bounds3, Vec3};
 use crust_sim::object_arena::SPAWN_TABLE_CAPACITY;
 use crust_sim::retail_runtime::RetailLevelSnapshot;
@@ -22,6 +23,7 @@ pub(crate) struct PreparedPbak {
     pub snapshot: RetailLevelSnapshot,
     pub crash_bound: Bounds3,
     pub player: DemoPlayer,
+    recorded_ticks_per_frame: Box<[i32]>,
 }
 
 impl PreparedPbak {
@@ -44,6 +46,7 @@ enum PlaybackPhase {
 pub(crate) struct RetailPbakPlayback {
     prepared: PreparedPbak,
     phase: PlaybackPhase,
+    frame_cursor: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,18 +56,123 @@ pub(crate) struct PbakInputFrame {
     pub end: Option<DemoEnd>,
 }
 
+/// Timing visible on either side of Crash's source `PadUpdatePbak` call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PbakFrameTiming {
+    pub prior: PbakPublishedTiming,
+    pub crash: PbakPublishedTiming,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PbakPublishedTiming {
+    pub current: i32,
+    pub period: i32,
+}
+
+/// Pad words visible to the synchronous completion event sent from inside
+/// `PadUpdatePbak`. Native has shifted history and replaced `held`, but does
+/// not calculate the current `tapped` word until the nested event returns.
+pub(crate) fn pbak_event_pad_snapshot(
+    previous: RetailPadSnapshot,
+    mut updated: RetailPadSnapshot,
+) -> RetailPadSnapshot {
+    updated.tapped = previous.tapped;
+    updated
+}
+
 impl RetailPbakPlayback {
     #[must_use]
     pub const fn new(prepared: PreparedPbak) -> Self {
         Self {
             prepared,
             phase: PlaybackPhase::Armed,
+            frame_cursor: 0,
         }
     }
 
     #[must_use]
     pub const fn is_armed(&self) -> bool {
         matches!(self.phase, PlaybackPhase::Armed)
+    }
+
+    /// Whether native would next service this playback from Crash's
+    /// `PadUpdatePbak` traversal boundary.
+    #[must_use]
+    pub const fn uses_crash_boundary(&self) -> bool {
+        matches!(
+            self.phase,
+            PlaybackPhase::Playing | PlaybackPhase::Returning
+        )
+    }
+
+    /// Recorded TPF Crash will consume at the next `PadUpdatePbak` call.
+    /// Cursor zero is the header TPF installed by Crash itself; later values
+    /// were published by the preceding native `GLUpdate`. Reading it does not
+    /// move either the browser cursor or `DemoPlayer`.
+    #[must_use]
+    pub fn pending_recorded_ticks_per_frame(&self) -> Option<i32> {
+        matches!(self.phase, PlaybackPhase::Playing)
+            .then(|| {
+                self.prepared
+                    .recorded_ticks_per_frame
+                    .get(self.frame_cursor)
+                    .copied()
+            })
+            .flatten()
+    }
+
+    /// Source timing on either side of the next Crash pad boundary.
+    ///
+    /// `PbakStart` occurs after the preceding `GLUpdate`, so earlier roots on
+    /// its first frame retain ordinary wall timing. Crash then installs only
+    /// the header TPF. Later recorded frames have already passed `GLUpdate`
+    /// with state two and therefore expose `(17, recorded TPF)` to every root.
+    /// Returning state three exposes `(17, rounded wall TPF)` throughout.
+    #[must_use]
+    pub fn frame_timing(
+        &self,
+        wall_ticks_current_frame: i32,
+        wall_ticks_per_frame: i32,
+    ) -> Option<PbakFrameTiming> {
+        match self.phase {
+            PlaybackPhase::Playing => {
+                let recorded = self.pending_recorded_ticks_per_frame()?;
+                if self.frame_cursor == 0 {
+                    Some(PbakFrameTiming {
+                        prior: PbakPublishedTiming {
+                            current: wall_ticks_current_frame,
+                            period: wall_ticks_per_frame,
+                        },
+                        crash: PbakPublishedTiming {
+                            current: wall_ticks_current_frame,
+                            period: recorded,
+                        },
+                    })
+                } else {
+                    Some(PbakFrameTiming {
+                        prior: PbakPublishedTiming {
+                            current: 17,
+                            period: recorded,
+                        },
+                        crash: PbakPublishedTiming {
+                            current: 17,
+                            period: recorded,
+                        },
+                    })
+                }
+            }
+            PlaybackPhase::Returning => Some(PbakFrameTiming {
+                prior: PbakPublishedTiming {
+                    current: 17,
+                    period: wall_ticks_per_frame,
+                },
+                crash: PbakPublishedTiming {
+                    current: 17,
+                    period: wall_ticks_per_frame,
+                },
+            }),
+            PlaybackPhase::Armed | PlaybackPhase::Ending(_) => None,
+        }
     }
 
     #[must_use]
@@ -83,6 +191,7 @@ impl RetailPbakPlayback {
 
     pub fn mark_started(&mut self) {
         debug_assert!(self.is_armed());
+        debug_assert_eq!(self.frame_cursor, 0);
         self.phase = PlaybackPhase::Playing;
     }
 
@@ -95,6 +204,7 @@ impl RetailPbakPlayback {
                 end: None,
             };
         }
+        let pending_ticks_per_frame = self.pending_recorded_ticks_per_frame();
         match self.prepared.player.advance(u32::from(physical_held)) {
             DemoStep::Playing {
                 held,
@@ -102,6 +212,8 @@ impl RetailPbakPlayback {
                 end,
                 ..
             } => {
+                debug_assert_eq!(pending_ticks_per_frame, Some(ticks_per_frame));
+                self.frame_cursor = self.frame_cursor.saturating_add(1);
                 if let Some(reason) = end {
                     self.phase = PlaybackPhase::Ending(reason);
                 }
@@ -125,10 +237,10 @@ impl RetailPbakPlayback {
     /// Advances and consumes an ending recording at one `PadUpdatePbak`
     /// boundary.
     ///
-    /// The native routine sends the caption event and latches its returning
-    /// state before tapped input, camera, or GOOL update work in that same
-    /// frame. Returning the end reason alongside the recorded input prevents
-    /// the browser host from deferring that synchronous handoff.
+    /// Native reaches this from Crash's `GoolObjectUpdate`, after earlier
+    /// roots (including the caption controller) and before Crash or later
+    /// roots run. Returning the end reason alongside the recorded input lets
+    /// the browser keep the synchronous event and state latch at that hook.
     pub fn advance_pad_boundary(
         &mut self,
         physical_held: u16,
@@ -273,6 +385,7 @@ fn prepare_header(
         frames,
     )
     .map_err(PbakRuntimeError::Demo)?;
+    let recorded_ticks_per_frame = recorded_frame_timings(header);
     let snapshot = RetailLevelSnapshot {
         player_translation: header.save_state.player_translation,
         // Serialized PBAK order is X/Y/Z. The process register block is the
@@ -307,7 +420,36 @@ fn prepare_header(
         snapshot,
         crash_bound,
         player: DemoPlayer::new(demo),
+        recorded_ticks_per_frame,
     })
+}
+
+fn recorded_frame_timings(header: &PbakHeader) -> Box<[i32]> {
+    header
+        .frames
+        .iter()
+        .enumerate()
+        .map(|(index, frame)| {
+            if index == 0 {
+                return header.ticks_per_frame;
+            }
+            let previous_stamp = if index == 1 {
+                header.draw_stamp.cast_signed()
+            } else {
+                header.frames[index - 1].ticks_elapsed
+            };
+            round_pbak_ticks(frame.ticks_elapsed.wrapping_sub(previous_stamp))
+        })
+        .collect()
+}
+
+const fn round_pbak_ticks(ticks: i32) -> i32 {
+    match ticks {
+        0..=18 => 17,
+        ..0 | 19..=35 => 34,
+        36..=52 => 51,
+        _ => ticks,
+    }
 }
 
 fn fixed_spawn_words(words: &[u32]) -> Result<[u32; SPAWN_TABLE_CAPACITY], PbakRuntimeError> {
@@ -386,6 +528,24 @@ mod tests {
                 index: 2,
             },
             progress: PathProgress::clamped(0x180, NonZeroU16::new(5).unwrap()),
+        }
+    }
+
+    const fn timing(
+        before_current: i32,
+        before_per_frame: i32,
+        at_current: i32,
+        at_per_frame: i32,
+    ) -> PbakFrameTiming {
+        PbakFrameTiming {
+            prior: PbakPublishedTiming {
+                current: before_current,
+                period: before_per_frame,
+            },
+            crash: PbakPublishedTiming {
+                current: at_current,
+                period: at_per_frame,
+            },
         }
     }
 
@@ -518,6 +678,9 @@ mod tests {
         let mut playback = RetailPbakPlayback::new(prepared);
 
         assert!(playback.is_armed());
+        assert!(!playback.uses_crash_boundary());
+        assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.frame_timing(40, 51), None);
         assert_eq!(
             playback.advance_input(0x1000),
             PbakInputFrame {
@@ -529,6 +692,9 @@ mod tests {
         let (_, seed, _) = playback.start_payload();
         assert_eq!(seed, 0x1234_5678);
         playback.mark_started();
+        assert!(playback.uses_crash_boundary());
+        assert_eq!(playback.pending_recorded_ticks_per_frame(), Some(34));
+        assert_eq!(playback.frame_timing(40, 51), Some(timing(40, 51, 40, 34)));
         assert_eq!(
             playback.advance_pad_boundary(0x0800),
             (
@@ -541,6 +707,9 @@ mod tests {
             )
         );
         assert!(playback.is_returning());
+        assert!(playback.uses_crash_boundary());
+        assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.frame_timing(40, 51), Some(timing(17, 51, 17, 51)));
         assert_eq!(playback.take_end(), None);
         assert_eq!(
             playback.advance_input(0xffff),
@@ -548,6 +717,90 @@ mod tests {
                 held: 0,
                 ticks_per_frame: None,
                 end: None,
+            }
+        );
+    }
+
+    #[test]
+    fn start_frame_switches_tpf_at_crash_then_later_frames_are_prepublished() {
+        let mut timeline = header(PbakLayout::SpawnWords304);
+        timeline.draw_stamp = 100;
+        timeline.ticks_per_frame = 34;
+        timeline.frames = vec![
+            PbakFrame {
+                ticks_elapsed: 120,
+                held: 1,
+            },
+            PbakFrame {
+                ticks_elapsed: 134,
+                held: 2,
+            },
+            PbakFrame {
+                ticks_elapsed: 185,
+                held: 3,
+            },
+        ];
+        let prepared = prepare_header(
+            Eid::from_name("pb0aB").unwrap(),
+            &timeline,
+            LevelId::N_SANITY_BEACH,
+            location(),
+        )
+        .unwrap();
+        let mut playback = RetailPbakPlayback::new(prepared);
+        playback.mark_started();
+
+        for (index, expected) in [34, 34, 51].into_iter().enumerate() {
+            let pending = playback.pending_recorded_ticks_per_frame();
+            assert_eq!(pending, Some(expected));
+            assert_eq!(
+                playback.pending_recorded_ticks_per_frame(),
+                pending,
+                "reading prepublished timing must not consume the recorded frame"
+            );
+            assert_eq!(
+                playback.frame_timing(40, 17),
+                Some(if index == 0 {
+                    timing(40, 17, 40, expected)
+                } else {
+                    timing(17, expected, 17, expected)
+                })
+            );
+            let (input, end) = playback.advance_pad_boundary(0);
+            assert_eq!(input.ticks_per_frame, Some(expected));
+            assert_eq!(end.is_some(), index == 2);
+        }
+
+        assert!(playback.is_returning());
+        assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.frame_timing(40, 34), Some(timing(17, 34, 17, 34)));
+    }
+
+    #[test]
+    fn completion_event_sees_new_held_and_previous_tapped_word() {
+        let previous = RetailPadSnapshot {
+            held: 0x1000,
+            tapped: 0x1000,
+            held_previous: 0x0040,
+            held_previous_2: 0x0080,
+            tapped_previous: 0x0040,
+        };
+        let updated = RetailPadSnapshot {
+            held: 0x2000,
+            tapped: 0x2000,
+            held_previous: 0x1000,
+            held_previous_2: 0x0040,
+            tapped_previous: 0x1000,
+        };
+
+        assert_eq!(
+            pbak_event_pad_snapshot(previous, updated),
+            RetailPadSnapshot {
+                held: 0x2000,
+                tapped: 0x1000,
+                held_previous: 0x1000,
+                held_previous_2: 0x0040,
+                tapped_previous: 0x1000,
             }
         );
     }
@@ -582,8 +835,29 @@ mod tests {
                 .unwrap()
                 .expect("counted PBAK entry must prepare");
             assert_eq!(prepared.snapshot.level, known.id);
+            let frame_count = prepared.frame_count();
+            let mut playback = RetailPbakPlayback::new(prepared);
+            playback.mark_started();
+            for frame_index in 0..frame_count {
+                let pending = playback
+                    .pending_recorded_ticks_per_frame()
+                    .expect("each legal recorded frame has pending timing");
+                assert_eq!(
+                    playback.frame_timing(40, 51),
+                    Some(if frame_index == 0 {
+                        timing(40, 51, 40, pending)
+                    } else {
+                        timing(17, pending, 17, pending)
+                    })
+                );
+                let (input, end) = playback.advance_pad_boundary(0);
+                assert_eq!(input.ticks_per_frame, Some(pending));
+                assert_eq!(end.is_some(), frame_index + 1 == frame_count);
+            }
+            assert!(playback.is_returning());
+            assert_eq!(playback.frame_timing(40, 51), Some(timing(17, 51, 17, 51)));
             recordings += 1;
-            frames += prepared.frame_count();
+            frames += frame_count;
         }
         assert_eq!(recordings, 9);
         assert_eq!(frames, 10_966);

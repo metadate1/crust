@@ -59,8 +59,8 @@ use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, RetailDemoFinishOutcome, RetailLevelStateContext,
     RetailRestartOutcome, RetailRuntime, RetailSaveStateOutcome, RetailSessionCarry,
-    RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle,
-    StateProgramBinding, ZoneTerminationMode,
+    RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError,
+    RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -79,7 +79,9 @@ use web_sys::{
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
-use crate::pbak_runtime::{RetailPbakPlayback, prepare_pair_pbak};
+use crate::pbak_runtime::{
+    PbakFrameTiming, RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak,
+};
 use crate::retail_scene::{RetailSceneBuilder, RetailSceneProgressLocation};
 use crate::storage::StorageState;
 use crate::title_runtime::{
@@ -391,6 +393,12 @@ enum RetailTickState {
     PausedBeforeSpawn,
     Running,
     Paused,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailPbakPadBoundary {
+    physical_held: u16,
+    timing: PbakFrameTiming,
 }
 
 #[derive(Debug)]
@@ -1433,24 +1441,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn finish_retail_pbak_frame(&mut self, reason: DemoEnd, dom: &Dom) -> Result<(), JsValue> {
-        let outcome = {
-            let mut host = BrowserProgramHost::new(
-                &self.level_assets.nsd,
-                &self.level_assets.nsf,
-                &self.level_assets.nsf_bytes,
-                &mut self.retail_audio,
-                &mut self.card,
-                &mut self.storage,
-            );
-            self.retail_objects.finish_retail_demo(&mut host)
-        }
-        .map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not finish retail PBAK caption handoff: {error:?}"
-            ))
-        })?;
-        self.drain_retail_reclaim_diagnostics(dom);
+    fn record_retail_pbak_finish(
+        &mut self,
+        reason: DemoEnd,
+        outcome: RetailDemoFinishOutcome,
+        dom: &Dom,
+    ) {
         match outcome {
             RetailDemoFinishOutcome::Released => {
                 self.retail_pbak = None;
@@ -1464,10 +1460,8 @@ impl Runtime {
             RetailDemoFinishOutcome::CaptionEvent {
                 recipient,
                 dispatch,
-                effects,
+                effects: _,
             } => {
-                self.apply_retail_gool_level_effects(&effects, dom)
-                    .map_err(|error| JsValue::from_str(&error))?;
                 dom.log(
                     &format!(
                         "Retail PBAK input ended ({reason:?}); caption {recipient:?} received event 0xE00 (acknowledged: {}) and retained the authored return lock.",
@@ -1476,9 +1470,10 @@ impl Runtime {
                     false,
                 );
             }
-            RetailDemoFinishOutcome::CaptionEventFault { recipient, effects } => {
-                self.apply_retail_gool_level_effects(&effects, dom)
-                    .map_err(|error| JsValue::from_str(&error))?;
+            RetailDemoFinishOutcome::CaptionEventFault {
+                recipient,
+                effects: _,
+            } => {
                 let message = format!(
                     "Retail PBAK input ended ({reason:?}); native ignored caption {recipient:?}'s faulted event 0xE00 handler and retained the authored return lock."
                 );
@@ -1486,7 +1481,6 @@ impl Runtime {
                 self.retail_runtime_warning = Some(message);
             }
         }
-        Ok(())
     }
 
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
@@ -1497,54 +1491,48 @@ impl Runtime {
             });
             self.previous_step_us = Some(now_us);
             self.start_armed_retail_pbak(dom)?;
-            if self
-                .retail_pbak
-                .as_ref()
-                .is_some_and(RetailPbakPlayback::is_returning)
-                && self
-                    .retail_objects
-                    .global_word(PBAK_STATE_GLOBAL)
-                    .is_ok_and(|state| state != 3)
-            {
-                // Authored caption GOOL may release `pbak_state` without a
-                // stream transition. Drop the process adapter at the same
-                // following PadUpdate boundary so physical input resumes.
-                self.retail_pbak = None;
-            }
             let physical_held = held | self.pending_buttons;
             self.pending_buttons = 0;
-            let (pbak_input, pbak_end) = self.retail_pbak.as_mut().map_or((None, None), |pbak| {
-                let (input, end) = pbak.advance_pad_boundary(physical_held);
-                (Some(input), end)
-            });
-            let pbak_owned_input = pbak_input.is_some();
-            if let Some(reason) = pbak_end {
-                // Keep the state clear, synchronous caption event, and
-                // state-three latch atomic at the browser pad boundary. The
-                // native traversal reaches that boundary on Crash under root
-                // six, after ordinary root-one caption work; the browser's
-                // whole-frame pad sampling currently runs this handoff before
-                // the GOOL traversal (documented as a timing approximation).
-                self.finish_retail_pbak_frame(reason, dom)?;
-            }
-            let (ticks_current_frame, ticks_per_frame, demo_override) = pbak_input.map_or_else(
-                || {
+            let wall_ticks_per_frame = round_retail_ticks(wall_ticks_current_frame);
+            let pbak_boundary = self
+                .retail_pbak
+                .as_ref()
+                .filter(|playback| playback.uses_crash_boundary())
+                .and_then(|playback| {
+                    playback
+                        .frame_timing(wall_ticks_current_frame, wall_ticks_per_frame)
+                        .map(|timing| RetailPbakPadBoundary {
+                            physical_held,
+                            timing,
+                        })
+                });
+            let pbak_input = if pbak_boundary.is_some() {
+                None
+            } else {
+                self.retail_pbak
+                    .as_mut()
+                    .map(|pbak| pbak.advance_input(physical_held))
+            };
+            let pbak_owned_input = self.retail_pbak.is_some();
+            let (ticks_current_frame, ticks_per_frame, demo_override) =
+                if let Some(boundary) = pbak_boundary {
                     (
-                        wall_ticks_current_frame,
-                        round_retail_ticks(wall_ticks_current_frame),
+                        boundary.timing.prior.current,
+                        boundary.timing.prior.period,
                         None,
                     )
-                },
-                |input| {
-                    (
-                        17,
-                        input
-                            .ticks_per_frame
-                            .unwrap_or_else(|| round_retail_ticks(wall_ticks_current_frame)),
-                        Some(input.held),
+                } else {
+                    pbak_input.map_or_else(
+                        || (wall_ticks_current_frame, wall_ticks_per_frame, None),
+                        |input| {
+                            (
+                                17,
+                                input.ticks_per_frame.unwrap_or(wall_ticks_per_frame),
+                                Some(input.held),
+                            )
+                        },
                     )
-                },
-            );
+                };
             self.retail_objects
                 .set_frame_timing(ticks_current_frame, ticks_per_frame);
             self.card.update();
@@ -1555,14 +1543,17 @@ impl Runtime {
                         "could not publish retail card frame state: {error:?}"
                     ))
                 })?;
-            self.pad.update(physical_held, 0, demo_override);
-            let snapshot = self.pad.snapshot();
-            self.retail_objects
-                .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
-                .map_err(|error| {
-                    JsValue::from_str(&format!("could not bind retail pad state: {error:?}"))
-                })?;
-            let sim_pad = SimPadState {
+            let mut snapshot = self.pad.snapshot();
+            if pbak_boundary.is_none() {
+                self.pad.update(physical_held, 0, demo_override);
+                snapshot = self.pad.snapshot();
+                self.retail_objects
+                    .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
+                    .map_err(|error| {
+                        JsValue::from_str(&format!("could not bind retail pad state: {error:?}"))
+                    })?;
+            }
+            let mut sim_pad = SimPadState {
                 held: u32::from(snapshot.held),
                 tapped: u32::from(snapshot.tapped),
             };
@@ -1636,7 +1627,7 @@ impl Runtime {
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
-                    self.tick_retail_runtime(dom);
+                    self.tick_retail_runtime(dom, pbak_boundary);
                 }
                 if let Some(camera_location) = camera_location {
                     let count_draws = self.effective_retail_display_mask() & 0x1000 != 0;
@@ -1669,6 +1660,14 @@ impl Runtime {
             } else if !retail_state {
                 let trace = self.retail_frame.tick();
                 self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
+            }
+
+            if pbak_boundary.is_some() {
+                snapshot = self.pad.snapshot();
+                sim_pad = SimPadState {
+                    held: u32::from(snapshot.held),
+                    tapped: u32::from(snapshot.tapped),
+                };
             }
 
             if !transition_queued {
@@ -1880,8 +1879,10 @@ impl Runtime {
         Ok(())
     }
 
-    fn tick_retail_runtime(&mut self, dom: &Dom) {
+    fn tick_retail_runtime(&mut self, dom: &Dom, pbak_boundary: Option<RetailPbakPadBoundary>) {
         let title_mdat = self.live_title_mdat_eid();
+        let mut pbak_finish = None;
+        let mut pbak_finish_effects_applied = false;
         let result = {
             let mut host = if let Some(mdat) = title_mdat {
                 BrowserProgramHost::for_title_mdat(
@@ -1903,8 +1904,67 @@ impl Runtime {
                     &mut self.storage,
                 )
             };
-            self.retail_objects
-                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+            if let Some(boundary) = pbak_boundary {
+                let playback = &mut self.retail_pbak;
+                let pad = &mut self.pad;
+                self.retail_objects.run_frame_with_traversal_hook(
+                    &mut host,
+                    RETAIL_INSTRUCTION_BUDGET,
+                    |runtime, host, point| {
+                        let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                        let released_return = playback
+                            .as_ref()
+                            .is_some_and(RetailPbakPlayback::is_returning)
+                            && runtime
+                                .global_word(PBAK_STATE_GLOBAL)
+                                .map_err(RuntimeError::Vm)?
+                                != 3;
+                        if released_return {
+                            *playback = None;
+                            pad.update(boundary.physical_held, 0, None);
+                            runtime
+                                .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
+                                .map_err(RuntimeError::Vm)?;
+                            return Ok(());
+                        }
+                        let Some(playback) = playback.as_mut() else {
+                            return Ok(());
+                        };
+                        let (input, end) = playback.advance_pad_boundary(boundary.physical_held);
+                        debug_assert!(
+                            input.ticks_per_frame.is_none()
+                                || input.ticks_per_frame == Some(boundary.timing.crash.period),
+                            "pre-Crash timing must match the frame consumed by PadUpdatePbak"
+                        );
+                        runtime.set_frame_timing(
+                            boundary.timing.crash.current,
+                            boundary.timing.crash.period,
+                        );
+                        let previous_pad = pad.snapshot();
+                        pad.update(boundary.physical_held, 0, Some(input.held));
+                        let updated_pad = pad.snapshot();
+                        if let Some(reason) = end {
+                            runtime
+                                .set_pad_snapshot(
+                                    0,
+                                    pbak_event_pad_snapshot(
+                                        retail_pad_snapshot(previous_pad),
+                                        retail_pad_snapshot(updated_pad),
+                                    ),
+                                )
+                                .map_err(RuntimeError::Vm)?;
+                            pbak_finish = Some((reason, runtime.finish_retail_demo(host)?));
+                        }
+                        runtime
+                            .set_pad_snapshot(0, retail_pad_snapshot(updated_pad))
+                            .map_err(RuntimeError::Vm)?;
+                        Ok(())
+                    },
+                )
+            } else {
+                self.retail_objects
+                    .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+            }
         };
         self.drain_retail_reclaim_diagnostics(dom);
         match result {
@@ -1943,18 +2003,43 @@ impl Runtime {
                         frame_execution_errors != 0,
                     );
                 }
-                if let Err(error) = self.apply_retail_gool_level_effects(&frame.effects, dom) {
-                    let message = format!("retail save/restart effect failed: {error}");
-                    dom.log(&message, true);
-                    self.retail_runtime_error = Some(message);
-                    self.retail_tick_state = RetailTickState::Paused;
+                match self.apply_retail_gool_level_effects(&frame.effects, dom) {
+                    Ok(()) => {
+                        pbak_finish_effects_applied = pbak_finish.is_some();
+                    }
+                    Err(error) => {
+                        let message = format!("retail save/restart effect failed: {error}");
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = RetailTickState::Paused;
+                    }
                 }
             }
             Err(error) => {
-                let message = format!("retail GOOL frame failed: {error:?}");
+                let mut message = format!("retail GOOL frame failed: {error:?}");
+                if let Some((_, outcome)) = pbak_finish.as_ref() {
+                    // A failure after the Crash traversal hook returns no
+                    // RuntimeFrame, and the machine discards its pending
+                    // effects at the next frame boundary. Recover only the
+                    // caption event's captured prefix before recording the
+                    // handoff; successful frames apply the same effects from
+                    // `frame.effects` above.
+                    match self.apply_retail_gool_level_effects(outcome.effects(), dom) {
+                        Ok(()) => pbak_finish_effects_applied = true,
+                        Err(effect_error) => {
+                            message.push_str(&format!(
+                                "; PBAK completion effect recovery failed: {effect_error}"
+                            ));
+                            self.retail_tick_state = RetailTickState::Paused;
+                        }
+                    }
+                }
                 dom.log(&message, true);
                 self.retail_runtime_error = Some(message);
             }
+        }
+        if pbak_finish_effects_applied && let Some((reason, outcome)) = pbak_finish {
+            self.record_retail_pbak_finish(reason, outcome, dom);
         }
         self.sync_completed_card_load(dom);
         if self.retail_runtime_error.is_none()
@@ -3684,7 +3769,14 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
                 event.prevent_default();
                 let mut app = app.borrow_mut();
                 app.keyboard_bits |= bit;
-                if let Some(runtime) = &app.runtime {
+                if let Some(runtime) = &mut app.runtime {
+                    // Preserve a complete key press that begins and ends
+                    // between two 30 Hz simulation samples. Held input still
+                    // comes from `keyboard_bits`; this one-frame latch only
+                    // guarantees the authored tapped edge is observable.
+                    if !event.repeat() {
+                        runtime.pending_buttons |= bit;
+                    }
                     runtime.resume_audio();
                 }
             }
@@ -3711,6 +3803,9 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
             let mut app = app.borrow_mut();
             app.keyboard_bits = 0;
             app.active_touches.clear();
+            if let Some(runtime) = &mut app.runtime {
+                runtime.pending_buttons = 0;
+            }
         });
         window()?.add_event_listener_with_callback("blur", callback.as_ref().unchecked_ref())?;
         callback.forget();
@@ -3749,7 +3844,8 @@ fn bind_touch_controls(app: &Rc<RefCell<App>>, dom: &Dom) -> Result<(), JsValue>
                 let _ = visual.class_list().add_1("is-held");
                 let mut app = app.borrow_mut();
                 app.active_touches.insert(event.pointer_id(), bit);
-                if let Some(runtime) = &app.runtime {
+                if let Some(runtime) = &mut app.runtime {
+                    runtime.pending_buttons |= bit;
                     runtime.resume_audio();
                 }
             });

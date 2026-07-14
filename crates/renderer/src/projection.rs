@@ -186,9 +186,10 @@ pub fn object_rotation_matrix(
 }
 
 /// Build a screen-aligned sprite matrix from its local rotation and scale.
+/// The shift count uses the MIPS variable-shift low five bits.
 #[must_use]
 pub fn sprite_rotation_matrix(local_rotation: Matrix3, scale: Vec3i, shrink: u8) -> Matrix3 {
-    let shift = u32::from(shrink).min(31);
+    let shift = u32::from(shrink & 31);
     let diagonal = Matrix3::diagonal(
         wrapping_i16(i64::from(scale.x >> shift)),
         wrapping_i16(i64::from(scale.y >> shift)),
@@ -425,6 +426,26 @@ mod tests {
         );
         assert_eq!(matrix.values[1][1], -2559);
         assert_eq!(matrix.values[2], [0, 0, 0]);
+        assert_eq!(
+            sprite_rotation_matrix(
+                Matrix3::IDENTITY,
+                Vec3i {
+                    x: 16,
+                    y: 32,
+                    z: 64
+                },
+                34
+            ),
+            sprite_rotation_matrix(
+                Matrix3::IDENTITY,
+                Vec3i {
+                    x: 16,
+                    y: 32,
+                    z: 64
+                },
+                2
+            ),
+        );
     }
 
     #[test]

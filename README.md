@@ -52,15 +52,19 @@ immutable texture allocations. Parsed item-five animation descriptors now resolv
 TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
 fixed 63-glyph type-three font resource. Post-GOOL object snapshots drive their fixed-point
 projection, lighting/color modulation, ordering and the same resident TPAG cache as the world;
-the status-B 2D CVTX path uses the shared retail sprite matrix. Eligible animation frames also
+the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragment half-size math
+uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
+GTE validity gate. The legal `pb0cB` trace therefore carries the authored `FruiC` scale through raw
+shifts 24–297 without turning a saturating/cullable sprite into a runtime failure. Eligible
+animation frames also
 register an ordered, bounded collision snapshot before execution, allowing the checked solid query
 to cross the former N. Sanity animation-bound boundary without emulating undefined C locals.
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A strict 18,000-frame
-state-aware input trace carries the camera and Crash from `e0_9Z` through `a0_9Z` and `a1_9Z`–
-`a6_9Z`, reaches the first authored `a6_9Z` ledge by frame 759, and reports no VM errors, faulted
-objects or terminal fall.
+state-aware input trace carries the camera and Crash from `e0_9Z` through `a0_9Z`, `a1_9Z`–
+`a9_9Z`, `b0_9Z`, and into `b1_9Z` by frame 1,396. It remains stable there through frame 18,000
+with no VM errors, faulted objects, restart, below-zero position, or terminal fall.
 The strict 360-frame Hog Wild idle characterization now delivers the authored `0x900` fall-kill
 event, advances the native signed display fade through `-2`/`-1`, performs two same-level
 load-state restarts, and retains no terminal fall or checked runtime issue.
@@ -85,6 +89,11 @@ snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine l
 (10,966 frames) pass the adapter characterization. The checked caption controller now survives
 the demo restart beneath logical root one; a nonzero island-camera target dispatches its checked
 event `0xE00`, while a zero target releases physical input without inventing a title transition.
+Playback advances at Crash's actual root-six traversal boundary: root-one caption work runs first,
+the completion event and input-lock rebind are synchronous, and Crash plus later roots observe the
+new pad/controller state in that same frame. Caption objects retain their intentional null lifecycle
+zone; spawned caption children consult the current camera ZDAT only for the environment/colors that
+native `GoolObjectCreate` obtains through `cur_zone`.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 
@@ -114,8 +123,8 @@ flags are instantiated into a checked 96-object arena and run by the live browse
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
 camera-selected world; Crash accepts retail pad input and has a clean 18,000-frame characterized
-route from `e0_9Z` through `a0_9Z` and `a1_9Z`–`a6_9Z`, but no authored level completion has been
-certified. Save/checkpoint behavior is not yet playthrough-certified, and a
+route from `e0_9Z` through `a0_9Z`, `a1_9Z`–`a9_9Z`, `b0_9Z`, and into `b1_9Z`, but no authored
+level completion has been certified. Save/checkpoint behavior is not yet playthrough-certified, and a
 same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
 local scan of all 44 retail pairs found zero authored occurrences of that nested case.
 

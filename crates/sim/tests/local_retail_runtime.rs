@@ -8,7 +8,6 @@ use crust_formats::stream::{
     LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
     parse_nsf,
 };
-use crust_sim::Angle12;
 use crust_sim::gool::{RetailPadSnapshot, VmEffect};
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
@@ -17,6 +16,7 @@ use crust_sim::retail_runtime::{NsfProgramHost, ProgramHost, RetailRuntime};
 use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, SpawnScanZone, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
 };
+use crust_sim::{Angle12, Vec3};
 
 const N_SANITY_E0_ENTRIES: &[&str] = &["WillT", "Ju89T", "JuA9T", "Ju19T", "Ju49T", "Ju59T"];
 const N_SANITY_A0_ENTRIES: &[&str] = N_SANITY_E0_ENTRIES;
@@ -608,6 +608,7 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
         first_crash_vm.register(27).unwrap(),
     )];
     let mut previous_crash_state = first_crash_vm.state();
+    let mut frame_192_query = None;
     for frame in 2_u32..=1_000 {
         if frame == 192 {
             runtime.set_physics_frame_context(true, Angle12::new(0));
@@ -635,6 +636,45 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
                 .collect::<Vec<_>>()
         );
         let crash_vm = runtime.machine().object(crash.vm()).unwrap();
+        if frame == 192 {
+            frame_192_query = Some(
+                runtime
+                    .machine()
+                    .retail_solid_query_cache()
+                    .expect("settled Crash must populate native cur_zone_query")
+                    .clone(),
+            );
+        } else if frame == 193 {
+            let previous_query = frame_192_query
+                .as_ref()
+                .expect("frame 192 must capture cur_zone_query");
+            let live_query = runtime
+                .machine()
+                .retail_solid_query_cache()
+                .expect("the state-17 movement keeps cur_zone_query initialized");
+            assert_eq!(
+                live_query, previous_query,
+                "native reuses process-global cur_zone_query across the state-17 transition"
+            );
+            let translation = Vec3 {
+                x: crash_vm.register(8).unwrap().cast_signed(),
+                y: crash_vm.register(9).unwrap().cast_signed(),
+                z: crash_vm.register(10).unwrap().cast_signed(),
+            };
+            assert!(
+                live_query
+                    .strictly_contains_event_probe(translation)
+                    .unwrap(),
+                "the state-17 event probe must take native's cached-query branch"
+            );
+            assert!(
+                report.effects.iter().all(|effect| !matches!(
+                    effect,
+                    VmEffect::Solid { object, .. } if *object == crash.vm()
+                )),
+                "frame-193 STATUS_A is not the result of an inline solid-event handler"
+            );
+        }
         if crash_vm.state() != previous_crash_state {
             previous_crash_state = crash_vm.state();
             crash_state_trace.push((
@@ -656,7 +696,10 @@ fn n_sanity_neighbors_spawn_and_crash_hosts_both_boot_children() {
         crash_state_trace,
         [
             (1, 34, 8, 0x0002_0800, 0x0404_2069),
-            (193, 17, 1126, 0x0006_0001, 0x0404_20e8),
+            // State 17's authored, ineligible 0x87 opcode still clears
+            // KEEP_EVENT_STACK before the condition check. The horizontal
+            // movement then reuses cur_zone_query and records no floor hit.
+            (193, 17, 1126, 0, 0x0404_20e8),
             (205, 19, 1245, 0x0006_0901, 0x0404_20e9),
             (210, 2, 499, 0x0006_0901, 0x0404_20e9),
         ],

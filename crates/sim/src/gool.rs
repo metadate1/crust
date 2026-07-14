@@ -29,8 +29,8 @@ use crate::retail_physics::{
 };
 use crate::retail_solid_motion::{
     SmoothStopMemory, SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError,
-    SolidMotionState, SolidObjectCandidate, SolidObjectZone, SolidZoneBoundary, SolidZoneView,
-    solve_retail_solid_motion,
+    SolidMotionState, SolidObjectCandidate, SolidObjectZone, SolidQuery, SolidZoneBoundary,
+    SolidZoneView, solve_retail_solid_motion_with_event_handler,
 };
 
 /// Maximum simultaneous VM identities: the 96-object retail pool plus its
@@ -2584,7 +2584,6 @@ pub struct VmObject {
     solid_environment: Option<RetailSolidEnvironment>,
     local_bound: Bounds3,
     solid_zone_eid: Option<Eid>,
-    solid_smooth_stop: SmoothStopMemory,
     is_main_player: bool,
     page_count: u32,
     resident_pages: Vec<PageIndex>,
@@ -2631,7 +2630,6 @@ impl VmObject {
             solid_environment: None,
             local_bound: Bounds3::default(),
             solid_zone_eid: None,
-            solid_smooth_stop: SmoothStopMemory::default(),
             is_main_player: false,
             page_count: 0,
             resident_pages: Vec::new(),
@@ -3255,7 +3253,6 @@ impl VmObject {
     /// entry or octree pointers from the source runtime.
     pub fn bind_retail_solid_environment(&mut self, environment: RetailSolidEnvironment) {
         self.solid_zone_eid = environment.object_zone;
-        self.solid_smooth_stop = SmoothStopMemory::default();
         self.solid_environment = Some(environment);
     }
 
@@ -3271,6 +3268,14 @@ impl VmObject {
     #[must_use]
     pub const fn retail_solid_zone_eid(&self) -> Option<Eid> {
         self.solid_zone_eid
+    }
+
+    /// Synchronizes the pointer-free VM mirror after a runtime-owned `SZON`
+    /// mutation. The arena remains the generational authority; this value is
+    /// consumed only by the in-flight solid solver and its final checked
+    /// commit.
+    pub(crate) fn set_retail_solid_zone_eid(&mut self, zone: Option<Eid>) {
+        self.solid_zone_eid = zone;
     }
 
     /// Updates the persistent object-local AABB calculated from the current
@@ -3677,11 +3682,22 @@ pub struct Machine {
     // deterministic machine state rather than hidden Rust statics.
     solid_trans3: [i32; 3],
     solid_trans4: [i32; 3],
+    /// Native `being_stopped` and `prev_velocity` are process globals shared
+    /// by every `TransSmoothStopAtSolid` caller, not per-object fields.
+    solid_smooth_stop: SmoothStopMemory,
+    /// Owned form of native BSS `cur_zone_query`. Its `once` lifetime spans
+    /// objects, frames, and current-zone replacement until `LevelInitMisc`
+    /// explicitly invalidates it or a strict event-bound escape rebuilds it.
+    solid_query_cache: Option<SolidQuery>,
     /// Octree neighborhood owned by native global `cur_zone`. Per-object
     /// solid environments remain separate because their headers supply
     /// object-zone colors and boundary/water behavior.
     current_solid_environment: Option<RetailSolidEnvironment>,
     solid_frame_bounds: FrameBounds<ObjectHandle>,
+    /// Incarnation captured beside each frame-owned AABB. Native bounds keep
+    /// a raw object pointer; this map prevents a compact VM slot reused later
+    /// in the traversal from inheriting that earlier generation's rectangle.
+    solid_frame_bound_incarnations: Vec<u64>,
     camera_translation: [i32; 3],
     transform_vectors_camera: Option<RetailTransformVectorsCamera>,
     paging_page_capacity: u32,
@@ -3724,8 +3740,11 @@ impl Machine {
             next_event_argument_generation: 1,
             solid_trans3: [0; 3],
             solid_trans4: [0; 3],
+            solid_smooth_stop: SmoothStopMemory::default(),
+            solid_query_cache: None,
             current_solid_environment: None,
             solid_frame_bounds: FrameBounds::new(),
+            solid_frame_bound_incarnations: Vec::new(),
             camera_translation: [0; 3],
             transform_vectors_camera: None,
             paging_page_capacity: 0,
@@ -3935,14 +3954,15 @@ impl Machine {
         self.level_globals_reset_since_context = false;
     }
 
-    /// Clears the modeled `TransSmoothStopAtSolid(0, 0, 0)` memory used by
-    /// `LevelInitMisc(0)`. The source stores one function-static latch; this
-    /// checked VM keeps equivalent state beside each isolated object query, so
-    /// all latches are cleared together at the native reset boundary.
+    /// Clears the modeled solid BSS state used by `LevelInitMisc(0)`.
+    ///
+    /// The latch/prior displacement and `cur_zone_query.once` are shared by
+    /// interleaved object updates. Current-zone replacement intentionally does
+    /// not invalidate the query; native keeps it until the next strict-bound
+    /// escape.
     pub(crate) fn reset_retail_solid_smoothing(&mut self) {
-        for object in self.objects.values_mut() {
-            object.solid_smooth_stop = SmoothStopMemory::default();
-        }
+        self.solid_smooth_stop = SmoothStopMemory::default();
+        self.solid_query_cache = None;
     }
 
     /// Native misc 12/1 does not return to the pre-restart instruction walk.
@@ -4145,10 +4165,19 @@ impl Machine {
         self.frames_elapsed
     }
 
+    /// Returns the owned mirror of native process-global `cur_zone_query`.
+    /// This is exposed read-only so legal-data characterization tests can
+    /// distinguish cache reuse from a collision or handler mutation.
+    #[must_use]
+    pub fn retail_solid_query_cache(&self) -> Option<&SolidQuery> {
+        self.solid_query_cache.as_ref()
+    }
+
     /// Clears the animation-derived AABB snapshots at the start of a frame.
     /// The retail-sized backing allocation is retained for the next traversal.
     pub fn clear_frame_bounds(&mut self) {
         self.solid_frame_bounds.clear();
+        self.solid_frame_bound_incarnations.clear();
     }
 
     /// Appends one world-space object AABB in host traversal order.
@@ -4160,12 +4189,14 @@ impl Machine {
         object: ObjectHandle,
         bound: Bounds3,
     ) -> Result<(), VmError> {
-        self.object(object)?;
+        let incarnation = self.object_incarnation(object)?;
         self.solid_frame_bounds
             .push(FrameBound { bound, object })
             .map_err(|error| match error {
                 FrameBoundsError::CapacityExceeded => VmError::FrameBoundsCapacityExceeded,
-            })
+            })?;
+        self.solid_frame_bound_incarnations.push(incarnation);
+        Ok(())
     }
 
     /// Returns this frame's AABB snapshots in their exact registration order.
@@ -4414,11 +4445,32 @@ impl Machine {
     /// Executes the native post-interpreter color and physics phases for one
     /// live GOOL object, in source order. Static ZDAT floor response is
     /// resolved here against the machine's global current-zone collision
-    /// environment; dynamic object/wall service effects remain explicit
-    /// follow-on branches.
+    /// environment; collision-generated event effects are committed at their
+    /// source call sites through the hosted variant below.
     pub fn run_retail_object_physics(
         &mut self,
         handle: ObjectHandle,
+    ) -> Result<RetailPhysicsResult, VmError> {
+        self.run_retail_object_physics_with_solid_event_handler(handle, |_, _, _, _| true)
+    }
+
+    /// Executes retail physics while hosting each collision-generated GOOL
+    /// event at its native call site.
+    ///
+    /// Returning `false` from `solid_event_handler` stops the pass before any
+    /// later collision work. This is used when synchronous delivery kills the
+    /// mover or requests a level restart. The callback runs after all earlier
+    /// collision-link/status effects have been committed and after the mover's
+    /// current process fields have been made visible in the VM.
+    pub fn run_retail_object_physics_with_solid_event_handler(
+        &mut self,
+        handle: ObjectHandle,
+        mut solid_event_handler: impl FnMut(
+            &mut Self,
+            ObjectHandle,
+            &mut [SolidObjectCandidate],
+            SolidEffect,
+        ) -> bool,
     ) -> Result<RetailPhysicsResult, VmError> {
         self.run_retail_object_colors(handle)?;
         let object_type = self
@@ -4444,7 +4496,16 @@ impl Machine {
                 let _changed = apply_free_movement(&mut state, plan);
             }
             RetailTranslationMode::StoppedBySolid => {
-                self.resolve_retail_static_solid_motion(handle, &mut state, plan)?;
+                if self.resolve_retail_static_solid_motion(
+                    handle,
+                    &mut state,
+                    plan,
+                    &mut solid_event_handler,
+                )? {
+                    return Ok(RetailPhysicsResult {
+                        register_collision_bound: false,
+                    });
+                }
             }
         }
         if path_orientation_requested(&state) {
@@ -4461,7 +4522,13 @@ impl Machine {
         handle: ObjectHandle,
         state: &mut RetailPhysicsState,
         plan: RetailPhysicsPlan,
-    ) -> Result<(), VmError> {
+        solid_event_handler: &mut impl FnMut(
+            &mut Self,
+            ObjectHandle,
+            &mut [SolidObjectCandidate],
+            SolidEffect,
+        ) -> bool,
+    ) -> Result<bool, VmError> {
         let (
             environment,
             local_bound,
@@ -4505,7 +4572,7 @@ impl Machine {
                     .ok_or(VmError::MissingSolidEnvironment(handle))?,
                 object.local_bound,
                 object_zone_context,
-                object.solid_smooth_stop,
+                self.solid_smooth_stop,
                 object.links[6].map(|collider| u32::from(collider.get())),
                 object.register(process_register::STATUS_C)?,
                 object.register(process_register::ANIMATION_STAMP)? as i32,
@@ -4544,11 +4611,33 @@ impl Machine {
         // snapshot owns only its world AABB; all gates and metadata are live
         // object fields at the exact moment this mover reaches physics.
         let mut candidates = Vec::with_capacity(self.solid_frame_bounds.len());
-        for snapshot in &self.solid_frame_bounds {
+        for (bound_index, snapshot) in self.solid_frame_bounds.iter().enumerate() {
+            let registered_incarnation = self
+                .solid_frame_bound_incarnations
+                .get(bound_index)
+                .copied();
+            let active = registered_incarnation
+                .is_some_and(|incarnation| self.incarnation_is_live(snapshot.object, incarnation));
+            if !active {
+                candidates.push(SolidObjectCandidate {
+                    id: u32::from(snapshot.object.get()),
+                    active: false,
+                    translation: Vec3::ZERO,
+                    bounds: snapshot.bound,
+                    status_b: 0,
+                    status_c: 0,
+                    state_flags: 0,
+                    category: 0,
+                    object_type: 0,
+                    hotspot_size: 0,
+                });
+                continue;
+            }
             let candidate = self.object(snapshot.object)?;
             let identity = candidate.program_identity;
             candidates.push(SolidObjectCandidate {
                 id: u32::from(snapshot.object.get()),
+                active,
                 translation: Vec3 {
                     x: candidate.register(process_register::TRANSLATION_X)? as i32,
                     y: candidate.register(process_register::TRANSLATION_Y)? as i32,
@@ -4580,9 +4669,22 @@ impl Machine {
             hotspot_size,
             collider,
         };
-        let outcome = solve_retail_solid_motion(
+        // `begin_retail_physics` has already changed fields outside the solid
+        // solver's narrower state (notably speed and rotations). Carry that
+        // complete snapshot through synchronous event boundaries so a handler
+        // observes every earlier native physics mutation and its own changes
+        // survive any later collision event in the same pull loop.
+        let mut live_physics_state = *state;
+        let mut applied_effects = 0_usize;
+        let mut hook_error = None;
+        let mut interrupted = false;
+        // The event hook needs `&mut Machine`, so temporarily move the owned
+        // BSS query out instead of borrowing one field across nested GOOL
+        // dispatch. Restore it before inspecting every solver/error outcome.
+        let mut query_cache = self.solid_query_cache.take();
+        let outcome = solve_retail_solid_motion_with_event_handler(
             &zones,
-            &candidates,
+            &mut candidates,
             solid_state,
             plan.displacement,
             SolidMotionContext {
@@ -4592,15 +4694,85 @@ impl Machine {
                 quirks: environment.level_quirks,
             },
             smooth_stop,
-        )
-        .map_err(VmError::RetailSolidMotion)?;
+            &mut query_cache,
+            |solid_state, object_zone, candidates, effects, event| {
+                if let Err(error) =
+                    self.commit_live_solid_motion_state(handle, live_physics_state, solid_state)
+                {
+                    hook_error = Some(error);
+                    interrupted = true;
+                    return false;
+                }
+                if let Err(error) =
+                    self.commit_live_solid_object_zone(handle, &environment, *object_zone)
+                {
+                    hook_error = Some(error);
+                    interrupted = true;
+                    return false;
+                }
+                if let Err(error) =
+                    self.apply_retail_solid_effects(handle, &effects[applied_effects..])
+                {
+                    hook_error = Some(error);
+                    interrupted = true;
+                    return false;
+                }
+                applied_effects = effects.len();
+                if !solid_event_handler(self, handle, candidates, event) {
+                    interrupted = true;
+                    return false;
+                }
+                match self.object(handle).and_then(VmObject::retail_physics_state) {
+                    Ok(refreshed) => live_physics_state = refreshed,
+                    Err(error) => {
+                        hook_error = Some(error);
+                        interrupted = true;
+                        return false;
+                    }
+                }
+                if let Err(error) = self.refresh_live_solid_motion_state(handle, solid_state) {
+                    hook_error = Some(error);
+                    interrupted = true;
+                    return false;
+                }
+                if let Err(error) =
+                    self.refresh_live_solid_object_zone(handle, &environment, object_zone)
+                {
+                    hook_error = Some(error);
+                    interrupted = true;
+                    return false;
+                }
+                true
+            },
+        );
+        self.solid_query_cache = query_cache;
+        let outcome = outcome.map_err(VmError::RetailSolidMotion)?;
+        if let Some(error) = hook_error {
+            return Err(error);
+        }
+        if interrupted {
+            // Native computes `being_stopped`/`prev_velocity` after
+            // TransPullStopAtSolid returns. A safely modeled recipient kill
+            // stops our remaining pointer-backed work, but the completed
+            // partial solver outcome still owns the process-global update.
+            self.solid_smooth_stop = outcome.smooth_stop;
+            return Ok(true);
+        }
 
-        state.translation = outcome.state.translation;
-        state.velocity = outcome.state.velocity;
-        state.status_a = outcome.state.status_a;
-        state.floor_impact_stamp = outcome.state.floor_impact_stamp as u32;
-        state.floor_impact_velocity = outcome.state.floor_impact_velocity;
-        state.event = outcome.state.event;
+        // A synchronous handler may update any process register. Preserve
+        // those live values as the base for the remaining native physics
+        // phases, then overlay fields changed by collision after the handler.
+        let mut live_state = live_physics_state;
+        live_state.translation = outcome.state.translation;
+        live_state.velocity = outcome.state.velocity;
+        live_state.status_a = outcome.state.status_a;
+        live_state.status_b = outcome.state.status_b;
+        live_state.state_flags = outcome.state.state_flags;
+        live_state.invincibility_state = outcome.state.invincibility_state as u32;
+        live_state.floor_impact_stamp = outcome.state.floor_impact_stamp as u32;
+        live_state.floor_impact_velocity = outcome.state.floor_impact_velocity;
+        live_state.event = outcome.state.event;
+        *state = live_state;
 
         {
             let object = self.object_mut(handle)?;
@@ -4620,14 +4792,145 @@ impl Machine {
                 ),
                 SolidObjectZone::Detached { eid, .. } => Some(eid),
             };
-            object.solid_smooth_stop = outcome.smooth_stop;
             object.links[6] = outcome
                 .state
                 .collider
                 .and_then(|candidate| u16::try_from(candidate).ok())
                 .and_then(ObjectHandle::new);
         }
-        self.apply_retail_solid_effects(handle, &outcome.effects)?;
+        self.solid_smooth_stop = outcome.smooth_stop;
+        self.apply_retail_solid_effects(handle, &outcome.effects[applied_effects..])?;
+        Ok(false)
+    }
+
+    fn commit_live_solid_motion_state(
+        &mut self,
+        handle: ObjectHandle,
+        mut physics_state: RetailPhysicsState,
+        state: &SolidMotionState,
+    ) -> Result<(), VmError> {
+        physics_state.translation = state.translation;
+        physics_state.velocity = state.velocity;
+        physics_state.status_a = state.status_a;
+        physics_state.status_b = state.status_b;
+        physics_state.state_flags = state.state_flags;
+        physics_state.invincibility_state = state.invincibility_state as u32;
+        physics_state.floor_impact_stamp = state.floor_impact_stamp as u32;
+        physics_state.floor_impact_velocity = state.floor_impact_velocity;
+        physics_state.event = state.event;
+        let object = self.object_mut(handle)?;
+        object.set_retail_physics_state(physics_state)?;
+        for (register, value) in [
+            (process_register::STATUS_C, state.status_c as i32),
+            (process_register::ANIMATION_STAMP, state.animation_stamp),
+            (process_register::HOTSPOT_SIZE, state.hotspot_size),
+        ] {
+            object.set_register(register, value as u32)?;
+        }
+        object.links[6] = state
+            .collider
+            .and_then(|candidate| u16::try_from(candidate).ok())
+            .and_then(ObjectHandle::new);
+        Ok(())
+    }
+
+    fn refresh_live_solid_motion_state(
+        &self,
+        handle: ObjectHandle,
+        state: &mut SolidMotionState,
+    ) -> Result<(), VmError> {
+        let object = self.object(handle)?;
+        state.translation = Vec3 {
+            x: object.register(process_register::TRANSLATION_X)? as i32,
+            y: object.register(process_register::TRANSLATION_Y)? as i32,
+            z: object.register(process_register::TRANSLATION_Z)? as i32,
+        };
+        state.velocity = Vec3 {
+            x: object.register(process_register::MISC_A_X)? as i32,
+            y: object.register(process_register::MISC_A_Y)? as i32,
+            z: object.register(process_register::MISC_A_Z)? as i32,
+        };
+        state.status_a = object.register(process_register::STATUS_A)?;
+        state.status_b = object.register(process_register::STATUS_B)?;
+        state.status_c = object.register(process_register::STATUS_C)?;
+        state.state_flags = object.register(process_register::STATE_FLAGS)?;
+        state.invincibility_state = object.register(process_register::INVINCIBILITY_STATE)? as i32;
+        state.animation_stamp = object.register(process_register::ANIMATION_STAMP)? as i32;
+        state.floor_impact_stamp = object.register(process_register::FLOOR_IMPACT_STAMP)? as i32;
+        state.floor_impact_velocity =
+            object.register(process_register::FLOOR_IMPACT_VELOCITY)? as i32;
+        state.event = object.register(process_register::EVENT)?;
+        state.hotspot_size = object.register(process_register::HOTSPOT_SIZE)? as i32;
+        state.collider = object.links[6].map(|collider| u32::from(collider.get()));
+        Ok(())
+    }
+
+    fn commit_live_solid_object_zone(
+        &mut self,
+        handle: ObjectHandle,
+        environment: &RetailSolidEnvironment,
+        object_zone: SolidObjectZone,
+    ) -> Result<(), VmError> {
+        let zone = match object_zone {
+            SolidObjectZone::Missing => None,
+            SolidObjectZone::CurrentNeighbor(index) => Some(
+                environment
+                    .neighbors
+                    .get(index)
+                    .ok_or(VmError::RetailSolidMotion(
+                        SolidMotionError::InvalidObjectZoneIndex {
+                            index,
+                            zone_count: environment.neighbors.len(),
+                        },
+                    ))?
+                    .eid,
+            ),
+            SolidObjectZone::Detached { eid, .. } => Some(eid),
+        };
+        self.object_mut(handle)?.set_retail_solid_zone_eid(zone);
+        Ok(())
+    }
+
+    fn refresh_live_solid_object_zone(
+        &self,
+        handle: ObjectHandle,
+        environment: &RetailSolidEnvironment,
+        object_zone: &mut SolidObjectZone,
+    ) -> Result<(), VmError> {
+        let object = self.object(handle)?;
+        let Some(eid) = object.solid_zone_eid else {
+            *object_zone = SolidObjectZone::Missing;
+            return Ok(());
+        };
+        if let Some(index) = environment
+            .neighbors
+            .iter()
+            .position(|zone| zone.eid == eid)
+        {
+            *object_zone = SolidObjectZone::CurrentNeighbor(index);
+            return Ok(());
+        }
+        let bound_environment = object
+            .solid_environment
+            .as_ref()
+            .ok_or(VmError::MissingSolidEnvironment(handle))?;
+        let zone = bound_environment
+            .neighbors
+            .iter()
+            .find(|zone| zone.eid == eid)
+            .ok_or(VmError::SolidObjectZoneMissingFromBoundEnvironment {
+                object: handle,
+                zone: eid,
+            })?;
+        *object_zone = SolidObjectZone::Detached {
+            eid,
+            boundary: SolidZoneBoundary {
+                origin: zone.origin,
+                dimensions: zone.dimensions,
+                graphics_flags: zone.graphics_flags,
+                water_y: zone.water_y,
+            },
+        };
         Ok(())
     }
 
@@ -6597,7 +6900,6 @@ impl Machine {
         let eligible = event_source.is_some()
             && condition != 0
             && (linked_recipient.is_some() || opcode == 0x8f);
-
         if !eligible {
             self.object_mut(handle)?
                 .set_register(process_register::MISC_VALUE, 0)?;
@@ -7368,7 +7670,17 @@ impl Machine {
         let mut highest_object = None;
         let mut highest_y = RETAIL_SOLID_INITIAL_Y_MAX;
 
-        for snapshot in &self.solid_frame_bounds {
+        for (bound_index, snapshot) in self.solid_frame_bounds.iter().enumerate() {
+            let Some(incarnation) = self
+                .solid_frame_bound_incarnations
+                .get(bound_index)
+                .copied()
+            else {
+                continue;
+            };
+            if !self.incarnation_is_live(snapshot.object, incarnation) {
+                continue;
+            }
             let candidate = self.object(snapshot.object)?;
             if !predicate(candidate.register(process_register::STATUS_B)?) {
                 continue;
@@ -7418,7 +7730,17 @@ impl Machine {
         let mut nearest_object = None;
         let mut nearest_axis = RETAIL_SOLID_INITIAL_Y_MAX;
 
-        for snapshot in &self.solid_frame_bounds {
+        for (bound_index, snapshot) in self.solid_frame_bounds.iter().enumerate() {
+            let Some(incarnation) = self
+                .solid_frame_bound_incarnations
+                .get(bound_index)
+                .copied()
+            else {
+                continue;
+            };
+            if !self.incarnation_is_live(snapshot.object, incarnation) {
+                continue;
+            }
             if snapshot.object == query {
                 continue;
             }
@@ -10815,6 +11137,460 @@ mod tests {
     }
 
     #[test]
+    fn smooth_stop_latch_is_shared_across_interleaved_objects() {
+        let zone_eid = Eid::from_name("sm_9Z").unwrap();
+        let mut bytes = vec![0_u8; 44];
+        for (index, child) in [0x0003_u16, 0, 0x0003, 0x0001].into_iter().enumerate() {
+            let offset = RETAIL_SOLID_RECT_BYTES + index * 2;
+            bytes[offset..offset + 2].copy_from_slice(&child.to_le_bytes());
+        }
+        let zone = RetailSolidZone::new(
+            [-100; 3],
+            [200; 3],
+            RETAIL_SOLID_RECT_BYTES as u16,
+            [1, 1, 0],
+            bytes,
+        )
+        .unwrap()
+        .with_eid(zone_eid);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let first = handle(0);
+        let second = handle(1);
+        let mut machine = Machine::new(0);
+        for object_handle in [first, second] {
+            let mut object = VmObject::new(object_handle, Vec::new()).unwrap();
+            object.bind_retail_solid_environment(environment.clone());
+            object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                        | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+                )
+                .unwrap();
+            object
+                .set_register(process_register::TRANSLATION_X, (-3_856_i32) as u32)
+                .unwrap();
+            object
+                .set_register(process_register::TRANSLATION_Y, 1)
+                .unwrap();
+            object
+                .set_register(process_register::MISC_A_X, 602_353)
+                .unwrap();
+            machine.insert_object(object).unwrap();
+        }
+
+        machine.run_retail_object_physics(first).unwrap();
+        assert!(
+            machine.solid_smooth_stop.being_stopped,
+            "the first blocked mover must arm native being_stopped: smooth={:?}, translation={:?}",
+            machine.solid_smooth_stop,
+            machine.object(first).unwrap().process_vector(0)
+        );
+        assert_ne!(machine.solid_smooth_stop.previous_displacement, Vec3::ZERO);
+
+        machine.run_retail_object_physics(second).unwrap();
+        assert_eq!(
+            machine.solid_smooth_stop,
+            SmoothStopMemory::default(),
+            "the second mover consumes the process-global latch instead of using a private copy"
+        );
+    }
+
+    #[test]
+    fn stopped_by_solid_without_event_preserves_pre_solver_control_state() {
+        let zone_eid = Eid::from_name("np_9Z").unwrap();
+        let zone = RetailSolidZone::new(
+            [-100_000; 3],
+            [200_000; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap()
+        .with_eid(zone_eid);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let object_handle = handle(0);
+        let mut object = VmObject::new(object_handle, Vec::new()).unwrap();
+        object.bind_retail_solid_environment(environment);
+        object
+            .set_register(
+                process_register::STATUS_B,
+                STATUS_B_DPAD_CONTROL
+                    | crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                    | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+            )
+            .unwrap();
+        object
+            .set_register(
+                process_register::STATUS_A,
+                crate::retail_physics::STATUS_A_MOVEMENT_ACTIVE,
+            )
+            .unwrap();
+        object
+            .set_register(
+                process_register::STATE_FLAGS,
+                crate::retail_physics::STATE_FLAG_GROUND,
+            )
+            .unwrap();
+        let mut expected = object.retail_physics_state().unwrap();
+        begin_retail_physics(
+            &mut expected,
+            RetailPhysicsContext {
+                ticks_per_frame: 34,
+                game_state_playing: true,
+                pad_held: 4 << 12,
+                ..RetailPhysicsContext::default()
+            },
+        );
+        assert!(expected.speed > 0);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.set_retail_physics_frame_context(true, 0);
+        machine
+            .set_pad_snapshot(
+                0,
+                RetailPadSnapshot {
+                    held: 4 << 12,
+                    ..RetailPadSnapshot::default()
+                },
+            )
+            .unwrap();
+        let mut event_count = 0;
+        machine
+            .run_retail_object_physics_with_solid_event_handler(object_handle, |_, _, _, _| {
+                event_count += 1;
+                true
+            })
+            .unwrap();
+
+        assert_eq!(event_count, 0);
+        let actual = machine.object(object_handle).unwrap();
+        assert_eq!(
+            actual.register(process_register::SPEED),
+            Ok(expected.speed as u32)
+        );
+        assert_eq!(
+            actual.register(process_register::MISC_B_X),
+            Ok(expected.target_rotation.x as u32)
+        );
+    }
+
+    #[test]
+    fn inline_solid_handler_observes_complete_pre_solver_control_state() {
+        let zone_eid = Eid::from_name("hp_9Z").unwrap();
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [100; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap()
+        .with_eid(zone_eid)
+        .with_graphics(2, i32::MIN);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let object_handle = handle(0);
+        let mut object = VmObject::new(object_handle, Vec::new()).unwrap();
+        object.bind_retail_solid_environment(environment);
+        object
+            .set_register(
+                process_register::STATUS_B,
+                STATUS_B_DPAD_CONTROL
+                    | crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                    | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+            )
+            .unwrap();
+        object
+            .set_register(
+                process_register::STATUS_A,
+                crate::retail_physics::STATUS_A_MOVEMENT_ACTIVE,
+            )
+            .unwrap();
+        object
+            .set_register(
+                process_register::STATE_FLAGS,
+                crate::retail_physics::STATE_FLAG_GROUND,
+            )
+            .unwrap();
+        object
+            .set_register(process_register::TRANSLATION_Y, 100)
+            .unwrap();
+        object
+            .set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+            .unwrap();
+        let mut expected = object.retail_physics_state().unwrap();
+        begin_retail_physics(
+            &mut expected,
+            RetailPhysicsContext {
+                ticks_per_frame: 34,
+                game_state_playing: true,
+                pad_held: 4 << 12,
+                ..RetailPhysicsContext::default()
+            },
+        );
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.set_retail_physics_frame_context(true, 0);
+        machine
+            .set_pad_snapshot(
+                0,
+                RetailPadSnapshot {
+                    held: 4 << 12,
+                    ..RetailPadSnapshot::default()
+                },
+            )
+            .unwrap();
+        let mut observed = None;
+        machine
+            .run_retail_object_physics_with_solid_event_handler(
+                object_handle,
+                |machine, moving, _, effect| {
+                    if matches!(effect, SolidEffect::SendEvent { .. }) {
+                        let object = machine.object(moving).unwrap();
+                        observed = Some((
+                            object.register(process_register::SPEED).unwrap(),
+                            object.register(process_register::MISC_B_X).unwrap(),
+                        ));
+                        return false;
+                    }
+                    true
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            observed,
+            Some((expected.speed as u32, expected.target_rotation.x as u32))
+        );
+    }
+
+    #[test]
+    fn solid_query_cache_spans_objects_frames_and_current_zone_replacement() {
+        fn environment(eid: Eid, raw_node: u16) -> RetailSolidEnvironment {
+            let zone = RetailSolidZone::new(
+                [-2_000; 3],
+                [4_000; 3],
+                raw_node,
+                [0; 3],
+                vec![0; RETAIL_SOLID_RECT_BYTES],
+            )
+            .unwrap()
+            .with_eid(eid);
+            RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+                .with_runtime_context(Some(eid), SolidLevelQuirks::default())
+        }
+
+        fn object(
+            handle: ObjectHandle,
+            environment: RetailSolidEnvironment,
+            translation_x: i32,
+        ) -> VmObject {
+            let mut object = VmObject::new(handle, Vec::new()).unwrap();
+            object.bind_retail_solid_environment(environment);
+            object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                        | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+                )
+                .unwrap();
+            object
+                .set_register(process_register::TRANSLATION_X, translation_x as u32)
+                .unwrap();
+            object.set_register(process_register::MISC_A_X, 31).unwrap();
+            object
+        }
+
+        let first_zone = Eid::from_name("qa_9Z").unwrap();
+        let second_zone = Eid::from_name("qb_9Z").unwrap();
+        let first_environment = environment(first_zone, 0x0013);
+        let second_environment = environment(second_zone, 0x0023);
+        let first = handle(0);
+        let second = handle(1);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(object(first, first_environment.clone(), 0))
+            .unwrap();
+        machine
+            .insert_object(object(second, first_environment, 100))
+            .unwrap();
+
+        machine.run_retail_object_physics(first).unwrap();
+        let initial = machine.solid_query_cache.clone().unwrap();
+        assert_eq!(initial.nodes()[0].raw_node, 0x0013);
+
+        machine.set_frames_elapsed(1);
+        machine.set_current_retail_solid_environment(Some(second_environment));
+        assert_eq!(machine.solid_query_cache, Some(initial.clone()));
+        machine.run_retail_object_physics(second).unwrap();
+        assert_eq!(
+            machine.solid_query_cache,
+            Some(initial.clone()),
+            "a nearby object in the next frame keeps native cur_zone_query even after cur_zone changes"
+        );
+
+        {
+            let object = machine.object_mut(second).unwrap();
+            object
+                .set_register(process_register::TRANSLATION_X, 200_000)
+                .unwrap();
+            object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                        | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+                )
+                .unwrap();
+            object.set_register(process_register::MISC_A_X, 31).unwrap();
+        }
+        machine.run_retail_object_physics(second).unwrap();
+        let rebuilt = machine.solid_query_cache.as_ref().unwrap();
+        assert_ne!(rebuilt.nodes_bound, initial.nodes_bound);
+        assert_eq!(rebuilt.nodes()[0].raw_node, 0x0023);
+
+        machine.reset_retail_solid_smoothing();
+        assert!(machine.solid_query_cache.is_none());
+    }
+
+    #[test]
+    fn interrupted_solid_event_commits_process_global_smoothing() {
+        let zone_eid = Eid::from_name("si_9Z").unwrap();
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [100; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap()
+        .with_eid(zone_eid)
+        .with_graphics(2, i32::MIN);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let object_handle = handle(0);
+        let mut object = VmObject::new(object_handle, Vec::new()).unwrap();
+        object.bind_retail_solid_environment(environment.clone());
+        object
+            .set_register(
+                process_register::STATUS_B,
+                crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                    | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+            )
+            .unwrap();
+        object
+            .set_register(process_register::TRANSLATION_Y, 100)
+            .unwrap();
+        object
+            .set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine.solid_smooth_stop = SmoothStopMemory {
+            being_stopped: true,
+            previous_displacement: Vec3::ZERO,
+        };
+
+        machine
+            .run_retail_object_physics_with_solid_event_handler(object_handle, |_, _, _, effect| {
+                !matches!(effect, SolidEffect::SendEvent { .. })
+            })
+            .unwrap();
+
+        assert_eq!(
+            machine.solid_smooth_stop,
+            SmoothStopMemory::default(),
+            "native updates its process-global latch after the pull loop"
+        );
+        let interrupted_cache = machine.solid_query_cache.clone().unwrap();
+
+        let next_handle = handle(1);
+        let mut next = VmObject::new(next_handle, Vec::new()).unwrap();
+        next.bind_retail_solid_environment(environment);
+        next.set_register(
+            process_register::STATUS_B,
+            crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+        )
+        .unwrap();
+        next.set_register(process_register::TRANSLATION_Y, 100)
+            .unwrap();
+        next.set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+            .unwrap();
+        machine.insert_object(next).unwrap();
+        machine.run_retail_object_physics(next_handle).unwrap();
+        assert_eq!(
+            machine.solid_query_cache,
+            Some(interrupted_cache),
+            "a callback-false early return restores cur_zone_query for the next mover"
+        );
+    }
+
+    #[test]
+    fn solid_event_hook_error_restores_process_global_query_cache() {
+        let zone_eid = Eid::from_name("qe_9Z").unwrap();
+        let zone = RetailSolidZone::new(
+            [0; 3],
+            [100; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap()
+        .with_eid(zone_eid)
+        .with_graphics(2, i32::MIN);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let make_object = |object_handle| {
+            let mut object = VmObject::new(object_handle, Vec::new()).unwrap();
+            object.bind_retail_solid_environment(environment.clone());
+            object
+                .set_register(
+                    process_register::STATUS_B,
+                    crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                        | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+                )
+                .unwrap();
+            object
+                .set_register(process_register::TRANSLATION_Y, 100)
+                .unwrap();
+            object
+                .set_register(process_register::MISC_A_Y, (-4_000_i32) as u32)
+                .unwrap();
+            object
+        };
+
+        let seed = handle(0);
+        let failing = handle(1);
+        let mut machine = Machine::new(0);
+        machine.insert_object(make_object(seed)).unwrap();
+        machine.run_retail_object_physics(seed).unwrap();
+        let cached = machine.solid_query_cache.clone().unwrap();
+        machine.insert_object(make_object(failing)).unwrap();
+
+        let result = machine.run_retail_object_physics_with_solid_event_handler(
+            failing,
+            |machine, moving, _, effect| {
+                if matches!(effect, SolidEffect::SendEvent { .. }) {
+                    machine.remove_object_for_host_termination(moving).unwrap();
+                }
+                true
+            },
+        );
+
+        assert_eq!(result, Err(VmError::UnknownObject(failing)));
+        assert_eq!(
+            machine.solid_query_cache,
+            Some(cached),
+            "an error while refreshing callback-mutated live state must not strand cur_zone_query"
+        );
+    }
+
+    #[test]
     fn detached_object_zone_fallback_does_not_alias_current_neighbor_slot() {
         let object_zone = Eid::from_name("oz_9Z").unwrap();
         let current_zone = Eid::from_name("cz_9Z").unwrap();
@@ -11080,6 +11856,95 @@ mod tests {
         assert!(machine.frame_bounds().is_empty());
         machine.register_frame_bound(candidate, bound).unwrap();
         assert_eq!(machine.frame_bounds().len(), 1);
+    }
+
+    #[test]
+    fn stale_frame_bound_cannot_alias_a_reused_slot_before_the_first_solid_event() {
+        let candidate = handle(0);
+        let mover = handle(1);
+        let zone_eid = Eid::from_name("gi_9Z").unwrap();
+        let zone = RetailSolidZone::new(
+            [-2_000; 3],
+            [4_000; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap()
+        .with_eid(zone_eid);
+        let environment = RetailSolidEnvironment::new(0, [0; 24], [0; 24], vec![zone])
+            .with_runtime_context(Some(zone_eid), SolidLevelQuirks::default());
+        let mut original = VmObject::new(candidate, Vec::new()).unwrap();
+        original
+            .set_register(
+                process_register::STATUS_B,
+                crate::retail_solid_motion::SOLID_BOTTOM,
+            )
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(original).unwrap();
+        machine
+            .register_frame_bound(
+                candidate,
+                Bounds3 {
+                    min: Vec3 {
+                        x: -20_000,
+                        y: 250_000,
+                        z: -20_000,
+                    },
+                    max: Vec3 {
+                        x: 20_000,
+                        y: 500_000,
+                        z: 20_000,
+                    },
+                },
+            )
+            .unwrap();
+        let registered_incarnation = machine.solid_frame_bound_incarnations[0];
+
+        machine.remove_object(candidate).unwrap();
+        let mut replacement = VmObject::new(candidate, Vec::new()).unwrap();
+        replacement
+            .set_register(
+                process_register::STATUS_B,
+                crate::retail_solid_motion::SOLID_BOTTOM,
+            )
+            .unwrap();
+        machine.insert_object(replacement).unwrap();
+        assert!(!machine.incarnation_is_live(candidate, registered_incarnation));
+        assert_eq!(
+            machine
+                .find_retail_solid_object_node(&environment, [0, 300_000, 0], 9, 0, |_| true)
+                .unwrap()
+                .0,
+            RetailSolidHit::None
+        );
+
+        let mut moving = VmObject::new(mover, Vec::new()).unwrap();
+        moving.bind_retail_solid_environment(environment);
+        moving
+            .set_register(
+                process_register::STATUS_B,
+                crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                    | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+            )
+            .unwrap();
+        moving
+            .set_register(process_register::MISC_A_Y, 6_000_000)
+            .unwrap();
+        machine.insert_object(moving).unwrap();
+        let mut events = 0;
+
+        machine
+            .run_retail_object_physics_with_solid_event_handler(mover, |_, _, candidates, _| {
+                assert!(candidates.iter().all(|candidate| !candidate.active));
+                events += 1;
+                true
+            })
+            .unwrap();
+
+        assert_eq!(events, 0);
+        assert_eq!(machine.object(candidate).unwrap().state_flags(), 0);
     }
 
     #[test]

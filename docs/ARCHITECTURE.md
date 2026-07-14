@@ -91,7 +91,10 @@ preserve the source's head-insert ordering-table behavior. Type-two sprites and 
 share the checked ZXY sprite matrix. Type-four text safely formats bounded negative-stack
 arguments, resolves default or dynamic fixed-63 type-three fonts, and emits ordered
 glyph/backdrop quads; standalone type-three fonts remain resource-only. Status-B `0x200` CVTX uses
-the same 2D matrix path. ZDAT object shader modes two and three feed source-specific SVTX light
+the same 2D matrix path. Retail sprite half-size calculation keeps the raw signed scale quotient,
+masks MIPS variable shifts to five bits, and performs the source's wrapping 32-bit shift before the
+checked GTE range/cull decision; it never applies a host-width shift or treats a saturating sprite as
+a scene-wide fault. ZDAT object shader modes two and three feed source-specific SVTX light
 ramps or CVTX shifts into that projection and can reject objects at their authored depth cutoffs.
 The pure mode-four evaluator is also checked and tested, but the live builder does not invoke it
 until render snapshots carry the current pause-object/player selection and `dark_dist`. For zones
@@ -172,6 +175,14 @@ water plane remain available for the source ceiling/zone fallback without silent
 detached octree to geometry candidates. `StopAtZone` can move the typed object-zone identity when a
 current neighbor contains the object.
 
+The machine also owns the source process globals used by this pass. Smooth-stop history is shared
+by interleaved objects, and the pointer-free `cur_zone_query` equivalent persists across objects,
+frames and current-zone replacement until its strict collider bound escapes or `LevelInitMisc`
+invalidates it. Collision-generated ceiling, outside-zone, water and surface events yield from the
+solver at the native call sites. Before each nested GOOL handler, the runtime publishes the full
+pre-physics state plus the ordered collision-effect prefix; afterward it refreshes handler
+mutations before continuing the same pull pass.
+
 The PBAK runtime adapter accepts the ordinary 304-spawn-word snapshot and the one observed
 511-word layout only when its discarded tail is zero. It remaps serialized X/Y/Z rotation into the
 VM's Y/X/Z register order, restores camera/path/progress and Crash state, and preserves the recorded
@@ -179,11 +190,21 @@ RNG, draw stamp, bounds and timing. `DemoPlayer` makes the final recorded pad wo
 the finished/physical-interrupt handoff. Before the restart, the runtime creates the exact
 executable-four/subtype-eight controller under root one with its two caption arguments. Its typed
 null lifecycle zone survives zone termination while environment lookups use the checked current
-ZDAT fallback. At completion, a tagged live `caption_obj` handle receives synchronous event
+ZDAT fallback. Children retain that null lifecycle identity too, but binding and process-color
+initialization use the current camera ZDAT exactly where native `GoolObjectCreate` falls back to
+`cur_zone`; no `EID_NONE` asset lookup is attempted. At completion, a tagged live `caption_obj`
+handle receives synchronous event
 `0xE00` when `island_cam_rot_x` is nonzero; otherwise playback simply releases physical input. The
-browser currently samples pad/PBAK state once before its whole GOOL traversal; native code reaches
-that update between the root-one caption and root-six Crash updates, so this intra-frame placement
-remains an explicit compatibility boundary.
+browser advances pad/PBAK state through a typed traversal hook immediately before the live Crash
+object under root six. Earlier root-one caption work has completed; the completion event/rebind,
+state-three latch and final pad history are then visible to Crash and every later root in the same
+frame. Because `PbakStart` follows `GLUpdate`, the start frame keeps ordinary wall timing through
+root one and Crash retains the wall tick count while installing the recording header's TPF. On
+later recorded frames, the preceding `GLUpdate` exposes `(ticks_cur_frame, ticks_per_frame) ==
+(17, recorded TPF)` throughout the traversal; returning frames expose `(17, rounded wall TPF)`.
+The non-advancing timing peek prevents the Crash hook from consuming a frame twice. If later
+traversal fails after the synchronous caption event, its captured effect slice is recovered exactly
+once because no completed `RuntimeFrame` exists to carry it.
 
 `RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
 VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs

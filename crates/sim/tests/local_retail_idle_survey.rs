@@ -162,6 +162,11 @@ impl NSanityRouteController {
         let a3 = Eid::from_name("a3_9Z").expect("fixed N. Sanity route EID is valid");
         let a4 = Eid::from_name("a4_9Z").expect("fixed N. Sanity route EID is valid");
         let a5 = Eid::from_name("a5_9Z").expect("fixed N. Sanity route EID is valid");
+        let a6 = Eid::from_name("a6_9Z").expect("fixed N. Sanity route EID is valid");
+        let a7 = Eid::from_name("a7_9Z").expect("fixed N. Sanity route EID is valid");
+        let a8 = Eid::from_name("a8_9Z").expect("fixed N. Sanity route EID is valid");
+        let a9 = Eid::from_name("a9_9Z").expect("fixed N. Sanity route EID is valid");
+        let b0 = Eid::from_name("b0_9Z").expect("fixed N. Sanity route EID is valid");
         let progress = camera.progress.raw();
         let grounded = player.status_a & 1 != 0;
         if self.opening_stage < 2 {
@@ -371,6 +376,145 @@ impl NSanityRouteController {
                 button_frames: 16,
                 ..RouteAction::default()
             },
+            29 if camera.path.zone == a6 && progress >= 2_000 && grounded => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            30 if camera.path.zone == a6 && progress >= 7_000 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            31 if camera.path.zone == a6 && progress >= 10_000 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            32 if camera.path.zone == a6 && progress >= 15_000 && grounded => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            33 if camera.path.zone == a7 && progress >= 2_500 && grounded => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            34 if camera.path.zone == a7 && progress >= 9_000 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            35 if camera.path.zone == a7
+                && camera.path.index == 1
+                && progress >= 2_900
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            36 if camera.path.zone == a7
+                && camera.path.index == 1
+                && progress >= 18_500
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            37 if camera.path.zone == a7
+                && camera.path.index == 2
+                && progress >= 13_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            38 if camera.path.zone == a8
+                && camera.path.index == 1
+                && progress >= 16_500
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            39 if camera.path.zone == a9
+                && camera.path.index == 0
+                && progress >= 11_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            40 if camera.path.zone == a9
+                && camera.path.index == 2
+                && progress >= 9_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            41 if camera.path.zone == a9
+                && camera.path.index == 1
+                && progress >= 6_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            42 if camera.path.zone == b0
+                && camera.path.index == 0
+                && progress >= 2_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            43 if camera.path.zone == b0
+                && camera.path.index == 0
+                && progress >= 17_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
             _ => return PAD_UP,
         };
         self.active = Some(action);
@@ -1561,7 +1705,19 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         survey.summary()
     );
     if frames >= 900 {
-        for zone_name in ["a1_9Z", "a2_9Z", "a3_9Z", "a4_9Z", "a5_9Z", "a6_9Z"] {
+        for zone_name in [
+            "a1_9Z", "a2_9Z", "a3_9Z", "a4_9Z", "a5_9Z", "a6_9Z", "a7_9Z",
+        ] {
+            let zone = Eid::from_name(zone_name).unwrap();
+            assert!(
+                survey.camera_ranges.keys().any(|path| path.zone == zone),
+                "the authored controller did not reach {zone_name}: {}",
+                survey.summary()
+            );
+        }
+    }
+    if frames >= 1_400 {
+        for zone_name in ["a8_9Z", "a9_9Z", "b0_9Z", "b1_9Z"] {
             let zone = Eid::from_name(zone_name).unwrap();
             assert!(
                 survey.camera_ranges.keys().any(|path| path.zone == zone),

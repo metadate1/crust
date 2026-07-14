@@ -47,7 +47,10 @@ frame offset. The checked browser adapter prepared all nine, validated each reco
 accepted Upstream only because its extra active-spawn tail is zero, and preserved the one legal pad
 word containing a bit above the 16-bit physical-controller range. A separate raw-BIN corpus test
 also bound the native executable-four/subtype-eight caption controller in every one of those nine
-pairs, retained its null lifecycle zone, and rejected no program or environment lookup.
+pairs, retained its null lifecycle zone, and rejected no program or environment lookup. The exact
+non-advancing timing sweep covered all 10,966 frames. It separately verified the start-frame split
+(wall timing through root one, wall tick count plus header TPF at Crash), later recorded frames at
+`(17, recorded TPF)`, and returning frames at `(17, rounded wall TPF)`.
 
 The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
 verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
@@ -112,14 +115,13 @@ copy any disc or stream bytes into the repository:
   nonlinear overlay-alpha sequence, including opaque blank/swap phases and the pre-quantization
   counter step used by the WebGL pass.
 - The strict goal-directed N. Sanity survey completed its default 18,000 frames with
-  `terminal=None`, `next_lid=None`, 16 live objects (peak 19), 286,888 GOOL executions, zero VM
-  errors and zero faulted objects. It recorded 33 successful spawns from 249,014 attempts, zero
-  unexpected spawn failures, seven zone transitions, 17 camera-path changes, four save handshakes
-  and no restart. State-aware forward/jump/spin/steering input carried Crash through
-  `e0_9Z → a0_9Z → a1_9Z → a2_9Z → a3_9Z → a4_9Z → a5_9Z → a6_9Z`; the trace reached `a6_9Z`
-  at frame 759, then remained safely at its first authored ledge through frame 18,000. It recorded
-  neither a below-zero player position nor terminal-fall velocity. This proves a clean authored
-  progression window, not a completed level.
+  `terminal=None`, `next_lid=None`, 352,077 GOOL executions, zero VM errors and zero faulted
+  objects. It recorded 50 successful spawns, zero unexpected spawn failures, 12 zone transitions,
+  no restart, and neither a below-zero player position nor terminal-fall velocity. State-aware
+  forward/jump/spin/steering input carried Crash through
+  `e0_9Z → a0_9Z → a1_9Z → … → a9_9Z → b0_9Z → b1_9Z`; the trace reached `b1_9Z` path zero at
+  progress 218 by frame 1,396 and remained stable there through frame 18,000. This proves a clean
+  authored progression window, not a completed level.
 - A separate strict 360-frame Hog Wild idle trace completed with 713 GOOL executions, zero
   execution errors, zero faulted objects and no checked issues. Crash retained the typed detached
   object zone `0c_hZ`; its rectangle, graphics and water fallback remained available without
@@ -127,10 +129,19 @@ copy any disc or stream bytes into the repository:
   signed display fade reached `-2` then `-1`, and `LoadState` completed same-level restarts at
   frames 179 and 356. No below-zero or terminal fall remained. This verifies the idle
   death/restart loop, not steering or level-completion parity.
+- An isolated legally-local Intro test held the shipped no-link terminal path for 64 GOOL frames
+  without inventing a transition, confirmed the main controller stayed in state 15, injected its
+  first fresh `PAD_START` tap, observed state 16, and received the authored `Transition(0x19)`
+  within four frames.
 - Focused renderer tests exercise mode-two dual color ramps and cutoff, mode-three SVTX fade and
   CVTX shift/cutoff, the checked pure mode-four lighting calculation and malformed-coordinate
   rejection. Web scene tests confirm modes two/three are gated into live object rendering and that
   graphics flag `0x1000` substitutes the Q24.8 bobbing/fixed-pitch camera for objects only.
+- The exact Jungle Rollers `pb0cB` integration trace builds every scene through frame 231 and
+  checks every contained object execution. It covers `FruiC` raw sprite shifts 24, 26, 28, 31, 34,
+  246, 271 and 297 with their low-five-bit effective values, and verifies the caption's
+  executable-four/subtype-nine child keeps a null lifecycle zone while using the current ZDAT for
+  environment/colors.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
@@ -228,13 +239,25 @@ audio active. Disc bytes remained local to the browser tab. DevTools network/con
 inspected in this foreground pass, so the visible engineering log and successful rendering are the
 only browser error evidence claimed here.
 
+The final 2026-07-14 renderer/PBAK build was then reloaded in a foreground Chrome 150 session and
+the same 632,083,536-byte legal BIN was selected through the native file chooser. Client-side
+discovery again reported 88 files, all 44 pairs, 43 playable pairs and 219 MiB, with no upload path.
+The authored Naughty Dog/title sequence reached the real menu, timed out to Intro `0x38`, accepted
+a fresh Return/Start edge back to title, and entered the Jungle Rollers `pb0cB` attract path at
+`0x0C`. The final run remained `RUNNING` beyond both the caption-child and raw sprite-shift
+regressions. At retail frame 1,601, the live debug surface reported zero execution errors, zero
+faulted objects, no warning, no runtime error and WebGL error zero. The visible tab was left running
+the real local-data scene with synthesized audio enabled.
+
 ## Final automated results
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 655 asset-free tests passed, zero failed; 46 legally local tests
-  remain ignored by default (701 tests total across all targets).
+- locked native workspace suite: 680 asset-free tests passed, zero failed; 48 legally local tests
+  remain ignored by default (728 tests total across all targets).
 - post-fix legal-data gates passed against the supplied raw BIN and read-only extracted streams:
+  the complete opt-in workspace sweep passed 48 tests with zero failures, including the final
+  Jungle Rollers PBAK scene regression;
   88 exact streams/44 pairs and 229,312,048 extracted bytes; all nine PBAK recordings/10,966
   controller frames; the exact title-MDAT runtime check; all 43 bootable pairs for 360 strict
   frames; N. Sanity for 17,000 strict idle frames and 18,000 goal-directed frames; the focused Hog
@@ -250,8 +273,8 @@ only browser error evidence claimed here.
   raw BIN alone in the earlier sweep.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 1,143,491 bytes (SHA-256
-  `6a4bd5b8893bcf287d557ac445adc526d79c510270070880a798a19c43495c8d`).
+- generated web release: passed; Wasm payload was 1,162,154 bytes (SHA-256
+  `179489a2a99008a34cb9a80eb1fccb99a8105ac37e6bd151195c59baacc03328`).
 
 ## Reproducible commands
 
@@ -276,6 +299,9 @@ C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
   C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
   every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_intro_terminal_start --locked \
+  -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \

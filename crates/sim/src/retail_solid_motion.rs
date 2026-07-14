@@ -319,6 +319,13 @@ impl Default for SolidMotionState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SolidObjectCandidate {
     pub id: u32,
+    /// Whether this exact dynamic-object generation remains live.
+    ///
+    /// Hosted synchronous handlers may terminate a candidate and immediately
+    /// reuse its compact VM slot. Keeping liveness separate from `id` lets the
+    /// solver retain the frame-owned AABB without ever treating that
+    /// replacement as the original collision object.
+    pub active: bool,
     pub translation: Vec3,
     pub bounds: Bounds3,
     pub status_b: u32,
@@ -514,6 +521,16 @@ impl SolidQuery {
     #[must_use]
     pub fn nodes(&self) -> &[SolidQueryNode] {
         &self.nodes
+    }
+
+    /// Reports whether native's first floor-query guard reuses this cache for
+    /// the event probe at `translation`.
+    pub fn strictly_contains_event_probe(
+        &self,
+        translation: Vec3,
+    ) -> Result<bool, SolidMotionError> {
+        let event_bound = checked_translate_bound(TEST_BOUND_EVENT, translation)?;
+        Ok(bound_strictly_contains(self.nodes_bound, event_bound))
     }
 }
 
@@ -740,6 +757,48 @@ pub fn solve_retail_solid_motion(
     context: SolidMotionContext,
     smooth_stop: SmoothStopMemory,
 ) -> Result<SolidMotionOutcome, SolidMotionError> {
+    let mut query_cache = None;
+    let mut candidates = candidates.to_vec();
+    solve_retail_solid_motion_with_event_handler(
+        zones,
+        &mut candidates,
+        state,
+        displacement,
+        context,
+        smooth_stop,
+        &mut query_cache,
+        |_, _, _, _, _| true,
+    )
+}
+
+/// Runs retail solid motion while yielding each native `GoolSendEvent` call.
+///
+/// The callback receives the complete ordered effect prefix through the event
+/// being sent. A hosted runtime can therefore commit collision-link/status
+/// effects before executing the GOOL handler, then refresh `state` from the
+/// live object before returning. Returning `false` stops the remaining motion
+/// pass, as required when the handler terminates the mover or requests a level
+/// restart. `query_cache` models native process-global `cur_zone_query`: the
+/// caller retains it across objects and frames, and this function rebuilds it
+/// only when the event probe escapes its strict cached `nodes_bound`. The
+/// ordinary pure solver above installs a no-op callback and a fresh cache.
+#[allow(clippy::too_many_arguments)]
+pub fn solve_retail_solid_motion_with_event_handler(
+    zones: &[SolidZoneView<'_>],
+    candidates: &mut [SolidObjectCandidate],
+    state: SolidMotionState,
+    displacement: Vec3,
+    context: SolidMotionContext,
+    smooth_stop: SmoothStopMemory,
+    query_cache: &mut Option<SolidQuery>,
+    mut event_handler: impl FnMut(
+        &mut SolidMotionState,
+        &mut SolidObjectZone,
+        &mut [SolidObjectCandidate],
+        &[SolidEffect],
+        SolidEffect,
+    ) -> bool,
+) -> Result<SolidMotionOutcome, SolidMotionError> {
     let mut state = state;
     let mut effective_displacement = displacement;
     if smooth_stop.being_stopped {
@@ -758,13 +817,13 @@ pub fn solve_retail_solid_motion(
     let mut translation = state.translation;
     let mut remaining = effective_displacement;
     let maximum = maximum_step(remaining);
-    let mut query = None;
     let mut effects = Vec::new();
     let mut summary = SolidQuerySummary::default();
     let mut floor = None;
     let mut object_zone = context.object_zone;
     let mut iterations = 0_usize;
     let mut stopped_by_wall = false;
+    let mut interrupted = false;
 
     while remaining != Vec3::ZERO {
         if iterations == MAX_PULL_STEPS {
@@ -784,10 +843,11 @@ pub fn solve_retail_solid_motion(
             &mut state,
             translation,
             step,
-            &mut query,
+            query_cache,
             &mut object_zone,
             context,
             &mut effects,
+            &mut event_handler,
         )?;
         translation = step_outcome.translation;
         summary = step_outcome.summary;
@@ -795,6 +855,10 @@ pub fn solve_retail_solid_motion(
         stopped_by_wall |= step_outcome.stopped_by_wall;
         remaining = checked_vec_sub(remaining, step)?;
         iterations += 1;
+        if step_outcome.interrupted {
+            interrupted = true;
+            break;
+        }
     }
     state.translation = translation;
 
@@ -813,15 +877,18 @@ pub fn solve_retail_solid_motion(
         SmoothStopMemory::default()
     };
 
-    if state.status_a & STATUS_SURFACE_EVENT != 0
+    if !interrupted
+        && state.status_a & STATUS_SURFACE_EVENT != 0
         && (state.status_a & STATUS_GROUNDLAND == 0 || state.event != EVENT_FALL_KILL)
     {
-        effects.push(SolidEffect::SendEvent {
+        let effect = SolidEffect::SendEvent {
             target: SolidEventTarget::MovingObject,
             event: state.event,
             argument: 0x6400,
             reason: SolidEventReason::Surface,
-        });
+        };
+        effects.push(effect);
+        let _ = event_handler(&mut state, &mut object_zone, candidates, &effects, effect);
     }
 
     Ok(SolidMotionOutcome {
@@ -842,12 +909,22 @@ struct StepOutcome {
     summary: SolidQuerySummary,
     floor: Option<i32>,
     stopped_by_wall: bool,
+    interrupted: bool,
 }
+
+type SolidEventHandler<'a> = dyn FnMut(
+        &mut SolidMotionState,
+        &mut SolidObjectZone,
+        &mut [SolidObjectCandidate],
+        &[SolidEffect],
+        SolidEffect,
+    ) -> bool
+    + 'a;
 
 #[allow(clippy::too_many_arguments)]
 fn stop_at_solid(
     zones: &[SolidZoneView<'_>],
-    candidates: &[SolidObjectCandidate],
+    candidates: &mut [SolidObjectCandidate],
     state: &mut SolidMotionState,
     translation: Vec3,
     displacement: Vec3,
@@ -855,6 +932,7 @@ fn stop_at_solid(
     object_zone: &mut SolidObjectZone,
     context: SolidMotionContext,
     effects: &mut Vec<SolidEffect>,
+    event_handler: &mut SolidEventHandler<'_>,
 ) -> Result<StepOutcome, SolidMotionError> {
     let mut adjusted = checked_vec_add(translation, displacement)?;
     let floor_result = stop_at_floor(
@@ -891,7 +969,7 @@ fn stop_at_solid(
     let collider_type = state.collider.and_then(|id| {
         candidates
             .iter()
-            .find(|candidate| candidate.id == id)
+            .find(|candidate| candidate.active && candidate.id == id)
             .map(|candidate| candidate.object_type)
     });
     let mut nearest =
@@ -932,8 +1010,26 @@ fn stop_at_solid(
     }
 
     let mut summary = floor_result.summary;
-    let ceiling = stop_at_ceiling(zones, candidates, adjusted, query, *object_zone, effects)?;
+    let (ceiling, interrupted) = stop_at_ceiling(
+        zones,
+        candidates,
+        state,
+        adjusted,
+        query,
+        object_zone,
+        effects,
+        event_handler,
+    )?;
     summary.ceiling = ceiling;
+    if interrupted {
+        return Ok(StepOutcome {
+            translation: adjusted,
+            summary,
+            floor: floor_result.floor,
+            stopped_by_wall,
+            interrupted: true,
+        });
+    }
     if let Some(ceiling) = ceiling {
         let object_top = adjusted
             .y
@@ -952,12 +1048,22 @@ fn stop_at_solid(
             state.status_a |= STATUS_HIT_CEILING;
         }
     }
-    stop_at_zone(zones, state, &mut adjusted, object_zone, context, effects)?;
+    let interrupted = stop_at_zone(
+        zones,
+        candidates,
+        state,
+        &mut adjusted,
+        object_zone,
+        context,
+        effects,
+        event_handler,
+    )?;
     Ok(StepOutcome {
         translation: adjusted,
         summary,
         floor: floor_result.floor,
         stopped_by_wall,
+        interrupted,
     })
 }
 
@@ -1017,10 +1123,11 @@ fn stop_at_floor(
     if let Some(object_y) = object_floor {
         floor_nodes_y = Some(object_y);
         flags = 0x0020_0001;
-        if let Some(collider) = state
-            .collider
-            .and_then(|id| candidates.iter().find(|candidate| candidate.id == id))
-        {
+        if let Some(collider) = state.collider.and_then(|id| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.active && candidate.id == id)
+        }) {
             if collider.status_b & BOX_OBJECT != 0 {
                 floor_offset = 0x19_000;
             }
@@ -1233,6 +1340,9 @@ fn highest_object_below(
     let mut highest = None;
     let mut found = None;
     for candidate in candidates {
+        if !candidate.active {
+            continue;
+        }
         let higher = highest.is_none_or(|height| height < candidate.bounds.max.y);
         if (test_y >= candidate.bounds.max.y || candidate.status_b & BOX_OBJECT != 0)
             && higher
@@ -1280,7 +1390,10 @@ fn register_object_collision(
             });
             return Ok(());
         }
-        if let Some(current) = candidates.iter().find(|current| current.id == current_id) {
+        if let Some(current) = candidates
+            .iter()
+            .find(|current| current.active && current.id == current_id)
+        {
             let current_distance = approximate_distance(state.translation, current.translation)?;
             let candidate_distance =
                 approximate_distance(state.translation, candidate.translation)?;
@@ -1345,16 +1458,21 @@ fn approximate_distance(left: Vec3, right: Vec3) -> Result<i32, SolidMotionError
 #[allow(clippy::too_many_arguments)]
 fn stop_at_ceiling(
     zones: &[SolidZoneView<'_>],
-    candidates: &[SolidObjectCandidate],
+    candidates: &mut [SolidObjectCandidate],
+    state: &mut SolidMotionState,
     next_translation: Vec3,
     query: &SolidQuery,
-    object_zone: SolidObjectZone,
+    object_zone: &mut SolidObjectZone,
     effects: &mut Vec<SolidEffect>,
-) -> Result<Option<i32>, SolidMotionError> {
+    event_handler: &mut SolidEventHandler<'_>,
+) -> Result<(Option<i32>, bool), SolidMotionError> {
     let object_probe = checked_translate_bound(TEST_BOUND_OBJECT_TOP, next_translation)?;
     let mut minimum_object_y = None;
     let mut found = None;
-    for candidate in candidates {
+    for candidate in candidates.iter() {
+        if !candidate.active {
+            continue;
+        }
         if candidate.status_b & SOLID_BOTTOM == 0 {
             continue;
         }
@@ -1367,7 +1485,7 @@ fn stop_at_ceiling(
     }
     let static_probe = checked_translate_bound(TEST_BOUND_CEILING, next_translation)?;
     let mut ceiling = find_ceiling_y(query, static_probe, 2, 1)?;
-    let zone = object_zone
+    let zone = (*object_zone)
         .boundary(zones)?
         .ok_or(SolidMotionError::MissingObjectZone)?;
     if zone.graphics_flags & 0x0002_0000 != 0 {
@@ -1391,16 +1509,20 @@ fn stop_at_ceiling(
                 candidate: candidate.id,
                 status_bits: STATUS_HIT_CEILING,
             });
-            effects.push(SolidEffect::SendEvent {
+            let effect = SolidEffect::SendEvent {
                 target: SolidEventTarget::Candidate(candidate.id),
                 event: 0x1700,
                 argument: 0x6400,
                 reason: SolidEventReason::ObjectHitFromBelow,
-            });
+            };
+            effects.push(effect);
+            if !event_handler(state, object_zone, candidates, effects, effect) {
+                return Ok((Some(object_y), true));
+            }
         }
-        return Ok(Some(object_y));
+        return Ok((Some(object_y), false));
     }
-    Ok(ceiling)
+    Ok((ceiling, false))
 }
 
 /// Averages the lower faces of all overlapping nodes of either requested type.
@@ -1428,14 +1550,17 @@ pub fn find_ceiling_y(
     average_height(sum, count)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stop_at_zone(
     zones: &[SolidZoneView<'_>],
+    candidates: &mut [SolidObjectCandidate],
     state: &mut SolidMotionState,
     next_translation: &mut Vec3,
     object_zone: &mut SolidObjectZone,
     context: SolidMotionContext,
     effects: &mut Vec<SolidEffect>,
-) -> Result<(), SolidMotionError> {
+    event_handler: &mut SolidEventHandler<'_>,
+) -> Result<bool, SolidMotionError> {
     if let Some(containing) = find_containing_zone(zones, *next_translation)? {
         if *object_zone != SolidObjectZone::CurrentNeighbor(containing) {
             effects.push(SolidEffect::ZoneChanged {
@@ -1452,20 +1577,35 @@ fn stop_at_zone(
             .ok_or(SolidMotionError::ArithmeticOverflow)?;
         if object_bottom < bottom {
             if context.quirks.drown_when_below_zone {
-                effects.push(SolidEffect::SendEvent {
+                let effect = SolidEffect::SendEvent {
                     target: SolidEventTarget::MovingObject,
                     event: EVENT_DROWN,
                     argument: 0,
                     reason: SolidEventReason::OutsideZone,
-                });
+                };
+                effects.push(effect);
+                if !event_handler(state, object_zone, candidates, effects, effect) {
+                    return Ok(true);
+                }
             }
+            // `SZON` inside the synchronous DROWN handler mutates `obj->zone`.
+            // Native reloads that pointer before selecting the fall-kill or
+            // solid-bottom branch, while retaining the rectangle/bottom read
+            // before the event.
+            let zone = object_zone
+                .boundary(zones)?
+                .ok_or(SolidMotionError::MissingObjectZone)?;
             if zone.graphics_flags & 2 != 0 && state.invincibility_state != 2 {
-                effects.push(SolidEffect::SendEvent {
+                let effect = SolidEffect::SendEvent {
                     target: SolidEventTarget::MovingObject,
                     event: EVENT_FALL_KILL,
                     argument: 0x6400,
                     reason: SolidEventReason::OutsideZone,
-                });
+                };
+                effects.push(effect);
+                if !event_handler(state, object_zone, candidates, effects, effect) {
+                    return Ok(true);
+                }
             } else {
                 next_translation.y = bottom
                     .checked_sub(state.local_bound.min.y)
@@ -1484,14 +1624,18 @@ fn stop_at_zone(
         && state.translation.y < zone.water_y
         && context.quirks.lethal_river_water
     {
-        effects.push(SolidEffect::SendEvent {
+        let effect = SolidEffect::SendEvent {
             target: SolidEventTarget::MovingObject,
             event: EVENT_DROWN,
             argument: 0x2_7100,
             reason: SolidEventReason::Water,
-        });
+        };
+        effects.push(effect);
+        if !event_handler(state, object_zone, candidates, effects, effect) {
+            return Ok(true);
+        }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn find_containing_zone(
@@ -1979,6 +2123,9 @@ fn plot_object_walls(
     )
     .ok_or(SolidMotionError::ArithmeticOverflow)?;
     for candidate in candidates {
+        if !candidate.active {
+            continue;
+        }
         if include_collisions
             && state.collider == Some(candidate.id)
             && test_bound.min.y >= candidate.bounds.max.y
@@ -2429,6 +2576,237 @@ mod tests {
             argument: 0x6400,
             reason: SolidEventReason::Surface,
         }));
+    }
+
+    #[test]
+    fn outside_zone_drown_handler_can_prevent_the_following_fall_kill() {
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let zone = SolidZoneView::new([0; 3], [100; 3], 0, [0; 3], &bytes)
+            .unwrap()
+            .with_graphics(2, i32::MIN);
+        let state = SolidMotionState {
+            translation: Vec3 { x: 0, y: 100, z: 0 },
+            velocity: Vec3 {
+                x: 0,
+                y: -200,
+                z: 0,
+            },
+            local_bound: Bounds3::default(),
+            ..SolidMotionState::default()
+        };
+        let context = SolidMotionContext {
+            object_zone: SolidObjectZone::CurrentNeighbor(0),
+            quirks: SolidLevelQuirks {
+                drown_when_below_zone: true,
+                ..SolidLevelQuirks::default()
+            },
+            ..SolidMotionContext::default()
+        };
+
+        let deferred = solve_retail_solid_motion(
+            &[zone],
+            &[],
+            state,
+            Vec3 {
+                x: 0,
+                y: -200,
+                z: 0,
+            },
+            context,
+            SmoothStopMemory::default(),
+        )
+        .unwrap();
+        assert!(deferred.effects.iter().any(|effect| matches!(
+            effect,
+            SolidEffect::SendEvent {
+                event: EVENT_FALL_KILL,
+                ..
+            }
+        )));
+
+        let mut delivered = Vec::new();
+        let mut query_cache = None;
+        let mut candidates = [];
+        let inline = solve_retail_solid_motion_with_event_handler(
+            &[zone],
+            &mut candidates,
+            state,
+            Vec3 {
+                x: 0,
+                y: -200,
+                z: 0,
+            },
+            context,
+            SmoothStopMemory::default(),
+            &mut query_cache,
+            |state, _, _, _, effect| {
+                delivered.push(effect);
+                if matches!(
+                    effect,
+                    SolidEffect::SendEvent {
+                        event: EVENT_DROWN,
+                        ..
+                    }
+                ) {
+                    state.invincibility_state = 2;
+                }
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            delivered,
+            [SolidEffect::SendEvent {
+                target: SolidEventTarget::MovingObject,
+                event: EVENT_DROWN,
+                argument: 0,
+                reason: SolidEventReason::OutsideZone,
+            }]
+        );
+        assert_eq!(inline.state.translation.y, 0);
+        assert_eq!(inline.state.velocity.y, 0);
+        assert_ne!(inline.state.status_a & STATUS_GROUNDLAND, 0);
+    }
+
+    #[test]
+    fn inline_ceiling_handler_can_disable_a_candidate_before_the_next_pull_step() {
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let zone = SolidZoneView::new([-2_000; 3], [4_000; 3], 0, [0; 3], &bytes).unwrap();
+        let mut candidates = [SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3 {
+                x: 0,
+                y: 250_000,
+                z: 0,
+            },
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -20_000,
+                    y: 250_000,
+                    z: -20_000,
+                },
+                max: Vec3 {
+                    x: 20_000,
+                    y: 500_000,
+                    z: 20_000,
+                },
+            },
+            status_b: SOLID_BOTTOM,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 0,
+        }];
+        let state = SolidMotionState {
+            velocity: Vec3 {
+                x: 0,
+                y: 200_000,
+                z: 0,
+            },
+            local_bound: Bounds3::default(),
+            ..SolidMotionState::default()
+        };
+        let mut query_cache = None;
+        let mut delivered = 0;
+
+        let outcome = solve_retail_solid_motion_with_event_handler(
+            &[zone],
+            &mut candidates,
+            state,
+            Vec3 {
+                x: 0,
+                y: 200_000,
+                z: 0,
+            },
+            SolidMotionContext {
+                object_zone: SolidObjectZone::CurrentNeighbor(0),
+                ..SolidMotionContext::default()
+            },
+            SmoothStopMemory::default(),
+            &mut query_cache,
+            |_, _, candidates, _, effect| {
+                assert!(matches!(
+                    effect,
+                    SolidEffect::SendEvent {
+                        target: SolidEventTarget::Candidate(7),
+                        reason: SolidEventReason::ObjectHitFromBelow,
+                        ..
+                    }
+                ));
+                delivered += 1;
+                candidates[0].active = false;
+                true
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.movement_iterations, 2);
+        assert_eq!(delivered, 1);
+        assert!(!candidates[0].active);
+    }
+
+    #[test]
+    fn caller_owned_query_cache_reuses_until_strict_upper_escape() {
+        fn solve_at(
+            zone: SolidZoneView<'_>,
+            context: SolidMotionContext,
+            query_cache: &mut Option<SolidQuery>,
+            translation_x: i32,
+        ) {
+            let mut candidates = [];
+            solve_retail_solid_motion_with_event_handler(
+                &[zone],
+                &mut candidates,
+                SolidMotionState {
+                    translation: Vec3 {
+                        x: translation_x,
+                        y: 0,
+                        z: 0,
+                    },
+                    local_bound: Bounds3::default(),
+                    ..SolidMotionState::default()
+                },
+                Vec3 { x: 1, y: 0, z: 0 },
+                context,
+                SmoothStopMemory::default(),
+                query_cache,
+                |_, _, _, _, _| true,
+            )
+            .unwrap();
+        }
+
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let zone = SolidZoneView::new([-2_000; 3], [4_000; 3], 0, [0; 3], &bytes).unwrap();
+        let context = SolidMotionContext {
+            object_zone: SolidObjectZone::CurrentNeighbor(0),
+            ..SolidMotionContext::default()
+        };
+        let mut query_cache = None;
+
+        solve_at(zone, context, &mut query_cache, 0);
+        let initial = query_cache.clone().unwrap();
+        let cached_upper_x = initial.nodes_bound.max.x;
+        let inside_x = cached_upper_x - TEST_BOUND_EVENT.max.x - 2;
+        solve_at(zone, context, &mut query_cache, inside_x);
+        assert_eq!(query_cache, Some(initial.clone()));
+
+        let equality_x = cached_upper_x - TEST_BOUND_EVENT.max.x - 1;
+        solve_at(zone, context, &mut query_cache, equality_x);
+        let rebuilt = query_cache.unwrap();
+        assert_ne!(rebuilt.nodes_bound, initial.nodes_bound);
+        assert_eq!(
+            rebuilt.nodes_bound,
+            query_bound(Vec3 {
+                x: equality_x + 1,
+                y: 0,
+                z: 0,
+            })
+            .unwrap(),
+            "an event-bound high face equal to the cached high face is outside native's strict bound"
+        );
     }
 
     proptest! {

@@ -12,7 +12,7 @@ use crate::command::ScreenPoint;
 use crate::projection::{Matrix3, Vec3i, project, rotate, sprite_rotation_matrix};
 use crate::rotation::{angle12, zxy_rotation_matrix};
 
-const MAX_SAFE_SHIFT: u8 = 30;
+const MAX_EFFECTIVE_SHIFT: u8 = 31;
 const ORDERING_DEPTH_MAX: i64 = 0x7ff;
 
 /// GOOL transform vectors consumed by the retail sprite matrix path.
@@ -110,17 +110,51 @@ pub struct ProjectedSpriteQuad {
     pub ordering_depth: u16,
 }
 
-/// Derives retail's exponential sprite-shrink shift from signed scale X.
+/// Derives retail's effective exponential sprite-shrink shift from signed
+/// scale X.
+///
+/// Native computes `abs(scale_x) / 27279`, then consumes that value only as a
+/// MIPS variable-shift count. `SRAV` and `SLLV` use its low five bits. Authored
+/// GOOL relies on this when projection scratch makes the raw count exceed 31.
 ///
 /// # Errors
 ///
-/// Rejects shifts above 30 rather than reproducing C's undefined oversized
-/// left/right shifts. Retail-authored objects normally select zero or one.
+/// Rejects `i32::MIN`, whose C `abs` has no representable signed result.
 pub fn retail_sprite_shrink(scale_x: i32) -> Result<u8, RetailSpriteError> {
-    let raw = scale_x.unsigned_abs() / 27_279;
-    let shift = u8::try_from(raw).unwrap_or(u8::MAX);
-    validate_shrink(shift)?;
-    Ok(shift)
+    let magnitude = scale_x
+        .checked_abs()
+        .ok_or(RetailSpriteError::ScaleOutOfRange(scale_x))?;
+    let raw = magnitude.cast_unsigned() / 27_279;
+    u8::try_from(raw & u32::from(MAX_EFFECTIVE_SHIFT))
+        .map_err(|_| RetailSpriteError::ScaleOutOfRange(scale_x))
+}
+
+/// Reproduces one PS1 variable left shift without relying on C signed-overflow
+/// behavior.
+///
+/// # Errors
+///
+/// Rejects counts outside the effective five-bit MIPS shift range.
+pub fn retail_sprite_shift_word(value: i32, shrink: u8) -> Result<i32, RetailSpriteError> {
+    validate_shrink(shrink)?;
+    Ok(value.wrapping_shl(u32::from(shrink)))
+}
+
+/// Reproduces the PS1 `200 << shrink` sprite half-size calculation without
+/// relying on C signed-overflow behavior.
+///
+/// Authored GOOL can transiently select a shift whose mathematical result is
+/// larger than `i32::MAX`. The retail MIPS instruction retains the low 32
+/// bits, and the following GTE path either projects that signed value or
+/// rejects the saturated quad. Treating the same value as a scene-construction
+/// error pauses the whole browser even though retail only skips that sprite.
+///
+/// # Errors
+///
+/// Rejects shifts outside the validated range used by the matching sprite
+/// matrix calculation.
+pub fn retail_sprite_half_size(shrink: u8) -> Result<i32, RetailSpriteError> {
+    retail_sprite_shift_word(200, shrink)
 }
 
 /// Projects the source's `[-size, size]` sprite square. All four RTPS results
@@ -246,7 +280,7 @@ fn ordering_depth(ordering_far: i64, z_sum: i64) -> u16 {
 }
 
 fn validate_shrink(shrink: u8) -> Result<(), RetailSpriteError> {
-    if shrink > MAX_SAFE_SHIFT {
+    if shrink > MAX_EFFECTIVE_SHIFT {
         Err(RetailSpriteError::ShrinkOutOfRange(shrink))
     } else {
         Ok(())
@@ -256,6 +290,7 @@ fn validate_shrink(shrink: u8) -> Result<(), RetailSpriteError> {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetailSpriteError {
     ShrinkOutOfRange(u8),
+    ScaleOutOfRange(i32),
     ProjectionOutOfRange(u32),
 }
 
@@ -263,7 +298,13 @@ impl fmt::Display for RetailSpriteError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ShrinkOutOfRange(value) => {
-                write!(formatter, "retail sprite shift {value} exceeds 30")
+                write!(formatter, "retail sprite shift {value} exceeds 31")
+            }
+            Self::ScaleOutOfRange(value) => {
+                write!(
+                    formatter,
+                    "retail sprite scale {value} has no signed magnitude"
+                )
             }
             Self::ProjectionOutOfRange(value) => {
                 write!(
@@ -371,11 +412,87 @@ mod tests {
         assert_eq!(retail_sprite_shrink(27_279), Ok(1));
         assert_eq!(
             retail_sprite_shrink(i32::MIN),
-            Err(RetailSpriteError::ShrinkOutOfRange(u8::MAX))
+            Err(RetailSpriteError::ScaleOutOfRange(i32::MIN))
         );
         assert_eq!(
-            RetailSpriteTransform::screen_2d(vectors(), 31, 500),
-            Err(RetailSpriteError::ShrinkOutOfRange(31))
+            RetailSpriteTransform::screen_2d(vectors(), 32, 500),
+            Err(RetailSpriteError::ShrinkOutOfRange(32))
+        );
+        assert!(RetailSpriteTransform::screen_2d(vectors(), 31, 500).is_ok());
+    }
+
+    #[test]
+    fn pbak_fruit_raw_shift_sequence_uses_the_mips_low_five_bits() {
+        for (raw, effective) in [
+            (24_u32, 24_u8),
+            (26, 26),
+            (28, 28),
+            (31, 31),
+            (34, 2),
+            (246, 22),
+            (271, 15),
+            (297, 9),
+        ] {
+            let magnitude = i32::try_from(raw * 27_279).unwrap();
+            assert_eq!(retail_sprite_shrink(-magnitude), Ok(effective));
+        }
+    }
+
+    #[test]
+    fn authored_large_sprite_shift_wraps_like_the_retail_mips_word() {
+        // Exact live pb0cB 2D FruiC scale on recorded frame 179 at 0a_cZ:0
+        // progress 0x297. Its shift is a valid 32-bit retail word, not a fatal
+        // asset-format error.
+        let scale = [-655_688, 1_665_544, 1_257];
+        let shrink = retail_sprite_shrink(scale[0]).unwrap();
+        assert_eq!(shrink, 24);
+        assert_eq!(
+            retail_sprite_half_size(shrink),
+            Ok(0xc800_0000_u32.cast_signed())
+        );
+
+        let transform = RetailSpriteTransform::screen_2d(
+            RetailSpriteVectors { scale, ..vectors() },
+            shrink,
+            500,
+        )
+        .unwrap();
+        assert!(
+            project_retail_sprite(
+                transform,
+                retail_sprite_half_size(shrink).unwrap(),
+                500,
+                1798,
+            )
+            .is_none(),
+            "retail's accumulated GTE validity flag culls the saturated fruit quad"
+        );
+    }
+
+    #[test]
+    fn malformed_sprite_half_size_shift_remains_rejected() {
+        assert_eq!(
+            retail_sprite_half_size(32),
+            Err(RetailSpriteError::ShrinkOutOfRange(32))
+        );
+        assert_eq!(retail_sprite_half_size(31), Ok(0));
+        assert_eq!(retail_sprite_shift_word(1, 31), Ok(i32::MIN));
+        assert_eq!(retail_sprite_shift_word(i32::MIN, 1), Ok(0));
+        assert_eq!(
+            retail_sprite_shift_word(1, 32),
+            Err(RetailSpriteError::ShrinkOutOfRange(32))
+        );
+        // A representable retail shift can still yield INT_MIN. The checked
+        // corner negation safely omits it instead of reproducing C `-INT_MIN`.
+        assert_eq!(retail_sprite_half_size(28), Ok(i32::MIN));
+        assert!(
+            project_retail_sprite(
+                RetailSpriteTransform::screen_2d(vectors(), 28, 500).unwrap(),
+                i32::MIN,
+                500,
+                1798,
+            )
+            .is_none()
         );
     }
 

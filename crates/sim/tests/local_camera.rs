@@ -9,8 +9,8 @@ use crust_formats::stream::{
 };
 use crust_sim::Vec3;
 use crust_sim::camera::{
-    GAME_STATE_PLAYING, RetailCameraFollowInput, RetailCameraInput, RetailCameraOutcome,
-    RetailCameraRuntime,
+    GAME_STATE_PLAYING, RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput,
+    RetailCameraOutcome, RetailCameraRuntime,
 };
 use crust_sim::retail_frame::PathProgress;
 
@@ -112,10 +112,20 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
     };
     let mut camera = RetailCameraRuntime::new(&graph).unwrap();
     let mut save_handshakes = 0_usize;
+    let mut level_updates = 0_usize;
     let mut path_crossings = 0_u32;
     for _ in 0..192 {
         let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
-        save_handshakes += step.effects.len();
+        save_handshakes += step
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, RetailCameraEffect::SaveStateHandshake { .. }))
+            .count();
+        level_updates += step
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, RetailCameraEffect::LevelUpdate { .. }))
+            .count();
         if let RetailCameraOutcome::AutoAdvanced {
             path_crossings: crossings,
             ..
@@ -131,6 +141,7 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
     );
     assert_eq!(camera.location().progress, PathProgress::ZERO);
     assert_eq!(path_crossings, 4);
+    assert_eq!(level_updates, 4);
     assert_eq!(save_handshakes, 4);
 
     let follow = camera.update(&graph, RetailCameraInput::default()).unwrap();
@@ -153,7 +164,23 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
             path_crossings: 4,
         }
     );
-    assert_eq!(skipped.effects.len(), 4);
+    assert_eq!(skipped.effects.len(), 8);
+    assert_eq!(
+        skipped
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, RetailCameraEffect::LevelUpdate { .. }))
+            .count(),
+        4
+    );
+    assert_eq!(
+        skipped
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, RetailCameraEffect::SaveStateHandshake { .. }))
+            .count(),
+        4
+    );
 }
 
 #[test]

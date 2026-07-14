@@ -24,7 +24,8 @@ use crust_renderer::retail_texture::{
 };
 use crust_renderer::sprite::{
     ProjectedSpriteQuad, RetailSpriteCamera, RetailSpriteTransform, RetailSpriteVectors,
-    project_retail_fragment, project_retail_sprite, retail_sprite_shrink,
+    project_retail_fragment, project_retail_sprite, retail_sprite_half_size,
+    retail_sprite_shift_word, retail_sprite_shrink,
 };
 use crust_renderer::text::{RetailTextProjection, project_retail_text};
 use crust_renderer::texture::{DecodedTexture, Rgba8};
@@ -1293,8 +1294,8 @@ fn prepare_sprite_animation(
         .map_err(|error| scene_error(format!("GOOL sprite shrink: {error}")))?;
     let transform =
         object_sprite_transform(object, camera, camera_matrix, projection_distance, shrink)?;
-    let half_size = i32::try_from(200_i64 << u32::from(shrink))
-        .map_err(|_| scene_error("GOOL sprite half-size exceeds signed transform space"))?;
+    let half_size = retail_sprite_half_size(shrink)
+        .map_err(|error| scene_error(format!("GOOL sprite half-size: {error}")))?;
     let ordering_far = object
         .size
         .wrapping_add(0x800)
@@ -1496,8 +1497,8 @@ fn object_sprite_transform(
 }
 
 fn scaled_fragment_bound(value: i16, shrink: u8) -> Result<i32, RetailSceneError> {
-    i32::try_from(i64::from(value) << u32::from(shrink))
-        .map_err(|_| scene_error("GOOL fragment bound exceeds signed transform space"))
+    retail_sprite_shift_word(i32::from(value), shrink)
+        .map_err(|error| scene_error(format!("GOOL fragment bound: {error}")))
 }
 
 fn prepared_object_quad(
@@ -2042,10 +2043,17 @@ mod tests {
         KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity,
         parse_nsd, parse_nsf,
     };
-    use crust_sim::camera::{RetailCameraInput, RetailCameraRuntime};
+    use crust_sim::camera::{RetailCameraFollowInput, RetailCameraInput, RetailCameraRuntime};
+    use crust_sim::gool::{RetailPadSnapshot, RetailTransformVectorsCamera, process_register};
+    use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
-    use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime};
+    use crust_sim::retail_runtime::{
+        NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
+    };
+    use crust_sim::zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone};
     use std::path::PathBuf;
+
+    use crate::pbak_runtime::{RetailPbakPlayback, prepare_pair_pbak};
 
     #[test]
     fn text_font_resolution_prefers_the_validated_dynamic_word_offset() {
@@ -2141,6 +2149,18 @@ mod tests {
         assert_eq!(projection_distance(60).unwrap(), 460);
         assert_eq!(projection_distance(90).unwrap(), 288);
         assert!(projection_distance(45).is_err());
+    }
+
+    #[test]
+    fn fragment_bounds_use_the_effective_mips_shift_word() {
+        assert_eq!(scaled_fragment_bound(1, 31), Ok(i32::MIN));
+        assert_eq!(scaled_fragment_bound(i16::MIN, 17), Ok(0));
+        assert_eq!(
+            scaled_fragment_bound(1, 32),
+            Err(scene_error(
+                "GOOL fragment bound: retail sprite shift 32 exceeds 31"
+            ))
+        );
     }
 
     #[test]
@@ -2889,6 +2909,349 @@ mod tests {
         assert!(peak.submitted_object_polygons > 0);
         assert!(builder.object_models.len() <= RETAIL_OBJECT_MODEL_CACHE_FRAMES);
         assert_eq!(builder.object_models.len(), builder.object_model_lru.len());
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn jungle_rollers_pbak_restored_scene_is_renderable() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+        const PBAK_STATE_GLOBAL: usize = 105;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let level = LevelId::new_const(0x0c);
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let mut camera =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0, 0x600).unwrap();
+
+        let mut owned_zones = BTreeMap::new();
+        let mut lifecycle_zones = Vec::new();
+        for node in graph.zones() {
+            let entry = typed_entry(&nsf, &nsd, node.eid, ZDAT_ENTRY_TYPE, "PBAK ZDAT").unwrap();
+            let header =
+                ZoneHeader::parse(entry_item(entry, &nsf_bytes, 0, "PBAK ZDAT header").unwrap())
+                    .unwrap();
+            let entities = (0..header.entity_count)
+                .map(|entity_index| {
+                    let item_index =
+                        usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+                    ZoneEntity::parse(
+                        entry_item(entry, &nsf_bytes, item_index, "PBAK ZDAT entity").unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            owned_zones.insert(node.eid, entities);
+            lifecycle_zones.push(ZoneLifecycleZone::new(
+                node.eid,
+                header.display_flags,
+                header.neighbors.iter().copied(),
+                OrderedZoneLoadList::from(&header.load_list),
+            ));
+        }
+        let mut lifecycle = ZoneLifecycle::new(lifecycle_zones).unwrap();
+        lifecycle
+            .transition_with_marker(camera.location().path.zone, true)
+            .unwrap();
+
+        let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, level);
+        runtime
+            .set_global_word(crust_sim::gool::GAME_STATE_GLOBAL, 0x600)
+            .unwrap();
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 3).unwrap();
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: camera.location(),
+            graphics_flags: graph
+                .zone(camera.location().path.zone)
+                .unwrap()
+                .graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: lifecycle.active_neighbor_zones(),
+        });
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        let initial_neighbors = lifecycle
+            .next_frame_spawn_scan()
+            .into_iter()
+            .map(|candidate| NeighborZone {
+                eid: candidate.zone,
+                display_flags: candidate.display_flags,
+                entities: owned_zones[&candidate.zone].as_slice(),
+            })
+            .collect::<Vec<_>>();
+        let attempts = runtime.spawn_current_zone_neighbors(&initial_neighbors, &mut host);
+        assert!(
+            attempts.iter().any(|attempt| attempt.result.is_ok()),
+            "Jungle Rollers initial spawn scan must create Crash"
+        );
+        assert!(runtime.arena().main_object().is_some());
+
+        let follow_input = |runtime: &RetailRuntime, held_buttons: u32| {
+            let main = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena))
+                .unwrap();
+            let player = runtime.machine().object(main.vm()).unwrap();
+            let signed = |index| player.register(index).unwrap().cast_signed();
+            RetailCameraFollowInput {
+                player_translation: Vec3 {
+                    x: signed(process_register::TRANSLATION_X),
+                    y: signed(process_register::TRANSLATION_Y),
+                    z: signed(process_register::TRANSLATION_Z),
+                },
+                player_cam_zoom: signed(process_register::CAMERA_ZOOM),
+                held_buttons,
+                level_id: 0x0c,
+                frames_elapsed: runtime.machine().frames_elapsed(),
+                gem_stamp: 0,
+            }
+        };
+        let publish_camera = |runtime: &mut RetailRuntime,
+                              camera: &RetailCameraRuntime,
+                              game_state: i32| {
+            let pose = camera.pose(&graph).unwrap();
+            runtime.set_frame_context(game_state, camera.rotation_xz(&graph).unwrap());
+            runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+                pose.translation,
+                pose.rotation_yxz,
+                projection_distance(nsd.ldat().unwrap().field_of_view).unwrap(),
+            ));
+        };
+        let initial_camera_step = camera
+            .update_follow(&graph, follow_input(&runtime, 0))
+            .unwrap();
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: initial_camera_step.after,
+            graphics_flags: graph
+                .zone(initial_camera_step.after.path.zone)
+                .unwrap()
+                .graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: lifecycle.active_neighbor_zones(),
+        });
+        publish_camera(&mut runtime, &camera, initial_camera_step.game_state);
+        runtime.set_frame_timing(34, 34);
+        runtime
+            .set_pad_snapshot(0, RetailPadSnapshot::default())
+            .unwrap();
+        runtime.run_frame(&mut host, 67).unwrap();
+
+        let prepared = prepare_pair_pbak(&nsd, &nsf, &nsf_bytes, &graph)
+            .unwrap()
+            .expect("Jungle Rollers has pb0cB");
+        assert_eq!(prepared.eid.name().as_deref(), Some("pb0cB"));
+        assert_eq!(prepared.snapshot.location.progress.raw(), 0);
+        let mut playback = RetailPbakPlayback::new(prepared.clone());
+        runtime
+            .create_retail_demo_caption(camera.location().path.zone, &mut host)
+            .unwrap();
+        runtime
+            .install_retail_demo_start(
+                prepared.snapshot.clone(),
+                prepared.player.seed(),
+                prepared.crash_bound,
+            )
+            .unwrap();
+
+        let restart_plan = lifecycle
+            .plan_hard_restart(prepared.snapshot.location.path.zone, true)
+            .unwrap();
+        let outcome = runtime.restart_saved_level(&mut host).unwrap();
+        let RetailRestartOutcome::Restarted(report) = outcome else {
+            panic!("same-level PBAK restore requested a remount");
+        };
+        lifecycle.commit_hard_restart(&restart_plan).unwrap();
+        let restart_camera_step = camera
+            .level_update(
+                &graph,
+                report.snapshot.location.path,
+                report.snapshot.location.progress.raw(),
+                report.level_update_flags,
+            )
+            .unwrap();
+        assert_eq!(restart_camera_step.after, report.snapshot.location);
+        assert_eq!(report.snapshot.location.progress.raw(), 0);
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: report.snapshot.location,
+            graphics_flags: graph
+                .zone(report.snapshot.location.path.zone)
+                .unwrap()
+                .graphics_flags,
+            box_count: report.restored_box_count,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: lifecycle.active_neighbor_zones(),
+        });
+
+        playback.mark_started();
+        let mut pad = RetailPadSnapshot::default();
+        let mut builder = RetailSceneBuilder::new();
+        let mut observed_offender = false;
+        for pbak_frame in 0..232 {
+            let restored_neighbors = lifecycle
+                .next_frame_spawn_scan()
+                .into_iter()
+                .map(|candidate| NeighborZone {
+                    eid: candidate.zone,
+                    display_flags: candidate.display_flags,
+                    entities: owned_zones[&candidate.zone].as_slice(),
+                })
+                .collect::<Vec<_>>();
+            runtime.spawn_current_zone_neighbors(&restored_neighbors, &mut host);
+
+            let draw_count = runtime.draw_count();
+            let display_mask = runtime.current_display_mask();
+            let timing = playback.frame_timing(34, 34).unwrap();
+            runtime.set_frame_timing(timing.prior.current, timing.prior.period);
+            let camera_step = camera
+                .update_follow(&graph, follow_input(&runtime, pad.held))
+                .unwrap();
+            assert_eq!(camera_step.after.path, report.snapshot.location.path);
+            runtime.set_level_state_context(RetailLevelStateContext {
+                location: camera_step.after,
+                graphics_flags: graph
+                    .zone(camera_step.after.path.zone)
+                    .unwrap()
+                    .graphics_flags,
+                box_count: report.restored_box_count,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+                first_spawn: false,
+                active_neighbor_zones: lifecycle.active_neighbor_zones(),
+            });
+            publish_camera(&mut runtime, &camera, camera_step.game_state);
+            let runtime_frame = runtime
+                .run_frame_with_traversal_hook(&mut host, 67, |runtime, _host, _point| {
+                    let (input, end) = playback.advance_pad_boundary(0);
+                    assert!(end.is_none());
+                    runtime.set_frame_timing(timing.crash.current, timing.crash.period);
+                    let previous = pad;
+                    pad = RetailPadSnapshot {
+                        tapped: input.held & !previous.held,
+                        held: input.held,
+                        held_previous: previous.held,
+                        tapped_previous: previous.tapped,
+                        held_previous_2: previous.held_previous,
+                    };
+                    runtime
+                        .set_pad_snapshot(0, pad)
+                        .map_err(crust_sim::retail_runtime::RuntimeError::Vm)
+                })
+                .unwrap_or_else(|error| panic!("pb0cB frame {pbak_frame}: {error:?}"));
+            assert!(
+                runtime_frame
+                    .executions
+                    .iter()
+                    .all(|execution| execution.result.is_ok()),
+                "pb0cB frame {pbak_frame} reached a checked object failure: {:?}",
+                runtime_frame
+                    .executions
+                    .iter()
+                    .filter(|execution| execution.result.is_err())
+                    .collect::<Vec<_>>()
+            );
+
+            let objects = runtime.render_objects().unwrap();
+            let main_object = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena));
+            let location = RetailSceneProgressLocation {
+                zone: camera_step.after.path.zone,
+                path_index: camera_step.after.path.index,
+                path_progress: camera_step.after.progress.raw(),
+                draw_count,
+            };
+            builder
+                .build_at_progress_with_objects_and_display_mask(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    location,
+                    &objects,
+                    main_object,
+                    display_mask,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "pb0cB frame {pbak_frame} scene at progress {:#x}: {error}",
+                        location.path_progress
+                    )
+                });
+
+            let offender = objects.iter().find(|object| {
+                object.executable == 3
+                    && object.subtype == 13
+                    && object.program.is_some_and(|program| {
+                        program.global_eid().name().as_deref() == Some("FruiC")
+                    })
+                    && object.transform.scale == [-655_688, 1_665_544, 1_257]
+            });
+            if let Some(offender) = offender {
+                observed_offender = true;
+                assert_eq!(pbak_frame, 179);
+                assert_eq!(camera_step.after.progress.raw(), 0x297);
+                assert_eq!(offender.object.arena().slot(), 11);
+                assert_eq!(offender.object.arena().generation(), 1);
+                assert_eq!(offender.object.vm().get(), 12);
+                assert_eq!(offender.animation_reference.unwrap().offset(), 0);
+                assert_eq!(offender.animation_frame, 0x0c00);
+                assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(24));
+                let vm = runtime.machine().object(offender.object.vm()).unwrap();
+                assert_eq!(vm.state(), 12);
+                assert_eq!(vm.pc(), 953);
+            }
+            if let Some((raw_shrink, effective_shrink)) = match pbak_frame {
+                180 => Some((26_u32, 26_u8)),
+                181 => Some((28, 28)),
+                182 => Some((31, 31)),
+                183 => Some((34, 2)),
+                204 => Some((246, 22)),
+                205 => Some((271, 15)),
+                206 => Some((297, 9)),
+                _ => None,
+            } {
+                let transient = objects
+                    .iter()
+                    .find(|object| {
+                        object.object.arena().slot() == 11
+                            && object.object.arena().generation() == 1
+                            && object.object.vm().get() == 12
+                    })
+                    .expect("the authored FruiC transient remains live");
+                assert_eq!(
+                    transient.transform.scale[0].unsigned_abs() / 27_279,
+                    raw_shrink,
+                    "pb0cB frame {pbak_frame} raw MIPS shift"
+                );
+                assert_eq!(
+                    retail_sprite_shrink(transient.transform.scale[0]),
+                    Ok(effective_shrink),
+                    "pb0cB frame {pbak_frame} effective five-bit shift"
+                );
+            }
+        }
+        assert!(
+            observed_offender,
+            "pb0cB did not reach its authored transient shrink-24 sprite"
+        );
     }
 
     #[test]

@@ -104,10 +104,17 @@ pause object) is sampled at each object's post-update/pre-child display boundary
 passes that translation plus the pre-camera `dark_dist` value to the fixed-point evaluator. The
 browser pause path materializes the native root-seven subtype-four controller, preserves its
 paused-only update override and blink timing, and submits its five authored `WillT` fragment
-quads. The derived light matrix/color remain render-owned rather than being written back to VM
-object colors.
+quads. Modes two through four execute their native shader side effects at that same post-update,
+pre-child boundary. The gate excludes the main object, display-mask `0x10000`, status-B `0x400`,
+and near-plane failures unless `0x40000` overrides the latter; status-B `0x200` bypasses CVTX but
+not SVTX. Derived colors are committed to the live VM before child execution and copied separately
+into the render snapshot. A subsequent status-B `0x100000` zone-color reset changes the VM colors
+seen by children without discarding those effective render colors; a null object-zone handle falls
+back to the checked current zone.
 For zones with graphics flag `0x1000`, a fixed Q24.8 camera with the 128-frame triangular Y bob and
 fixed pitch is substituted only for object projection; the ordinary world camera is unchanged.
+Simulation and WebGL use the same fixed-point matrix and GOOL `frames_elapsed` stamp, carried
+separately from texture-animation `draw_count` while authored display frames are hidden.
 
 `GlStage` can transactionally update an installed retail scene. It validates command texture
 references, compares immutable decoded-texture allocation identities, prepares all new/replacement

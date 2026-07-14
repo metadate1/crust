@@ -101,10 +101,20 @@ active spawn table. Exact `LevelResetGlobals(1)` and `CardRestorePayload` orderi
 active table and savestate while resetting the documented scalar globals and encounter registry.
 Retail object shader modes two and three, including their source depth rejection/ramp behavior,
 are live; zone-graphics flag `0x1000` substitutes the fixed Q24.8 bobbing camera and pitch for GOOL
-objects only. Mode four is also live: the simulation advances the Lights Out/Fumbling
+objects only. Simulation and rendering share its exact matrix and carry its `frames_elapsed` clock
+separately from texture `draw_count` across hidden frames. Mode four is also live: the simulation
+advances the Lights Out/Fumbling
 `dark_dist` ramp before camera work, retains its renderer-BSS words across stream remounts, and
 captures the checked player reference at each object's source-order display boundary. A checked
-pause-object reference is preferred when one exists. START now runs the native gate against the
+pause-object reference is preferred when one exists. For all three modes, the native display gate
+runs after that object's update and before child traversal, writes the derived colors into the live
+GOOL object, and preserves the same effective colors in its render snapshot. Status-B `0x100000`
+then restores the live VM colors from the object/player zone while leaving that snapshot intact;
+root objects without an attached zone fall back to the current ZDAT exactly like native.
+The gate also honors the main-object, display-mask `0x10000`, status-B `0x400`, near-plane/
+`0x40000`, and CVTX-only `0x200` conditions. A legally local all-pair regression exercised 1,800
+mode-four vertex displays and 2,880 primitives, including 540 changed color results verified in
+both the render snapshots and live VM. START now runs the native gate against the
 prior Crash pad snapshot, creates executable-four/subtype-four beneath root seven, publishes the
 tagged pause reference, and resumes through event `0xC00` with the saved GOOL clock restored.
 Paused frames continue spawn, object traversal, display latching, scene presentation and audio;

@@ -24,6 +24,7 @@ pub mod object_bounds;
 pub mod paging;
 pub mod player;
 pub mod retail_frame;
+pub mod retail_lighting;
 pub mod retail_physics;
 pub mod retail_runtime;
 pub mod retail_solid_motion;

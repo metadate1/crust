@@ -77,8 +77,8 @@ An external `git archive` copy produced these results:
   ownership are cleaned synchronously. The arena's spawn flag clears at teardown and remains
   authoritative until the VM mirror refreshes at the next frame boundary. A null current zone is a
   no-op; duplicate EIDs are preserved and every later entry traverses the tree as mutated by earlier
-  TERM handlers. Same-slot replacement during the host callback is not yet generation-aware when
-  deciding whether the requester may resume.
+  TERM handlers. Request continuation is guarded by both the arena generation and the VM object's
+  monotonic incarnation, so killing and reusing either slot cannot resume the replaced invocation.
 - SLST visibility is reconstructed from the nearest raw endpoint with the retail midpoint tie-break.
   Every adjacent delta is bounds-checked in both directions, and a failed seek rolls back both the
   point index and ordered visibility list.

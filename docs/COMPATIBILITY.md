@@ -102,9 +102,17 @@ gameplay path.
   shader modes two and three are connected with their separate SVTX/CVTX ramps and far-object
   cutoffs. Mode four consumes a source-order player translation (or a checked live pause-object
   translation) and the Lights Out/Fumbling `dark_dist` ramp advanced at the unpaused pre-camera
-  boundary; its five renderer-BSS words survive stream remounts. Graphics flag `0x1000` replaces
+  boundary; its five renderer-BSS words survive stream remounts. All three modes run at each
+  post-update/pre-child vertex-display boundary, honor the native main-object, display-mask
+  `0x10000`, status-B `0x400`, near-plane/`0x40000`, and CVTX-only `0x200` gates, and commit their
+  derived colors to the live VM before child traversal. Render snapshots retain the effective
+  colors independently; status-B `0x100000` can therefore restore the live object/player-zone
+  colors without changing the already selected rendering. Graphics flag `0x1000` replaces
   only the GOOL-object camera with the source Q24.8 fixed position, triangular Y bob and fixed
-  pitch; the world keeps the authored path camera.
+  pitch; the world keeps the authored path camera. Simulation and rendering are cross-checked at
+  the camera-space-point level, and the bob follows `frames_elapsed` independently from texture
+  `draw_count` through hidden/loading display frames. Null-zone root objects inherit from the
+  current ZDAT rather than attempting to resolve an absent EID.
 - The WebGL stage has a validated transactional scene-update path with shared immutable
   decoded-texture identity reuse, atomic replacement/removal and a command-only fast path. Distinct
   allocations are conservatively uploaded without cloning or scanning their pixel vectors. Pair
@@ -187,9 +195,9 @@ gameplay path.
   The previously recorded legally local 300-frame N. Sanity trace crossed the former ShadC
   executable 29/state-one animation-bound boundary using validated frame bounds instead of the
   source branch's uninitialized C locals. The current Crash-stamp pre/post-physics schedule and
-  same-stamp collision tail require a fresh corpus run before that result is claimed for this change
-  set. All `0x85` and `0x8e` selectors have checked source-defined behavior; broader object behavior,
-  collision response, dynamic lighting and full level progression remain incomplete.
+  same-stamp collision tail pass the legally local corpus suite. All `0x85` and `0x8e` selectors
+  have checked source-defined behavior; broader object behavior, collision response, dynamic
+  lighting and full level progression remain incomplete.
 - Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
   monotonic object incarnation. If a TERM handler kills the active requester and synchronously
   reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or
@@ -216,8 +224,9 @@ gameplay path.
   Twenty-two starts use fog/ripple/lightning/dark variants whose world-level dynamic vertex/color
   effects remain incomplete. Object shader modes two and three and their source far-object
   rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
-  through immutable snapshots carrying source-order player/pause selection and `dark_dist`; a legal
-  all-pair boot trace rendered 1,800 mode-four vertices into 2,880 object primitives. Browser START
+  at the native display boundary with source-order player/pause selection and `dark_dist`; a legal
+  all-pair boot trace exercised 1,800 mode-four vertex displays, rendered 2,880 object primitives,
+  and verified 540 changed color results persisted in the live VM. Browser START
   now creates the native executable-four/subtype-four root-seven controller, publishes the tagged
   pause reference, freezes ordinary GOOL/camera/shader/draw-count work, and resumes through the
   source `0xC00` clock-rewind/cleanup handshake while spawn, scene presentation, display latching
@@ -225,11 +234,10 @@ gameplay path.
   animation rather than type-four font text. Its five pieces render as
   `PAUSED / PUSH SELECT FOR MAP`, at the retail far ordering depth, with the authored 15-frame
   visible/15-frame hidden blink. This is covered by a legally local scene regression and an
-  on-cycle WebGL browser capture. Mode four's derived light matrix and ambient color are not yet
-  written back into mutable GOOL object colors, so subsequent GOOL color reads can differ.
-  Rendering snapshots
-  the complete arena after GOOL, while the source interleaves each object's simulation and drawing
-  during preorder traversal. The current builder avoids reparsing an unchanged active graph,
+  on-cycle WebGL browser capture. Geometry command construction still consumes the complete arena
+  after GOOL, while the source interleaves each object's simulation and drawing during preorder
+  traversal; the effective colors and VM side effects are now captured at the native per-object
+  boundary. The current builder avoids reparsing an unchanged active graph,
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
   the projection and command list are still regenerated every presented gameplay frame. No
   low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.

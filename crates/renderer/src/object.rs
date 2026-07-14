@@ -10,6 +10,10 @@ use core::fmt;
 use crust_formats::binary::FormatError;
 use crust_formats::stream::structs::ColorInfo;
 use crust_formats::stream::{ObjectMaterial, ObjectModelFrame, ObjectVertex, ObjectVertexKind};
+pub use crust_sim::retail_lighting::ObjectDarkShaderInput;
+use crust_sim::retail_lighting::{
+    RetailDarkShaderError, RetailObjectZoneShaderError, apply_retail_object_zone_shader,
+};
 
 use crate::command::ScreenPoint;
 use crate::projection::{Matrix3, Vec3i, object_rotation_matrix, project};
@@ -108,18 +112,6 @@ pub struct GoolObjectLighting {
     pub scale_x: i32,
 }
 
-/// Dynamic inputs consumed only by ZDAT object-shader mode four.
-///
-/// Translations retain GOOL's native Q24.8 representation. `reference_translation`
-/// is the pause object when one exists and the player object otherwise. The
-/// scalar is the live `dark_dist` value advanced by the level shader runtime.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ObjectDarkShaderInput {
-    pub reference_translation: [i32; 3],
-    pub object_translation: [i32; 3],
-    pub dark_distance: i32,
-}
-
 /// Source-compatible result of applying one ZDAT object shader.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ObjectZoneShading {
@@ -180,162 +172,27 @@ pub fn apply_object_zone_shader(
     depth_anchor: i32,
     dark: Option<ObjectDarkShaderInput>,
 ) -> Result<Option<ObjectZoneShading>, ObjectZoneShaderError> {
-    let mut shading = ObjectZoneShading {
-        colors: object_colors,
-        colored_shift: 0,
-    };
-    let depth_delta = i64::from(camera_depth) - i64::from(depth_anchor);
-    match mode {
-        2 => {
-            let ramp = depth_delta.saturating_mul(8).max(0);
-            if ramp > 0x7fff {
-                return Ok(None);
-            }
-            for (index, output) in shading.colors[..12].iter_mut().enumerate() {
-                *output = u16::try_from((i64::from(zone_colors[index]) + ramp).min(0x7fff))
-                    .unwrap_or(0x7fff);
-            }
-            for (relative, output) in shading.colors[12..].iter_mut().enumerate() {
-                *output = u16::try_from((i64::from(zone_colors[12 + relative]) + ramp).min(0x1000))
-                    .unwrap_or(0x1000);
-            }
-        }
-        3 if vertex_kind == ObjectVertexKind::Lit => {
-            let ramp = (depth_delta / 4).max(0);
-            if ramp > 28_000 {
-                return Ok(None);
-            }
-            for (source, output) in zone_colors.into_iter().zip(&mut shading.colors) {
-                *output = u16::try_from((i64::from(source) - ramp).max(0)).unwrap_or_default();
-            }
-        }
-        3 => {
-            shading.colored_shift = u8::try_from((depth_delta / 200).clamp(0, 8)).unwrap_or(8);
-        }
-        4 => {
-            shading.colors = mode_four_colors(
-                shading.colors,
-                dark.ok_or(ObjectZoneShaderError::MissingDarkInput)?,
-            )?;
-        }
-        _ => {}
-    }
-    Ok(Some(shading))
-}
-
-fn mode_four_colors(
-    mut colors: [u16; 24],
-    input: ObjectDarkShaderInput,
-) -> Result<[u16; 24], ObjectZoneShaderError> {
-    let initial_x = checked_difference(
-        input.object_translation[0],
-        input.reference_translation[0],
-        "initial x difference",
-    )? >> 8;
-    let initial_y = (checked_difference(
-        input.object_translation[1],
-        input.reference_translation[1],
-        "initial y difference",
-    )? >> 8)
-        .checked_sub(800)
-        .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(
-            "initial y offset",
-        ))?;
-    let initial_z = checked_difference(
-        input.object_translation[2],
-        input.reference_translation[2],
-        "initial z difference",
-    )? >> 8;
-    let distance_squared = checked_square_sum(
-        [initial_x, initial_y, initial_z],
-        "initial distance squared",
-    )?;
-    let distance = retail_sqrt(distance_squared).max(1);
-
-    let mut direction = [0_i32; 3];
-    for (axis, output) in direction.iter_mut().enumerate() {
-        let difference = checked_difference(
-            input.reference_translation[axis],
-            input.object_translation[axis],
-            "normalized direction difference",
-        )?;
-        let numerator = difference.checked_mul(0x100).ok_or(
-            ObjectZoneShaderError::DarkArithmeticOutOfRange("normalized direction numerator"),
-        )?;
-        *output = numerator / distance;
-    }
-
-    let complementary_distance = 6_000 - distance;
-    if complementary_distance < 0 {
-        direction[0] = 0;
-        direction[2] = 0;
-    }
-    let dark_distance = input.dark_distance.max(1);
-    let mut light_direction = [0_i32; 3];
-    for (source, output) in direction.into_iter().zip(&mut light_direction) {
-        let product = source.checked_mul(complementary_distance).ok_or(
-            ObjectZoneShaderError::DarkArithmeticOutOfRange("light direction product"),
-        )?;
-        *output = ((product >> 8) / dark_distance).clamp(-6_000, 6_000);
-    }
-
-    for row in 0..3 {
-        for (column, component) in light_direction.into_iter().enumerate() {
-            colors[row * 3 + column] = wrapping_u16(component);
-        }
-    }
-    let light_magnitude = retail_sqrt(checked_square_sum(
-        light_direction,
-        "light direction magnitude",
-    )?);
-    let ambient = u16::try_from(light_magnitude / 32).unwrap_or(u16::MAX);
-    colors[9..12].fill(ambient);
-    Ok(colors)
-}
-
-fn checked_difference(
-    left: i32,
-    right: i32,
-    context: &'static str,
-) -> Result<i32, ObjectZoneShaderError> {
-    left.checked_sub(right)
-        .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(context))
-}
-
-fn checked_square_sum(
-    values: [i32; 3],
-    context: &'static str,
-) -> Result<i32, ObjectZoneShaderError> {
-    values.into_iter().try_fold(0_i32, |sum, value| {
-        value
-            .checked_mul(value)
-            .and_then(|square| sum.checked_add(square))
-            .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(context))
+    apply_retail_object_zone_shader(
+        mode,
+        vertex_kind,
+        object_colors,
+        zone_colors,
+        camera_depth,
+        depth_anchor,
+        dark,
+    )
+    .map(|shading| {
+        shading.map(|shading| ObjectZoneShading {
+            colors: shading.colors,
+            colored_shift: shading.colored_shift,
+        })
     })
-}
-
-fn retail_sqrt(value: i32) -> i32 {
-    if value == 0 {
-        return 0;
-    }
-    debug_assert!(value > 0);
-    let leading_zeros = value.leading_zeros() & !1;
-    let table_index = if leading_zeros < 24 {
-        value >> (24 - leading_zeros)
-    } else {
-        value << (leading_zeros - 24)
-    };
-    debug_assert!((64..=255).contains(&table_index));
-    // The source's 192-entry table is exactly floor(sqrt(index / 64) *
-    // 4096). Derive it without retaining a copied lookup table.
-    let table_value = (u64::try_from(table_index).unwrap_or_default() << 18).isqrt();
-    let table_value = i32::try_from(table_value).unwrap_or(i32::MAX);
-    (table_value << ((31 - leading_zeros) / 2)) >> 12
-}
-
-fn wrapping_u16(value: i32) -> u16 {
-    let bytes = value.to_le_bytes();
-    u16::from_le_bytes([bytes[0], bytes[1]])
+    .map_err(|error| match error {
+        RetailObjectZoneShaderError::MissingDarkInput => ObjectZoneShaderError::MissingDarkInput,
+        RetailObjectZoneShaderError::Dark(RetailDarkShaderError::ArithmeticOutOfRange(context)) => {
+            ObjectZoneShaderError::DarkArithmeticOutOfRange(context)
+        }
+    })
 }
 
 /// One projected vertex with its final source-compatible RGBA color.
@@ -1115,7 +972,7 @@ mod tests {
         .unwrap();
         // Retail's normalized table sqrt returns 999 for 1_000_000, making
         // this component -384 rather than an ideal-float -383.
-        let negative_384 = wrapping_u16(-384);
+        let negative_384 = 65_152;
         assert_eq!(
             &shaded.colors[..9],
             &[0, 0, negative_384, 0, 0, negative_384, 0, 0, negative_384]

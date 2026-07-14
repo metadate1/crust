@@ -7,6 +7,8 @@
 
 use core::fmt;
 
+use crust_formats::stream::ObjectVertexKind;
+
 use crate::math::{Angle12, Angles, Bounds3, Vec3};
 
 /// Maximum number of object bounds in one retail frame.
@@ -24,6 +26,8 @@ const NON_VERTEX_HALF_EXTENT: i32 = 200;
 pub enum AnimationBoundSource {
     /// A type-one GOOL animation resolved to one SVTX/CVTX frame.
     Vertex {
+        /// Whether the resolved model frame is lit SVTX or colored CVTX.
+        vertex_kind: ObjectVertexKind,
         /// Six serialized frame-bound words, before object scaling.
         serialized_bound: Bounds3,
         /// Frame collision-center offset used by rendering and collision.
@@ -60,6 +64,7 @@ pub const fn calculate_local_bound(
         AnimationBoundSource::Vertex {
             serialized_bound,
             collision_center,
+            ..
         } => {
             let adjusted = if is_crash {
                 Bounds3 {
@@ -409,6 +414,7 @@ mod tests {
 
     const fn vertex_source(bound: Bounds3, collision_center: Vec3) -> AnimationBoundSource {
         AnimationBoundSource::Vertex {
+            vertex_kind: ObjectVertexKind::Lit,
             serialized_bound: bound,
             collision_center,
         }

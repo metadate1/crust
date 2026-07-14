@@ -662,6 +662,30 @@ impl RetailTransformVectorsCamera {
             screen_projection,
         }
     }
+
+    /// Transforms one native Q24.8 world point into the camera-space integer
+    /// coordinates consumed by object visibility and zone-shader checks.
+    #[must_use]
+    pub fn camera_space_point(self, point: [i32; 3]) -> [i32; 3] {
+        camera_space_point(point, self)
+    }
+
+    /// Applies native's object-only camera substitution for ZDAT graphics
+    /// flag `0x1000`. World rendering and the ordinary camera remain intact;
+    /// displayed objects use fixed X/Z, a 128-frame triangular Y bob, and the
+    /// authored 125-angle pitch.
+    #[must_use]
+    pub fn for_object_display(self, graphics_flags: u32, frame_stamp: u32) -> Self {
+        if graphics_flags & 0x1000 == 0 {
+            return self;
+        }
+        let phase = i32::try_from(frame_stamp % 128).unwrap_or_default();
+        let y = 901_600 + (phase - 64).abs() * 800;
+        // `from_retail_pose` negates authored camera angles while assembling
+        // the ordinary camera matrix. Native's special branch instead writes
+        // a positive-125 matrix directly, so feed the inverse stored angle.
+        Self::from_retail_pose([0, y, 6_144_000], [-125, 0, 0], self.screen_projection)
+    }
 }
 
 fn multiply_q12_matrices(left: [[i16; 3]; 3], right: [[i16; 3]; 3]) -> [[i16; 3]; 3] {
@@ -814,6 +838,8 @@ impl RetailSolidZone {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetailSolidEnvironment {
     graphics_flags: u32,
+    object_shader_mode: u32,
+    object_shader_depth_anchor: i32,
     object_colors: [u16; COLOR_COUNT],
     player_colors: [u16; COLOR_COUNT],
     neighbors: Vec<RetailSolidZone>,
@@ -1327,6 +1353,8 @@ impl RetailSolidEnvironment {
     ) -> Self {
         Self {
             graphics_flags,
+            object_shader_mode: 0,
+            object_shader_depth_anchor: 0,
             object_colors,
             player_colors,
             neighbors,
@@ -1345,6 +1373,19 @@ impl RetailSolidEnvironment {
     ) -> Self {
         self.object_zone = object_zone;
         self.level_quirks = level_quirks;
+        self
+    }
+
+    /// Adds the current ZDAT object-shader selector used while displaying
+    /// vertex animations. Zero retains the native no-shader/default branch.
+    #[must_use]
+    pub const fn with_object_shader(
+        mut self,
+        object_shader_mode: u32,
+        object_shader_depth_anchor: i32,
+    ) -> Self {
+        self.object_shader_mode = object_shader_mode;
+        self.object_shader_depth_anchor = object_shader_depth_anchor;
         self
     }
 }
@@ -3268,6 +3309,12 @@ impl VmObject {
         self.colors = colors;
     }
 
+    /// Applies a display-time mutation to the live GOOL color words while
+    /// preserving the zone-color source used by later authored scale seeks.
+    pub(crate) fn set_retail_display_colors(&mut self, colors: [u16; COLOR_COUNT]) {
+        self.colors = colors;
+    }
+
     /// Owns the current ZDAT solid-query inputs without retaining relocated
     /// entry or octree pointers from the source runtime.
     pub fn bind_retail_solid_environment(&mut self, environment: RetailSolidEnvironment) {
@@ -4195,6 +4242,26 @@ impl Machine {
         environment: Option<RetailSolidEnvironment>,
     ) {
         self.current_solid_environment = environment;
+    }
+
+    /// Returns the active `cur_zone` object-shader selector, when a retail
+    /// ZDAT environment has been installed for this traversal.
+    #[must_use]
+    pub fn current_retail_object_shader(&self) -> Option<(u32, [u16; COLOR_COUNT], i32)> {
+        self.current_solid_environment.as_ref().map(|environment| {
+            (
+                environment.object_shader_mode,
+                environment.object_colors,
+                environment.object_shader_depth_anchor,
+            )
+        })
+    }
+
+    /// Returns the frozen camera snapshot shared by GOOL projection and the
+    /// source-ordered object display boundary.
+    #[must_use]
+    pub const fn transform_vectors_camera(&self) -> Option<RetailTransformVectorsCamera> {
+        self.transform_vectors_camera
     }
 
     #[must_use]
@@ -15877,6 +15944,39 @@ mod tests {
             | (u16::from(output_vector) << 3)
             | (u16::from(suboperation) << 6);
         Instruction::encode(0x85, packed, operand)
+    }
+
+    #[test]
+    fn special_object_camera_matches_native_direct_matrix_and_bob() {
+        let ordinary = RetailTransformVectorsCamera::from_retail_pose([1, 2, 3], [17, 29, 41], 500);
+        assert_eq!(ordinary.for_object_display(0, 0), ordinary);
+
+        let special = ordinary.for_object_display(0x1000, 0);
+        let sine = Angle12::new(125).sin_q12();
+        let cosine = Angle12::new(125).cos_q12();
+        assert_eq!(special.translation, [0, 952_800, 6_144_000]);
+        assert_eq!(special.rotation_yxz, [-125, 0, 0]);
+        assert_eq!(
+            special.rotation_matrix,
+            [
+                [0x1000, 0, 0],
+                [
+                    0,
+                    ((-5 * i32::from(cosine)) >> 3) as i16,
+                    ((5 * i32::from(sine)) >> 3) as i16,
+                ],
+                [0, sine.wrapping_neg(), cosine.wrapping_neg()],
+            ]
+        );
+        assert_eq!(
+            ordinary.for_object_display(0x1000, 64).translation,
+            [0, 901_600, 6_144_000]
+        );
+        assert_eq!(
+            ordinary.for_object_display(0x1000, 128),
+            special,
+            "the native triangular bob repeats every 128 frame stamps"
+        );
     }
 
     #[test]

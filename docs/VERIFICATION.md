@@ -133,11 +133,16 @@ copy any disc or stream bytes into the repository:
   `DispC` in all 39 eligible legal pairs, verified native creation/preorder, null lifecycle-zone
   identity and exact tagged globals 7/6/14, and verified that title `0x19`, level complete `0x2d`,
   intro `0x38`, and ending `0x39` create none. The all-pair live renderer trace then exercised
-  1,800 mode-four vertices and emitted 2,880 mode-four object primitives while Lights Out and
-  Fumbling in the Dark consumed the live player reference and darkness distance. Focused tests
+  1,800 mode-four vertex displays and emitted 2,880 mode-four object primitives while Lights Out and
+  Fumbling in the Dark consumed the live player reference and darkness distance. Of those displays,
+  540 produced changed shader colors and the trace verified every result both in the effective
+  render snapshot and persisted in the live VM. Focused tests
   verify that the reference is sampled separately around the root-six player update, that native
   target/step/current darkness survive level reinitialization, and that all five renderer-BSS words
-  retain their exact first-tick behavior across a fresh stream runtime.
+  retain their exact first-tick behavior across a fresh stream runtime. Additional focused cases
+  exercise modes two/three live writeback, post-update/pre-child color visibility, the
+  main/display/status/CVTX/near-plane gates, the status-B `0x100000` split between restored VM
+  colors and retained effective render colors, and native's null-object-zone fallback.
 - All nine PBAK recordings completed full live simulation/render traces across their 10,966 Crash
   pad boundaries. Papu Papu's recording exercised an authored same-level death/restart before
   continuing to its final input handshake. These traces honor display-mask/spin-death camera
@@ -326,10 +331,10 @@ The final checks below were run against this change set on 2026-07-14:
 - `cargo fmt --all -- --check` passed.
 - locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
   `crust-web` Clippy pass both completed with warnings denied.
-- the locked asset-free workspace suite passed all 720 default tests across 33 targets. Another 51
-  legally local tests remain ignored by default, for 771 listed tests across all targets.
+- the locked asset-free workspace suite passed all 728 default tests across 33 targets. Another 52
+  legally local tests remain ignored by default, for 780 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. All 51 selected tests passed with zero failures, including every
+  streams in place. All 52 selected tests passed with zero failures, including every
   raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
 - executable-`0x22` crate coverage now checks the native strict adjacency boundary, checked
   bidirectional misc-A links, skipped-lower-crate Y compaction, activation/restart reset, stagger
@@ -357,9 +362,19 @@ The final checks below were run against this change set on 2026-07-14:
   legally local scene regression additionally proves that `DispC` state six selects the type-five
   `WillT` descriptor at byte offset 136, emits five far-depth fragment quads with no skips for the
   first 15 paused frames, hides them for the next 15, and repeats.
+- native object-display tests cover the source preorder boundary: modes two through four write
+  derived colors after parent update and before child execution, while the display snapshot keeps
+  its effective colors independently of the status-B `0x100000` object/player-zone reset. The
+  legally local all-pair regression exercised 1,800 mode-four vertex displays and 2,880 emitted
+  primitives; all 540 changed shader results matched the fixed-point evaluator and persisted in
+  the live VM.
+- the object-only graphics-flag `0x1000` camera has a cross-crate fixed-point golden covering its
+  direct pitch matrix, fixed/bobbing translation and camera-space point. A separate clock test
+  proves GOOL `frames_elapsed` advances while texture `draw_count` is frozen; scene locations carry
+  both values so hidden/loading frames cannot desynchronize shading from geometry.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,226,585 bytes with SHA-256
-  `4bff814ee6569be65824ccf0ff875cac6bc264d22ca62c1d226c36d985549a75`.
+  web release. The Wasm payload is 1,230,231 bytes with SHA-256
+  `6acdcd1002041099e82ac03d2a6319988049bf9abf6c4b38dd62e77c5ba9ca8c`.
 - the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
   the route and pause integration was loaded in the visible in-app browser. Because that browser
   cannot automate a native file picker,
@@ -380,6 +395,18 @@ The final checks below were run against this change set on 2026-07-14:
   pause field/error corrections; its served hash matches the hash above, the removed route returns
   HTTP 404, and the already-loaded gameplay tab was deliberately not reloaded so its in-memory local
   BIN selection remained visible.
+
+  The final fixed-camera/object-shader artifact was exercised once more through the same ephemeral
+  loopback-only bridge. It recognized 88 streams and 44/44 pairs, launched title `0x19`, rendered
+  the retail tent scene and then the island map with the N. Sanity Beach card, and continued at
+  30.00 Hz with mounted synthesized audio active. The UI pause and mute controls each changed live
+  telemetry and were restored to `RUNNING`/`SYNTH ACTIVE`; the in-app browser warning/error log was
+  empty. Keyboard injection was not repeated successfully in this final in-app-browser pass and is
+  therefore not newly claimed for this artifact. After the tab had retained its local `File`, the
+  temporary bridge was deleted, the ignored release directory was rebuilt from the checked-in
+  sources, and the normal no-store server was restarted. Its root returns HTTP 200, the removed
+  bridge returns HTTP 404, and the visible tab remains on the in-memory island-map scene. No game
+  bytes entered Git, browser persistence, or the repository working tree.
 
 ## Reproducible commands
 

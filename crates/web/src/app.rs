@@ -19,9 +19,9 @@ use crust_audio::retail_music::RetailMusic;
 use crust_audio::retail_player::RetailMusicChange;
 use crust_formats::binary::{Eid, FormatError};
 use crust_formats::stream::{
-    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, RetailPathId, RetailZoneGraph,
-    ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry, parse_retail_midi,
-    title_mdat_eid,
+    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, ObjectVertexKind, RetailPathId,
+    RetailZoneGraph, ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry,
+    parse_retail_midi, title_mdat_eid,
 };
 use crust_platform::input::{
     PAD_START, PadSnapshot as PlatformPadSnapshot, PadState as PlatformPadState, keyboard_code,
@@ -563,6 +563,15 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
     ) -> Result<Option<AnimationBoundSource>, Self::Error> {
         self.program
             .animation_bound_source(binding)
+            .map_err(BrowserProgramError::Program)
+    }
+
+    fn animation_display_vertex_kind(
+        &mut self,
+        binding: AnimationBoundBinding,
+    ) -> Result<Option<ObjectVertexKind>, Self::Error> {
+        self.program
+            .animation_display_vertex_kind(binding)
             .map_err(BrowserProgramError::Program)
     }
 
@@ -1647,6 +1656,7 @@ impl Runtime {
                 let native_paused = self.retail_objects.retail_pause_state().paused();
                 let frame_display_mask = self.effective_retail_display_mask();
                 let frame_draw_count = self.retail_objects.draw_count();
+                let frame_stamp = self.retail_objects.next_frame_stamp();
                 if !native_paused && let Err(error) = self.retail_objects.advance_level_shader() {
                     let message = format!("retail level shader update failed: {error:?}");
                     dom.log(&message, true);
@@ -1685,13 +1695,23 @@ impl Runtime {
                     if matches!(trace.presented(), PresentedFrame::Gameplay { .. })
                         && is_retail_runtime_state(self.flow.state())
                     {
-                        scene_location =
-                            Some((camera_location, frame_draw_count, frame_display_mask));
+                        scene_location = Some((
+                            camera_location,
+                            frame_draw_count,
+                            frame_stamp,
+                            frame_display_mask,
+                        ));
                     }
                 }
-                if let Some((camera_location, draw_count, display_mask)) = scene_location
-                    && let Err(error) =
-                        self.update_retail_scene(camera_location, draw_count, display_mask, dom)
+                if let Some((camera_location, draw_count, frame_stamp, display_mask)) =
+                    scene_location
+                    && let Err(error) = self.update_retail_scene(
+                        camera_location,
+                        draw_count,
+                        frame_stamp,
+                        display_mask,
+                        dom,
+                    )
                 {
                     let message = format!("retail scene update failed: {}", js_message(&error));
                     dom.log(&message, true);
@@ -2496,6 +2516,7 @@ impl Runtime {
         &mut self,
         location: RetailCameraLocation,
         draw_count: u32,
+        frame_stamp: u32,
         display_mask: u32,
         dom: &Dom,
     ) -> Result<(), JsValue> {
@@ -2538,6 +2559,7 @@ impl Runtime {
                     zone: location.path.zone,
                     path_index: location.path.index,
                     path_progress,
+                    frame_stamp,
                     draw_count,
                 },
                 &objects,

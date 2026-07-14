@@ -41,6 +41,9 @@ use crate::{
         AnimationBoundSource, BoundTransform, bounds_intersect_asymmetric, calculate_local_bound,
         calculate_world_bound,
     },
+    retail_lighting::{
+        ObjectDarkShaderInput, RetailObjectZoneShaderError, apply_retail_object_zone_shader,
+    },
     retail_solid_motion::{
         HOG_LAND_OFFSET, STANDARD_LAND_OFFSET, SolidEffect, SolidEventReason, SolidEventTarget,
         SolidLevelQuirks, SolidObjectCandidate,
@@ -155,6 +158,16 @@ fn solid_level_quirks(level: LevelId) -> SolidLevelQuirks {
         type_four_pits_drown: matches!(level, 0x03 | 0x07),
         drown_when_below_zone: level == 0x17,
         lethal_river_water: matches!(level, 0x0f | 0x18),
+    }
+}
+
+fn retail_object_shader_depth_anchor(level: LevelId, visibility_depth: u32, fog_shift: u32) -> i32 {
+    let visibility = i32::try_from(visibility_depth >> 8).unwrap_or(i32::MAX);
+    if matches!(level.get(), 0x14 | 0x16) {
+        // `fog_z` starts at zero in native LevelInit for both bridge levels.
+        visibility.wrapping_add(400)
+    } else {
+        visibility.wrapping_sub(if fog_shift == 0 { 0 } else { 1_200 })
     }
 }
 
@@ -598,6 +611,18 @@ pub trait ProgramHost {
         Ok(None)
     }
 
+    /// Validates that the current item-five animation resolves to an
+    /// available SVTX/CVTX frame and returns its vertex kind for native's
+    /// display-time side effects. This is deliberately separate from
+    /// [`Self::animation_bound_source`]: display must not manufacture a
+    /// collision-bound callback or perturb its source-ordered scheduling.
+    fn animation_display_vertex_kind(
+        &mut self,
+        _binding: AnimationBoundBinding,
+    ) -> Result<Option<ObjectVertexKind>, Self::Error> {
+        Ok(None)
+    }
+
     /// Resolves one packed SVTX/CVTX vertex and its TGEO scale without
     /// retaining pointers into mounted stream bytes. Authored hosts may return
     /// `None`; the VM then preserves native's no-animation/no-model no-op.
@@ -940,6 +965,14 @@ impl ProgramHost for NsfProgramHost<'_> {
                 header.graphics.player_colors.words,
                 neighbors,
             )
+            .with_object_shader(
+                header.graphics.unknown_a,
+                retail_object_shader_depth_anchor(
+                    self.metadata.level(),
+                    header.graphics.visibility_depth,
+                    header.graphics.unknown_b_to_e[0],
+                ),
+            )
             .with_runtime_context(Some(zone), solid_level_quirks(self.metadata.level())),
         ))
     }
@@ -1007,6 +1040,7 @@ impl ProgramHost for NsfProgramHost<'_> {
         // avoids reparsing full geometry for every collidable object/frame.
         let header = frame.header;
         Ok(Some(AnimationBoundSource::Vertex {
+            vertex_kind,
             serialized_bound: Bounds3 {
                 min: Vec3 {
                     x: header.local_bound_min[0],
@@ -1025,6 +1059,16 @@ impl ProgramHost for NsfProgramHost<'_> {
                 z: header.collision_center[2],
             },
         }))
+    }
+
+    fn animation_display_vertex_kind(
+        &mut self,
+        binding: AnimationBoundBinding,
+    ) -> Result<Option<ObjectVertexKind>, Self::Error> {
+        Ok(match self.animation_bound_source(binding)? {
+            Some(AnimationBoundSource::Vertex { vertex_kind, .. }) => Some(vertex_kind),
+            Some(AnimationBoundSource::NonVertex) | None => None,
+        })
     }
 
     fn model_vertex_source(
@@ -1466,6 +1510,7 @@ pub enum RuntimeError<E> {
     Create(RuntimeCreateError),
     Tree(TreeError),
     Vm(VmError),
+    ObjectZoneShader(RetailObjectZoneShaderError),
     Program(E),
     VmHandleCapacity,
     DuplicateArenaBinding(ArenaObjectHandle),
@@ -1761,6 +1806,10 @@ impl RetailDarkShaderState {
 struct RetailDisplaySnapshot {
     enabled: bool,
     dark_reference_translation: Option<[i32; 3]>,
+    /// Colors consumed by this object's already-completed native transform.
+    /// They remain separate because status-B `0x100000` resets live VM colors
+    /// after geometry but before child traversal.
+    effective_colors: Option<[u16; COLOR_COUNT]>,
 }
 
 /// Safe replacement for native's `prev_box`, `prev_box_entity`, and
@@ -2289,6 +2338,14 @@ impl RetailRuntime {
     #[must_use]
     pub const fn frame_index(&self) -> u64 {
         self.frame_index
+    }
+
+    /// Low native word that the next cooperative GOOL frame publishes as
+    /// `frames_elapsed`. Unlike [`Self::draw_count`], this advances while the
+    /// authored display-count bit is clear and is rewound by pause resume.
+    #[must_use]
+    pub fn next_frame_stamp(&self) -> u32 {
+        wrapping_frame_stamp(self.frame_index)
     }
 
     /// Current host-side pause latch. The authored controller is still a
@@ -3590,7 +3647,9 @@ impl RetailRuntime {
                     size: vm_object
                         .register(process_register::SIZE)
                         .map_err(RenderObjectsError::Vm)? as i32,
-                    colors: *vm_object.retail_colors(),
+                    colors: display_snapshot
+                        .and_then(|snapshot| snapshot.effective_colors)
+                        .unwrap_or(*vm_object.retail_colors()),
                     text_font_override_word_offset: vm_object
                         .register(process_register::INVINCIBILITY_STATE)
                         .map_err(RenderObjectsError::Vm)?
@@ -3938,11 +3997,18 @@ impl RetailRuntime {
             let dark_reference_translation = self
                 .current_dark_reference_translation()
                 .map_err(RuntimeError::Vm)?;
+            let effective_colors = self.apply_native_vertex_display_side_effects(
+                object,
+                displayed,
+                dark_reference_translation,
+                host,
+            )?;
             self.displayed_objects.insert(
                 object,
                 RetailDisplaySnapshot {
                     enabled: displayed,
                     dark_reference_translation,
+                    effective_colors,
                 },
             );
         }
@@ -4041,6 +4107,141 @@ impl RetailRuntime {
             subtype,
             paused,
         ))
+    }
+
+    /// Applies the color mutations performed by native `GoolObjectTransform`
+    /// at this object's exact post-update/pre-child display boundary.
+    ///
+    /// The returned colors are the values consumed by geometry. Live VM
+    /// colors are committed immediately so a child opcode `0x23` observes its
+    /// parent's display side effects in the same preorder frame. Status-B
+    /// `0x100000` then performs its separate post-transform zone-color reset,
+    /// while the returned snapshot retains the already-rendered values.
+    fn apply_native_vertex_display_side_effects<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        displayed: bool,
+        dark_reference_translation: Option<[i32; 3]>,
+        host: &mut H,
+    ) -> Result<Option<[u16; COLOR_COUNT]>, RuntimeError<H::Error>> {
+        if !displayed {
+            return Ok(None);
+        }
+        let (zone, executable) = {
+            let spawned = self
+                .arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+            (spawned.zone(), spawned.origin().executable())
+        };
+        let (reference, frame_index, status_b, transform, original_colors) = {
+            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
+            let Some(reference) = vm_object.animation_reference().map_err(RuntimeError::Vm)? else {
+                return Ok(None);
+            };
+            (
+                reference,
+                vm_object.animation_frame() >> 8,
+                vm_object
+                    .register(process_register::STATUS_B)
+                    .map_err(RuntimeError::Vm)?,
+                vm_object.retail_transform().map_err(RuntimeError::Vm)?,
+                *vm_object.retail_colors(),
+            )
+        };
+        let Some(vertex_kind) = host
+            .animation_display_vertex_kind(AnimationBoundBinding {
+                object,
+                zone,
+                executable,
+                reference,
+                frame_index,
+            })
+            .map_err(RuntimeError::Program)?
+        else {
+            return Ok(None);
+        };
+
+        let is_main = object.arena.is_dedicated_main();
+        let mut effective_colors = original_colors;
+        let display_mask = self
+            .machine
+            .global_word(CURRENT_DISPLAY_GLOBAL)
+            .unwrap_or(INITIAL_DISPLAY_MASK);
+        let two_dimensional_cvtx =
+            vertex_kind == ObjectVertexKind::Colored && status_b & 0x200 != 0;
+        if display_mask & 0x1_0000 == 0
+            && !is_main
+            && status_b & 0x400 == 0
+            && !two_dimensional_cvtx
+            && let Some((mode, zone_colors, depth_anchor)) =
+                self.machine.current_retail_object_shader()
+            && let Some(camera) = self.machine.transform_vectors_camera()
+        {
+            let graphics_flags = self
+                .level_state_context
+                .as_ref()
+                .map_or(0, |context| context.graphics_flags);
+            let camera = camera.for_object_display(graphics_flags, self.machine.frames_elapsed());
+            let camera_depth = camera.camera_space_point(transform.translation)[2];
+            let projection = i32::try_from(camera.screen_projection).unwrap_or(i32::MAX);
+            if status_b & 0x4_0000 != 0 || projection < camera_depth {
+                if mode == 4 {
+                    // Native assigns this clamp into renderer BSS only after
+                    // the mode-four object reaches the shader.
+                    self.dark_shader.distance = self.dark_shader.distance.max(1);
+                }
+                let dark =
+                    dark_reference_translation.map(|reference_translation| ObjectDarkShaderInput {
+                        reference_translation,
+                        object_translation: transform.translation,
+                        dark_distance: self.dark_shader.distance,
+                    });
+                if let Some(shading) = apply_retail_object_zone_shader(
+                    mode,
+                    vertex_kind,
+                    original_colors,
+                    zone_colors,
+                    camera_depth,
+                    depth_anchor,
+                    dark,
+                )
+                .map_err(RuntimeError::ObjectZoneShader)?
+                {
+                    effective_colors = shading.colors;
+                    self.machine
+                        .object_mut(object.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .set_retail_display_colors(effective_colors);
+                }
+            }
+        }
+
+        let reset_zone = if zone == Eid::NONE {
+            self.level_state_context
+                .as_ref()
+                .map(|context| context.location.path.zone)
+                .filter(|zone| *zone != Eid::NONE)
+        } else {
+            Some(zone)
+        };
+        if status_b & 0x10_0000 != 0
+            && let Some(reset_zone) = reset_zone
+            && let Some(environment) = host
+                .zone_environment(reset_zone)
+                .map_err(RuntimeError::Program)?
+        {
+            let reset = if is_main {
+                environment.player_colors
+            } else {
+                environment.object_colors
+            };
+            self.machine
+                .object_mut(object.vm)
+                .map_err(RuntimeError::Vm)?
+                .set_retail_display_colors(reset);
+        }
+        Ok(Some(effective_colors))
     }
 
     fn retail_display_enabled(&self, object: RuntimeObjectHandle) -> Result<bool, VmError> {
@@ -8348,12 +8549,18 @@ mod tests {
     #[test]
     fn newly_latched_count_draws_bit_controls_the_following_counter() {
         let mut runtime = RetailRuntime::new(crate::gool::DRAW_COUNT_GLOBAL + 1);
+        assert_eq!(runtime.next_frame_stamp(), 0);
         runtime
             .machine
             .set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK & !0x1000)
             .unwrap();
         runtime.run_frame(&mut SnapshotHost, 1).unwrap();
         assert_eq!(runtime.draw_count(), 0);
+        assert_eq!(
+            runtime.next_frame_stamp(),
+            1,
+            "GOOL time advances while the independent draw counter is frozen"
+        );
 
         runtime
             .machine
@@ -8361,6 +8568,7 @@ mod tests {
             .unwrap();
         runtime.run_frame(&mut SnapshotHost, 1).unwrap();
         assert_eq!(runtime.draw_count(), 1);
+        assert_eq!(runtime.next_frame_stamp(), 2);
         assert_eq!(
             runtime
                 .machine()
@@ -8370,6 +8578,7 @@ mod tests {
 
         runtime.finish_display_frame(true).unwrap();
         assert_eq!(runtime.draw_count(), 1, "paused GLUpdate never increments");
+        assert_eq!(runtime.next_frame_stamp(), 2);
     }
 
     #[test]
@@ -9245,6 +9454,63 @@ mod tests {
         }
     }
 
+    struct DisplayShaderHost {
+        source: AnimationBoundSource,
+        solid: RetailSolidEnvironment,
+        zone: RetailZoneEnvironment,
+    }
+
+    impl ProgramHost for DisplayShaderHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let mut object = VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())?;
+            object.configure_test_program_identity_with_type(0x100, 0);
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn zone_environment(
+            &mut self,
+            zone: Eid,
+        ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
+            if zone != ZONE {
+                return Err(());
+            }
+            Ok(Some(self.zone))
+        }
+
+        fn solid_environment(
+            &mut self,
+            _zone: Eid,
+        ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+            Ok(Some(self.solid.clone()))
+        }
+
+        fn animation_bound_source(
+            &mut self,
+            _binding: AnimationBoundBinding,
+        ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+            Ok(Some(self.source))
+        }
+
+        fn animation_display_vertex_kind(
+            &mut self,
+            _binding: AnimationBoundBinding,
+        ) -> Result<Option<ObjectVertexKind>, Self::Error> {
+            Ok(match self.source {
+                AnimationBoundSource::Vertex { vertex_kind, .. } => Some(vertex_kind),
+                AnimationBoundSource::NonVertex => None,
+            })
+        }
+    }
+
     fn entity(id: u16, executable: u8, subtype: u8) -> ZoneEntity {
         ZoneEntity {
             serialized_parent: EntryRef::from_raw(0),
@@ -9733,6 +9999,7 @@ mod tests {
                 RetailDisplaySnapshot {
                     enabled: true,
                     dark_reference_translation: None,
+                    effective_colors: None,
                 },
             );
         }
@@ -11261,6 +11528,7 @@ mod tests {
                 RetailDisplaySnapshot {
                     enabled: true,
                     dark_reference_translation: None,
+                    effective_colors: None,
                 },
             );
             runtime
@@ -11696,6 +11964,312 @@ mod tests {
         assert_eq!(dark_reference(before_main), Some(initial_translation));
         assert_eq!(dark_reference(main), Some(updated_translation));
         assert_eq!(dark_reference(after_main), Some(updated_translation));
+    }
+
+    fn run_vertex_display_fixture(
+        shader_mode: u32,
+        vertex_kind: ObjectVertexKind,
+        status_b: u32,
+        parent_translation: [i32; 3],
+        display_mask: u32,
+        object_zone: Eid,
+        expect_shader: bool,
+    ) -> (
+        RetailRuntime,
+        RuntimeObjectHandle,
+        RuntimeObjectHandle,
+        [u16; COLOR_COUNT],
+        [u16; COLOR_COUNT],
+    ) {
+        let original_colors = std::array::from_fn(|index| 0x100 + index as u16);
+        let zone_colors = std::array::from_fn(|index| 0x400 + index as u16);
+        let player_colors = std::array::from_fn(|index| 0x700 + index as u16);
+        let source = AnimationBoundSource::Vertex {
+            vertex_kind,
+            serialized_bound: Bounds3::default(),
+            collision_center: Vec3::default(),
+        };
+        let mut host = DisplayShaderHost {
+            source,
+            solid: RetailSolidEnvironment::new(0, zone_colors, player_colors, Vec::new())
+                .with_object_shader(shader_mode, 0),
+            zone: RetailZoneEnvironment {
+                origin: [0; 3],
+                object_colors: zone_colors,
+                player_colors,
+                graphics_flags: 0,
+            },
+        };
+        let entities = [entity(10, 2, 0), entity(11, 0, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x28));
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        let parent = *attempts[0].result.as_ref().unwrap();
+        let main = *attempts[1].result.as_ref().unwrap();
+        runtime.arena.set_zone(parent.arena, object_zone).unwrap();
+        let child = attach_test_child(&mut runtime, parent, ZONE, 3);
+        let read_parent_light_x = (0x23_u32 << 24) | (1 << 12);
+        let mut child_vm = VmObject::new(child.vm, vec![read_parent_light_x, RETURN]).unwrap();
+        child_vm.set_link(1, Some(parent.vm)).unwrap();
+        child_vm.set_link(4, Some(parent.vm)).unwrap();
+        child_vm.configure_test_program_identity_with_type(0x100, 0);
+        runtime.machine.upsert_object(child_vm).unwrap();
+
+        runtime
+            .machine
+            .object_mut(main.vm)
+            .unwrap()
+            .set_retail_transform(RetailTransform {
+                translation: [0; 3],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        let parent_vm = runtime.machine.object_mut(parent.vm).unwrap();
+        parent_vm.bind_animation_data(&[0; 8]);
+        parent_vm
+            .set_register(process_register::ANIMATION_SEQUENCE, 0xa700_0001)
+            .unwrap();
+        parent_vm
+            .set_register(process_register::ANIMATION_FRAME, 0)
+            .unwrap();
+        parent_vm
+            .set_register(process_register::STATUS_B, status_b)
+            .unwrap();
+        parent_vm
+            .set_retail_transform(RetailTransform {
+                translation: parent_translation,
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        parent_vm.set_retail_display_colors(original_colors);
+
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+            [0; 3], [0; 3], 500,
+        ));
+        runtime
+            .machine
+            .set_global_word(CURRENT_DISPLAY_GLOBAL, display_mask)
+            .unwrap();
+        runtime.run_frame(&mut host, 4).unwrap();
+
+        let expected = if expect_shader {
+            apply_retail_object_zone_shader(
+                shader_mode,
+                vertex_kind,
+                original_colors,
+                zone_colors,
+                -(parent_translation[2] >> 8),
+                0,
+                Some(ObjectDarkShaderInput {
+                    reference_translation: [0; 3],
+                    object_translation: parent_translation,
+                    dark_distance: 1,
+                }),
+            )
+            .unwrap()
+            .unwrap()
+            .colors
+        } else {
+            original_colors
+        };
+        (runtime, parent, child, expected, zone_colors)
+    }
+
+    #[test]
+    fn mode_four_display_writeback_is_visible_to_child_in_same_preorder_frame() {
+        let (runtime, parent, child, expected, _) = run_vertex_display_fixture(
+            4,
+            ObjectVertexKind::Lit,
+            0,
+            [600 << 8, 0, -600 << 8],
+            INITIAL_DISPLAY_MASK,
+            ZONE,
+            true,
+        );
+        assert_eq!(runtime.dark_shader.distance, 1);
+        assert_eq!(
+            runtime.machine.object(parent.vm).unwrap().retail_colors(),
+            &expected
+        );
+        assert_eq!(
+            runtime.machine.object(child.vm).unwrap().stack(),
+            &[u32::from(expected[0])]
+        );
+        let snapshot = runtime
+            .render_objects()
+            .unwrap()
+            .into_iter()
+            .find(|object| object.object == parent)
+            .unwrap();
+        assert_eq!(snapshot.colors, expected);
+    }
+
+    #[test]
+    fn inherited_zone_colors_follow_effective_render_colors_before_child_traversal() {
+        let (runtime, parent, child, expected, zone_colors) = run_vertex_display_fixture(
+            4,
+            ObjectVertexKind::Lit,
+            0x10_0000,
+            [600 << 8, 0, -600 << 8],
+            INITIAL_DISPLAY_MASK,
+            ZONE,
+            true,
+        );
+        assert_eq!(
+            runtime.machine.object(parent.vm).unwrap().retail_colors(),
+            &zone_colors
+        );
+        assert_eq!(
+            runtime.machine.object(child.vm).unwrap().stack(),
+            &[u32::from(zone_colors[0])]
+        );
+        let snapshot = runtime
+            .render_objects()
+            .unwrap()
+            .into_iter()
+            .find(|object| object.object == parent)
+            .unwrap();
+        assert_eq!(snapshot.colors, expected);
+        assert_ne!(snapshot.colors, zone_colors);
+    }
+
+    #[test]
+    fn inherited_colors_fall_back_from_null_object_zone_to_current_zone() {
+        let (runtime, parent, child, expected, zone_colors) = run_vertex_display_fixture(
+            4,
+            ObjectVertexKind::Lit,
+            0x10_0000,
+            [600 << 8, 0, -600 << 8],
+            INITIAL_DISPLAY_MASK,
+            Eid::NONE,
+            true,
+        );
+        assert_eq!(
+            runtime.machine.object(parent.vm).unwrap().retail_colors(),
+            &zone_colors
+        );
+        assert_eq!(
+            runtime.machine.object(child.vm).unwrap().stack(),
+            &[u32::from(zone_colors[0])]
+        );
+        let snapshot = runtime
+            .render_objects()
+            .unwrap()
+            .into_iter()
+            .find(|object| object.object == parent)
+            .unwrap();
+        assert_eq!(snapshot.colors, expected);
+        assert_ne!(snapshot.colors, zone_colors);
+    }
+
+    #[test]
+    fn native_vertex_display_gates_mode_four_color_side_effects() {
+        let cases = [
+            (
+                ObjectVertexKind::Colored,
+                0x200,
+                -600 << 8,
+                INITIAL_DISPLAY_MASK,
+                false,
+            ),
+            (
+                ObjectVertexKind::Lit,
+                0x400,
+                -600 << 8,
+                INITIAL_DISPLAY_MASK,
+                false,
+            ),
+            (
+                ObjectVertexKind::Lit,
+                0,
+                -600 << 8,
+                INITIAL_DISPLAY_MASK | 0x1_0000,
+                false,
+            ),
+            (
+                ObjectVertexKind::Lit,
+                0,
+                -400 << 8,
+                INITIAL_DISPLAY_MASK,
+                false,
+            ),
+            (
+                ObjectVertexKind::Lit,
+                0x4_0000,
+                -400 << 8,
+                INITIAL_DISPLAY_MASK,
+                true,
+            ),
+        ];
+
+        for (vertex_kind, status_b, translation_z, display_mask, expect_shader) in cases {
+            let (runtime, parent, child, expected, _) = run_vertex_display_fixture(
+                4,
+                vertex_kind,
+                status_b,
+                [600 << 8, 0, translation_z],
+                display_mask,
+                ZONE,
+                expect_shader,
+            );
+            assert_eq!(
+                runtime.dark_shader.distance,
+                i32::from(expect_shader),
+                "unexpected dark-distance side effect for {vertex_kind:?}, status {status_b:#x}"
+            );
+            assert_eq!(
+                runtime.machine.object(parent.vm).unwrap().retail_colors(),
+                &expected
+            );
+            assert_eq!(
+                runtime.machine.object(child.vm).unwrap().stack(),
+                &[u32::from(expected[0])]
+            );
+            let snapshot = runtime
+                .render_objects()
+                .unwrap()
+                .into_iter()
+                .find(|object| object.object == parent)
+                .unwrap();
+            assert_eq!(snapshot.colors, expected);
+        }
+    }
+
+    #[test]
+    fn modes_two_and_three_commit_native_live_color_results() {
+        let original_colors = std::array::from_fn(|index| 0x100 + index as u16);
+        for (mode, vertex_kind, changes_colors) in [
+            (2, ObjectVertexKind::Lit, true),
+            (3, ObjectVertexKind::Lit, true),
+            (3, ObjectVertexKind::Colored, false),
+        ] {
+            let (runtime, parent, child, expected, _) = run_vertex_display_fixture(
+                mode,
+                vertex_kind,
+                0,
+                [600 << 8, 0, -600 << 8],
+                INITIAL_DISPLAY_MASK,
+                ZONE,
+                true,
+            );
+            assert_eq!(runtime.dark_shader.distance, 0);
+            assert_eq!(expected != original_colors, changes_colors);
+            assert_eq!(
+                runtime.machine.object(parent.vm).unwrap().retail_colors(),
+                &expected
+            );
+            assert_eq!(
+                runtime.machine.object(child.vm).unwrap().stack(),
+                &[u32::from(expected[0])]
+            );
+        }
     }
 
     #[test]
@@ -12727,6 +13301,7 @@ mod tests {
             entities: &entities,
         }];
         let source = AnimationBoundSource::Vertex {
+            vertex_kind: ObjectVertexKind::Lit,
             serialized_bound: Bounds3 {
                 min: Vec3 {
                     x: -256,
@@ -12875,6 +13450,7 @@ mod tests {
         assert_eq!(
             host.animation_bound_source(binding).unwrap(),
             Some(AnimationBoundSource::Vertex {
+                vertex_kind: ObjectVertexKind::Lit,
                 serialized_bound: Bounds3 {
                     min: Vec3 {
                         x: -0x1000,

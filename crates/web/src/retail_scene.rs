@@ -113,6 +113,9 @@ pub struct RetailSceneProgressLocation {
     pub zone: Eid,
     pub path_index: u32,
     pub path_progress: i32,
+    /// Native `frames_elapsed` consumed by the graphics-flag `0x1000`
+    /// object-only camera. This advances independently from `draw_count`.
+    pub frame_stamp: u32,
     pub draw_count: u32,
 }
 
@@ -269,6 +272,7 @@ impl RetailSceneBuilder {
                 zone: location.zone,
                 path_index: location.path_index,
                 path_progress,
+                frame_stamp: location.draw_count,
                 draw_count: location.draw_count,
             },
         )
@@ -559,7 +563,8 @@ fn build_retail_scene_cached(
     let raw_world_camera_matrix =
         raw_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
     let camera_matrix = adjusted_camera_matrix(raw_world_camera_matrix);
-    let object_camera = object_camera_sample(camera, graph.zone_header.graphics.flags, draw_count);
+    let object_camera =
+        object_camera_sample_for_location(camera, graph.zone_header.graphics.flags, location);
     let raw_object_camera_matrix = raw_camera_matrix(
         object_camera.rotation_y,
         object_camera.rotation_x,
@@ -1788,8 +1793,10 @@ fn object_camera_sample(
     }
     // GfxInitMatrices seeds cam_prev to (0, 921600, 6144000). In these
     // zones GfxUpdateMatrices deliberately retains X/Z, replaces Y with a
-    // 128-frame triangular path, and substitutes a fixed 125-angle pitch for
-    // GOOL objects only. World geometry continues to use `camera` above.
+    // 128-frame triangular path, and substitutes a fixed positive-125 matrix
+    // for GOOL objects only. `raw_camera_matrix` negates stored camera angles,
+    // so the pointer-free sample retains the inverse scalar. World geometry
+    // continues to use `camera` above.
     let phase = i32::try_from(frame_stamp % 128).expect("a modulo-128 frame fits i32");
     let y = 901_600 + (phase - 64).abs() * 800;
     let translation_fixed = [0, y, 6_144_000];
@@ -1800,10 +1807,18 @@ fn object_camera_sample(
             z: translation_fixed[2] >> 8,
         },
         translation_fixed,
-        rotation_y: 125,
+        rotation_y: -125,
         rotation_x: 0,
         rotation_z: 0,
     }
+}
+
+fn object_camera_sample_for_location(
+    camera: CameraSample,
+    graphics_flags: u32,
+    location: RetailSceneProgressLocation,
+) -> CameraSample {
+    object_camera_sample(camera, graphics_flags, location.frame_stamp)
 }
 
 fn sample_camera(
@@ -2055,6 +2070,7 @@ mod tests {
     };
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
+    use crust_sim::retail_lighting::{ObjectDarkShaderInput, apply_retail_object_zone_shader};
     use crust_sim::retail_runtime::{
         NsfProgramHost, RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome,
         RetailRuntime, ZoneTerminationMode,
@@ -2232,14 +2248,46 @@ mod tests {
         );
         assert_eq!(
             [start.rotation_y, start.rotation_x, start.rotation_z],
-            [125, 0, 0]
+            [-125, 0, 0]
         );
 
         let trough = object_camera_sample(world, 0x1000, 64);
         assert_eq!(trough.translation_fixed, [0, 901_600, 6_144_000]);
+        let web_matrix = adjusted_camera_matrix(raw_camera_matrix(
+            trough.rotation_y,
+            trough.rotation_x,
+            trough.rotation_z,
+        ));
+        let sim_camera = RetailTransformVectorsCamera::from_retail_pose(
+            world.translation_fixed,
+            [world.rotation_y, world.rotation_x, world.rotation_z],
+            500,
+        )
+        .for_object_display(0x1000, 64);
+        assert_eq!(trough.translation_fixed, sim_camera.translation);
+        assert_eq!(web_matrix.values, sim_camera.rotation_matrix);
+        let point: [i32; 3] = [321 << 8, 4_567 << 8, 23_100 << 8];
+        let relative = Vec3i {
+            x: point[0].wrapping_sub(trough.translation_fixed[0]) >> 8,
+            y: point[1].wrapping_sub(trough.translation_fixed[1]) >> 8,
+            z: point[2].wrapping_sub(trough.translation_fixed[2]) >> 8,
+        };
+        let web_point = rotate(relative, web_matrix).point;
         assert_eq!(
-            raw_camera_matrix(trough.rotation_y, trough.rotation_x, trough.rotation_z),
-            raw_camera_matrix(125, 0, 0)
+            [web_point.x, web_point.y, web_point.z],
+            sim_camera.camera_space_point(point)
+        );
+        let frozen_draw_location = RetailSceneProgressLocation {
+            zone: Eid::NONE,
+            path_index: 0,
+            path_progress: 0,
+            frame_stamp: 64,
+            draw_count: 0,
+        };
+        assert_eq!(
+            object_camera_sample_for_location(world, 0x1000, frozen_draw_location),
+            trough,
+            "object bob follows GOOL time even while texture draw_count is frozen"
         );
         assert_eq!(object_camera_sample(world, 0x1000, 128), start);
     }
@@ -2388,6 +2436,7 @@ mod tests {
                 zone: ldat.spawn_zone,
                 path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
                 path_progress: 2 << 8,
+                frame_stamp: 1,
                 draw_count: 1,
             },
         )
@@ -2401,6 +2450,7 @@ mod tests {
                 zone: ldat.spawn_zone,
                 path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
                 path_progress: (2 << 8) | 0x80,
+                frame_stamp: 1,
                 draw_count: 1,
             },
         )
@@ -2419,6 +2469,7 @@ mod tests {
             zone: ldat.spawn_zone,
             path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
             path_progress: (2 << 8) | 0x80,
+            frame_stamp: 1,
             draw_count: 1,
         };
         let mut builder = RetailSceneBuilder::new();
@@ -2489,6 +2540,7 @@ mod tests {
                         zone,
                         path_index,
                         path_progress: 0,
+                        frame_stamp: 0,
                         draw_count: 0,
                     };
                     builder
@@ -2541,6 +2593,7 @@ mod tests {
                         zone: step.after.path.zone,
                         path_index: step.after.path.index,
                         path_progress: step.after.progress.raw(),
+                        frame_stamp: draw_count,
                         draw_count,
                     },
                 )
@@ -2665,6 +2718,7 @@ mod tests {
                     zone: step.after.path.zone,
                     path_index: step.after.path.index,
                     path_progress: step.after.progress.raw(),
+                    frame_stamp: draw_count,
                     draw_count,
                 };
                 let scene = match builder.build_at_progress(&nsd, &nsf, &nsf_bytes, location) {
@@ -2808,6 +2862,7 @@ mod tests {
                     path_index: u32::try_from(ldat.spawn_path_index)
                         .expect("retail spawn path is non-negative"),
                     path_progress: 0x80,
+                    frame_stamp: 0,
                     draw_count: 0,
                 },
             )
@@ -2853,6 +2908,7 @@ mod tests {
                             path_index: u32::try_from(ldat.spawn_path_index)
                                 .expect("retail spawn path is non-negative"),
                             path_progress: 0x80,
+                            frame_stamp: 0,
                             draw_count: 0,
                         },
                     )
@@ -2974,6 +3030,7 @@ mod tests {
                             zone: camera_step.after.path.zone,
                             path_index: camera_step.after.path.index,
                             path_progress: camera_step.after.progress.raw(),
+                            frame_stamp: draw_count,
                             draw_count,
                         },
                         &invalid_frames,
@@ -2991,6 +3048,7 @@ mod tests {
                         zone: camera_step.after.path.zone,
                         path_index: camera_step.after.path.index,
                         path_progress: camera_step.after.progress.raw(),
+                        frame_stamp: draw_count,
                         draw_count,
                     },
                     &objects,
@@ -3351,6 +3409,7 @@ mod tests {
                 zone: camera_step.after.path.zone,
                 path_index: camera_step.after.path.index,
                 path_progress: camera_step.after.progress.raw(),
+                frame_stamp: draw_count,
                 draw_count,
             };
             builder
@@ -3563,6 +3622,8 @@ mod tests {
         let mut emitted_fragment_quads = 0_usize;
         let mut emitted_text_quads = 0_usize;
         let mut live_mode_four_vertices = 0_usize;
+        let mut verified_mode_four_writebacks = 0_usize;
+        let mut changed_mode_four_writebacks = 0_usize;
         let mut emitted_mode_four_primitives = 0_usize;
         let mut observed_levels = std::collections::BTreeSet::new();
 
@@ -3657,6 +3718,21 @@ mod tests {
                     first_spawn: false,
                     active_neighbor_zones: active_neighbor_zones.clone(),
                 });
+                let pose = camera.pose(&graph).unwrap();
+                let runtime_camera = RetailTransformVectorsCamera::from_retail_pose(
+                    pose.translation,
+                    pose.rotation_yxz,
+                    projection_distance(ldat.field_of_view).unwrap(),
+                );
+                runtime.set_transform_vectors_camera(runtime_camera);
+                let object_camera = runtime_camera.for_object_display(
+                    graph
+                        .zone(camera_step.after.path.zone)
+                        .unwrap()
+                        .graphics_flags,
+                    draw_count,
+                );
+                let frame_display_mask = runtime.current_display_mask();
                 runtime
                     .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
                     .unwrap_or_else(|error| panic!("{} frame {draw_count}: {error:?}", known.name));
@@ -3715,21 +3791,66 @@ mod tests {
                             text_handles.insert(u32::from(object.object.vm().get()));
                         }
                         GoolAnimationDescriptor::Vertex(vertex) => {
+                            let vertex_kind = nsf
+                                .resolve_entry(&nsd, vertex.model_eid)
+                                .ok()
+                                .and_then(|entry| {
+                                    ObjectVertexKind::from_entry_type(entry.entry_type).ok()
+                                });
                             if object.status_b & 0x200 != 0
-                                && nsf
-                                    .resolve_entry(&nsd, vertex.model_eid)
-                                    .is_ok_and(|entry| entry.entry_type == 20)
+                                && vertex_kind == Some(ObjectVertexKind::Colored)
                             {
                                 live_2d_cvtx += 1;
                             }
                             if current_header.graphics.unknown_a == 4
-                                && current_header.display_flags & 0x1_0000 == 0
+                                && frame_display_mask & 0x1_0000 == 0
                                 && Some(object.object) != main_object
                                 && object.status_b & 0x400 == 0
+                                && !(vertex_kind == Some(ObjectVertexKind::Colored)
+                                    && object.status_b & 0x200 != 0)
                             {
                                 live_mode_four_vertices += 1;
                                 has_live_non_vertex = true;
                                 mode_four_handles.insert(u32::from(object.object.vm().get()));
+
+                                let camera_depth = object_camera
+                                    .camera_space_point(object.transform.translation)[2];
+                                let projection = i32::try_from(object_camera.screen_projection)
+                                    .unwrap_or(i32::MAX);
+                                if object.status_b & 0x4_0000 != 0 || projection < camera_depth {
+                                    let expected = apply_retail_object_zone_shader(
+                                        4,
+                                        vertex_kind.unwrap(),
+                                        object.colors,
+                                        current_header.graphics.object_colors.words,
+                                        camera_depth,
+                                        object_zone_depth_anchor(&nsd, &current_header),
+                                        object.dark_reference_translation.map(
+                                            |reference_translation| ObjectDarkShaderInput {
+                                                reference_translation,
+                                                object_translation: object.transform.translation,
+                                                dark_distance: object.dark_distance,
+                                            },
+                                        ),
+                                    )
+                                    .unwrap()
+                                    .unwrap();
+                                    assert_eq!(object.colors, expected.colors);
+                                    verified_mode_four_writebacks += 1;
+                                    if object.status_b & 0x10_0000 == 0 {
+                                        let live = runtime
+                                            .machine()
+                                            .object(object.object.vm())
+                                            .unwrap()
+                                            .retail_colors();
+                                        assert_eq!(live, &expected.colors);
+                                        changed_mode_four_writebacks += usize::from(
+                                            expected.colors[..12]
+                                                != current_header.graphics.object_colors.words
+                                                    [..12],
+                                        );
+                                    }
+                                }
                             }
                         }
                         GoolAnimationDescriptor::Font(_) => {}
@@ -3747,6 +3868,7 @@ mod tests {
                             zone: camera_step.after.path.zone,
                             path_index: camera_step.after.path.index,
                             path_progress: camera_step.after.progress.raw(),
+                            frame_stamp: draw_count,
                             draw_count,
                         },
                         &objects,
@@ -3782,7 +3904,7 @@ mod tests {
         }
 
         eprintln!(
-            "live non-vertex boot frames: sprites={live_sprites}, fragments={live_fragments}, texts={live_texts} ({live_dynamic_fonts} dynamic-font overrides), 2D CVTX={live_2d_cvtx}, mode-4 vertices={live_mode_four_vertices}, sprite quads={emitted_sprite_quads}, fragment quads={emitted_fragment_quads}, text quads={emitted_text_quads}, mode-4 primitives={emitted_mode_four_primitives}, levels={observed_levels:?}"
+            "live non-vertex boot frames: sprites={live_sprites}, fragments={live_fragments}, texts={live_texts} ({live_dynamic_fonts} dynamic-font overrides), 2D CVTX={live_2d_cvtx}, mode-4 vertices={live_mode_four_vertices} ({verified_mode_four_writebacks} verified, {changed_mode_four_writebacks} changed+persisted), sprite quads={emitted_sprite_quads}, fragment quads={emitted_fragment_quads}, text quads={emitted_text_quads}, mode-4 primitives={emitted_mode_four_primitives}, levels={observed_levels:?}"
         );
         assert!(live_sprites > 0);
         assert!(live_fragments > 0);
@@ -3791,6 +3913,8 @@ mod tests {
         assert!(live_texts > 0);
         assert!(emitted_text_quads > 0);
         assert!(live_mode_four_vertices > 0);
+        assert!(verified_mode_four_writebacks > 0);
+        assert!(changed_mode_four_writebacks > 0);
         assert!(emitted_mode_four_primitives > 0);
         // Fragment/2D-CVTX descriptors are corpus-covered by renderer tests;
         // an idle direct boot is not guaranteed to enter those object states.
@@ -3919,6 +4043,7 @@ mod tests {
             let frame = runtime
                 .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
                 .unwrap();
+            let frame_stamp = u32::try_from(frame.frame_index).unwrap();
             assert!(
                 frame
                     .executions
@@ -3979,6 +4104,7 @@ mod tests {
                         zone: camera.location().path.zone,
                         path_index: camera.location().path.index,
                         path_progress: camera.location().progress.raw(),
+                        frame_stamp,
                         draw_count: runtime.draw_count(),
                     },
                     &objects,

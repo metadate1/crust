@@ -112,7 +112,12 @@ copy any disc or stream bytes into the repository:
   lowercase sentinel terms that Rust rejects instead of indexing beyond retail's 63-glyph table.
   Across 42 non-title idle boots, 531 live type-four text frames emitted 3,894 textured quads; the
   same trace also exercised 50,714 sprite and 177 fragment frames. No dynamic-font override became
-  live in that idle window, so default-vs-override selection remains covered by a focused unit test.
+  live in that idle window. A separate legally local Great Hall ending-route golden now executes
+  the authentic `WinGC` program with its retail child arguments and verifies the first two display
+  boundaries: the hidden first frame records the authored override and the visible frame preserves
+  it with its `PAPU PAPU:` text state. The descriptor default resolves to `Fon0T` and that override
+  resolves to `Op2pT`. This characterizes the real dynamic-font path without claiming that the idle
+  boot naturally reaches the ending route.
 - The exact title MDAT runtime test loaded the legal title pair directly from the raw image and
   confirmed type-17 source-vs-object-zone binding, source-ordered state changes and the type-zero
   display masks `0x22_3ff0` at load and `0x22_3ffc` when active. Focused tests cover the complete
@@ -331,10 +336,10 @@ The final checks below were run against this change set on 2026-07-14:
 - `cargo fmt --all -- --check` passed.
 - locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
   `crust-web` Clippy pass both completed with warnings denied.
-- the locked asset-free workspace suite passed all 728 default tests across 33 targets. Another 52
-  legally local tests remain ignored by default, for 780 listed tests across all targets.
+- the locked asset-free workspace suite passed all 730 default tests across 33 targets. Another 53
+  legally local tests remain ignored by default, for 783 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. All 52 selected tests passed with zero failures, including every
+  streams in place. All 53 selected tests passed with zero failures, including every
   raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
 - executable-`0x22` crate coverage now checks the native strict adjacency boundary, checked
   bidirectional misc-A links, skipped-lower-crate Y compaction, activation/restart reset, stagger
@@ -367,14 +372,18 @@ The final checks below were run against this change set on 2026-07-14:
   its effective colors independently of the status-B `0x100000` object/player-zone reset. The
   legally local all-pair regression exercised 1,800 mode-four vertex displays and 2,880 emitted
   primitives; all 540 changed shader results matched the fixed-point evaluator and persisted in
-  the live VM.
+  the live VM. The snapshot now also latches animation/frame, transform, process flags, text
+  arguments/font, darkness and the live object display mask. Focused linked-child coverage proves
+  that a later child write cannot retroactively mutate its parent's render state, while an actual
+  global-nine write proves that world geometry keeps the pre-GOOL mask and later objects consume
+  the traversal-time mask.
 - the object-only graphics-flag `0x1000` camera has a cross-crate fixed-point golden covering its
   direct pitch matrix, fixed/bobbing translation and camera-space point. A separate clock test
   proves GOOL `frames_elapsed` advances while texture `draw_count` is frozen; scene locations carry
   both values so hidden/loading frames cannot desynchronize shading from geometry.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,230,231 bytes with SHA-256
-  `6acdcd1002041099e82ac03d2a6319988049bf9abf6c4b38dd62e77c5ba9ca8c`.
+  web release. The Wasm payload is 1,231,524 bytes with SHA-256
+  `58cd4200db4980117625048c2fa6e5e444d73b4624ecc4996c2a23951ae1260d`.
 - the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
   the route and pause integration was loaded in the visible in-app browser. Because that browser
   cannot automate a native file picker,
@@ -407,6 +416,18 @@ The final checks below were run against this change set on 2026-07-14:
   sources, and the normal no-store server was restarted. Its root returns HTTP 200, the removed
   bridge returns HTTP 404, and the visible tab remains on the in-memory island-map scene. No game
   bytes entered Git, browser persistence, or the repository working tree.
+
+  The traversal-snapshot/display-mask artifact was then rebuilt and loaded in a fresh in-app
+  browser page. The supplied raw BIN again resolved 88 streams, 44/44 pairs and 219 MiB of selected
+  stream extents. Title boot rendered the publisher screen at 30.00 Hz with synthesized audio, and
+  its mute control changed telemetry to `MUTED` before being restored to `SYNTH ACTIVE`. A second
+  fresh mount directly booted N. Sanity Beach, rendered its live world, Crash and crate geometry,
+  and changed `RUNNING → PAUSED → RUNNING` through the native pause controller. The page reported
+  no warning or error console entries. The loopback-only mount bridge was stopped and deleted after
+  dispatching the ordinary local-input event; the normal no-store server was restored, its root
+  returns HTTP 200, the removed route returns HTTP 404, and the visible tab remains on the in-memory
+  N. Sanity scene. Keyboard, physical gamepad, fullscreen and touch presentation were not repeated
+  in this pass.
 
 ## Reproducible commands
 
@@ -450,6 +471,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   n_sanity_authored_pause_panel_blinks_five_willt_fragment_quads -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --test local_great_hall_dynamic_font --locked -- \
+  --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture

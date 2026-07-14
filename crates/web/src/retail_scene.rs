@@ -325,7 +325,7 @@ impl RetailSceneBuilder {
         objects: &[RetailRenderObject],
         main_object: Option<RuntimeObjectHandle>,
     ) -> Result<RetailScene, RetailSceneError> {
-        self.build_at_progress_with_objects_and_display_mask(
+        self.build_at_progress_with_objects_and_world_display_mask(
             nsd,
             nsf,
             nsf_bytes,
@@ -336,18 +336,21 @@ impl RetailSceneBuilder {
         )
     }
 
-    /// Builds the post-GOOL scene using the exact current-frame display mask.
+    /// Builds the post-GOOL snapshot using the exact pre-GOOL world mask.
     ///
-    /// The caller must pass current global nine after GOOL, never the
-    /// script-owned next global four. This also preserves the source's rare
-    /// same-frame behavior if an opcode writes current directly.
+    /// Native submits world geometry before traversing GOOL objects. The
+    /// caller must therefore capture current global nine after spawn/camera
+    /// setup but before GOOL. Each [`RetailRenderObject`] independently carries
+    /// the live global-nine value sampled at its later transform boundary, so
+    /// a same-frame authored write cannot retroactively alter the world or be
+    /// collapsed into one post-GOOL mask.
     ///
     /// # Errors
     ///
     /// Returns an error for malformed scene, animation, object, paging, or
     /// texture data referenced by the mounted pair.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_at_progress_with_objects_and_display_mask(
+    pub fn build_at_progress_with_objects_and_world_display_mask(
         &mut self,
         nsd: &Nsd,
         nsf: &Nsf,
@@ -355,7 +358,7 @@ impl RetailSceneBuilder {
         location: RetailSceneProgressLocation,
         objects: &[RetailRenderObject],
         main_object: Option<RuntimeObjectHandle>,
-        display_mask: u32,
+        world_display_mask: u32,
     ) -> Result<RetailScene, RetailSceneError> {
         build_retail_scene_cached(
             self,
@@ -365,7 +368,7 @@ impl RetailSceneBuilder {
             location,
             objects,
             main_object,
-            display_mask,
+            world_display_mask,
             None,
         )
     }
@@ -379,10 +382,11 @@ impl RetailSceneBuilder {
     /// # Errors
     ///
     /// Returns the same checked scene and asset errors as
-    /// [`Self::build_at_progress_with_objects_and_display_mask`], including an
+    /// [`Self::build_at_progress_with_objects_and_world_display_mask`],
+    /// including an
     /// unsupported field of view.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_at_progress_with_objects_display_mask_and_fov(
+    pub fn build_at_progress_with_objects_and_world_display_mask_and_fov(
         &mut self,
         nsd: &Nsd,
         nsf: &Nsf,
@@ -390,7 +394,7 @@ impl RetailSceneBuilder {
         location: RetailSceneProgressLocation,
         objects: &[RetailRenderObject],
         main_object: Option<RuntimeObjectHandle>,
-        display_mask: u32,
+        world_display_mask: u32,
         field_of_view: u32,
     ) -> Result<RetailScene, RetailSceneError> {
         build_retail_scene_cached(
@@ -401,7 +405,7 @@ impl RetailSceneBuilder {
             location,
             objects,
             main_object,
-            display_mask,
+            world_display_mask,
             Some(field_of_view),
         )
     }
@@ -489,7 +493,7 @@ fn build_retail_scene_cached(
     location: RetailSceneProgressLocation,
     render_objects: &[RetailRenderObject],
     main_object: Option<RuntimeObjectHandle>,
-    display_mask: u32,
+    world_display_mask: u32,
     field_of_view_override: Option<u32>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
@@ -542,7 +546,7 @@ fn build_retail_scene_cached(
         visibility
             .seek(path_point_index)
             .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
-        if display_mask & 1 == 0 {
+        if world_display_mask & 1 == 0 {
             Vec::new()
         } else {
             visibility.visibility().to_vec()
@@ -586,7 +590,6 @@ fn build_retail_scene_cached(
         raw_object_camera_matrix,
         object_camera_matrix,
         projection_distance,
-        display_mask,
     )?;
 
     let mut page_ids = BTreeSet::new();
@@ -1020,7 +1023,6 @@ fn prepare_objects(
     raw_camera_matrix: Matrix3,
     adjusted_camera_matrix: Matrix3,
     projection_distance: u32,
-    display_flags: u32,
 ) -> Result<PreparedObjects, RetailSceneError> {
     let mut prepared = PreparedObjects::default();
     for (render_index, object) in render_objects.iter().enumerate() {
@@ -1057,7 +1059,6 @@ fn prepare_objects(
                 raw_camera_matrix,
                 adjusted_camera_matrix,
                 projection_distance,
-                display_flags,
                 animation,
                 render_index,
                 &mut prepared,
@@ -1113,7 +1114,6 @@ fn prepare_vertex_animation(
     raw_camera_matrix: Matrix3,
     adjusted_camera_matrix: Matrix3,
     projection_distance: u32,
-    display_flags: u32,
     animation: GoolVertexAnimation,
     render_index: usize,
     prepared: &mut PreparedObjects,
@@ -1193,7 +1193,7 @@ fn prepare_vertex_animation(
         // Retail's generic visibility-depth rejection is disabled in the
         // executable. Only the near-plane check here and the mode-two/three
         // shader cutoffs below may reject the object origin by depth.
-        if display_flags & 0x1_0000 == 0
+        if object.display_mask & 0x1_0000 == 0
             && object.status_b & 0x4_0000 == 0
             && i32::try_from(projection_distance).unwrap_or(i32::MAX) >= camera_translation.z
         {
@@ -1202,7 +1202,7 @@ fn prepare_vertex_animation(
         let is_main = main_object == Some(object.object);
         let mut effective_colors = object.colors;
         let mut colored_shift = 0;
-        if display_flags & 0x1_0000 == 0
+        if object.display_mask & 0x1_0000 == 0
             && !is_main
             && object.status_b & 0x400 == 0
             && matches!(zone_header.graphics.unknown_a, 2..=4)
@@ -3413,7 +3413,7 @@ mod tests {
                 draw_count,
             };
             builder
-                .build_at_progress_with_objects_and_display_mask(
+                .build_at_progress_with_objects_and_world_display_mask(
                     &nsd,
                     &nsf,
                     &nsf_bytes,
@@ -3732,7 +3732,6 @@ mod tests {
                         .graphics_flags,
                     draw_count,
                 );
-                let frame_display_mask = runtime.current_display_mask();
                 runtime
                     .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
                     .unwrap_or_else(|error| panic!("{} frame {draw_count}: {error:?}", known.name));
@@ -3803,7 +3802,7 @@ mod tests {
                                 live_2d_cvtx += 1;
                             }
                             if current_header.graphics.unknown_a == 4
-                                && frame_display_mask & 0x1_0000 == 0
+                                && object.display_mask & 0x1_0000 == 0
                                 && Some(object.object) != main_object
                                 && object.status_b & 0x400 == 0
                                 && !(vertex_kind == Some(ObjectVertexKind::Colored)

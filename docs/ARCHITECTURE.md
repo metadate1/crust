@@ -124,8 +124,12 @@ even if its bytes happen to match, avoiding per-frame pixel-vector clones and by
 `CamUpdate` and live main-object `CamFollow` path/zone changes select the canvas scene; pause freezes
 the last successfully installed snapshot. Three-dimensional vertex object models and their current
 animation transforms, screen-aligned sprites/fragments, text/font quads and 2D CVTX objects are
-reflected in that snapshot. Ordered zone teardown and dynamic display masks affect post-GOOL
-snapshots; mid-frame paging-driven texture replacement remains incomplete. The final title pass
+reflected in that snapshot. World visibility retains the global-nine mask sampled before GOOL,
+while every object carries the potentially different live mask, animation, transform, process,
+text-argument/font and effective-color state consumed at its post-update display boundary. A child
+that writes through an authored parent link therefore cannot retroactively alter its parent's
+already-rendered state. Ordered zone teardown affects post-GOOL snapshots; mid-frame paging-driven
+texture replacement remains incomplete. The final title pass
 applies the native 16-band nonlinear black-overlay alpha after the source counter step. A healthy
 authored arena owns the 4:3 canvas. Until one is available, the browser shows only loading/error
 diagnostics and keeps state/warning text in the external monitor panel; it does not substitute a

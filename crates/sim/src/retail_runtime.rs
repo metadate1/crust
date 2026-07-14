@@ -368,7 +368,10 @@ impl RuntimeObjectHandle {
 /// `program` is present for objects materialized from a parsed retail
 /// [`crust_formats::stream::GoolProgram`]. Authored objects created directly
 /// with [`VmObject::new`] retain `None`; their process state is still exposed
-/// for deterministic tests and non-retail hosts.
+/// for deterministic tests and non-retail hosts. Every remaining render field
+/// is copied at native's post-update/pre-child display boundary. A descendant
+/// may subsequently mutate its parent through a linked register without
+/// retroactively changing the parent's already-consumed render state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetailRenderObject {
     pub object: RuntimeObjectHandle,
@@ -397,8 +400,16 @@ pub struct RetailRenderObject {
     /// Live source reference for ZDAT object-shader mode four. Native uses the
     /// pause object while it exists and the dedicated player otherwise.
     pub dark_reference_translation: Option<[i32; 3]>,
-    /// Source `dark_dist` after this frame's `ShaderParamsUpdate(0)` step.
+    /// Source `dark_dist` at this display boundary, after the frame shader
+    /// step and any mode-four clamp performed for this object.
     pub dark_distance: i32,
+    /// Live global-nine display mask sampled at this object's exact
+    /// post-update transform boundary.
+    ///
+    /// This is deliberately independent from the pre-GOOL mask consumed by
+    /// world geometry: an earlier object may write global nine before this
+    /// object is displayed in the same preorder traversal.
+    pub display_mask: u32,
     /// Exact per-object display decision captured after this object's update.
     pub display_eligible: bool,
 }
@@ -1804,12 +1815,58 @@ impl RetailDarkShaderState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct RetailDisplaySnapshot {
+    /// Live global nine consumed by this object's display/transform path.
+    display_mask: u32,
     enabled: bool,
+    /// Validation is retained until `render_objects()` so malformed animation
+    /// references keep their historical render-snapshot error boundary.
+    animation_reference: Result<Option<AnimationReference>, VmError>,
+    animation_frame: u32,
+    transform: RetailTransform,
+    status_a: u32,
+    status_b: u32,
+    status_c: u32,
+    state_flags: u32,
+    size: i32,
+    text_font_override_word_offset: u32,
+    text_arguments: [Option<u32>; 10],
     dark_reference_translation: Option<[i32; 3]>,
+    dark_distance: i32,
     /// Colors consumed by this object's already-completed native transform.
-    /// They remain separate because status-B `0x100000` resets live VM colors
-    /// after geometry but before child traversal.
-    effective_colors: Option<[u16; COLOR_COUNT]>,
+    /// These can differ from the live VM because status-B `0x100000` resets
+    /// live colors after geometry but before child traversal.
+    colors: [u16; COLOR_COUNT],
+}
+
+impl RetailDisplaySnapshot {
+    fn capture(
+        vm_object: &VmObject,
+        display_mask: u32,
+        enabled: bool,
+        dark_reference_translation: Option<[i32; 3]>,
+        dark_distance: i32,
+        effective_colors: Option<[u16; COLOR_COUNT]>,
+    ) -> Result<Self, VmError> {
+        Ok(Self {
+            display_mask,
+            enabled,
+            animation_reference: vm_object.animation_reference(),
+            animation_frame: vm_object.animation_frame(),
+            transform: vm_object.retail_transform()?,
+            status_a: vm_object.register(process_register::STATUS_A)?,
+            status_b: vm_object.register(process_register::STATUS_B)?,
+            status_c: vm_object.status_c(),
+            state_flags: vm_object.state_flags(),
+            size: vm_object.register(process_register::SIZE)? as i32,
+            text_font_override_word_offset: vm_object
+                .register(process_register::INVINCIBILITY_STATE)?
+                >> 8,
+            text_arguments: retail_text_arguments(vm_object.stack()),
+            dark_reference_translation,
+            dark_distance,
+            colors: effective_colors.unwrap_or(*vm_object.retail_colors()),
+        })
+    }
 }
 
 /// Safe replacement for native's `prev_box`, `prev_box_entity`, and
@@ -3578,10 +3635,6 @@ impl RetailRuntime {
     pub fn render_objects(&self) -> Result<Vec<RetailRenderObject>, RenderObjectsError> {
         self.validate_render_object_pairs()?;
         let mut objects = Vec::with_capacity(self.arena.len());
-        let current_dark_reference_translation = self
-            .current_dark_reference_translation()
-            .map_err(RenderObjectsError::Vm)?;
-        let dark_distance = self.dark_shader.distance;
 
         for root_index in 0..ROOT_HANDLE_COUNT {
             let root_index_u8 = u8::try_from(root_index)
@@ -3612,52 +3665,53 @@ impl RetailRuntime {
                     return Err(RenderObjectsError::StaleObjectPair(object));
                 }
                 let origin = spawned.origin();
-                let display_snapshot = self.displayed_objects.get(&object).copied();
-                let display_eligible = display_snapshot
-                    .map_or_else(
-                        || self.retail_display_enabled(object),
-                        |snapshot| Ok(snapshot.enabled),
-                    )
-                    .map_err(RenderObjectsError::Vm)?;
-                let dark_reference_translation = display_snapshot
-                    .map_or(current_dark_reference_translation, |snapshot| {
-                        snapshot.dark_reference_translation
-                    });
+                let display_snapshot =
+                    if let Some(snapshot) = self.displayed_objects.get(&object).copied() {
+                        snapshot
+                    } else {
+                        // Before the first simulated frame (and in deliberately
+                        // constructed tests) retain the historical live-state
+                        // fallback while still assembling one coherent snapshot.
+                        let display_mask = self.current_display_mask();
+                        let display_eligible = self
+                            .retail_display_enabled_at(object, display_mask)
+                            .map_err(RenderObjectsError::Vm)?;
+                        let current_dark_reference_translation = self
+                            .current_dark_reference_translation()
+                            .map_err(RenderObjectsError::Vm)?;
+                        RetailDisplaySnapshot::capture(
+                            vm_object,
+                            display_mask,
+                            display_eligible,
+                            current_dark_reference_translation,
+                            self.dark_shader.distance,
+                            None,
+                        )
+                        .map_err(RenderObjectsError::Vm)?
+                    };
                 objects.push(RetailRenderObject {
                     object,
                     zone: spawned.zone(),
                     executable: origin.executable(),
                     subtype: origin.subtype(),
                     program: vm_object.program_identity(),
-                    animation_reference: vm_object
-                        .animation_reference()
+                    animation_reference: display_snapshot
+                        .animation_reference
                         .map_err(RenderObjectsError::Vm)?,
-                    animation_frame: vm_object.animation_frame(),
-                    transform: vm_object
-                        .retail_transform()
-                        .map_err(RenderObjectsError::Vm)?,
-                    status_a: vm_object
-                        .register(process_register::STATUS_A)
-                        .map_err(RenderObjectsError::Vm)?,
-                    status_b: vm_object
-                        .register(process_register::STATUS_B)
-                        .map_err(RenderObjectsError::Vm)?,
-                    status_c: vm_object.status_c(),
-                    state_flags: vm_object.state_flags(),
-                    size: vm_object
-                        .register(process_register::SIZE)
-                        .map_err(RenderObjectsError::Vm)? as i32,
-                    colors: display_snapshot
-                        .and_then(|snapshot| snapshot.effective_colors)
-                        .unwrap_or(*vm_object.retail_colors()),
-                    text_font_override_word_offset: vm_object
-                        .register(process_register::INVINCIBILITY_STATE)
-                        .map_err(RenderObjectsError::Vm)?
-                        >> 8,
-                    text_arguments: retail_text_arguments(vm_object.stack()),
-                    dark_reference_translation,
-                    dark_distance,
-                    display_eligible,
+                    animation_frame: display_snapshot.animation_frame,
+                    transform: display_snapshot.transform,
+                    status_a: display_snapshot.status_a,
+                    status_b: display_snapshot.status_b,
+                    status_c: display_snapshot.status_c,
+                    state_flags: display_snapshot.state_flags,
+                    size: display_snapshot.size,
+                    colors: display_snapshot.colors,
+                    text_font_override_word_offset: display_snapshot.text_font_override_word_offset,
+                    text_arguments: display_snapshot.text_arguments,
+                    dark_reference_translation: display_snapshot.dark_reference_translation,
+                    dark_distance: display_snapshot.dark_distance,
+                    display_mask: display_snapshot.display_mask,
+                    display_eligible: display_snapshot.enabled,
                 });
             }
         }
@@ -3991,8 +4045,13 @@ impl RetailRuntime {
         if let Some(object) = self.handles.for_arena(arena_handle)
             && self.handles.is_live_pair(object)
         {
+            // Native reads global nine after this object's transition/code and
+            // consumes that same live value throughout its display transform.
+            // Capture it once: earlier/later objects in this preorder frame may
+            // legitimately observe different authored values.
+            let display_mask = self.current_display_mask();
             let displayed = self
-                .retail_display_enabled(object)
+                .retail_display_enabled_at(object, display_mask)
                 .map_err(RuntimeError::Vm)?;
             let dark_reference_translation = self
                 .current_dark_reference_translation()
@@ -4000,17 +4059,20 @@ impl RetailRuntime {
             let effective_colors = self.apply_native_vertex_display_side_effects(
                 object,
                 displayed,
+                display_mask,
                 dark_reference_translation,
                 host,
             )?;
-            self.displayed_objects.insert(
-                object,
-                RetailDisplaySnapshot {
-                    enabled: displayed,
-                    dark_reference_translation,
-                    effective_colors,
-                },
-            );
+            let display_snapshot = RetailDisplaySnapshot::capture(
+                self.machine.object(object.vm).map_err(RuntimeError::Vm)?,
+                display_mask,
+                displayed,
+                dark_reference_translation,
+                self.dark_shader.distance,
+                effective_colors,
+            )
+            .map_err(RuntimeError::Vm)?;
+            self.displayed_objects.insert(object, display_snapshot);
         }
 
         let mut child = self
@@ -4121,6 +4183,7 @@ impl RetailRuntime {
         &mut self,
         object: RuntimeObjectHandle,
         displayed: bool,
+        display_mask: u32,
         dark_reference_translation: Option<[i32; 3]>,
         host: &mut H,
     ) -> Result<Option<[u16; COLOR_COUNT]>, RuntimeError<H::Error>> {
@@ -4164,10 +4227,6 @@ impl RetailRuntime {
 
         let is_main = object.arena.is_dedicated_main();
         let mut effective_colors = original_colors;
-        let display_mask = self
-            .machine
-            .global_word(CURRENT_DISPLAY_GLOBAL)
-            .unwrap_or(INITIAL_DISPLAY_MASK);
         let two_dimensional_cvtx =
             vertex_kind == ObjectVertexKind::Colored && status_b & 0x200 != 0;
         if display_mask & 0x1_0000 == 0
@@ -4244,11 +4303,11 @@ impl RetailRuntime {
         Ok(Some(effective_colors))
     }
 
-    fn retail_display_enabled(&self, object: RuntimeObjectHandle) -> Result<bool, VmError> {
-        let display_mask = self
-            .machine
-            .global_word(CURRENT_DISPLAY_GLOBAL)
-            .unwrap_or(INITIAL_DISPLAY_MASK);
+    fn retail_display_enabled_at(
+        &self,
+        object: RuntimeObjectHandle,
+        display_mask: u32,
+    ) -> Result<bool, VmError> {
         let vm_object = self.machine.object(object.vm)?;
         let status_b = vm_object.register(process_register::STATUS_B)?;
         Ok(retail_display_mask_enabled(
@@ -8110,6 +8169,71 @@ mod tests {
     }
 
     #[test]
+    fn opcode_twenty_global_nine_write_latches_distinct_object_and_world_masks() {
+        let mut runtime = RetailRuntime::new(CURRENT_DISPLAY_GLOBAL + 1);
+        let before_writer = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let writer = spawn_test_object(&mut runtime, ZONE, 11, 2, 0);
+        let main = spawn_test_object(&mut runtime, ZONE, 12, 0, 0);
+        let after_writer = spawn_test_object(&mut runtime, ZONE, 13, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(before_writer.arena, RootHandle::new(2).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(after_writer.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+
+        let initial_mask = INITIAL_DISPLAY_MASK;
+        let later_object_mask = initial_mask | 0x1_0000;
+        let mut writer_vm =
+            VmObject::new(writer.vm, vec![Instruction::encode(0x20, 0, 1), RETURN]).unwrap();
+        writer_vm.configure_test_program_identity_with_type(0x100, 0);
+        writer_vm.set_internal(0, later_object_mask).unwrap();
+        writer_vm
+            .set_internal(1, (CURRENT_DISPLAY_GLOBAL as u32) << 8)
+            .unwrap();
+        runtime.machine.upsert_object(writer_vm).unwrap();
+        runtime
+            .machine
+            .set_global_word(CURRENT_DISPLAY_GLOBAL, initial_mask)
+            .unwrap();
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, initial_mask)
+            .unwrap();
+        // This is the value the browser must retain for the already-submitted
+        // world even though object traversal can change global nine below.
+        let world_display_mask = runtime.current_display_mask();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+        assert!(
+            frame.executions.iter().any(|execution| {
+                execution.object == writer && execution.result.as_ref().is_ok()
+            })
+        );
+
+        let objects = runtime.render_objects().unwrap();
+        let mask = |object| {
+            objects
+                .iter()
+                .find(|snapshot| snapshot.object == object)
+                .unwrap()
+                .display_mask
+        };
+        assert_eq!(world_display_mask, initial_mask);
+        assert_eq!(mask(before_writer), world_display_mask);
+        assert_eq!(mask(writer), later_object_mask);
+        assert_eq!(mask(main), later_object_mask);
+        assert_eq!(mask(after_writer), later_object_mask);
+        assert_eq!(
+            runtime.current_display_mask(),
+            initial_mask,
+            "the end-of-frame next-to-current latch cannot reconstruct per-object masks"
+        );
+    }
+
+    #[test]
     fn retail_animation_masks_match_every_category_and_force_path() {
         assert!(!retail_animation_mask_enabled(
             0xffff & !ANIMATE_OBJECTS,
@@ -9994,14 +10118,16 @@ mod tests {
                 .unwrap();
             runtime.pending_states.insert(object.vm, 7);
             runtime.faulted_objects.insert(object);
-            runtime.displayed_objects.insert(
-                object,
-                RetailDisplaySnapshot {
-                    enabled: true,
-                    dark_reference_translation: None,
-                    effective_colors: None,
-                },
-            );
+            let display_snapshot = RetailDisplaySnapshot::capture(
+                runtime.machine.object(object.vm).unwrap(),
+                INITIAL_DISPLAY_MASK,
+                true,
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+            runtime.displayed_objects.insert(object, display_snapshot);
         }
         mark_reclaimable(&mut runtime, candidate);
 
@@ -11523,14 +11649,16 @@ mod tests {
         for (index, object) in [parent, child, grandchild].into_iter().enumerate() {
             runtime.pending_states.insert(object.vm, index as u16);
             runtime.faulted_objects.insert(object);
-            runtime.displayed_objects.insert(
-                object,
-                RetailDisplaySnapshot {
-                    enabled: true,
-                    dark_reference_translation: None,
-                    effective_colors: None,
-                },
-            );
+            let display_snapshot = RetailDisplaySnapshot::capture(
+                runtime.machine.object(object.vm).unwrap(),
+                INITIAL_DISPLAY_MASK,
+                true,
+                None,
+                0,
+                None,
+            )
+            .unwrap();
+            runtime.displayed_objects.insert(object, display_snapshot);
             runtime
                 .machine
                 .register_frame_bound(object.vm, Bounds3::default())
@@ -11676,6 +11804,116 @@ mod tests {
             )
             .unwrap();
         vm_object.set_retail_colors([u16::from(seed); COLOR_COUNT]);
+    }
+
+    struct LinkedParentRenderMutationHost;
+
+    impl ProgramHost for LinkedParentRenderMutationHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let parent_register = |register: usize| {
+                0x0c40 | u16::try_from(register).expect("process register fits linked operand")
+            };
+            let mut child = VmObject::new(
+                binding.object.vm(),
+                vec![
+                    Instruction::encode(
+                        0x11,
+                        0,
+                        parent_register(process_register::INVINCIBILITY_STATE),
+                    ),
+                    Instruction::encode(
+                        0x11,
+                        1,
+                        parent_register(process_register::ANIMATION_FRAME),
+                    ),
+                    Instruction::encode(0x11, 2, parent_register(process_register::TRANSLATION_X)),
+                    Instruction::encode(0x11, 3, parent_register(process_register::STATUS_B)),
+                    (0x24_u32 << 24) | (5 << 15) | (1 << 12) | 4,
+                    RETURN,
+                ],
+            )
+            .map_err(|_| ())?;
+            for (index, value) in [
+                0x0002_aa00,
+                0x0000_9900,
+                0x0000_0777,
+                0x0000_0100,
+                0x0000_0777,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                child.set_internal(index, value).map_err(|_| ())?;
+            }
+            Ok(child)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    #[test]
+    fn spawned_child_link_writes_cannot_retroactively_change_parent_render_snapshot() {
+        const SPAWN_EXECUTABLE_FIVE_CHILD: u32 = 0x8a00_5001;
+        let mut runtime = RetailRuntime::new(0);
+        let parent = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let initial_transform = RetailTransform {
+            translation: [0x111, 0x222, 0x333],
+            rotation_yxz: [0x10, 0x20, 0x30],
+            scale: [0x1000; 3],
+        };
+        let mut parent_vm =
+            VmObject::new(parent.vm, vec![SPAWN_EXECUTABLE_FIVE_CHILD, RETURN]).unwrap();
+        parent_vm.bind_animation_data(&[0; 16]);
+        parent_vm
+            .set_register(process_register::ANIMATION_SEQUENCE, 0xa700_0001)
+            .unwrap();
+        parent_vm
+            .set_register(process_register::ANIMATION_FRAME, 0x2200)
+            .unwrap();
+        parent_vm
+            .set_register(process_register::INVINCIBILITY_STATE, 0x0001_4600)
+            .unwrap();
+        parent_vm.set_retail_transform(initial_transform).unwrap();
+        parent_vm.set_retail_colors([0x123; COLOR_COUNT]);
+        runtime.machine.upsert_object(parent_vm).unwrap();
+
+        let frame = runtime
+            .run_frame(&mut LinkedParentRenderMutationHost, 6)
+            .unwrap();
+        assert_eq!(frame.spawned_children.len(), 1);
+        let live_parent = runtime.machine.object(parent.vm).unwrap();
+        assert_eq!(
+            live_parent.register(process_register::INVINCIBILITY_STATE),
+            Ok(0x0002_aa00)
+        );
+        assert_eq!(live_parent.animation_frame(), 0x9900);
+        assert_eq!(
+            live_parent.register(process_register::TRANSLATION_X),
+            Ok(0x777)
+        );
+        assert_eq!(live_parent.register(process_register::STATUS_B), Ok(0x100));
+        assert_eq!(live_parent.color(5), Ok(0x777));
+
+        let parent_render = runtime
+            .render_objects()
+            .unwrap()
+            .into_iter()
+            .find(|render| render.object == parent)
+            .unwrap();
+        assert_eq!(parent_render.animation_reference.unwrap().offset(), 1);
+        assert_eq!(parent_render.animation_frame, 0x2200);
+        assert_eq!(parent_render.transform, initial_transform);
+        assert_eq!(parent_render.status_b, 0);
+        assert_eq!(parent_render.colors, [0x123; COLOR_COUNT]);
+        assert_eq!(parent_render.text_font_override_word_offset, 0x146);
+        assert!(parent_render.display_eligible);
     }
 
     fn arm_animation_bound(

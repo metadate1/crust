@@ -236,8 +236,12 @@ gameplay path.
   visible/15-frame hidden blink. This is covered by a legally local scene regression and an
   on-cycle WebGL browser capture. Geometry command construction still consumes the complete arena
   after GOOL, while the source interleaves each object's simulation and drawing during preorder
-  traversal; the effective colors and VM side effects are now captured at the native per-object
-  boundary. The current builder avoids reparsing an unchanged active graph,
+  traversal; animation/frame, transform, render process flags, text font/arguments, effective
+  colors, live display mask and VM side effects are now captured at the native per-object boundary.
+  A later child link write cannot mutate an already-rendered parent snapshot. World geometry
+  separately retains the pre-GOOL display mask, so an authored global-nine write during traversal
+  cannot retroactively hide the world or be replaced by the end-of-frame next-mask latch. The
+  current builder avoids reparsing an unchanged active graph,
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
   the projection and command list are still regenerated every presented gameplay frame. No
   low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.

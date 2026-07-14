@@ -1654,7 +1654,10 @@ impl Runtime {
             if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
                 let mut scene_location = None;
                 let native_paused = self.retail_objects.retail_pause_state().paused();
-                let frame_display_mask = self.effective_retail_display_mask();
+                // Native submits worlds before GOOL. Preserve that exact mask
+                // separately from the per-object values latched later during
+                // the live preorder traversal.
+                let world_display_mask = self.effective_retail_display_mask();
                 let frame_draw_count = self.retail_objects.draw_count();
                 let frame_stamp = self.retail_objects.next_frame_stamp();
                 if !native_paused && let Err(error) = self.retail_objects.advance_level_shader() {
@@ -1699,17 +1702,17 @@ impl Runtime {
                             camera_location,
                             frame_draw_count,
                             frame_stamp,
-                            frame_display_mask,
+                            world_display_mask,
                         ));
                     }
                 }
-                if let Some((camera_location, draw_count, frame_stamp, display_mask)) =
+                if let Some((camera_location, draw_count, frame_stamp, world_display_mask)) =
                     scene_location
                     && let Err(error) = self.update_retail_scene(
                         camera_location,
                         draw_count,
                         frame_stamp,
-                        display_mask,
+                        world_display_mask,
                         dom,
                     )
                 {
@@ -2517,7 +2520,7 @@ impl Runtime {
         location: RetailCameraLocation,
         draw_count: u32,
         frame_stamp: u32,
-        display_mask: u32,
+        world_display_mask: u32,
         dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
@@ -2551,7 +2554,7 @@ impl Runtime {
             .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
-            .build_at_progress_with_objects_display_mask_and_fov(
+            .build_at_progress_with_objects_and_world_display_mask_and_fov(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -2564,7 +2567,7 @@ impl Runtime {
                 },
                 &objects,
                 main_object,
-                display_mask,
+                world_display_mask,
                 field_of_view,
             )
             .map_err(|error| {

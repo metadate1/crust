@@ -131,6 +131,10 @@ const PBAK_CAPTION_EVENT: u32 = 0x0e00;
 const PBAK_CAPTION_EXECUTABLE: u8 = 4;
 const PBAK_CAPTION_SUBTYPE: u8 = 8;
 const PBAK_CAPTION_ARGUMENTS: [u32; 2] = [2_279, 19_993];
+const PAUSE_RESUME_EVENT: u32 = 0x0c00;
+const PAUSE_CONTROLLER_EXECUTABLE: u8 = 4;
+const PAUSE_CONTROLLER_SUBTYPE: u8 = 4;
+const PAUSE_CONTROLLER_ROOT: u8 = 7;
 
 fn solid_level_quirks(level: LevelId) -> SolidLevelQuirks {
     let level = level.get();
@@ -172,6 +176,49 @@ const fn retail_animation_mask_enabled(
         _ => 0,
     };
     display_mask & category_mask != 0
+}
+
+/// Applies native `GoolObjectUpdate(obj, !paused)` ordering to the animation
+/// mask decision. The authored pause/options controllers are the only objects
+/// allowed to execute while the host update flag is clear. The override lives
+/// inside category two's ordinary branch, so force-menu animation does not
+/// accidentally inherit it.
+const fn retail_animation_update_enabled(
+    display_mask: u32,
+    status_b: u32,
+    state_flags: u32,
+    category: Option<u32>,
+    object_type: Option<u32>,
+    subtype: u32,
+    paused: bool,
+) -> bool {
+    if !paused {
+        return retail_animation_mask_enabled(display_mask, status_b, state_flags, category);
+    }
+    if display_mask & ANIMATE_OBJECTS == 0 {
+        return false;
+    }
+    if (status_b & FORCE_UPDATE_STATUS_B != 0 || state_flags & MENU_TEXT_STATE_FLAG != 0)
+        && display_mask & FORCE_ANIMATE_MENUS != 0
+    {
+        return false;
+    }
+    let Some(category) = category else {
+        // Synthetic host objects have no native header contract. Preserve
+        // their historical unpaused behavior but never grant a pause override.
+        return false;
+    };
+    let category_enabled = match category {
+        0x100 => display_mask & 0x20 != 0,
+        0x300 | 0x500 | 0x600 => display_mask & 0x80 != 0,
+        0x400 => display_mask & 0x400 != 0,
+        0x200 => display_mask & 0x100 != 0,
+        _ => false,
+    };
+    if !category_enabled {
+        return false;
+    }
+    category == 0x200 && matches!(object_type, Some(4)) && matches!(subtype, 4 | 7)
 }
 
 const fn retail_display_mask_enabled(
@@ -219,6 +266,66 @@ pub struct RetailCoreObjects {
     pub life: RuntimeObjectHandle,
     pub fruit: RuntimeObjectHandle,
     pub pickup: RuntimeObjectHandle,
+}
+
+/// Host-owned native pause handshake retained across cooperative frames.
+///
+/// `controller` is the executable-four/subtype-four object beneath logical
+/// root seven. `saved_frame_index` is the pointer-free equivalent of native
+/// `pause_draw_stamp`: pause frames advance so the authored menu can animate,
+/// then resume rewinds ordinary GOOL waits to the pre-pause timestamp.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailPauseState {
+    paused: bool,
+    status: i32,
+    controller: Option<RuntimeObjectHandle>,
+    saved_frame_index: Option<u64>,
+}
+
+impl RetailPauseState {
+    #[must_use]
+    pub const fn paused(self) -> bool {
+        self.paused
+    }
+
+    /// Native `pause_status`: one on creation, minus one on resume/screen
+    /// teardown, and zero on an ordinary frame without a successful toggle.
+    #[must_use]
+    pub const fn status(self) -> i32 {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn controller(self) -> Option<RuntimeObjectHandle> {
+        self.controller
+    }
+}
+
+/// Result of one source-ordered `CoreFrame` pause-input check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailPauseUpdate {
+    /// START was not tapped; `pause_status` was reset to zero.
+    Unchanged,
+    /// START was tapped while the level/title/PBAK gate rejected pausing.
+    Blocked,
+    /// The controller could not be allocated or materialized. Native treats
+    /// this as a failed toggle, clears its pause globals, and keeps running.
+    Failed,
+    /// The authored root-seven controller was created successfully.
+    Paused { controller: RuntimeObjectHandle },
+    /// Resume event delivery completed or faulted as native permits. The
+    /// controller remains live until its state-seven return later this frame.
+    Resumed {
+        controller: Option<RuntimeObjectHandle>,
+        event_faulted: bool,
+    },
+}
+
+/// One resume event whose checked handler faulted. Native ignores this return
+/// value, clears the pause latch, and continues the same frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimePauseEventFault {
+    pub object: RuntimeObjectHandle,
 }
 
 impl RuntimeObjectHandle {
@@ -1378,6 +1485,7 @@ struct FrameWork<E> {
 struct FrameTraversalHook<'hook, F> {
     callback: &'hook mut F,
     main_invoked: bool,
+    paused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1650,6 +1758,7 @@ pub struct RetailRuntime {
     pending_states: BTreeMap<VmObjectHandle, u16>,
     pending_cleanup_actions: Vec<RuntimeCleanupAction>,
     reclaim_event_faults: Vec<RuntimeReclaimEventFault>,
+    pause_event_faults: Vec<RuntimePauseEventFault>,
     solid_event_faults: Vec<RuntimeSolidEventFault>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
     displayed_objects: BTreeMap<RuntimeObjectHandle, RetailDisplaySnapshot>,
@@ -1669,6 +1778,7 @@ pub struct RetailRuntime {
     dark_shader: RetailDarkShaderState,
     core_objects_initialized: bool,
     core_objects: Option<RetailCoreObjects>,
+    pause: RetailPauseState,
 }
 
 impl RetailRuntime {
@@ -1690,6 +1800,7 @@ impl RetailRuntime {
             pending_states: BTreeMap::new(),
             pending_cleanup_actions: Vec::new(),
             reclaim_event_faults: Vec::new(),
+            pause_event_faults: Vec::new(),
             solid_event_faults: Vec::new(),
             faulted_objects: BTreeSet::new(),
             displayed_objects: BTreeMap::new(),
@@ -1707,6 +1818,7 @@ impl RetailRuntime {
             dark_shader: RetailDarkShaderState::default(),
             core_objects_initialized: false,
             core_objects: None,
+            pause: RetailPauseState::default(),
         }
     }
 
@@ -2109,6 +2221,140 @@ impl RetailRuntime {
         self.frame_index
     }
 
+    /// Current host-side pause latch. The authored controller is still a
+    /// normal arena/VM object and can be inspected through render snapshots.
+    #[must_use]
+    pub const fn retail_pause_state(&self) -> RetailPauseState {
+        self.pause
+    }
+
+    /// Exact `CoreFrame` level/title/PBAK gate for a START pause toggle.
+    pub fn can_retail_pause(&self) -> Result<bool, VmError> {
+        let Some(level) = self.level else {
+            return Ok(false);
+        };
+        let title_pause_state = self.machine.global_word(TITLE_PAUSE_STATE_GLOBAL)? as i32;
+        let pbak_state = self.machine.global_word(PBAK_STATE_GLOBAL)?;
+        let ordinary_pause_level = !matches!(
+            level,
+            LevelId::TITLE | LevelId::LEVEL_COMPLETE | LevelId::INTRO
+        );
+        Ok(pbak_state == 0
+            && ((ordinary_pause_level && title_pause_state != -1) || title_pause_state > 0))
+    }
+
+    /// Performs native `CoreFrame`'s pause check using the pad snapshot from
+    /// the previous Crash traversal.
+    ///
+    /// Call this before level-transition handling, spawning, camera work, and
+    /// [`Self::run_frame`]. A successful resume clears global word twelve and
+    /// rewinds the GOOL frame clock immediately; the state-seven controller is
+    /// killed when its ordinary top-level return is observed later in the same
+    /// traversal. Checked event faults are recorded but do not prevent resume,
+    /// matching the source's ignored `GoolSendEvent` result.
+    pub fn update_retail_pause<H: ProgramHost>(
+        &mut self,
+        start_tapped: bool,
+        current_zone: Eid,
+        host: &mut H,
+    ) -> Result<RetailPauseUpdate, RuntimeError<H::Error>> {
+        if !start_tapped {
+            self.pause.status = 0;
+            return Ok(RetailPauseUpdate::Unchanged);
+        }
+        if !self.can_retail_pause().map_err(RuntimeError::Vm)? {
+            self.pause.status = 0;
+            return Ok(RetailPauseUpdate::Blocked);
+        }
+
+        if !self.pause.paused {
+            // Preflight the pointer-global slot so a deliberately undersized
+            // runtime cannot allocate a controller it is unable to publish.
+            self.machine
+                .global_word(PAUSE_OBJECT_GLOBAL)
+                .map_err(RuntimeError::Vm)?;
+            let controller = match self.create_root_program(
+                PAUSE_CONTROLLER_ROOT,
+                current_zone,
+                PAUSE_CONTROLLER_EXECUTABLE,
+                PAUSE_CONTROLLER_SUBTYPE,
+                &[],
+                false,
+                host,
+            ) {
+                Ok(controller) => controller,
+                Err(_error) => {
+                    self.pause = RetailPauseState::default();
+                    self.machine
+                        .set_global_word(PAUSE_OBJECT_GLOBAL, 0)
+                        .map_err(RuntimeError::Vm)?;
+                    // Native discards the controller-creation error and
+                    // continues the frame with pause_status/paused cleared.
+                    return Ok(RetailPauseUpdate::Failed);
+                }
+            };
+            self.machine
+                .set_global_word(
+                    PAUSE_OBJECT_GLOBAL,
+                    CollisionObjectReference::new(controller.vm).to_word(),
+                )
+                .map_err(RuntimeError::Vm)?;
+            self.pause = RetailPauseState {
+                paused: true,
+                status: 1,
+                controller: Some(controller),
+                saved_frame_index: Some(self.frame_index),
+            };
+            return Ok(RetailPauseUpdate::Paused { controller });
+        }
+
+        // Native flips `paused` before delivering C00, so event-authored work
+        // observes the unpaused host state and the following traversal uses the
+        // ordinary update flag.
+        self.pause.paused = false;
+        let controller = self
+            .pause
+            .controller
+            .filter(|controller| self.handles.is_live_pair(*controller));
+        let event_faulted = controller.is_some_and(|controller| {
+            if self
+                .dispatch_event(host, None, Some(controller), PAUSE_RESUME_EVENT, Some(&[0]))
+                .is_err()
+            {
+                self.pause_event_faults
+                    .push(RuntimePauseEventFault { object: controller });
+                true
+            } else {
+                false
+            }
+        });
+        self.machine
+            .set_global_word(PAUSE_OBJECT_GLOBAL, 0)
+            .map_err(RuntimeError::Vm)?;
+        self.pause.status = -1;
+        if let Some(saved_frame_index) = self.pause.saved_frame_index.take() {
+            self.frame_index = saved_frame_index;
+        }
+        Ok(RetailPauseUpdate::Resumed {
+            controller,
+            event_faulted,
+        })
+    }
+
+    /// Clears the host latch at native screen-load/remount boundaries. The
+    /// caller must immediately perform its ordinary all-object teardown; this
+    /// method deliberately does not invent a TERM event for the controller.
+    pub fn reset_retail_pause_for_screen_load(&mut self) -> Result<(), VmError> {
+        self.pause = RetailPauseState {
+            status: -1,
+            ..RetailPauseState::default()
+        };
+        if self.machine.global_words().len() > PAUSE_OBJECT_GLOBAL {
+            self.machine.set_global_word(PAUSE_OBJECT_GLOBAL, 0)?;
+        }
+        Ok(())
+    }
+
     /// Refreshes the pointer-free globals consumed by retail save/restart.
     pub fn set_level_state_context(&mut self, mut context: RetailLevelStateContext) {
         if self.pending_first_spawn {
@@ -2165,7 +2411,7 @@ impl RetailRuntime {
 
         let mut created = Vec::with_capacity(3);
         for subtype in [0, 1, 5] {
-            match self.create_root_one_program(current_zone, 4, subtype, &[], false, host) {
+            match self.create_root_program(1, current_zone, 4, subtype, &[], false, host) {
                 Ok(object) => created.push(object),
                 Err(error) => {
                     self.discard_unstarted_runtime_roots::<H::Error>(&created)?;
@@ -2201,8 +2447,10 @@ impl RetailRuntime {
         Ok(())
     }
 
-    fn create_root_one_program<H: ProgramHost>(
+    #[allow(clippy::too_many_arguments)]
+    fn create_root_program<H: ProgramHost>(
         &mut self,
+        root_index: u8,
         binding_zone: Eid,
         executable: u8,
         subtype: u8,
@@ -2210,7 +2458,8 @@ impl RetailRuntime {
         allow_reclaim: bool,
         host: &mut H,
     ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
-        let root = RootHandle::new(1).ok_or(RuntimeError::InvalidRootIndex(1))?;
+        let root = RootHandle::new(root_index)
+            .ok_or(RuntimeError::InvalidRootIndex(usize::from(root_index)))?;
         let arena_handle = loop {
             match self
                 .arena
@@ -2266,7 +2515,8 @@ impl RetailRuntime {
         current_zone: Eid,
         host: &mut H,
     ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
-        self.create_root_one_program(
+        self.create_root_program(
+            1,
             current_zone,
             PBAK_CAPTION_EXECUTABLE,
             PBAK_CAPTION_SUBTYPE,
@@ -2881,6 +3131,12 @@ impl RetailRuntime {
         std::mem::take(&mut self.reclaim_event_faults)
     }
 
+    /// Drains C00 resume deliveries whose checked handler faulted. Resume
+    /// still completes in source order; this queue is diagnostics only.
+    pub fn take_pause_event_faults(&mut self) -> Vec<RuntimePauseEventFault> {
+        std::mem::take(&mut self.pause_event_faults)
+    }
+
     /// Drains collision-generated event deliveries whose GOOL handlers
     /// faulted. Native ignores these return codes and continues the mover's
     /// update; the ordered queue makes the checked Rust failures observable.
@@ -3428,9 +3684,11 @@ impl RetailRuntime {
             executions: Vec::with_capacity(self.handles.vm_by_arena.len()),
             spawned_children: Vec::new(),
         };
+        let paused = self.pause.paused;
         let mut traversal_hook = FrameTraversalHook {
             callback: &mut hook,
             main_invoked: false,
+            paused,
         };
 
         'roots: for root_index in 0..ROOT_HANDLE_COUNT {
@@ -3472,7 +3730,8 @@ impl RetailRuntime {
         let frame_index = self.frame_index;
         self.frame_index = self.frame_index.wrapping_add(1);
         if !self.machine.level_restart_requested() {
-            self.finish_display_frame(false).map_err(RuntimeError::Vm)?;
+            self.finish_display_frame(paused)
+                .map_err(RuntimeError::Vm)?;
         }
         let effects = self.machine.take_effects();
         if effects
@@ -3502,6 +3761,7 @@ impl RetailRuntime {
         H: ProgramHost,
         F: FnMut(&mut Self, &mut H, RetailTraversalBoundary) -> Result<(), RuntimeError<H::Error>>,
     {
+        let paused = traversal_hook.paused;
         if !traversal_hook.main_invoked
             && self.arena.main_object() == Some(arena_handle)
             && let Some(object) = self.handles.for_arena(arena_handle)
@@ -3519,7 +3779,7 @@ impl RetailRuntime {
         }
         if let Some(object) = self.handles.for_arena(arena_handle)
             && !self.faulted_objects.contains(&object)
-            && self.retail_animation_enabled(object)?
+            && self.retail_animation_enabled(object, paused)?
         {
             let result = if self.handles.is_live_pair(object) {
                 self.begin_native_object_update(object).and_then(|stalled| {
@@ -3569,6 +3829,20 @@ impl RetailRuntime {
                     .map_err(RuntimeError::Tree)?;
             }
             work.executions.push(RuntimeExecution { object, result });
+            if !paused
+                && self.pause.controller == Some(object)
+                && work.executions.last().is_some_and(|execution| {
+                    matches!(
+                        &execution.result,
+                        Ok(Execution {
+                            reason: HaltReason::Halted,
+                            ..
+                        })
+                    )
+                })
+            {
+                self.kill_resumed_pause_controller(object, host, &mut work.spawned_children)?;
+            }
         }
         if self.machine.level_restart_requested() {
             return Ok(());
@@ -3616,9 +3890,48 @@ impl RetailRuntime {
         Ok(())
     }
 
+    fn kill_resumed_pause_controller<H: ProgramHost>(
+        &mut self,
+        object: RuntimeObjectHandle,
+        host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let mut report = ZoneTerminationReport::new();
+        {
+            let Self {
+                arena,
+                machine,
+                handles,
+                pending_states,
+                pending_cleanup_actions,
+                ..
+            } = self;
+            Self::kill_runtime_subtree_with_host_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                host,
+                object.arena,
+                spawned_children,
+                true,
+                &mut report,
+            )?;
+            Self::refresh_tree_links(arena, handles, machine)?;
+        }
+        self.faulted_objects
+            .retain(|candidate| self.handles.is_live_pair(*candidate));
+        self.displayed_objects
+            .retain(|candidate, _| self.handles.is_live_pair(*candidate));
+        self.pause.controller = None;
+        Ok(())
+    }
+
     fn retail_animation_enabled<E>(
         &self,
         object: RuntimeObjectHandle,
+        paused: bool,
     ) -> Result<bool, RuntimeError<E>> {
         let Ok(display_mask) = self.machine.global_word(CURRENT_DISPLAY_GLOBAL) else {
             return Ok(true);
@@ -3627,13 +3940,23 @@ impl RetailRuntime {
         let status_b = vm_object
             .register(process_register::STATUS_B)
             .map_err(RuntimeError::Vm)?;
-        Ok(retail_animation_mask_enabled(
+        // GOOL register 29 is mutable authored process state. Native reads
+        // obj->process.subtype here, not the immutable entity/root origin.
+        let subtype = vm_object
+            .register(process_register::SUBTYPE)
+            .map_err(RuntimeError::Vm)?;
+        Ok(retail_animation_update_enabled(
             display_mask,
             status_b,
             vm_object.state_flags(),
             vm_object
                 .program_identity()
                 .map(GoolProgramIdentity::category),
+            vm_object
+                .program_identity()
+                .map(GoolProgramIdentity::object_type),
+            subtype,
+            paused,
         ))
     }
 
@@ -7323,6 +7646,327 @@ mod tests {
     }
 
     #[test]
+    fn paused_update_override_is_exactly_authored_type_four_subtypes_four_and_seven() {
+        let category_two_mask = ANIMATE_OBJECTS | 0x100;
+        for subtype in [4, 7] {
+            assert!(retail_animation_update_enabled(
+                category_two_mask,
+                0,
+                0,
+                Some(0x200),
+                Some(4),
+                subtype,
+                true,
+            ));
+        }
+        for (category, object_type, subtype) in
+            [(0x100, 4, 4), (0x200, 3, 4), (0x200, 4, 3), (0x200, 4, 8)]
+        {
+            assert!(!retail_animation_update_enabled(
+                0xffff,
+                0,
+                0,
+                Some(category),
+                Some(object_type),
+                subtype,
+                true,
+            ));
+        }
+        assert!(!retail_animation_update_enabled(
+            0xffff, 0, 0, None, None, 4, true,
+        ));
+        assert!(!retail_animation_update_enabled(
+            category_two_mask | FORCE_ANIMATE_MENUS,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x200),
+            Some(4),
+            4,
+            true,
+        ));
+        assert!(retail_animation_update_enabled(
+            category_two_mask,
+            FORCE_UPDATE_STATUS_B,
+            0,
+            Some(0x200),
+            Some(4),
+            4,
+            true,
+        ));
+        assert!(retail_animation_update_enabled(
+            category_two_mask,
+            0,
+            0,
+            Some(0x200),
+            Some(3),
+            4,
+            false,
+        ));
+    }
+
+    #[test]
+    fn paused_update_override_reads_mutable_live_process_subtype() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let origin_four_live_three = spawn_test_object(&mut runtime, ZONE, 10, 4, 4);
+        let origin_three_live_four = spawn_test_object(&mut runtime, ZONE, 11, 4, 3);
+        for (object, live_subtype) in [(origin_four_live_three, 3), (origin_three_live_four, 4)] {
+            let vm = runtime.machine.object_mut(object.vm).unwrap();
+            vm.configure_test_program_identity_with_type(0x200, 4);
+            vm.set_register(process_register::SUBTYPE, live_subtype)
+                .unwrap();
+        }
+        assert_eq!(
+            runtime
+                .arena
+                .get(origin_four_live_three.arena)
+                .unwrap()
+                .origin()
+                .subtype(),
+            4
+        );
+        assert_eq!(
+            runtime
+                .arena
+                .get(origin_three_live_four.arena)
+                .unwrap()
+                .origin()
+                .subtype(),
+            3
+        );
+        runtime
+            .machine
+            .set_global_word(CURRENT_DISPLAY_GLOBAL, ANIMATE_OBJECTS | 0x100)
+            .unwrap();
+        runtime.pause.paused = true;
+
+        assert_eq!(
+            runtime.retail_animation_enabled::<()>(origin_four_live_three, true),
+            Ok(false)
+        );
+        assert_eq!(
+            runtime.retail_animation_enabled::<()>(origin_three_live_four, true),
+            Ok(true)
+        );
+        let frame = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
+        assert_eq!(
+            frame
+                .executions
+                .iter()
+                .map(|execution| execution.object)
+                .collect::<Vec<_>>(),
+            [origin_three_live_four]
+        );
+    }
+
+    #[test]
+    fn retail_pause_gate_matches_level_title_and_pbak_globals() {
+        let cases = [
+            (LevelId::N_SANITY_BEACH, -1, 0, false),
+            (LevelId::N_SANITY_BEACH, 0, 0, true),
+            (LevelId::N_SANITY_BEACH, 1, 2, false),
+            (LevelId::TITLE, 0, 0, false),
+            (LevelId::TITLE, 1, 0, true),
+            (LevelId::LEVEL_COMPLETE, 0, 0, false),
+            (LevelId::LEVEL_COMPLETE, 1, 0, true),
+            (LevelId::INTRO, 0, 0, false),
+            (LevelId::INTRO, 1, 0, true),
+            (LevelId::ENDING, 0, 0, true),
+        ];
+        for (level, title_pause_state, pbak_state, expected) in cases {
+            let mut runtime = RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, level);
+            runtime
+                .set_global_word(TITLE_PAUSE_STATE_GLOBAL, title_pause_state as u32)
+                .unwrap();
+            runtime
+                .set_global_word(PBAK_STATE_GLOBAL, pbak_state)
+                .unwrap();
+            assert_eq!(
+                runtime.can_retail_pause(),
+                Ok(expected),
+                "level {level}, title pause {title_pause_state}, PBAK {pbak_state}"
+            );
+        }
+    }
+
+    #[test]
+    fn pause_controller_create_failure_is_a_nonfatal_failed_toggle() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let main = spawn_test_object(&mut runtime, ZONE, 1, 0, 0);
+        let mut host = RejectProgramHost;
+
+        assert_eq!(
+            runtime.update_retail_pause(true, ZONE, &mut host),
+            Ok(RetailPauseUpdate::Failed)
+        );
+        assert!(!runtime.retail_pause_state().paused());
+        assert_eq!(runtime.retail_pause_state().status(), 0);
+        assert_eq!(runtime.retail_pause_state().controller(), None);
+        assert_eq!(runtime.global_word(PAUSE_OBJECT_GLOBAL), Ok(0));
+        assert!(
+            runtime
+                .arena
+                .preorder(TreeParent::Root(RootHandle::new(7).unwrap()))
+                .unwrap()
+                .next()
+                .is_none(),
+            "failed controller materialization leaked a root-seven object"
+        );
+
+        let frame = runtime.run_frame(&mut host, 1).unwrap();
+        assert_eq!(
+            frame
+                .executions
+                .iter()
+                .map(|execution| execution.object)
+                .collect::<Vec<_>>(),
+            [main]
+        );
+    }
+
+    #[test]
+    fn pause_controller_lives_under_root_seven_and_resumes_with_clock_rewind() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let main = spawn_test_object(&mut runtime, ZONE, 1, 0, 0);
+        runtime
+            .arena
+            .reparent_to_root(main.arena, RootHandle::new(6).unwrap())
+            .unwrap();
+        let mut host = SnapshotHost;
+
+        let paused = runtime.update_retail_pause(true, ZONE, &mut host).unwrap();
+        let RetailPauseUpdate::Paused { controller } = paused else {
+            panic!("START did not create the authored pause controller");
+        };
+        let spawned = runtime.arena.get(controller.arena).unwrap();
+        assert_eq!(
+            spawned.parent(),
+            TreeParent::Root(RootHandle::new(7).unwrap())
+        );
+        assert_eq!(spawned.zone(), Eid::NONE);
+        assert_eq!(spawned.origin().executable(), PAUSE_CONTROLLER_EXECUTABLE);
+        assert_eq!(spawned.origin().subtype(), PAUSE_CONTROLLER_SUBTYPE);
+        assert_eq!(
+            runtime.global_word(PAUSE_OBJECT_GLOBAL),
+            Ok(CollisionObjectReference::new(controller.vm).to_word())
+        );
+        assert_eq!(runtime.retail_pause_state().status(), 1);
+        assert!(runtime.retail_pause_state().paused());
+
+        let mut hook_calls = 0;
+        let paused_frame = runtime
+            .run_frame_with_traversal_hook(&mut host, 1, |_, _, boundary| {
+                assert_eq!(
+                    boundary,
+                    RetailTraversalBoundary::BeforeMainObjectUpdate {
+                        root: RootHandle::new(6).unwrap(),
+                        object: main,
+                    }
+                );
+                hook_calls += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(hook_calls, 1, "PadUpdate still runs at Crash while paused");
+        assert!(paused_frame.executions.is_empty());
+        assert_eq!(runtime.frame_index(), 1);
+        assert_eq!(runtime.draw_count(), 0);
+
+        assert_eq!(
+            runtime.update_retail_pause(false, ZONE, &mut host),
+            Ok(RetailPauseUpdate::Unchanged)
+        );
+        assert_eq!(runtime.retail_pause_state().status(), 0);
+        assert_eq!(
+            runtime.update_retail_pause(true, ZONE, &mut host),
+            Ok(RetailPauseUpdate::Resumed {
+                controller: Some(controller),
+                event_faulted: false,
+            })
+        );
+        assert_eq!(runtime.frame_index(), 0, "resume restores pause_draw_stamp");
+        assert_eq!(runtime.global_word(PAUSE_OBJECT_GLOBAL), Ok(0));
+        assert_eq!(runtime.retail_pause_state().status(), -1);
+        assert!(!runtime.retail_pause_state().paused());
+
+        let resumed_frame = runtime.run_frame(&mut host, 1).unwrap();
+        assert!(resumed_frame.executions.iter().any(|execution| {
+            execution.object == controller
+                && matches!(
+                    execution.result,
+                    Ok(Execution {
+                        reason: HaltReason::Halted,
+                        ..
+                    })
+                )
+        }));
+        assert!(runtime.object_for_vm(controller.vm).is_none());
+        assert_eq!(runtime.retail_pause_state().controller(), None);
+        assert_eq!(
+            runtime.take_cleanup_actions(),
+            [RuntimeCleanupAction::FreeObjectAudio(controller)]
+        );
+    }
+
+    #[test]
+    fn malformed_resume_event_is_diagnostic_and_does_not_keep_game_paused() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let mut host = SnapshotHost;
+        let RetailPauseUpdate::Paused { controller } =
+            runtime.update_retail_pause(true, ZONE, &mut host).unwrap()
+        else {
+            unreachable!();
+        };
+        runtime
+            .machine
+            .object_mut(controller.vm)
+            .unwrap()
+            .configure_test_event_interrupt(PAUSE_RESUME_EVENT, vec![0xff00_0000])
+            .unwrap();
+
+        assert_eq!(
+            runtime.update_retail_pause(true, ZONE, &mut host),
+            Ok(RetailPauseUpdate::Resumed {
+                controller: Some(controller),
+                event_faulted: true,
+            })
+        );
+        assert!(!runtime.retail_pause_state().paused());
+        assert_eq!(runtime.global_word(PAUSE_OBJECT_GLOBAL), Ok(0));
+        assert_eq!(
+            runtime.take_pause_event_faults(),
+            [RuntimePauseEventFault { object: controller }]
+        );
+    }
+
+    #[test]
+    fn screen_load_reset_clears_pause_latches_before_ordinary_teardown() {
+        let mut runtime =
+            RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, LevelId::N_SANITY_BEACH);
+        let mut host = SnapshotHost;
+        let RetailPauseUpdate::Paused { controller } =
+            runtime.update_retail_pause(true, ZONE, &mut host).unwrap()
+        else {
+            unreachable!();
+        };
+
+        runtime.reset_retail_pause_for_screen_load().unwrap();
+
+        assert!(!runtime.retail_pause_state().paused());
+        assert_eq!(runtime.retail_pause_state().status(), -1);
+        assert_eq!(runtime.retail_pause_state().controller(), None);
+        assert_eq!(runtime.global_word(PAUSE_OBJECT_GLOBAL), Ok(0));
+        assert!(runtime.object_for_vm(controller.vm).is_some());
+
+        let report = runtime.terminate_all_objects(&mut host).unwrap();
+        assert_eq!(report.terminated, [controller]);
+        assert!(runtime.object_for_vm(controller.vm).is_none());
+    }
+
+    #[test]
     fn retail_display_masks_match_post_update_visibility_and_categories() {
         assert!(!retail_display_mask_enabled(
             0xffff,
@@ -7509,6 +8153,23 @@ mod tests {
 
         fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
             VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    struct RejectProgramHost;
+
+    impl ProgramHost for RejectProgramHost {
+        type Error = ();
+
+        fn bind_program(&mut self, _binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            Err(())
         }
 
         fn bind_state_program(

@@ -171,6 +171,7 @@ impl NSanityRouteController {
         let zone_2b = Eid::from_name("2b_9Z").expect("fixed N. Sanity route EID is valid");
         let zone_3b = Eid::from_name("3b_9Z").expect("fixed N. Sanity route EID is valid");
         let zone_4b = Eid::from_name("4b_9Z").expect("fixed N. Sanity route EID is valid");
+        let b5 = Eid::from_name("b5_9Z").expect("fixed N. Sanity route EID is valid");
         let b6 = Eid::from_name("b6_9Z").expect("fixed N. Sanity route EID is valid");
         let b7 = Eid::from_name("b7_9Z").expect("fixed N. Sanity route EID is valid");
         let progress = camera.progress.raw();
@@ -626,16 +627,50 @@ impl NSanityRouteController {
                     ..RouteAction::default()
                 }
             }
-            52 if camera.path.zone == b6 && camera.path.index == 0 && grounded => RouteAction {
-                button: PAD_CROSS,
-                button_frames: 16,
-                ..RouteAction::default()
-            },
-            53 if camera.path.zone == b7 && camera.path.index == 0 && grounded => RouteAction {
-                direction: PAD_LEFT,
-                direction_frames: 14,
-                button: PAD_CROSS,
-                button_frames: 16,
+            // The authored camera topology is b5:p4 -> b5:p1 -> b6:p0.
+            // Two grounded jumps clear the static steps while staying inside
+            // the center/right lane selected by the retail collision bitmap.
+            52 if camera.path.zone == b5
+                && camera.path.index == 4
+                && progress >= 10_000
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            53 if camera.path.zone == b5
+                && camera.path.index == 1
+                && progress >= 5_500
+                && grounded =>
+            {
+                RouteAction {
+                    direction: PAD_RIGHT,
+                    direction_frames: 16,
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            // b6:p1 has one last static rise before the terminal b7 zone.
+            54 if camera.path.zone == b6
+                && camera.path.index == 1
+                && progress >= 6_500
+                && grounded =>
+            {
+                RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 16,
+                    ..RouteAction::default()
+                }
+            }
+            // Stay in the live WarpC portal lane; the previous left jump
+            // bypassed the portal and parked against b7's static boundary.
+            55 if camera.path.zone == b7 && camera.path.index == 0 && grounded => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 8,
                 ..RouteAction::default()
             },
             _ => return PAD_UP,

@@ -10,6 +10,7 @@
 use core::num::NonZeroU16;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 use crust_audio::output::{OutputOptions, RetailMasterFade};
@@ -55,9 +56,10 @@ use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
-    RetailLevelStateContext, RetailRestartOutcome, RetailRuntime, RetailSaveStateOutcome,
-    RetailSessionCarry, RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction,
-    RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
+    RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
+    RetailSaveStateOutcome, RetailSessionCarry, RetailTraversalBoundary, RetailZoneEnvironment,
+    RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding,
+    ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -106,14 +108,14 @@ const TITLE_DIRECT_ZONE_NAMES: [&str; 10] = [
 ];
 
 fn retail_zone_graph(pair: &ValidatedPair) -> Result<RetailZoneGraph, FormatError> {
-    let direct_roots = (pair.level == FormatLevelId::TITLE)
-        .then(|| {
-            TITLE_DIRECT_ZONE_NAMES
-                .iter()
-                .map(|name| Eid::from_name(name).expect("fixed title zone EID is valid"))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let direct_roots = if pair.level == FormatLevelId::TITLE {
+        TITLE_DIRECT_ZONE_NAMES
+            .iter()
+            .map(|name| Eid::from_name(name).expect("fixed title zone EID is valid"))
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     RetailZoneGraph::from_pair_with_roots(&pair.nsd, &pair.nsf, &pair.nsf_bytes, direct_roots)
 }
 
@@ -130,9 +132,8 @@ fn retail_screen_projection(field_of_view: u32) -> Option<u32> {
 
 fn round_retail_ticks(ticks: i32) -> i32 {
     match ticks {
-        ..0 => 34,
         0..=18 => 17,
-        19..=35 => 34,
+        ..0 | 19..=35 => 34,
         36..=52 => 51,
         _ => ticks,
     }
@@ -1488,10 +1489,96 @@ impl Runtime {
                 i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
             });
             self.previous_step_us = Some(now_us);
-            self.start_armed_retail_pbak(dom)?;
+            let wall_ticks_per_frame = round_retail_ticks(wall_ticks_current_frame);
+            // CoreFrame's pause event sees the current wall timing. PBAK may
+            // replace it with its prior/Crash boundary later in this frame.
+            self.retail_objects
+                .set_frame_timing(wall_ticks_current_frame, wall_ticks_per_frame);
             let physical_held = held | self.pending_buttons;
             self.pending_buttons = 0;
-            let wall_ticks_per_frame = round_retail_ticks(wall_ticks_current_frame);
+            self.card.update();
+            self.retail_objects
+                .publish_card_state(self.card.published_state())
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not publish retail card frame state: {error:?}"
+                    ))
+                })?;
+            // CoreFrame reads the snapshot published at Crash's preceding
+            // traversal. The physical/demonstration update is deferred to the
+            // next BeforeMainObjectUpdate hook below, matching native order.
+            let snapshot = self.pad.snapshot();
+            let retail_state = is_retail_runtime_state(self.flow.state());
+            if retail_state && self.retail_runtime_error.is_none() {
+                let title_mdat = self.live_title_mdat_eid();
+                let current_zone = self.retail_camera.location().path.zone;
+                let pause_update = {
+                    let mut host = if let Some(mdat) = title_mdat {
+                        BrowserProgramHost::for_title_mdat(
+                            &self.level_assets.nsd,
+                            &self.level_assets.nsf,
+                            &self.level_assets.nsf_bytes,
+                            &mut self.retail_audio,
+                            &mut self.card,
+                            &mut self.storage,
+                            mdat,
+                        )
+                    } else {
+                        BrowserProgramHost::new(
+                            &self.level_assets.nsd,
+                            &self.level_assets.nsf,
+                            &self.level_assets.nsf_bytes,
+                            &mut self.retail_audio,
+                            &mut self.card,
+                            &mut self.storage,
+                        )
+                    };
+                    self.retail_objects.update_retail_pause(
+                        snapshot.tapped & u32::from(PAD_START) != 0,
+                        current_zone,
+                        &mut host,
+                    )
+                };
+                match pause_update {
+                    Ok(RetailPauseUpdate::Paused { .. }) => {
+                        dom.log("Authored retail pause controller opened.", false);
+                    }
+                    Ok(RetailPauseUpdate::Failed) => {
+                        dom.log(
+                            "Authored retail pause controller was unavailable; gameplay continues.",
+                            true,
+                        );
+                    }
+                    Ok(RetailPauseUpdate::Resumed {
+                        event_faulted: false,
+                        ..
+                    }) => {
+                        dom.log("Authored retail pause controller resumed.", false);
+                    }
+                    // The typed diagnostic queue below owns the single C00
+                    // fault report while native still completes the resume.
+                    Ok(
+                        RetailPauseUpdate::Resumed {
+                            event_faulted: true,
+                            ..
+                        }
+                        | RetailPauseUpdate::Unchanged
+                        | RetailPauseUpdate::Blocked,
+                    ) => {}
+                    Err(error) => {
+                        let message = format!("retail pause handshake failed: {error:?}");
+                        dom.log(&message, true);
+                        self.retail_runtime_error = Some(message);
+                        self.retail_tick_state = RetailTickState::Paused;
+                    }
+                }
+                self.drain_retail_reclaim_diagnostics(dom);
+            }
+
+            // Native PbakPlay follows the CoreFrame pause gate. Starting an
+            // armed recording before that gate would incorrectly publish a
+            // nonzero PBAK state one boundary too early.
+            self.start_armed_retail_pbak(dom)?;
             let pbak_boundary = self
                 .retail_pbak
                 .as_ref()
@@ -1511,7 +1598,6 @@ impl Runtime {
                     .as_mut()
                     .map(|pbak| pbak.advance_input(physical_held))
             };
-            let pbak_owned_input = self.retail_pbak.is_some();
             let (ticks_current_frame, ticks_per_frame, demo_override) =
                 if let Some(boundary) = pbak_boundary {
                     (
@@ -1533,50 +1619,6 @@ impl Runtime {
                 };
             self.retail_objects
                 .set_frame_timing(ticks_current_frame, ticks_per_frame);
-            self.card.update();
-            self.retail_objects
-                .publish_card_state(self.card.published_state())
-                .map_err(|error| {
-                    JsValue::from_str(&format!(
-                        "could not publish retail card frame state: {error:?}"
-                    ))
-                })?;
-            let mut snapshot = self.pad.snapshot();
-            if pbak_boundary.is_none() {
-                self.pad.update(physical_held, 0, demo_override);
-                snapshot = self.pad.snapshot();
-                self.retail_objects
-                    .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
-                    .map_err(|error| {
-                        JsValue::from_str(&format!("could not bind retail pad state: {error:?}"))
-                    })?;
-            }
-            let retail_state = is_retail_runtime_state(self.flow.state());
-            if matches!(
-                self.flow.state(),
-                FlowState::Gameplay(_)
-                    | FlowState::Bonus(_)
-                    | FlowState::Boss(_)
-                    | FlowState::Ending
-            ) && self.retail_runtime_error.is_none()
-                && snapshot.tapped & u32::from(PAD_START) != 0
-                && !pbak_owned_input
-            {
-                self.retail_tick_state = match self.retail_tick_state {
-                    RetailTickState::NeedsSpawn => RetailTickState::PausedBeforeSpawn,
-                    RetailTickState::PausedBeforeSpawn => RetailTickState::NeedsSpawn,
-                    RetailTickState::Running => RetailTickState::Paused,
-                    RetailTickState::Paused => RetailTickState::Running,
-                };
-                dom.log(
-                    if self.paused() {
-                        "Retail object simulation paused."
-                    } else {
-                        "Retail object simulation resumed."
-                    },
-                    false,
-                );
-            }
 
             // CoreFrame consumes a level requested by the preceding GOOL
             // frame before any destination spawn, camera, or object work.
@@ -1599,29 +1641,30 @@ impl Runtime {
                 }
             }
 
-            if retail_state
-                && !transition_queued
-                && !self.paused()
-                && self.retail_runtime_error.is_none()
-            {
+            if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
                 let mut scene_location = None;
+                let native_paused = self.retail_objects.retail_pause_state().paused();
                 let frame_display_mask = self.effective_retail_display_mask();
                 let frame_draw_count = self.retail_objects.draw_count();
-                if let Err(error) = self.retail_objects.advance_level_shader() {
+                if !native_paused && let Err(error) = self.retail_objects.advance_level_shader() {
                     let message = format!("retail level shader update failed: {error:?}");
                     dom.log(&message, true);
                     self.retail_runtime_error = Some(message);
                     self.retail_tick_state = RetailTickState::Paused;
                 }
                 let camera_location = if self.retail_runtime_error.is_none() {
-                    match self.update_retail_camera(snapshot, dom) {
-                        Ok(step) => Some(step.after),
-                        Err(error) => {
-                            let message = format!("retail camera update failed: {error}");
-                            dom.log(&message, true);
-                            self.retail_runtime_error = Some(message);
-                            self.retail_tick_state = RetailTickState::Paused;
-                            None
+                    if native_paused {
+                        Some(self.retail_camera.location())
+                    } else {
+                        match self.update_retail_camera(snapshot, dom) {
+                            Ok(step) => Some(step.after),
+                            Err(error) => {
+                                let message = format!("retail camera update failed: {error}");
+                                dom.log(&message, true);
+                                self.retail_runtime_error = Some(message);
+                                self.retail_tick_state = RetailTickState::Paused;
+                                None
+                            }
                         }
                     }
                 } else {
@@ -1630,10 +1673,11 @@ impl Runtime {
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
-                    self.tick_retail_runtime(dom, pbak_boundary);
+                    self.tick_retail_runtime(dom, pbak_boundary, physical_held, demo_override);
                 }
                 if let Some(camera_location) = camera_location {
-                    let count_draws = self.effective_retail_display_mask() & 0x1000 != 0;
+                    let count_draws =
+                        !native_paused && self.effective_retail_display_mask() & 0x1000 != 0;
                     let trace = self.retail_frame.tick_with_draw_count_enabled(count_draws);
                     self.show_loading_image =
                         matches!(trace.presented(), PresentedFrame::LoadingImage);
@@ -1817,10 +1861,8 @@ impl Runtime {
         self.retail_metrics.failed_spawns =
             self.retail_metrics.failed_spawns.saturating_add(failed);
         self.retail_tick_state = match self.retail_tick_state {
-            RetailTickState::NeedsSpawn => RetailTickState::Running,
-            RetailTickState::PausedBeforeSpawn => RetailTickState::Paused,
-            RetailTickState::Running => RetailTickState::Running,
-            RetailTickState::Paused => RetailTickState::Paused,
+            RetailTickState::NeedsSpawn | RetailTickState::Running => RetailTickState::Running,
+            RetailTickState::PausedBeforeSpawn | RetailTickState::Paused => RetailTickState::Paused,
         };
         let unexpected = attempts.iter().find_map(|attempt| {
             attempt.result.as_ref().err().filter(|error| {
@@ -1850,7 +1892,13 @@ impl Runtime {
         Ok(())
     }
 
-    fn tick_retail_runtime(&mut self, dom: &Dom, pbak_boundary: Option<RetailPbakPadBoundary>) {
+    fn tick_retail_runtime(
+        &mut self,
+        dom: &Dom,
+        pbak_boundary: Option<RetailPbakPadBoundary>,
+        physical_held: u16,
+        demo_override: Option<u32>,
+    ) {
         let title_mdat = self.live_title_mdat_eid();
         let mut pbak_finish = None;
         let mut pbak_finish_effects_applied = false;
@@ -1933,8 +1981,18 @@ impl Runtime {
                     },
                 )
             } else {
-                self.retail_objects
-                    .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                let pad = &mut self.pad;
+                self.retail_objects.run_frame_with_traversal_hook(
+                    &mut host,
+                    RETAIL_INSTRUCTION_BUDGET,
+                    |runtime, _host, point| {
+                        let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = point;
+                        pad.update(physical_held, 0, demo_override);
+                        runtime
+                            .set_pad_snapshot(0, retail_pad_snapshot(pad.snapshot()))
+                            .map_err(RuntimeError::Vm)
+                    },
+                )
             }
         };
         self.drain_retail_reclaim_diagnostics(dom);
@@ -1998,9 +2056,10 @@ impl Runtime {
                     match self.apply_retail_gool_level_effects(outcome.effects(), dom) {
                         Ok(()) => pbak_finish_effects_applied = true,
                         Err(effect_error) => {
-                            message.push_str(&format!(
+                            let _ = write!(
+                                message,
                                 "; PBAK completion effect recovery failed: {effect_error}"
-                            ));
+                            );
                             self.retail_tick_state = RetailTickState::Paused;
                         }
                     }
@@ -2051,15 +2110,15 @@ impl Runtime {
         let key_count = read(KEY_COUNT_GLOBAL)?;
         let item_pool_1 = read(ITEM_POOL_1_GLOBAL)?;
         let item_pool_2 = read(ITEM_POOL_2_GLOBAL)?;
-        let life_count = read(LIFE_COUNT_GLOBAL)? as i32;
-        let health = read(HEALTH_GLOBAL)? as i32;
-        let fruit_count = read(FRUIT_COUNT_GLOBAL)? as i32;
-        let box_count = read(BOX_COUNT_GLOBAL)? as i32;
-        let checkpoint_id = read(CHECKPOINT_ID_GLOBAL)? as i32;
+        let life_count = read(LIFE_COUNT_GLOBAL)?.cast_signed();
+        let health = read(HEALTH_GLOBAL)?.cast_signed();
+        let fruit_count = read(FRUIT_COUNT_GLOBAL)?.cast_signed();
+        let box_count = read(BOX_COUNT_GLOBAL)?.cast_signed();
+        let checkpoint_id = read(CHECKPOINT_ID_GLOBAL)?.cast_signed();
         let checkpoint_translation = [
-            read(CHECKPOINT_TRANSLATION_GLOBALS[0])? as i32,
-            read(CHECKPOINT_TRANSLATION_GLOBALS[1])? as i32,
-            read(CHECKPOINT_TRANSLATION_GLOBALS[2])? as i32,
+            read(CHECKPOINT_TRANSLATION_GLOBALS[0])?.cast_signed(),
+            read(CHECKPOINT_TRANSLATION_GLOBALS[1])?.cast_signed(),
+            read(CHECKPOINT_TRANSLATION_GLOBALS[2])?.cast_signed(),
         ];
         let options = GameOptions {
             mono: read(MONO_GLOBAL)? != 0,
@@ -2109,6 +2168,16 @@ impl Runtime {
                 "Native object-pool reclaim ignored {} faulted TERM handler(s); first object: {:?}.",
                 faults.len(),
                 faults[0].object,
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
+        let pause_faults = self.retail_objects.take_pause_event_faults();
+        if !pause_faults.is_empty() {
+            let message = format!(
+                "Native pause resume ignored {} faulted C00 handler(s); first controller: {:?}.",
+                pause_faults.len(),
+                pause_faults[0].object,
             );
             dom.log(&message, true);
             self.retail_runtime_warning = Some(message);
@@ -2175,6 +2244,13 @@ impl Runtime {
                 .finish_level_transition(&mut host, requested_lid)
         }
         .map_err(|error| JsValue::from_str(&format!("retail LEVEL_END phase failed: {error:?}")))?;
+        self.retail_objects
+            .reset_retail_pause_for_screen_load()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not reset retail pause state for the destination mount: {error:?}"
+                ))
+            })?;
         self.drain_retail_reclaim_diagnostics(dom);
 
         let residual_effects = report
@@ -2500,7 +2576,7 @@ impl Runtime {
                 self.retail_camera.update(
                     &self.retail_zone_graph,
                     RetailCameraInput {
-                        tapped: u32::from(snapshot.tapped),
+                        tapped: snapshot.tapped,
                     },
                 )
             } else {
@@ -2523,7 +2599,7 @@ impl Runtime {
             self.retail_camera.update(
                 &self.retail_zone_graph,
                 RetailCameraInput {
-                    tapped: u32::from(snapshot.tapped),
+                    tapped: snapshot.tapped,
                 },
             )
         }
@@ -2782,7 +2858,7 @@ impl Runtime {
                 z: register(process_register::TRANSLATION_Z)?.cast_signed(),
             },
             player_cam_zoom: register(process_register::CAMERA_ZOOM)?.cast_signed(),
-            held_buttons: u32::from(snapshot.held),
+            held_buttons: snapshot.held,
             level_id,
             // CamUpdate precedes GoolUpdate, so it observes the stamp installed
             // by the previous retail object frame.
@@ -2795,11 +2871,7 @@ impl Runtime {
 
     fn paused(&self) -> bool {
         if is_retail_runtime_state(self.flow.state()) {
-            self.retail_runtime_error.is_some()
-                || matches!(
-                    self.retail_tick_state,
-                    RetailTickState::PausedBeforeSpawn | RetailTickState::Paused
-                )
+            self.retail_runtime_error.is_some() || self.retail_objects.retail_pause_state().paused()
         } else {
             self.flow.paused()
         }
@@ -2917,6 +2989,13 @@ impl Runtime {
 
         // TitleLoadScreen kills every old title/MDAT object before its
         // explicit flag-two LevelUpdate, without zone immunity gates.
+        self.retail_objects
+            .reset_retail_pause_for_screen_load()
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not reset retail pause state for the title screen: {error:?}"
+                ))
+            })?;
         let report = {
             let mut host = if let Some(mdat) = previous_title_mdat {
                 BrowserProgramHost::for_title_mdat(
@@ -3863,11 +3942,11 @@ fn poll_gamepad() -> Result<u16, JsValue> {
 
 fn retail_pad_snapshot(snapshot: PlatformPadSnapshot) -> RetailPadSnapshot {
     RetailPadSnapshot {
-        tapped: u32::from(snapshot.tapped),
-        held: u32::from(snapshot.held),
-        held_previous: u32::from(snapshot.held_previous),
-        tapped_previous: u32::from(snapshot.tapped_previous),
-        held_previous_2: u32::from(snapshot.held_previous_2),
+        tapped: snapshot.tapped,
+        held: snapshot.held,
+        held_previous: snapshot.held_previous,
+        tapped_previous: snapshot.tapped_previous,
+        held_previous_2: snapshot.held_previous_2,
     }
 }
 
@@ -4014,8 +4093,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     let current_zone = runtime
         .retail_zone_lifecycle
         .current_zone()
-        .map(|zone| JsValue::from_str(&zone.to_string()))
-        .unwrap_or(JsValue::NULL);
+        .map_or(JsValue::NULL, |zone| JsValue::from_str(&zone.to_string()));
     Reflect::set(
         debug,
         &JsValue::from_str("retailCurrentZone"),
@@ -4062,7 +4140,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
             })
         };
         for (name, value) in [
-            ("state", object.state() as u32),
+            ("state", u32::from(object.state())),
             ("pc", object.pc() as u32),
             ("statusA", read_register(process_register::STATUS_A)?),
             ("statusB", read_register(process_register::STATUS_B)?),

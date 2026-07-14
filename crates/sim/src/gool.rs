@@ -3648,9 +3648,18 @@ impl VmObject {
 
     #[cfg(test)]
     pub(crate) fn configure_test_program_identity(&mut self, category: u32) {
+        self.configure_test_program_identity_with_type(category, 0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configure_test_program_identity_with_type(
+        &mut self,
+        category: u32,
+        object_type: u32,
+    ) {
         self.program_identity = Some(GoolProgramIdentity {
             global_eid: Eid::from_raw(0),
-            object_type: 0,
+            object_type,
             category,
         });
     }

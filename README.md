@@ -72,17 +72,21 @@ bound to Crash's spawn zone; a detached object zone remains typed and supplies o
 rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
 18,000-frame state-aware input trace carried the camera and Crash from `e0_9Z` through the complete
 `a0_9Z`–`b7_9Z` authored chain and requested Level Complete `0x2d` at frame 1,995 with no VM error,
-faulted object, death restart, below-zero position, or terminal fall. Under the native
-animation-bound/collision schedule, the rerun now clears the newly exposed hazards through
-`4b_9Z` and reaches `b5_9Z` path four with Crash already in `b6_9Z`, but the camera does not cross
-that static boundary. The 18,000-frame run has zero restart, fall, VM error or fault and does not
-emit Level Complete; `docs/VERIFICATION.md` records the exact counters.
+faulted object, death restart, below-zero position, or terminal fall. The current native-schedule
+characterization also completes: a legally local 2,100-frame invocation follows
+`b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits
+`Transition(0x2d)` at frame 1,906. It records 18 zone transitions, 42 observed paths, 65 successful
+spawns and 32,808 GOOL executions with zero restarts, falls, VM errors or faulted objects. The
+former b5/b6 stop came from missing route actions in the test controller at authored static cells;
+the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
+actions required no camera or collision runtime change. `docs/VERIFICATION.md` records the exact
+invocation and boundaries.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
-The prior artifact includes one deterministic authored level completion; the current native
-schedule does not yet reproduce it and is not a full retail playthrough. Broader progression,
-several GOOL host operations, dynamic rendering effects and later
+The current native schedule includes one deterministic authored level completion; this is not a
+full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
+operations, dynamic rendering effects and later
 same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
 synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
 connected. Zone graphics now select local
@@ -100,8 +104,13 @@ are live; zone-graphics flag `0x1000` substitutes the fixed Q24.8 bobbing camera
 objects only. Mode four is also live: the simulation advances the Lights Out/Fumbling
 `dark_dist` ramp before camera work, retains its renderer-BSS words across stream remounts, and
 captures the checked player reference at each object's source-order display boundary. A checked
-pause-object reference is preferred when one exists; the browser pause control still freezes the
-presented snapshot and does not yet create the native subtype-four pause controller.
+pause-object reference is preferred when one exists. START now runs the native gate against the
+prior Crash pad snapshot, creates executable-four/subtype-four beneath root seven, publishes the
+tagged pause reference, and resumes through event `0xC00` with the saved GOOL clock restored.
+Paused frames continue spawn, object traversal, display latching, scene presentation and audio;
+ordinary GOOL, camera/shader motion and draw-count advancement remain frozen while the exact
+subtype-four/seven menu override executes. The captured browser pause panel still lacks readable
+authored `WillT` glyphs, so pause-menu text presentation remains incomplete.
 Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
 snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
 (10,966 Crash pad boundaries) pass complete live runtime/render traces, including same-level death

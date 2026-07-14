@@ -126,8 +126,9 @@ copy any disc or stream bytes into the repository:
   State-aware forward/jump/spin/steering input carried Crash through
   `e0_9Z → a0_9Z → a1_9Z → … → b7_9Z`. The survey includes the three native root-one HUD
   controllers, so that completed route exercised the same process-lifetime object infrastructure as
-  the browser mount. These counts remain a prior-artifact baseline: the revised legal run is recorded
-  in Current change-set verification below and stops cleanly at the b5/b6 camera boundary.
+  the browser mount. These counts remain a prior-artifact baseline. An intermediate
+  revised-controller run stopped at the b5/b6 boundary, but that stop is not the current result;
+  the corrected-input current run is recorded in Current change-set verification below.
 - The mount-time core-object corpus test materialized executable-four subtypes 0, 1, and 5 from
   `DispC` in all 39 eligible legal pairs, verified native creation/preorder, null lifecycle-zone
   identity and exact tagged globals 7/6/14, and verified that title `0x19`, level complete `0x2d`,
@@ -323,30 +324,53 @@ not as current-change-set counts or hashes.
 The final checks below were run against this change set on 2026-07-14:
 
 - `cargo fmt --all -- --check` passed.
-- locked workspace Clippy across all targets passed with warnings denied.
-- the locked asset-free workspace suite passed all 708 default tests. Another 50 legally local
-  tests remain ignored by default, for 758 listed tests across all targets.
+- locked workspace Clippy across all native targets and an explicit `wasm32-unknown-unknown`
+  `crust-web` Clippy pass both completed with warnings denied.
+- the locked asset-free workspace suite passed all 715 default tests across 33 targets. Another 50
+  legally local tests remain ignored by default, for 765 listed tests across all targets.
 - the complete legally local ignored sweep used the supplied raw BIN and read-only extracted
-  streams in place. Forty-nine tests passed. The sole failure is the strict N. Sanity
-  goal-directed progression survey; every raw-disc/catalog, all-pair parser, camera, title,
-  audio, PBAK, renderer and runtime golden in that same sweep passed.
-- the revised 18,000-frame N. Sanity survey now reaches `b5_9Z` path four at progress 10,685 with
-  Crash already assigned to `b6_9Z`. It records 16 zone transitions, 38 observed paths, zero
-  restarts, zero below-zero or terminal-fall boundaries, zero VM errors and zero faulted objects.
-  It remains at the static b5/b6 camera boundary rather than reaching the authored Level Complete
-  request. Straight and left jump variants remain in b5; the right variant falls and was not
-  retained. This is the exact current progression gap, not a completed-level claim.
+  streams in place. All 50 selected tests passed with zero failures, including every
+  raw-disc/catalog, all-pair parser, camera, title, audio, PBAK, renderer and runtime golden.
+- the corrected legally local 2,100-frame N. Sanity invocation passes. Its controller follows
+  `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits the authored
+  `Transition(0x2d)` at frame 1,906. It records 18 zone transitions, 42 observed paths, 65
+  successful spawns and 32,808 GOOL executions with zero restarts, below-zero or terminal falls,
+  VM errors or faulted objects. The former b5/b6 stop was caused by missing test-controller route
+  actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
+  lane. Correcting those inputs required no camera or collision runtime change. This deterministic
+  local test is not a browser playthrough or a claim of full retail parity.
 - the legal Jungle Rollers PBAK scene test passed after pinning the first source-correct `FruiC`
   incarnation: synchronous `0x83`/`0x84` local-bound refresh moves its first shrink-four frame to
   wall frame 190/pad boundary 191, followed by the exact raw/effective shift checkpoints through
   frame 217.
+- native pause unit tests cover the exact level/title/PBAK gate, root-seven
+  executable-four/subtype-four creation, tagged global word 12, the category/type/live-process-subtype
+  update allow-list, Crash-boundary hook invocation while ordinary updates are suppressed, frozen
+  draw count, `0xC00` resume clock rewind and synthetic controller/audio cleanup, checked-fault
+  diagnostics, nonfatal controller-create failure, and screen-load reset ordering. The end-to-end
+  START pause/resume path and visible authored controller panel were exercised in the browser below;
+  exact prior-pad latency and per-object paused execution are not claimed by that UI check.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
-  web release. The Wasm payload is 1,215,812 bytes with SHA-256
-  `494a272b4ce3afeeb2233e27f5b2a8cf298d0b6e13c1b884a5cc469673a40858`.
-- the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. The generated release was
-  reloaded in the visible in-app browser, its complete local loader and touch controls were present,
-  and captured console warnings/errors were empty. The BIN was not selected in this final browser
-  reload, so current mounted-media browser play is not claimed.
+  web release. The Wasm payload is 1,219,750 bytes with SHA-256
+  `422ffb4825d23f5329f58b0fa47ee4108c97c68fa70ea4ea2e7ad79f229265e4`.
+- the no-store server returned HTTP 200 at `http://127.0.0.1:4174/`. A release candidate containing
+  the route and pause integration was loaded in the visible in-app browser. Because that browser
+  cannot automate a native file picker,
+  an ephemeral loopback-only same-origin test route wrapped the supplied 632,083,536-byte BIN in a
+  browser `File` and dispatched the ordinary local-input change event; it was removed by rebuilding
+  the clean release afterward and is not part of the repository or production server. The importer
+  recognized all 88 streams and 44/44 level pairs (219 MiB of selected stream extents). Authored
+  title boot rendered the Naughty Dog publisher card and advanced by touch START to the island map.
+  Direct N. Sanity boot rendered live world/object geometry at 30 Hz with synthesized audio active.
+  Touch START and keyboard Enter both opened and resumed the native pause controller, with telemetry
+  changing `RUNNING → PAUSED → RUNNING`; paused scene presentation continued and resume restored the
+  world frame. The captured pause panel did not show readable `WillT` menu glyphs, which remains a
+  measured presentation gap. No new console warning/error appeared after the successful same-origin
+  mount and gameplay checks; the tab retained one earlier failed cross-origin bridge probe in its
+  historical log, before the successful route was used. The clean final artifact was then rebuilt
+  after the temporary route and follow-up pause field/error corrections; its served hash matches the
+  hash above, the removed route returns HTTP 404, and the already-loaded gameplay tab was deliberately
+  not reloaded so its in-memory local BIN selection remained visible.
 
 ## Reproducible commands
 
@@ -365,7 +389,7 @@ C1_DISC_IMAGE=/path/to/disc.bin \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   prepares_every_legally_local_recording_without_copying_game_data -- --ignored --nocapture
-C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 \
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \

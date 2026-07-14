@@ -20,7 +20,8 @@ gameplay path.
   fixed-point camera projection and retail world ordering depth are connected to WebGL2. Streams
   with a loading image use the observed tick-two path point/draw count before gameplay is shown.
   Subsequent frames use the validated camera graph's exact zone/path/signed-8.8 progress and the
-  retail-frame pre-increment texture-animation count; pause freezes the last presented snapshot.
+  retail-frame pre-increment texture-animation count. Paused frames retain the camera and shader
+  state but continue rebuilding and presenting world/object snapshots while draw count stays fixed.
 - Source-derived camera modes 0/1/3, tapped auto-camera skipping and path/zone crossing drive the
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
   prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing.
@@ -212,10 +213,14 @@ gameplay path.
   effects remain incomplete. Object shader modes two and three and their source far-object
   rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
   through immutable snapshots carrying source-order player/pause selection and `dark_dist`; a legal
-  all-pair boot trace rendered 1,800 mode-four vertices into 2,880 object primitives. Browser pause
-  still freezes the last presented snapshot rather than creating the native executable-four,
-  subtype-four root-seven controller. Mode four's derived light matrix and ambient color are not
-  yet written back into mutable GOOL object colors, so subsequent GOOL color reads can differ.
+  all-pair boot trace rendered 1,800 mode-four vertices into 2,880 object primitives. Browser START
+  now creates the native executable-four/subtype-four root-seven controller, publishes the tagged
+  pause reference, freezes ordinary GOOL/camera/shader/draw-count work, and resumes through the
+  source `0xC00` clock-rewind/cleanup handshake while spawn, scene presentation, display latching
+  and audio continue. The captured N. Sanity pause panel did not show readable authored `WillT`
+  glyphs, so pause-menu text remains a presentation gap. Mode four's derived light matrix and
+  ambient color are not yet written back into mutable GOOL object colors, so subsequent GOOL color
+  reads can differ.
   Rendering snapshots
   the complete arena after GOOL, while the source interleaves each object's simulation and drawing
   during preorder traversal. The current builder avoids reparsing an unchanged active graph,
@@ -235,11 +240,17 @@ gameplay path.
   used. A previously recorded strict legally-local 18,000-frame authored-input trace moved the
   camera and Crash through the complete N. Sanity `a1_9Z` through `b7_9Z` chain and emitted the
   authored Level Complete destination `0x2d` at frame 1,995 with no VM errors, faults, restart or
-  terminal fall. The revised schedule has now been rerun: it clears the newly exposed static and
-  object hazards through `4b_9Z`, reaches camera `b5_9Z` path four with Crash already in `b6_9Z`,
-  and remains there without a restart, fall, VM error or fault. It does not emit Level Complete;
-  straight/left jump variants remain in b5 and the right variant falls. Broader collision and later
-  Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain open. Hog Wild's previously
+  terminal fall. An intermediate native-schedule run later stopped at the b5/b6 boundary; that is
+  retained only as historical evidence, not a current progression gap. The corrected legally local
+  2,100-frame controller route follows `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches
+  `b7_9Z`'s `WarpC`, and emits `Transition(0x2d)` at frame 1,906. It records 18 zone transitions,
+  42 observed paths, 65 successful spawns and 32,808 GOOL executions with zero restarts, falls, VM
+  errors or faulted objects. The intermediate b5/b6 stop was caused by missing test-controller route
+  actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
+  lane. Correcting those route actions required no camera or collision runtime change. This
+  deterministic route does not establish a browser playthrough or full retail parity.
+  Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
+  open. Hog Wild's previously
   recorded checked 360-frame idle trace delivered the authored fall-kill event to state 22,
   advanced `fade_counter` through the native `-2`/`-1` sentinels, emitted `LoadState`, and completed
   two same-level restarts with no VM error, faulted

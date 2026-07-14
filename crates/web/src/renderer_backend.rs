@@ -127,6 +127,8 @@ pub struct RenderOptions {
     pub scissor: Option<PixelViewport>,
     /// When set, clear the color buffer before drawing.
     pub clear_color: Option<[f32; 4]>,
+    /// Draw a full-viewport black source-alpha pass after every scene batch.
+    pub black_overlay_alpha: u8,
 }
 
 /// Per-frame WebGL work and error counters.
@@ -144,6 +146,7 @@ pub struct BackendFrameDiagnostics {
     pub vertices_uploaded: u64,
     pub vertex_upload_bytes: u64,
     pub missing_textures: Vec<TextureHandle>,
+    pub black_overlay_drawn: bool,
     pub preexisting_gl_errors: Vec<u32>,
     pub gl_errors: Vec<u32>,
 }
@@ -593,6 +596,46 @@ impl RendererBackend {
                 add_count(&mut diagnostics.triangle_passes, triangle_count);
             }
         }
+
+        if options.black_overlay_alpha != 0 {
+            let alpha = f32::from(options.black_overlay_alpha) / 255.0;
+            let overlay_vertices = fullscreen_black_vertices();
+            let overlay_flattened = flatten_vertices(&overlay_vertices);
+            let overlay_bytes = overlay_flattened
+                .len()
+                .checked_mul(BYTES_PER_FLOAT)
+                .ok_or(BackendError::VertexDataTooLarge)?;
+            let overlay_buffer = Float32Array::from(overlay_flattened.as_slice());
+
+            self.gl.buffer_data_with_array_buffer_view(
+                WebGl2RenderingContext::ARRAY_BUFFER,
+                &overlay_buffer,
+                WebGl2RenderingContext::DYNAMIC_DRAW,
+            );
+            self.gl
+                .bind_texture(WebGl2RenderingContext::TEXTURE_2D, None);
+            self.gl.uniform1i(Some(&self.inputs.textured), 0);
+            self.gl.uniform1f(Some(&self.inputs.alpha_scale), alpha);
+            apply_pass(
+                &self.gl,
+                &self.inputs.alpha_test,
+                RenderPass {
+                    blend_enabled: true,
+                    equation: BlendEquation::Add,
+                    source_factor: BlendFactor::SourceAlpha,
+                    destination_factor: BlendFactor::OneMinusSourceAlpha,
+                    alpha_test: AlphaTest::Disabled,
+                },
+            );
+            self.gl.draw_arrays(WebGl2RenderingContext::TRIANGLES, 0, 6);
+
+            diagnostics.black_overlay_drawn = true;
+            diagnostics.draw_calls = diagnostics.draw_calls.saturating_add(1);
+            diagnostics.vertices_uploaded = diagnostics.vertices_uploaded.saturating_add(6);
+            diagnostics.vertex_upload_bytes = diagnostics
+                .vertex_upload_bytes
+                .saturating_add(u64::try_from(overlay_bytes).unwrap_or(u64::MAX));
+        }
         diagnostics.missing_textures = missing.into_iter().collect();
 
         self.gl
@@ -885,6 +928,22 @@ fn flatten_vertices(vertices: &[GpuVertex]) -> Vec<f32> {
     flattened
 }
 
+fn fullscreen_black_vertices() -> [GpuVertex; 6] {
+    let vertex = |x, y| GpuVertex {
+        position: [x, y, -1.0],
+        color: [0.0, 0.0, 0.0, 1.0],
+        uv: [0.0, 0.0],
+    };
+    [
+        vertex(-1.0, 1.0),
+        vertex(1.0, 1.0),
+        vertex(1.0, -1.0),
+        vertex(-1.0, -1.0),
+        vertex(-1.0, 1.0),
+        vertex(1.0, -1.0),
+    ]
+}
+
 fn untextured_alpha_scale(textured: bool, blend: BlendMode) -> f32 {
     if textured {
         return 1.0;
@@ -1075,6 +1134,28 @@ mod tests {
         assert_eq!(
             flattened[FLOATS_PER_VERTEX..],
             [10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0]
+        );
+    }
+
+    #[test]
+    fn black_overlay_is_two_full_viewport_triangles_and_opt_in() {
+        assert_eq!(RenderOptions::default().black_overlay_alpha, 0);
+        let vertices = fullscreen_black_vertices();
+        assert_eq!(
+            vertices.map(|vertex| vertex.position),
+            [
+                [-1.0, 1.0, -1.0],
+                [1.0, 1.0, -1.0],
+                [1.0, -1.0, -1.0],
+                [-1.0, -1.0, -1.0],
+                [-1.0, 1.0, -1.0],
+                [1.0, -1.0, -1.0],
+            ]
+        );
+        assert!(
+            vertices
+                .iter()
+                .all(|vertex| vertex.color.map(f32::to_bits) == [0, 0, 0, 1.0_f32.to_bits()])
         );
     }
 

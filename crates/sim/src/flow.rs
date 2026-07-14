@@ -177,6 +177,35 @@ pub enum TitleScreen {
     Map = 15,
 }
 
+impl TitleScreen {
+    /// Converts the checked 32-bit value stored in the retail GOOL global.
+    ///
+    /// The source engine represented this value as a signed `int`. Keeping the
+    /// boundary as a full word means negative or malformed values cannot be
+    /// truncated into a valid title state accidentally.
+    #[must_use]
+    pub const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            5 => Some(Self::MainMenu),
+            6 => Some(Self::Options),
+            7 => Some(Self::PublisherSecond),
+            8 => Some(Self::NaughtyDog),
+            10 => Some(Self::PublisherFirst),
+            12 => Some(Self::GameOver),
+            13 => Some(Self::Password),
+            14 => Some(Self::Load),
+            15 => Some(Self::Map),
+            _ => None,
+        }
+    }
+
+    /// Returns the stable title-state value consumed and authored by GOOL.
+    #[must_use]
+    pub const fn raw(self) -> u32 {
+        self as u32
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
 pub enum TitlePhase {
@@ -221,6 +250,15 @@ impl TitleMachine {
     #[must_use]
     pub const fn screen(self) -> TitleScreen {
         self.screen
+    }
+
+    /// Returns the target already latched for the current or next screen.
+    ///
+    /// This differs from [`Self::screen`] while a fade-out is pending and is
+    /// the value corresponding to native `title->next_state`.
+    #[must_use]
+    pub const fn next_screen(self) -> TitleScreen {
+        self.next_screen
     }
 
     #[must_use]
@@ -373,6 +411,7 @@ pub enum FlowCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FlowError {
     InvalidState,
+    InvalidTitleScreen(u32),
     NotPlayable(LevelId),
     ExpectedBonus(LevelId),
     ExpectedBoss(LevelId),
@@ -467,6 +506,91 @@ impl GameFlow {
 
     pub fn set_demo(&mut self, demo: Option<DemoPlayer>) {
         self.demo = demo;
+    }
+
+    /// Latches a title-state word written by retail GOOL.
+    ///
+    /// The native title update compares the authored global with its pending
+    /// `next_state` once per frame. Mirroring that comparison here is
+    /// important: blindly requesting the same target again would reset the
+    /// fade counter every frame and prevent the transition from completing.
+    /// The screen-change event remains deferred until [`Self::tick`] performs
+    /// the actual finished-fade screen swap.
+    pub fn request_authored_title_state(&mut self, raw: u32) -> Result<bool, FlowError> {
+        if !matches!(self.state, FlowState::Title) {
+            return Err(FlowError::InvalidState);
+        }
+        let screen = TitleScreen::from_raw(raw).ok_or(FlowError::InvalidTitleScreen(raw))?;
+        if self.title.next_screen() == screen {
+            return Ok(false);
+        }
+        self.title.request(screen);
+        self.title_idle_frames = 0;
+        Ok(true)
+    }
+
+    /// Advances only the presentation half of the title state machine.
+    ///
+    /// Stream-backed title screens receive navigation and idle behavior from
+    /// their authored GOOL objects. They still need the native fade/swap
+    /// boundary represented by [`TitleMachine`], but running [`Self::tick`]
+    /// would also execute the synthetic fallback publisher/menu timers and
+    /// could race the value written to the retail `title_state` global.
+    pub fn tick_authored_title(&mut self) -> Result<(), FlowError> {
+        if !matches!(self.state, FlowState::Title) {
+            return Err(FlowError::InvalidState);
+        }
+        self.state_frames = self.state_frames.wrapping_add(1);
+        self.advance_title_transition()
+    }
+
+    /// Mirrors a stream that has already passed platform validation and been
+    /// committed by the retail runtime.
+    ///
+    /// Unlike [`FlowCommand`], this does not emit a level-change request: the
+    /// pair is already mounted, so feeding another request into the browser
+    /// asset loader would form a transition loop. Retail GOOL globals remain
+    /// authoritative for progression and the caller supplies the title state
+    /// selected by the process-lifetime `TitleLoadNextState` contract.
+    pub fn mount_retail_level(
+        &mut self,
+        level: LevelId,
+        title_screen: Option<TitleScreen>,
+    ) -> Result<(), FlowError> {
+        if !level.is_playable() {
+            return Err(FlowError::NotPlayable(level));
+        }
+        let completion_source = match self.state {
+            FlowState::Gameplay(source)
+            | FlowState::Boss(source)
+            | FlowState::LevelComplete { source, .. } => source,
+            _ => level,
+        };
+        self.state = match level.kind() {
+            LevelKind::Title => {
+                self.title = TitleMachine::resumed(title_screen.unwrap_or(TitleScreen::MainMenu));
+                self.title_idle_frames = 0;
+                FlowState::Title
+            }
+            LevelKind::Gameplay => FlowState::Gameplay(level),
+            LevelKind::Bonus => FlowState::Bonus(level),
+            LevelKind::Boss => FlowState::Boss(level),
+            LevelKind::Completion => FlowState::LevelComplete {
+                source: completion_source,
+                missed_boxes: 0,
+            },
+            LevelKind::Intro => FlowState::Intro,
+            LevelKind::Ending => FlowState::Ending,
+        };
+        if matches!(
+            level.kind(),
+            LevelKind::Gameplay | LevelKind::Bonus | LevelKind::Boss
+        ) {
+            self.player.mode = PlayerMode::Cutscene;
+        }
+        self.state_frames = 0;
+        self.paused = false;
+        Ok(())
     }
 
     pub fn command(&mut self, command: FlowCommand) -> Result<(), FlowError> {
@@ -574,17 +698,20 @@ impl GameFlow {
     /// Advances one exact 30 Hz game frame.
     pub fn tick(&mut self, mut pad: PadState) -> Result<(), FlowError> {
         self.state_frames = self.state_frames.wrapping_add(1);
+        let mut demo_ended = false;
         if let Some(demo) = &mut self.demo {
             match demo.advance(pad.held) {
-                DemoStep::Playing { held, .. } => pad = PadState::from_frames(0, held),
-                DemoStep::Interrupted | DemoStep::Finished => {
-                    self.demo = None;
-                    self.emit(FlowEvent::DemoFinished)?;
+                DemoStep::Playing {
+                    held, tapped, end, ..
+                } => {
+                    pad = PadState { held, tapped };
+                    demo_ended = end.is_some();
                 }
+                DemoStep::Finished => demo_ended = true,
             }
         }
 
-        match self.state.clone() {
+        let result = match self.state.clone() {
             FlowState::Title => self.tick_title(pad),
             FlowState::Intro => {
                 if pad.held & 0x09f0 != 0 || self.state_frames >= 60 * 30 {
@@ -613,7 +740,12 @@ impl GameFlow {
                 Ok(())
             }
             FlowState::Boot => Ok(()),
+        };
+        if demo_ended {
+            self.demo = None;
+            self.emit(FlowEvent::DemoFinished)?;
         }
+        result
     }
 
     fn boot(&mut self, level: LevelId) -> Result<(), FlowError> {
@@ -672,13 +804,7 @@ impl GameFlow {
     }
 
     fn tick_title(&mut self, pad: PadState) -> Result<(), FlowError> {
-        let previous = self.title.screen();
-        self.title.tick();
-        if self.title.screen() != previous {
-            self.state_frames = 0;
-            self.title_idle_frames = 0;
-            self.emit(FlowEvent::TitleChanged(self.title.screen()))?;
-        }
+        self.advance_title_transition()?;
         if self.title.phase() != TitlePhase::Ready {
             return Ok(());
         }
@@ -705,6 +831,17 @@ impl GameFlow {
                 }
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn advance_title_transition(&mut self) -> Result<(), FlowError> {
+        let previous = self.title.screen();
+        self.title.tick();
+        if self.title.screen() != previous {
+            self.state_frames = 0;
+            self.title_idle_frames = 0;
+            self.emit(FlowEvent::TitleChanged(self.title.screen()))?;
         }
         Ok(())
     }
@@ -814,6 +951,15 @@ mod tests {
         }
     }
 
+    fn ready_main_menu() -> GameFlow {
+        let mut flow = GameFlow::new();
+        flow.state = FlowState::Title;
+        flow.title = TitleMachine::resumed(TitleScreen::MainMenu);
+        tick_until_ready(&mut flow);
+        let _ = flow.take_events();
+        flow
+    }
+
     #[test]
     fn catalog_has_44_pairs_and_only_cave_is_not_playable() {
         assert_eq!(KNOWN_LEVELS.len(), 44);
@@ -825,6 +971,143 @@ mod tests {
             43
         );
         assert!(!LevelId::CAVE.is_playable());
+    }
+
+    #[test]
+    fn title_screen_raw_conversion_rejects_unrecognized_full_words() {
+        for screen in [
+            TitleScreen::MainMenu,
+            TitleScreen::Options,
+            TitleScreen::PublisherSecond,
+            TitleScreen::NaughtyDog,
+            TitleScreen::PublisherFirst,
+            TitleScreen::GameOver,
+            TitleScreen::Password,
+            TitleScreen::Load,
+            TitleScreen::Map,
+        ] {
+            assert_eq!(TitleScreen::from_raw(screen.raw()), Some(screen));
+        }
+        for raw in [0, 4, 9, 11, 16, 0x105, u32::MAX] {
+            assert_eq!(TitleScreen::from_raw(raw), None);
+        }
+    }
+
+    #[test]
+    fn repeated_authored_request_does_not_restart_the_pending_fade() {
+        let mut flow = ready_main_menu();
+
+        assert_eq!(
+            flow.request_authored_title_state(TitleScreen::Options.raw()),
+            Ok(true)
+        );
+        assert_eq!(flow.title().next_screen(), TitleScreen::Options);
+        assert_eq!(flow.title().fade_counter(), -256);
+
+        flow.tick(PadState::default()).unwrap();
+        assert_eq!(flow.title().fade_counter(), -224);
+        assert_eq!(
+            flow.request_authored_title_state(TitleScreen::Options.raw()),
+            Ok(false)
+        );
+        assert_eq!(flow.title().fade_counter(), -224);
+        assert!(flow.events().is_empty());
+    }
+
+    #[test]
+    fn authored_main_menu_requests_latch_each_retail_destination() {
+        for destination in [
+            TitleScreen::Options,
+            TitleScreen::Password,
+            TitleScreen::Load,
+            TitleScreen::Map,
+        ] {
+            let mut flow = ready_main_menu();
+
+            assert_eq!(
+                flow.request_authored_title_state(destination.raw()),
+                Ok(true)
+            );
+            assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
+            assert_eq!(flow.title().next_screen(), destination);
+            assert_eq!(flow.title().phase(), TitlePhase::FadingOut);
+            assert!(flow.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn authored_title_change_emits_only_when_the_fade_swaps_screens() {
+        let mut flow = ready_main_menu();
+        flow.request_authored_title_state(TitleScreen::Options.raw())
+            .unwrap();
+
+        for _ in 0..8 {
+            flow.tick(PadState::default()).unwrap();
+        }
+        assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
+        assert_eq!(flow.title().phase(), TitlePhase::FinishedFadingOut);
+        assert!(flow.events().is_empty());
+
+        flow.tick(PadState::default()).unwrap();
+        assert_eq!(flow.title().screen(), TitleScreen::Options);
+        assert_eq!(flow.title().phase(), TitlePhase::Blank);
+        assert_eq!(
+            flow.take_events(),
+            vec![FlowEvent::TitleChanged(TitleScreen::Options)]
+        );
+
+        tick_until_ready(&mut flow);
+        assert_eq!(flow.title().screen(), TitleScreen::Options);
+        assert!(flow.events().is_empty());
+    }
+
+    #[test]
+    fn authored_title_ticks_advance_fades_without_synthetic_idle_navigation() {
+        let mut flow = ready_main_menu();
+
+        for _ in 0..=TITLE_IDLE_INTRO_FRAMES {
+            flow.tick_authored_title().unwrap();
+        }
+        assert_eq!(flow.state(), &FlowState::Title);
+        assert_eq!(flow.title().screen(), TitleScreen::MainMenu);
+        assert!(flow.events().is_empty());
+
+        flow.request_authored_title_state(TitleScreen::Options.raw())
+            .unwrap();
+        for _ in 0..9 {
+            flow.tick_authored_title().unwrap();
+        }
+        assert_eq!(flow.title().screen(), TitleScreen::Options);
+        assert_eq!(
+            flow.take_events(),
+            vec![FlowEvent::TitleChanged(TitleScreen::Options)]
+        );
+    }
+
+    #[test]
+    fn committed_retail_mount_mirrors_state_without_requeueing_assets() {
+        let mut flow = GameFlow::new();
+        let beach = LevelId::new(0x09).unwrap();
+        flow.command(FlowCommand::Boot(beach)).unwrap();
+        let _ = flow.take_events();
+
+        flow.mount_retail_level(LevelId::LEVEL_COMPLETE, None)
+            .unwrap();
+        assert_eq!(
+            flow.state(),
+            &FlowState::LevelComplete {
+                source: beach,
+                missed_boxes: 0,
+            }
+        );
+        assert!(flow.events().is_empty());
+
+        flow.mount_retail_level(LevelId::TITLE, Some(TitleScreen::Load))
+            .unwrap();
+        assert_eq!(flow.state(), &FlowState::Title);
+        assert_eq!(flow.title().screen(), TitleScreen::Load);
+        assert_eq!(flow.title().next_screen(), TitleScreen::Load);
+        assert!(flow.events().is_empty());
     }
 
     #[test]

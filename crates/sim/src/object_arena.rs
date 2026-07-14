@@ -9,12 +9,15 @@ use crust_formats::{binary::Eid, stream::ZoneEntity};
 
 /// Number of ordinary GOOL objects in the retail allocation table.
 pub const OBJECT_POOL_CAPACITY: usize = 96;
+/// Total live-object capacity: the ordinary pool plus retail's separately
+/// allocated player/main object.
+pub const OBJECT_ARENA_CAPACITY: usize = OBJECT_POOL_CAPACITY + 1;
 /// Number of persistent entity spawn-flag entries.
 pub const SPAWN_TABLE_CAPACITY: usize = 304;
 /// Number of logical GOOL tree roots.
 pub const ROOT_HANDLE_COUNT: usize = 8;
 
-const TOTAL_SLOT_COUNT: usize = OBJECT_POOL_CAPACITY + 1;
+const TOTAL_SLOT_COUNT: usize = OBJECT_ARENA_CAPACITY;
 const DEDICATED_MAIN_SLOT: usize = OBJECT_POOL_CAPACITY;
 const ACTIVE_ZONE_DISPLAY_BIT: u32 = 1 << 1;
 const SPAWNABLE_ENTITY_GROUP: u16 = 3;
@@ -172,6 +175,12 @@ pub enum RuntimeCreateError {
     InvalidParent(ObjectHandle),
     MainObjectUnavailable,
     ObjectPoolFull,
+    /// Native `GoolObjectAlloc(1)` selected this root-three preorder object
+    /// for synchronous TERM/release before the allocation is retried.
+    ///
+    /// The arena deliberately does not release it here: the runtime must first
+    /// deliver TERM and remove paired VM/audio state.
+    ReclaimRequired(ObjectHandle),
     BrokenTree(TreeError),
 }
 
@@ -212,6 +221,17 @@ impl SpawnTable {
             .ok_or(SpawnError::InvalidSpawnId(id))?;
         *slot = flags;
         Ok(())
+    }
+
+    /// Copies the exact 304 native spawn words used by `level_state`.
+    #[must_use]
+    pub const fn snapshot(&self) -> [u32; SPAWN_TABLE_CAPACITY] {
+        self.flags
+    }
+
+    /// Restores all native spawn words as one validated, fixed-size value.
+    pub fn restore(&mut self, flags: [u32; SPAWN_TABLE_CAPACITY]) {
+        self.flags = flags;
     }
 
     fn mark_active(&mut self, id: u16) {
@@ -441,10 +461,10 @@ impl ObjectArena {
     /// Runtime children do not mark an entity spawn-table ID when created.
     /// Their retail PID word is zero, however, so teardown clears the active
     /// bit of spawn slot zero exactly like `GoolObjectKill`. If the ordinary
-    /// pool is full, `allow_reclaim` mirrors opcode `0x91` by terminating the
-    /// first safe preorder object whose state has retail flag `0x80000`. The
-    /// live parent and its ancestors are excluded so a checked handle can
-    /// never be invalidated halfway through creation.
+    /// pool is full, `allow_reclaim` mirrors opcode `0x91` by reporting the
+    /// first root-three preorder object whose state has retail flag `0x80000`.
+    /// The runtime owns TERM delivery and paired VM/audio cleanup, so no arena
+    /// slot is released until that synchronous lifecycle has completed.
     pub fn create_child(
         &mut self,
         parent: ObjectHandle,
@@ -496,10 +516,10 @@ impl ObjectArena {
                 return Err(RuntimeCreateError::ObjectPoolFull);
             }
             let candidate = self
-                .first_reclaimable_outside_parent_chain(parent)?
+                .first_reclaimable()
+                .map_err(RuntimeCreateError::BrokenTree)?
                 .ok_or(RuntimeCreateError::ObjectPoolFull)?;
-            self.despawn_subtree(candidate)
-                .map_err(RuntimeCreateError::BrokenTree)?;
+            return Err(RuntimeCreateError::ReclaimRequired(candidate));
         }
 
         let tree_parent = TreeParent::Object(parent);
@@ -620,6 +640,16 @@ impl ObjectArena {
         })
     }
 
+    /// Returns the current head child of one logical root.
+    ///
+    /// Mutation-aware host traversals use this narrow accessor to begin each
+    /// native root walk live, then retain checked sibling handles across
+    /// synchronous callbacks without exposing the arena's root table.
+    #[must_use]
+    pub fn root_first_child(&self, root: RootHandle) -> Option<ObjectHandle> {
+        self.roots[usize::from(root.index())]
+    }
+
     /// Takes a deterministic, checked postorder snapshot of the whole forest.
     ///
     /// Roots are visited in retail index order `0..8`; siblings retain their
@@ -660,6 +690,35 @@ impl ObjectArena {
             self.release(handle)?;
         }
         Ok(postorder)
+    }
+
+    /// Releases one already-childless object.
+    ///
+    /// This is the checked final step of native recursive `GoolObjectKill`:
+    /// callers deliver TERM and release every child before invoking it. The
+    /// ordinary subtree API remains preferable for non-signalling teardown.
+    pub fn despawn_leaf(&mut self, object: ObjectHandle) -> Result<ObjectHandle, TreeError> {
+        if self.object(object)?.first_child.is_some() {
+            return Err(TreeError::BrokenTreeLink);
+        }
+        self.detach(object)?;
+        self.release(object)?;
+        Ok(object)
+    }
+
+    /// Returns native `GoolObjectAlloc(1)`'s expendable-object choice.
+    ///
+    /// The source searches only handle/root three, visiting its head-to-tail
+    /// children and every descendant in preorder. It does not exclude the
+    /// current creator or any ancestor; legal programs are responsible for
+    /// not marking an active creator expendable.
+    pub fn first_reclaimable(&self) -> Result<Option<ObjectHandle>, TreeError> {
+        Ok(self
+            .preorder(TreeParent::Root(ZONE_OBJECT_ROOT))?
+            .find(|candidate| {
+                self.get(*candidate)
+                    .is_some_and(|object| object.state_flags & RECLAIMABLE_STATE_FLAG != 0)
+            }))
     }
 
     fn allocate(
@@ -721,37 +780,6 @@ impl ObjectArena {
             slot: u8::try_from(slot_index).ok()?,
             generation: slot.generation,
         })
-    }
-
-    fn first_reclaimable_outside_parent_chain(
-        &self,
-        parent: ObjectHandle,
-    ) -> Result<Option<ObjectHandle>, RuntimeCreateError> {
-        let mut protected = [None; TOTAL_SLOT_COUNT];
-        let mut protected_len = 0_usize;
-        let mut cursor = Some(parent);
-        while let Some(handle) = cursor {
-            protected[protected_len] = Some(handle);
-            protected_len += 1;
-            cursor = match self
-                .object(handle)
-                .map_err(RuntimeCreateError::BrokenTree)?
-                .parent
-            {
-                TreeParent::Root(_) => None,
-                TreeParent::Object(next) => Some(next),
-            };
-        }
-
-        let preorder = self
-            .preorder(TreeParent::Root(ZONE_OBJECT_ROOT))
-            .map_err(RuntimeCreateError::BrokenTree)?;
-        Ok(preorder.into_iter().find(|candidate| {
-            !protected[..protected_len].contains(&Some(*candidate))
-                && self
-                    .get(*candidate)
-                    .is_some_and(|object| object.state_flags & RECLAIMABLE_STATE_FLAG != 0)
-        }))
     }
 
     fn first_child_of(&self, parent: TreeParent) -> Result<Option<ObjectHandle>, TreeError> {
@@ -1316,7 +1344,27 @@ mod tests {
 
         let main = arena.spawn_entity(ZONE_A, entity(201, 3, 0, 0)).unwrap();
         assert!(main.is_dedicated_main());
-        assert_eq!(arena.len(), OBJECT_POOL_CAPACITY + 1);
+        assert_eq!(arena.len(), OBJECT_ARENA_CAPACITY);
+    }
+
+    #[test]
+    fn native_capacity_keeps_all_96_pool_objects_alongside_main() {
+        let mut arena = ObjectArena::new();
+        let main = arena.spawn_entity(ZONE_A, entity(200, 3, 0, 0)).unwrap();
+        let parent = arena.spawn_entity(ZONE_A, entity(201, 3, 1, 0)).unwrap();
+
+        for _ in 1..OBJECT_POOL_CAPACITY {
+            arena.create_child(parent, ZONE_A, 39, 1, false).unwrap();
+        }
+
+        assert!(main.is_dedicated_main());
+        assert_eq!(arena.len(), OBJECT_ARENA_CAPACITY);
+        assert_eq!(arena.remaining_pool_capacity(), 0);
+        assert_eq!(
+            arena.create_child(parent, ZONE_A, 39, 1, false),
+            Err(RuntimeCreateError::ObjectPoolFull),
+            "opcode 0x8a cannot reclaim after the 96-slot ordinary pool fills"
+        );
     }
 
     #[test]
@@ -1342,7 +1390,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_reclaim_uses_first_flagged_preorder_candidate() {
+    fn runtime_reclaim_reports_first_flagged_preorder_candidate_without_releasing_it() {
         let mut arena = ObjectArena::new();
         let parent = arena.spawn_entity(ZONE_A, entity(100, 3, 1, 0)).unwrap();
         let candidate = arena.spawn_entity(ZONE_A, entity(101, 3, 1, 0)).unwrap();
@@ -1358,16 +1406,35 @@ mod tests {
         arena
             .set_state_flags(candidate, RECLAIMABLE_STATE_FLAG)
             .unwrap();
-        let child = arena.create_child(parent, ZONE_A, 5, 0, true).unwrap();
-        assert_eq!(child.slot(), candidate.slot());
-        assert!(arena.get(candidate).is_none());
-        assert_eq!(arena.spawn_table().flags(101), Some(0));
+        assert_eq!(arena.first_reclaimable(), Ok(Some(candidate)));
         assert_eq!(
-            arena.get(child).unwrap().origin(),
-            ObjectOrigin::Runtime {
-                executable: 5,
-                subtype: 0
-            }
+            arena.create_child(parent, ZONE_A, 5, 0, true),
+            Err(RuntimeCreateError::ReclaimRequired(candidate))
+        );
+        assert!(arena.get(candidate).is_some());
+        assert_eq!(arena.spawn_table().flags(101), Some(1));
+        assert_eq!(arena.remaining_pool_capacity(), 0);
+    }
+
+    #[test]
+    fn native_reclaim_search_does_not_exclude_the_active_parent() {
+        let mut arena = ObjectArena::new();
+        for id in 100..196 {
+            arena.spawn_entity(ZONE_A, entity(id, 3, 1, 0)).unwrap();
+        }
+        let parent = arena
+            .preorder(TreeParent::Root(ZONE_OBJECT_ROOT))
+            .unwrap()
+            .next()
+            .unwrap();
+        arena
+            .set_state_flags(parent, RECLAIMABLE_STATE_FLAG)
+            .unwrap();
+
+        assert_eq!(arena.first_reclaimable(), Ok(Some(parent)));
+        assert_eq!(
+            arena.create_child(parent, ZONE_A, 5, 0, true),
+            Err(RuntimeCreateError::ReclaimRequired(parent))
         );
     }
 

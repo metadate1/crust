@@ -6,4 +6,6 @@ pub mod adpcm;
 pub mod mixer;
 pub mod output;
 pub mod retail;
+pub mod retail_music;
+pub mod retail_player;
 pub mod sequencer;

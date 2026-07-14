@@ -12,25 +12,29 @@ use crust_formats::{
     binary::{Eid, FormatError},
     stream::{
         GoolAnimationDescriptor, LevelId, Nsd, Nsf, ObjectVertexKind, ZoneEntity, ZoneHeader,
-        ZoneRect, load_gool_program, load_gool_state_program, parse_gool_animation_descriptor,
-        parse_object_frame,
+        ZoneRect, load_gool_program, load_gool_state_program, load_object_model_frame,
+        parse_gool_animation_descriptor, parse_object_frame,
     },
 };
 
 use crate::{
+    camera::RetailCameraLocation,
+    card::{CardPublishedState, SaveData},
     gool::{
         AnimationReference, AudioHostRequest, AudioHostResponse, COLOR_COUNT,
-        CURRENT_DISPLAY_GLOBAL, EventDispatchOutcome, EventStateChange, Execution,
-        GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
-        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, RetailPadSnapshot,
-        RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
-        VmEffect, VmError, VmHostRequest, VmObject, VmStateProgram, process_register,
+        CURRENT_DISPLAY_GLOBAL, CURRENT_LEVEL_GLOBAL, CardHostRequest, CollisionObjectReference,
+        EventDispatchOutcome, EventStateChange, Execution, GoolProgramIdentity, HaltReason,
+        INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine, ModelVertexSource, NEXT_DISPLAY_GLOBAL,
+        NearestObjectCandidate, ObjectHandle as VmObjectHandle, RETAIL_LEVEL_SPAWN_CAPACITY,
+        RetailPadSnapshot, RetailSolidEnvironment, RetailSolidZone, RetailTransform,
+        RetailTransformVectorsCamera, SendEventRequest, SendEventTarget, VmEffect, VmError,
+        VmHostRequest, VmObject, VmStateProgram, process_register,
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
         ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, NeighborZone, ObjectArena,
         ObjectHandle as ArenaObjectHandle, ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError,
-        SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent,
+        SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent, ZONE_OBJECT_ROOT,
     },
     object_bounds::{
         AnimationBoundSource, BoundTransform, calculate_local_bound, calculate_world_bound,
@@ -53,8 +57,59 @@ const ANIMATE_OBJECTS: u32 = 0x8;
 const FORCE_DISPLAY_MENUS: u32 = 0x4000;
 const FORCE_ANIMATE_MENUS: u32 = 0x8000;
 const TERMINATE_EVENT: u32 = 0x1a00;
+const RESPAWN_EVENT: u32 = 0x1300;
+/// Native `GOOL_EVENT_LEVEL_END`, broadcast before every stream remount.
+pub const LEVEL_END_EVENT: u32 = 0x2900;
+const SAVE_RESTRICTED_ZONE_FLAG: u32 = 0x2000;
+const SAVE_TRANSLATION_FROM_CALLER_STATUS_B: u32 = 0x200;
+const SPAWN_ACTIVE_BIT: u32 = 1;
+const SPAWN_CHECKPOINT_BLOCKED_BIT: u32 = 2;
+const SPAWN_CHECKPOINT_SEEN_BIT: u32 = 8;
+/// `LevelUpdate(..., flags = 1)` clears native spawn bits one and two.
+const SPAWN_LEVEL_UPDATE_CLEAR_MASK: u32 = 0x6;
+const ACTIVE_ZONE_DISPLAY_BIT: u32 = 2;
+const SPAWNABLE_ENTITY_GROUP: u16 = 3;
 const ZONE_TERMINATION_STATUS_B_IMMUNE: u32 = 0x0100_0000;
 const ZONE_TERMINATION_STATE_IMMUNE: u32 = 0x0004_0000;
+
+// `gool_globals` words whose C values are native pointers. A stream remount
+// destroys every pointee. Retaining compact Rust handles here could alias a
+// newly allocated object, so these words are deliberately cleared rather than
+// reproducing that undefined dangling-pointer behavior.
+const POINTER_GLOBALS: [usize; 13] = [
+    6,   // fruit_hud
+    7,   // life_hud
+    8,   // ambiance_obj
+    12,  // pause_obj
+    14,  // pickup_hud
+    16,  // doctor
+    36,  // cam_spin_obj
+    54,  // light_src_obj
+    76,  // caption_obj
+    80,  // card_str
+    81,  // card_icon
+    116, // prev_box
+    118, // prev_box_entity
+];
+const RESPAWN_COUNT_GLOBAL: usize = 5;
+const SCREEN_SHAKE_GLOBAL: usize = 2;
+const AMBIANCE_OBJECT_GLOBAL: usize = 8;
+const CORTEX_COUNT_GLOBAL: usize = 27;
+const BRIO_COUNT_GLOBAL: usize = 28;
+const TAWNA_COUNT_GLOBAL: usize = 29;
+const GAME_STATE_GLOBAL: usize = 17;
+const CHECKPOINT_ID_GLOBAL: usize = 69;
+const DEATH_COUNT_GLOBAL: usize = 108;
+const BOX_COUNT_GLOBAL: usize = 62;
+const BONUS_ROUND_GLOBAL: usize = 60;
+const GEM_STAMP_GLOBAL: usize = 65;
+const ISLAND_CAMERA_STATE_GLOBAL: usize = 66;
+const IS_FIRST_ZONE_GLOBAL: usize = 67;
+const TITLE_PAUSE_STATE_GLOBAL: usize = 74;
+const CAPTION_OBJECT_GLOBAL: usize = 76;
+const PBAK_STATE_GLOBAL: usize = 105;
+const FADE_COUNTER_GLOBAL: usize = 106;
+const FADE_STEP_GLOBAL: usize = 107;
 
 fn solid_level_quirks(level: LevelId) -> SolidLevelQuirks {
     let level = level.get();
@@ -169,8 +224,27 @@ pub struct RetailRenderObject {
     pub state_flags: u32,
     pub size: i32,
     pub colors: [u16; COLOR_COUNT],
+    /// Type-four text's dynamic font word offset (`invincibility_state >> 8`).
+    /// Zero selects the font reference serialized in the text descriptor.
+    pub text_font_override_word_offset: u32,
+    /// Exact bounded aliases for native `sp[-2]` through `sp[-11]`.
+    ///
+    /// `snprintf` consumes the first four values, while retail's `~pN`
+    /// pluralization command can select any decimal `N` in `0..=9`. Missing
+    /// words stay explicit instead of reproducing an out-of-bounds C read.
+    pub text_arguments: [Option<u32>; 10],
     /// Exact per-object display decision captured after this object's update.
     pub display_eligible: bool,
+}
+
+fn retail_text_arguments(stack: &[u32]) -> [Option<u32>; 10] {
+    std::array::from_fn(|index| {
+        stack
+            .len()
+            .checked_sub(index + 2)
+            .and_then(|stack_index| stack.get(stack_index))
+            .copied()
+    })
 }
 
 /// Checked failures while taking an immutable render-object snapshot.
@@ -225,6 +299,27 @@ pub struct AnimationBoundBinding {
     pub frame_index: u32,
 }
 
+/// Typed asset request emitted by transform-vectors suboperation six.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ModelVertexBinding {
+    pub requester: RuntimeObjectHandle,
+    pub link: RuntimeObjectHandle,
+    pub model_eid: Eid,
+    pub frame_index: u32,
+    pub vertex_index: u32,
+}
+
+/// Synchronous result of one browser/platform memory-card operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CardHostResponse {
+    /// Native `CardControl` result written to process register 37.
+    pub result: i32,
+    /// Present only after a successful load operation.
+    pub loaded: Option<SaveData>,
+    /// Card metadata visible to GOOL immediately after the call.
+    pub published: CardPublishedState,
+}
+
 /// Immutable zone inputs needed to reproduce `GoolObjectSpawn` without
 /// retaining native pointers into a ZDAT entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -232,6 +327,38 @@ pub struct RetailZoneEnvironment {
     pub origin: [i32; 3],
     pub object_colors: [u16; COLOR_COUNT],
     pub player_colors: [u16; COLOR_COUNT],
+}
+
+/// Returns whether one native Q24.8 point lies inside a serialized ZDAT
+/// rectangle. The PSX additions and shifts are 32-bit wrapping operations;
+/// both faces are inclusive in the source `TestPointInRect` predicate.
+fn retail_zone_rect_contains(rect: ZoneRect, point: [i32; 3]) -> bool {
+    rect.origin.into_iter().zip(rect.dimensions).zip(point).all(
+        |((origin, dimension), coordinate)| {
+            let lower = origin.wrapping_shl(8);
+            let upper = origin.wrapping_add(dimension.cast_signed()).wrapping_shl(8);
+            coordinate >= lower && coordinate <= upper
+        },
+    )
+}
+
+/// Mirrors `ZoneFindNeighbor`'s reverse serialized-header scan. Rectangle
+/// resolution is deliberately lazy: native returns after its first match and
+/// never dereferences any earlier serialized neighbor.
+fn find_retail_neighbor_zone<E, F>(
+    neighbors: &[Eid],
+    point: [i32; 3],
+    mut resolve_rect: F,
+) -> Result<Option<Eid>, E>
+where
+    F: FnMut(Eid) -> Result<ZoneRect, E>,
+{
+    for zone in neighbors.iter().rev().copied() {
+        if retail_zone_rect_contains(resolve_rect(zone)?, point) {
+            return Ok(Some(zone));
+        }
+    }
+    Ok(None)
 }
 
 /// Supplies the initial GOOL object for an entity or runtime child.
@@ -270,6 +397,26 @@ pub trait ProgramHost {
         Ok(None)
     }
 
+    /// Resolves GOOL `SZON` against the current ZDAT header. The caller owns
+    /// the current-zone identity, while the stream host owns and validates the
+    /// serialized neighbor EIDs and rectangles. `None` means no neighbor
+    /// contains the point and therefore leaves the target object's zone
+    /// unchanged.
+    fn find_neighbor_zone(
+        &mut self,
+        _current_zone: Eid,
+        _point: [i32; 3],
+    ) -> Result<Option<Eid>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Returns the current ZDAT header's neighbor EIDs in exact serialized
+    /// forward order. Misc 12/7 intentionally does not filter display flags,
+    /// sort, or deduplicate this list.
+    fn current_zone_neighbors(&mut self, _current_zone: Eid) -> Result<Vec<Eid>, Self::Error> {
+        Ok(Vec::new())
+    }
+
     /// Optionally resolves the current item-five animation and frame to the
     /// fields needed by retail local/world AABB calculation.
     ///
@@ -280,6 +427,16 @@ pub trait ProgramHost {
         &mut self,
         _binding: AnimationBoundBinding,
     ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+        Ok(None)
+    }
+
+    /// Resolves one packed SVTX/CVTX vertex and its TGEO scale without
+    /// retaining pointers into mounted stream bytes. Authored hosts may return
+    /// `None`; the VM then preserves native's no-animation/no-model no-op.
+    fn model_vertex_source(
+        &mut self,
+        _binding: ModelVertexBinding,
+    ) -> Result<Option<ModelVertexSource>, Self::Error> {
         Ok(None)
     }
 
@@ -295,6 +452,29 @@ pub trait ProgramHost {
             AudioHostRequest::CreateVoice(_) => AudioHostResponse::VoiceCreated { voice_id: -2 },
             AudioHostRequest::Control(_) => AudioHostResponse::ControlApplied,
         })
+    }
+
+    /// Completes misc primary fifteen synchronously. Asset-only hosts reject
+    /// the operation while preserving an empty, deterministic card view.
+    fn handle_card_request(
+        &mut self,
+        _request: CardHostRequest,
+        _current: SaveData,
+    ) -> Result<CardHostResponse, Self::Error> {
+        Ok(CardHostResponse {
+            result: 1,
+            ..CardHostResponse::default()
+        })
+    }
+
+    /// Releases platform-owned voices before a reclaimed VM handle can be
+    /// rebound to a replacement object in the same cooperative frame.
+    ///
+    /// Return `true` when cleanup was completed synchronously. Hosts that do
+    /// not own audio can retain the default; the runtime then exposes an
+    /// ordered [`RuntimeCleanupAction`] through [`RetailRuntime::take_cleanup_actions`].
+    fn free_object_audio(&mut self, _object: RuntimeObjectHandle) -> bool {
+        false
     }
 }
 
@@ -422,6 +602,95 @@ impl ProgramHost for NsfProgramHost<'_> {
         }))
     }
 
+    fn find_neighbor_zone(
+        &mut self,
+        current_zone: Eid,
+        point: [i32; 3],
+    ) -> Result<Option<Eid>, Self::Error> {
+        let entry = self
+            .nsf
+            .resolve_entry(self.metadata, current_zone)
+            .map_err(NsfProgramError::Format)?;
+        if entry.entry_type != 7 {
+            return Err(NsfProgramError::Format(FormatError::global(format!(
+                "zone {current_zone} resolves to entry type {}, expected ZDAT type 7",
+                entry.entry_type
+            ))));
+        }
+        let header_item = entry.item(0).ok_or_else(|| {
+            NsfProgramError::Format(FormatError::global(format!(
+                "zone {current_zone} has no ZDAT header item"
+            )))
+        })?;
+        let header = ZoneHeader::parse(
+            header_item
+                .bytes(self.nsf_bytes)
+                .map_err(NsfProgramError::Format)?,
+        )
+        .map_err(NsfProgramError::Format)?;
+        find_retail_neighbor_zone(&header.neighbors, point, |neighbor| {
+            let entry = self
+                .nsf
+                .resolve_entry(self.metadata, neighbor)
+                .map_err(NsfProgramError::Format)?;
+            if entry.entry_type != 7 {
+                return Err(NsfProgramError::Format(FormatError::global(format!(
+                    "SZON neighbor {neighbor} resolves to entry type {}, expected ZDAT type 7",
+                    entry.entry_type
+                ))));
+            }
+            let rect_item = entry.item(1).ok_or_else(|| {
+                NsfProgramError::Format(FormatError::global(format!(
+                    "SZON neighbor {neighbor} has no ZDAT rectangle item"
+                )))
+            })?;
+            let rect = ZoneRect::parse(
+                rect_item
+                    .bytes(self.nsf_bytes)
+                    .map_err(NsfProgramError::Format)?,
+            )
+            .map_err(NsfProgramError::Format)?;
+            Ok(rect)
+        })
+    }
+
+    fn current_zone_neighbors(&mut self, current_zone: Eid) -> Result<Vec<Eid>, Self::Error> {
+        let entry = self
+            .nsf
+            .resolve_entry(self.metadata, current_zone)
+            .map_err(NsfProgramError::Format)?;
+        if entry.entry_type != 7 {
+            return Err(NsfProgramError::Format(FormatError::global(format!(
+                "zone {current_zone} resolves to entry type {}, expected ZDAT type 7",
+                entry.entry_type
+            ))));
+        }
+        let header_item = entry.item(0).ok_or_else(|| {
+            NsfProgramError::Format(FormatError::global(format!(
+                "zone {current_zone} has no ZDAT header item"
+            )))
+        })?;
+        let header = ZoneHeader::parse(
+            header_item
+                .bytes(self.nsf_bytes)
+                .map_err(NsfProgramError::Format)?,
+        )
+        .map_err(NsfProgramError::Format)?;
+        for neighbor in header.neighbors.iter().copied() {
+            let neighbor_entry = self
+                .nsf
+                .resolve_entry(self.metadata, neighbor)
+                .map_err(NsfProgramError::Format)?;
+            if neighbor_entry.entry_type != 7 {
+                return Err(NsfProgramError::Format(FormatError::global(format!(
+                    "zone {current_zone} neighbor {neighbor} resolves to entry type {}, expected ZDAT type 7",
+                    neighbor_entry.entry_type
+                ))));
+            }
+        }
+        Ok(header.neighbors)
+    }
+
     fn solid_environment(
         &mut self,
         zone: Eid,
@@ -448,8 +717,7 @@ impl ProgramHost for NsfProgramHost<'_> {
         )
         .map_err(NsfProgramError::Format)?;
         let mut neighbors = Vec::with_capacity(header.neighbors.len());
-        let mut object_zone = None;
-        for (neighbor_index, neighbor) in header.neighbors.iter().enumerate() {
+        for neighbor in &header.neighbors {
             let entry = self
                 .nsf
                 .resolve_entry(self.metadata, *neighbor)
@@ -459,9 +727,6 @@ impl ProgramHost for NsfProgramHost<'_> {
                     "solid-query neighbor {neighbor} resolves to entry type {}, expected ZDAT type 7",
                     entry.entry_type
                 ))));
-            }
-            if *neighbor == zone {
-                object_zone = Some(neighbor_index);
             }
             let neighbor_header_item = entry.item(0).ok_or_else(|| {
                 NsfProgramError::Format(FormatError::global(format!(
@@ -492,6 +757,7 @@ impl ProgramHost for NsfProgramHost<'_> {
                     bytes.to_vec(),
                 )
                 .map_err(NsfProgramError::Vm)?
+                .with_eid(*neighbor)
                 .with_graphics(
                     neighbor_header.graphics.flags,
                     neighbor_header.graphics.water_y,
@@ -505,7 +771,7 @@ impl ProgramHost for NsfProgramHost<'_> {
                 header.graphics.player_colors.words,
                 neighbors,
             )
-            .with_runtime_context(object_zone, solid_level_quirks(self.metadata.level())),
+            .with_runtime_context(Some(zone), solid_level_quirks(self.metadata.level())),
         ))
     }
 
@@ -591,6 +857,53 @@ impl ProgramHost for NsfProgramHost<'_> {
             },
         }))
     }
+
+    fn model_vertex_source(
+        &mut self,
+        binding: ModelVertexBinding,
+    ) -> Result<Option<ModelVertexSource>, Self::Error> {
+        // Some descriptors intentionally refer to a model resident in another
+        // retail pair. A pair-scoped host cannot manufacture those bytes.
+        if self.metadata.pte(binding.model_eid).is_none() {
+            return Ok(None);
+        }
+        let frame_index = u16::try_from(binding.frame_index).map_err(|_| {
+            NsfProgramError::Format(FormatError::global(format!(
+                "model {} frame {} does not fit the retail frame index",
+                binding.model_eid, binding.frame_index
+            )))
+        })?;
+        let model = load_object_model_frame(
+            self.metadata,
+            self.nsf,
+            self.nsf_bytes,
+            binding.model_eid,
+            frame_index,
+        )
+        .map_err(NsfProgramError::Format)?;
+        let vertex_offset = binding
+            .vertex_index
+            .checked_mul(6)
+            .and_then(|offset| u16::try_from(offset).ok())
+            .ok_or_else(|| {
+                NsfProgramError::Format(FormatError::global(format!(
+                    "model {} vertex {} does not fit its six-byte frame payload",
+                    binding.model_eid, binding.vertex_index
+                )))
+            })?;
+        // `ObjectFrame::local_position` uses the renderer's quarter-scale
+        // model domain. GoolOpTransformVectors uses the same packed vertex at
+        // `<< 10`, exactly 256 times that value.
+        let local_position = model
+            .frame
+            .local_position(vertex_offset)
+            .map_err(NsfProgramError::Format)?
+            .map(|value| value.wrapping_mul(256));
+        Ok(Some(ModelVertexSource {
+            local_position,
+            geometry_scale: model.geometry.header.scale,
+        }))
+    }
 }
 
 impl NsfProgramHost<'_> {
@@ -637,6 +950,189 @@ pub struct RuntimeFrame<E> {
     pub effects: Vec<VmEffect>,
 }
 
+/// External level words sampled at the same point as native `LevelSaveState`.
+///
+/// Pointer-bearing C globals are replaced by a validated camera location and
+/// an ordered list of active neighbor EIDs. The browser refreshes this value
+/// after every `LevelUpdate`, before GOOL can execute misc 12/0 or 12/1.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetailLevelStateContext {
+    pub location: RetailCameraLocation,
+    pub graphics_flags: u32,
+    pub box_count: i32,
+    /// Native `checkpoint_id`, including its eight fractional/tag bits. `-1`
+    /// means no checkpoint; zero deliberately remains distinct.
+    pub checkpoint_id: i32,
+    pub checkpoint_translation: [i32; 3],
+    pub first_spawn: bool,
+    /// Current header neighbors with display bit one set, in header order.
+    pub active_neighbor_zones: Vec<Eid>,
+}
+
+/// Pointer-free representation of retail `level_state`.
+///
+/// `level_spawns` is intentionally absent: although it exists in the C
+/// structure, `LevelSaveState` never copies that array. All fields actually
+/// written by the source are represented at their native widths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetailLevelSnapshot {
+    pub player_translation: [i32; 3],
+    /// Retail angle order is Y, X, Z; saving always zeroes all three words.
+    pub player_rotation_yxz: [i32; 3],
+    pub player_scale: [i32; 3],
+    pub location: RetailCameraLocation,
+    pub level: LevelId,
+    pub death_resets_counter: bool,
+    pub spawn_words: [u32; SPAWN_TABLE_CAPACITY],
+    pub box_count: i32,
+}
+
+/// Process-lifetime scalar state retained while pair-owned runtime state is
+/// destroyed and rebuilt around a newly mounted stream.
+///
+/// Native `NSKill` does not clear `gool_globals`, the gameplay RNG, or the
+/// global `level_state` save. Rust owns those values explicitly so no native
+/// pointers or pair-backed references cross the mount boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetailSessionCarry {
+    pub globals: Box<[u32]>,
+    /// Native process-lifetime `level_spawns` encounter registry. This is not
+    /// the destination pair's fresh 304-word active spawn table.
+    pub level_spawn_tags: Box<[u16]>,
+    pub saved_level_state: Option<RetailLevelSnapshot>,
+    pub random_seed: u32,
+    pub respawn_count: u32,
+    pub death_count: u32,
+    /// Native `first_spawn`, armed by a different-level `LevelRestart` and
+    /// applied when the destination host supplies its new camera context.
+    pub first_spawn: bool,
+}
+
+/// Checked failure while rebuilding a pair-owned runtime from retained
+/// process-lifetime state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailSessionImportError {
+    GlobalWordCount { expected: usize, actual: usize },
+    LevelSpawnTagCount { expected: usize, actual: usize },
+}
+
+/// Result of the exact `CoreResolveLevelTransition` decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResolvedRetailLevelTransition {
+    pub level: LevelId,
+    pub bonus_return: bool,
+}
+
+/// A malformed or incomplete signed native level transition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailTransitionError {
+    InvalidRequestedLevel(i32),
+    MissingSavedLevelState,
+}
+
+/// Preserves the originally requested target; only a post-event `-2` selects
+/// the level held by the retail save snapshot.
+pub fn resolve_retail_level_transition(
+    requested_lid: i32,
+    next_lid_after_event: i32,
+    saved_level: Option<LevelId>,
+) -> Result<ResolvedRetailLevelTransition, RetailTransitionError> {
+    if next_lid_after_event == -2 {
+        return Ok(ResolvedRetailLevelTransition {
+            level: saved_level.ok_or(RetailTransitionError::MissingSavedLevelState)?,
+            bonus_return: true,
+        });
+    }
+    let requested = u32::try_from(requested_lid)
+        .ok()
+        .and_then(|requested| LevelId::new(requested).ok())
+        .ok_or(RetailTransitionError::InvalidRequestedLevel(requested_lid))?;
+    Ok(ResolvedRetailLevelTransition {
+        level: requested,
+        bonus_return: false,
+    })
+}
+
+/// One checked event failure encountered by the native all-root level-end
+/// broadcast. Delivery continues with the remaining postorder recipients.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RetailLevelEndEventFailure<E> {
+    pub object: RuntimeObjectHandle,
+    pub error: RuntimeError<E>,
+}
+
+/// Source-ordered result of the pre-remount `GOOL_EVENT_LEVEL_END` phase.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RetailLevelEndReport<E> {
+    pub requested_lid: i32,
+    pub next_lid_after_event: i32,
+    pub resolved: ResolvedRetailLevelTransition,
+    pub event_failures: Vec<RetailLevelEndEventFailure<E>>,
+    /// Effects emitted by the broadcast in recipient/instruction order.
+    /// Transition and different-level load effects are already folded into
+    /// `next_lid_after_event` and must not be replayed by the caller.
+    pub effects: Vec<VmEffect>,
+    pub carry: RetailSessionCarry,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetailSaveStateOutcome {
+    Saved(Box<RetailLevelSnapshot>),
+    RestrictedByZone,
+}
+
+/// A checked failure at the pointer-free `LevelSaveState` boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailLevelStateError {
+    MissingContext,
+    MissingLevel,
+    MissingMainObject,
+    UnknownCaller(RuntimeObjectHandle),
+    Vm(VmError),
+}
+
+/// Checked failure while installing a pointer-free PBAK restart snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RetailDemoStartError {
+    MissingLevel,
+    LevelMismatch { mounted: LevelId, recorded: LevelId },
+    MissingLevelStateContext,
+    MissingMainObject,
+    Vm(VmError),
+}
+
+/// One failed source-order `RESPAWN` broadcast during `LevelRestart`.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RetailRespawnEventFailure<E> {
+    pub object: RuntimeObjectHandle,
+    pub error: RuntimeError<E>,
+}
+
+/// Same-level restart work completed by [`RetailRuntime`]. The host must then
+/// apply `LevelUpdate(snapshot.location, level_update_flags)` to its camera,
+/// pager, and zone lifecycle before the next spawn scan.
+#[derive(Debug, Eq, PartialEq)]
+pub struct RetailRestartReport<E> {
+    pub snapshot: RetailLevelSnapshot,
+    pub level_update_flags: u8,
+    pub respawn_event_failures: Vec<RetailRespawnEventFailure<E>>,
+    pub zone_reports: Vec<(Eid, ZoneTerminationReport<E>)>,
+    pub respawn_count: u32,
+    pub death_count: u32,
+    pub restored_box_count: i32,
+}
+
+/// Native different-level saves do not partially reload the current stream;
+/// they request sentinel level `-2` and arm `first_spawn` for the next mount.
+#[derive(Debug, Eq, PartialEq)]
+pub enum RetailRestartOutcome<E> {
+    Restarted(Box<RetailRestartReport<E>>),
+    DifferentLevel {
+        saved_level: LevelId,
+        requested_level_sentinel: i32,
+    },
+}
+
 /// Combined trace for the current-zone scan and its first simulation frame.
 #[derive(Debug, Eq, PartialEq)]
 pub struct SpawnedRuntimeFrame<E> {
@@ -656,8 +1152,15 @@ pub enum ZoneTerminationMode {
     HardRestart,
 }
 
+/// Pointer-free process-lifetime representation of native `obj_zone`.
+///
+/// The value starts null, becomes the destination on a real zone departure,
+/// and becomes `(entry *)-1` for hard restart. Native does not scope or restore
+/// this global around TERM delivery, so the runtime deliberately persists it
+/// until the next source-ordered assignment.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransitionZoneContext {
+pub enum ObjectZoneContext {
+    Null,
     Target(Eid),
     HardRestartSentinel,
 }
@@ -672,6 +1175,17 @@ pub enum RuntimeCleanupAction {
     /// object-associated voice. Actions retain exact child-before-parent
     /// teardown order.
     FreeObjectAudio(RuntimeObjectHandle),
+}
+
+/// One TERM delivery that faulted during native expendable-object reclaim.
+///
+/// Reclaim still releases the object, matching `GoolObjectKill`'s ignored
+/// event return value. The host error itself cannot be retained by the
+/// non-generic runtime, so this ordered queue exposes the exact recipient
+/// identities for deterministic diagnostics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RuntimeReclaimEventFault {
+    pub object: RuntimeObjectHandle,
 }
 
 /// Deterministic result of terminating all eligible objects from one zone.
@@ -729,6 +1243,13 @@ pub enum RuntimeError<E> {
         actual: VmObjectHandle,
     },
     MissingTransitionZoneTarget,
+    MissingLevelStateContext,
+    MissingSavedLevelState,
+    MissingMainObject,
+    LevelState(RetailLevelStateError),
+    Transition(RetailTransitionError),
+    PendingLevelRestartAtLevelEnd,
+    SameLevelRestartDuringLevelEnd(LevelId),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -740,6 +1261,130 @@ struct HandleMap {
 struct FrameWork<E> {
     executions: Vec<RuntimeExecution<E>>,
     spawned_children: Vec<RuntimeObjectHandle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EventLoadStateMode {
+    RequestRestart,
+    ContinueDifferentLevel,
+}
+
+/// Borrowed runtime pieces used by one native send-to-colliders traversal.
+///
+/// The cursor deliberately stays on the live arena instead of materializing a
+/// recipient snapshot: event handlers may mutate later descendants and the C
+/// traversal observes those mutations. A sibling is captured immediately
+/// before descent, matching the source's only stable pointer.
+struct SendEventTraversal<'a, H: ProgramHost> {
+    arena: &'a mut ObjectArena,
+    handles: &'a mut HandleMap,
+    machine: &'a mut Machine,
+    pending_states: &'a mut BTreeMap<VmObjectHandle, u16>,
+    pending_cleanup_actions: &'a mut Vec<RuntimeCleanupAction>,
+    reclaim_event_faults: &'a mut Vec<RuntimeReclaimEventFault>,
+    level: Option<LevelId>,
+    level_state_context: Option<&'a RetailLevelStateContext>,
+    saved_level_state: &'a mut Option<RetailLevelSnapshot>,
+    transition_zone_context: ObjectZoneContext,
+    host: &'a mut H,
+    spawned_children: &'a mut Vec<RuntimeObjectHandle>,
+    current_object: Option<VmObjectHandle>,
+    sender: RuntimeObjectHandle,
+    event: u32,
+    arguments: &'a [u32],
+    mode: u8,
+    count: u32,
+}
+
+impl<H: ProgramHost> SendEventTraversal<'_, H> {
+    fn traverse_root(&mut self, root: RootHandle) -> Result<(), VmError> {
+        let mut child = self.arena.root_first_child(root);
+        while let Some(child_handle) = child {
+            let Some(spawned) = self.arena.get(child_handle) else {
+                break;
+            };
+            let sibling = spawned.next_sibling();
+            self.traverse_subtree(child_handle)?;
+            child = sibling;
+        }
+        Ok(())
+    }
+
+    fn traverse_children(&mut self, root: ArenaObjectHandle) -> Result<(), VmError> {
+        let mut child = self.arena.get(root).and_then(SpawnedObject::first_child);
+        while let Some(child_handle) = child {
+            let Some(spawned) = self.arena.get(child_handle) else {
+                break;
+            };
+            let sibling = spawned.next_sibling();
+            self.traverse_subtree(child_handle)?;
+            child = sibling;
+        }
+        Ok(())
+    }
+
+    fn traverse_subtree(&mut self, arena_handle: ArenaObjectHandle) -> Result<(), VmError> {
+        let mut child = self
+            .arena
+            .get(arena_handle)
+            .and_then(SpawnedObject::first_child);
+        while let Some(child_handle) = child {
+            let Some(spawned) = self.arena.get(child_handle) else {
+                break;
+            };
+            let sibling = spawned.next_sibling();
+            self.traverse_subtree(child_handle)?;
+            child = sibling;
+        }
+        self.deliver_candidate(arena_handle)
+    }
+
+    fn deliver_candidate(&mut self, arena_handle: ArenaObjectHandle) -> Result<(), VmError> {
+        if !self.handles.is_live_pair(self.sender) {
+            return Ok(());
+        }
+        let Some(recipient) = self.handles.for_arena(arena_handle) else {
+            return Ok(());
+        };
+        let matches =
+            self.machine
+                .send_event_candidate_matches(self.sender.vm, recipient.vm, self.mode)?;
+        if !matches {
+            return Ok(());
+        }
+
+        // Mode five throttles matching candidates 1,2,3,6,11,...; its count
+        // advances even when delivery is suppressed or the recipient handler
+        // fails. Other modes send every match and retain the same native count.
+        let deliver = self.mode != 5 || self.count < 3 || self.count.is_multiple_of(5);
+        self.count += 1;
+        if !deliver {
+            return Ok(());
+        }
+
+        // GoolSendIfColliding discards GoolSendEvent's return code. Contain a
+        // malformed or terminating recipient and continue the live traversal.
+        let _ = RetailRuntime::dispatch_event_parts_current(
+            self.arena,
+            self.handles,
+            self.machine,
+            self.pending_states,
+            self.pending_cleanup_actions,
+            self.reclaim_event_faults,
+            self.level,
+            self.level_state_context,
+            self.saved_level_state,
+            self.transition_zone_context,
+            self.host,
+            self.current_object,
+            Some(self.sender),
+            Some(recipient),
+            self.event,
+            Some(self.arguments),
+            self.spawned_children,
+        );
+        Ok(())
+    }
 }
 
 impl Default for HandleMap {
@@ -819,10 +1464,21 @@ pub struct RetailRuntime {
     machine: Machine,
     handles: HandleMap,
     pending_states: BTreeMap<VmObjectHandle, u16>,
+    pending_cleanup_actions: Vec<RuntimeCleanupAction>,
+    reclaim_event_faults: Vec<RuntimeReclaimEventFault>,
     faulted_objects: BTreeSet<RuntimeObjectHandle>,
     displayed_objects: BTreeMap<RuntimeObjectHandle, bool>,
     level: Option<LevelId>,
-    transition_zone_context: Option<TransitionZoneContext>,
+    transition_zone_context: ObjectZoneContext,
+    level_state_context: Option<RetailLevelStateContext>,
+    /// Last ZDAT whose ordered neighborhood was installed as native global
+    /// `cur_zone` solid/query state.
+    current_solid_zone: Option<Eid>,
+    saved_level_state: Option<RetailLevelSnapshot>,
+    pending_first_spawn: bool,
+    suppress_initial_crash_save: bool,
+    respawn_count: u32,
+    death_count: u32,
     frame_index: u64,
     draw_count: u32,
 }
@@ -844,10 +1500,19 @@ impl RetailRuntime {
             machine,
             handles: HandleMap::default(),
             pending_states: BTreeMap::new(),
+            pending_cleanup_actions: Vec::new(),
+            reclaim_event_faults: Vec::new(),
             faulted_objects: BTreeSet::new(),
             displayed_objects: BTreeMap::new(),
             level: None,
-            transition_zone_context: None,
+            transition_zone_context: ObjectZoneContext::Null,
+            level_state_context: None,
+            current_solid_zone: None,
+            saved_level_state: None,
+            pending_first_spawn: false,
+            suppress_initial_crash_save: false,
+            respawn_count: 0,
+            death_count: 0,
             frame_index: 0,
             draw_count: 0,
         }
@@ -863,6 +1528,149 @@ impl RetailRuntime {
         runtime
     }
 
+    /// Rebuilds pair-owned state around exact process-lifetime scalar state.
+    ///
+    /// Object identities, spawn words, paging, frame effects, and all native
+    /// pointer globals start empty. The destination host subsequently installs
+    /// its camera/zone context and republishes card metadata before GOOL runs.
+    pub fn new_from_session(
+        global_words: usize,
+        level: LevelId,
+        carry: RetailSessionCarry,
+    ) -> Result<Self, RetailSessionImportError> {
+        if carry.globals.len() != global_words {
+            return Err(RetailSessionImportError::GlobalWordCount {
+                expected: global_words,
+                actual: carry.globals.len(),
+            });
+        }
+        if carry.level_spawn_tags.len() != RETAIL_LEVEL_SPAWN_CAPACITY {
+            return Err(RetailSessionImportError::LevelSpawnTagCount {
+                expected: RETAIL_LEVEL_SPAWN_CAPACITY,
+                actual: carry.level_spawn_tags.len(),
+            });
+        }
+        let RetailSessionCarry {
+            globals,
+            level_spawn_tags,
+            saved_level_state,
+            random_seed,
+            respawn_count,
+            death_count,
+            first_spawn,
+        } = carry;
+        let mut runtime = Self::new(global_words);
+        runtime.machine.restore_global_words(globals);
+        runtime
+            .machine
+            .restore_retail_level_spawn_tags(level_spawn_tags);
+        runtime.machine.initialize_retail_level_spawn_flags(level);
+        runtime
+            .arena
+            .spawn_table_mut()
+            .restore(runtime.machine.retail_spawn_flags_snapshot());
+        runtime.level = Some(level);
+        runtime.saved_level_state = saved_level_state;
+        runtime.pending_first_spawn = first_spawn;
+        runtime.respawn_count = respawn_count;
+        runtime.death_count = death_count;
+        runtime.machine.set_random_seed(random_seed);
+        runtime.apply_stream_mount_globals(level);
+        Ok(runtime)
+    }
+
+    /// Captures every process-lifetime value that native retains across
+    /// `NSKill`/`NSInit`, without retaining an arena, VM object, or pair-owned
+    /// reference.
+    #[must_use]
+    pub fn export_session_carry(&self) -> RetailSessionCarry {
+        let globals = self.machine.global_words().to_vec();
+        let respawn_count = globals
+            .get(RESPAWN_COUNT_GLOBAL)
+            .copied()
+            .unwrap_or(self.respawn_count);
+        let death_count = globals
+            .get(DEATH_COUNT_GLOBAL)
+            .copied()
+            .unwrap_or(self.death_count);
+        RetailSessionCarry {
+            globals: globals.into_boxed_slice(),
+            level_spawn_tags: self
+                .machine
+                .retail_level_spawn_tags()
+                .to_vec()
+                .into_boxed_slice(),
+            saved_level_state: self.saved_level_state.clone(),
+            random_seed: self.machine.random_seed(),
+            respawn_count,
+            death_count,
+            first_spawn: self.pending_first_spawn
+                || self
+                    .level_state_context
+                    .as_ref()
+                    .is_some_and(|context| context.first_spawn),
+        }
+    }
+
+    fn set_mount_global(&mut self, index: usize, value: u32) {
+        if index < self.machine.global_words().len() {
+            self.machine
+                .set_global_word(index, value)
+                .expect("mount global index was checked");
+        }
+    }
+
+    fn apply_stream_mount_globals(&mut self, level: LevelId) {
+        for index in POINTER_GLOBALS {
+            self.set_mount_global(index, 0);
+        }
+        for index in [
+            30, // cur_zone_flags_ro; republished by the destination LevelUpdate
+            37, 38, 39, // camera translation
+            40, 41, 42, // camera rotation
+            43, 44, 45,  // frame ticks and screen words
+            62,  // box_count
+            65,  // gem_stamp
+            66,  // island_cam_state
+            74,  // title_pause_state
+            79,  // draw_count_ro
+            105, // pbak_state
+        ] {
+            self.set_mount_global(index, 0);
+        }
+        // The destination's initial LevelUpdate activates a fresh neighbor
+        // band and establishes the first box stack offset before entity scan.
+        self.set_mount_global(117, 0x19000); // boxes_y
+        self.set_mount_global(CURRENT_LEVEL_GLOBAL, level.get() << 8);
+        self.set_mount_global(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
+        self.set_mount_global(CURRENT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK);
+        self.set_mount_global(RESPAWN_COUNT_GLOBAL, self.respawn_count);
+        self.set_mount_global(DEATH_COUNT_GLOBAL, self.death_count);
+        self.set_mount_global(67, 1); // is_first_zone
+        self.set_mount_global(107, 32); // fade_step
+        if self
+            .machine
+            .global_word(GAME_STATE_GLOBAL)
+            .is_ok_and(|state| state != 0x600)
+        {
+            self.set_mount_global(106, 288); // fade_counter
+        }
+        if level == LevelId::TITLE {
+            self.respawn_count = 0;
+            self.death_count = 0;
+            for (index, value) in [
+                (RESPAWN_COUNT_GLOBAL, 0),
+                (DEATH_COUNT_GLOBAL, 0),
+                (CORTEX_COUNT_GLOBAL, 0),
+                (BRIO_COUNT_GLOBAL, 0),
+                (TAWNA_COUNT_GLOBAL, 0),
+                (CHECKPOINT_ID_GLOBAL, u32::MAX),
+            ] {
+                self.set_mount_global(index, value);
+            }
+        }
+    }
+
     #[must_use]
     pub const fn arena(&self) -> &ObjectArena {
         &self.arena
@@ -871,6 +1679,126 @@ impl RetailRuntime {
     #[must_use]
     pub const fn machine(&self) -> &Machine {
         &self.machine
+    }
+
+    /// Checked access to one pointer-free retail global word.
+    pub fn global_word(&self, index: usize) -> Result<u32, VmError> {
+        self.machine.global_word(index)
+    }
+
+    /// Checked mutation of one pointer-free retail global word.
+    pub fn set_global_word(&mut self, index: usize, value: u32) -> Result<(), VmError> {
+        self.machine.set_global_word(index, value)?;
+        match index {
+            RESPAWN_COUNT_GLOBAL => self.respawn_count = value,
+            DEATH_COUNT_GLOBAL => self.death_count = value,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Captures the exact persistent globals serialized by memory-card saves.
+    pub fn card_save_data(&self) -> Result<SaveData, VmError> {
+        self.machine.retail_card_save_data()
+    }
+
+    /// Publishes card metadata before the next GOOL traversal.
+    pub fn publish_card_state(&mut self, state: CardPublishedState) -> Result<(), VmError> {
+        self.machine.publish_retail_card_state(state)
+    }
+
+    /// Applies a restored retail payload to a newly mounted or active runtime.
+    pub fn restore_card_save_data(&mut self, save: SaveData) -> Result<(), VmError> {
+        self.apply_loaded_card_save(save)
+    }
+
+    /// Applies the exact browser-relevant `LevelResetGlobals(1)` transaction.
+    ///
+    /// The retained savestate and 304-word active spawn table are deliberately
+    /// preserved. Native clears only its separate 3,592-halfword encountered-
+    /// object registry plus the documented scalar globals.
+    pub fn reset_level_globals(&mut self) -> Result<(), VmError> {
+        self.machine.reset_retail_level_globals()?;
+        self.sync_level_reset_mirrors();
+        Ok(())
+    }
+
+    /// Reapplies the protected browser-resume payload after title state five
+    /// has run [`Self::reset_level_globals`]. This matches
+    /// `CardBrowserResumeAfterTitleReset`: initial lives are installed, the
+    /// exact globals reset runs a second time, then only payload progression
+    /// and options are restored. Savestate and active spawn words survive.
+    pub fn restore_resume_after_title_reset(&mut self, save: SaveData) -> Result<(), VmError> {
+        self.machine.restore_retail_resume_save_data(save)?;
+        self.sync_level_reset_mirrors();
+        Ok(())
+    }
+
+    fn sync_level_reset_mirrors(&mut self) {
+        self.respawn_count = 0;
+        self.death_count = 0;
+        if let Some(context) = &mut self.level_state_context {
+            context.checkpoint_id = -1;
+        }
+        self.machine.acknowledge_level_state_context();
+    }
+
+    /// Exact representable scalar/object-latch body of `LevelInitMisc(0)`.
+    ///
+    /// The source's `cur_zone_query.once` has no persistent counterpart: each
+    /// Rust solid query is freshly bounds-checked. `ShaderParamsUpdate(1)` for
+    /// levels 0x28/0x2a is renderer-owned and is reapplied by the mounted-zone
+    /// host rather than retained in simulation state.
+    fn apply_level_init_misc_zero(&mut self, level: LevelId) {
+        // Cases with a level-specific branch do not execute the default
+        // `ambiance_obj = 0` assignment when flag is zero.
+        if !matches!(
+            level.get(),
+            0x05 | 0x0e | 0x14 | 0x16 | 0x17 | 0x22 | 0x28 | 0x2a | 0x2e
+        ) {
+            self.set_mount_global(AMBIANCE_OBJECT_GLOBAL, 0);
+        }
+        for (index, value) in [
+            (IS_FIRST_ZONE_GLOBAL, 1),
+            (BOX_COUNT_GLOBAL, 0),
+            (GEM_STAMP_GLOBAL, 0),
+            (ISLAND_CAMERA_STATE_GLOBAL, 0),
+            (TITLE_PAUSE_STATE_GLOBAL, 0),
+            (FADE_STEP_GLOBAL, 32),
+        ] {
+            self.set_mount_global(index, value);
+        }
+        if !self
+            .machine
+            .global_word(PBAK_STATE_GLOBAL)
+            .is_ok_and(|state| state == 2)
+        {
+            self.set_mount_global(CAPTION_OBJECT_GLOBAL, 0);
+        }
+        self.machine.reset_retail_solid_smoothing();
+        if !self
+            .machine
+            .global_word(GAME_STATE_GLOBAL)
+            .is_ok_and(|state| state == 0x600)
+        {
+            self.set_mount_global(FADE_COUNTER_GLOBAL, 288);
+        }
+    }
+
+    /// Takes a successful authored card load exactly once so the browser flow
+    /// and audio mirrors can synchronize with the already-restored VM.
+    pub fn take_card_load(&mut self) -> Option<SaveData> {
+        let loaded = self.machine.take_completed_card_load();
+        if loaded.is_some() {
+            self.sync_level_reset_mirrors();
+        }
+        loaded
+    }
+
+    fn apply_loaded_card_save(&mut self, save: SaveData) -> Result<(), VmError> {
+        self.machine.restore_retail_card_save_data(save)?;
+        self.sync_level_reset_mirrors();
+        Ok(())
     }
 
     /// Level identity used by lifecycle-only contracts such as Crash's title
@@ -922,6 +1850,450 @@ impl RetailRuntime {
     #[must_use]
     pub const fn frame_index(&self) -> u64 {
         self.frame_index
+    }
+
+    /// Refreshes the pointer-free globals consumed by retail save/restart.
+    pub fn set_level_state_context(&mut self, mut context: RetailLevelStateContext) {
+        if self.pending_first_spawn {
+            context.first_spawn = true;
+            self.pending_first_spawn = false;
+        }
+        self.level_state_context = Some(context);
+        self.machine.acknowledge_level_state_context();
+    }
+
+    #[must_use]
+    pub const fn level_state_context(&self) -> Option<&RetailLevelStateContext> {
+        self.level_state_context.as_ref()
+    }
+
+    #[must_use]
+    pub const fn saved_level_state(&self) -> Option<&RetailLevelSnapshot> {
+        self.saved_level_state.as_ref()
+    }
+
+    /// Installs the process-lifetime state written by native `PbakStart`.
+    ///
+    /// Pair parsing and path resolution happen in the browser host before this
+    /// call. The runtime still validates the mounted level and live Crash
+    /// handle before publishing any mutation. `restart_saved_level` performs
+    /// the following source-ordered `LevelRestart` transaction.
+    pub fn install_retail_demo_start(
+        &mut self,
+        snapshot: RetailLevelSnapshot,
+        random_seed: u32,
+        crash_bound: Bounds3,
+    ) -> Result<(), RetailDemoStartError> {
+        let mounted = self.level.ok_or(RetailDemoStartError::MissingLevel)?;
+        if snapshot.level != mounted {
+            return Err(RetailDemoStartError::LevelMismatch {
+                mounted,
+                recorded: snapshot.level,
+            });
+        }
+        if self.level_state_context.is_none() {
+            return Err(RetailDemoStartError::MissingLevelStateContext);
+        }
+        let main_arena = self
+            .arena
+            .main_object()
+            .ok_or(RetailDemoStartError::MissingMainObject)?;
+        let main = self
+            .handles
+            .for_arena(main_arena)
+            .filter(|handle| self.handles.is_live_pair(*handle))
+            .ok_or(RetailDemoStartError::MissingMainObject)?;
+        for index in [CHECKPOINT_ID_GLOBAL, PBAK_STATE_GLOBAL] {
+            self.machine
+                .global_word(index)
+                .map_err(RetailDemoStartError::Vm)?;
+        }
+        self.machine
+            .object(main.vm)
+            .map_err(RetailDemoStartError::Vm)?;
+
+        self.saved_level_state = Some(snapshot);
+        self.machine.set_random_seed(random_seed);
+        self.machine
+            .object_mut(main.vm)
+            .map_err(RetailDemoStartError::Vm)?
+            .set_retail_local_bound(crash_bound);
+        self.machine
+            .set_global_word(CHECKPOINT_ID_GLOBAL, u32::MAX)
+            .map_err(RetailDemoStartError::Vm)?;
+        self.machine
+            .set_global_word(PBAK_STATE_GLOBAL, 2)
+            .map_err(RetailDemoStartError::Vm)?;
+        if let Some(context) = self.level_state_context.as_mut() {
+            context.checkpoint_id = -1;
+        }
+        self.machine.acknowledge_level_state_context();
+        Ok(())
+    }
+
+    /// Mirrors the temporary `next_lid != -1` guard around Crash's initial
+    /// `LevelSaveState` call in `GoolObjectSpawn`.
+    ///
+    /// Ordinary destination mounts leave this disabled so their first Crash
+    /// spawn replaces the previous level's snapshot. Bonus returns enable it
+    /// only for the protected pre-restart spawn scan, preserving the snapshot
+    /// that `LevelRestart` immediately consumes.
+    pub fn set_initial_crash_save_suppressed(&mut self, suppressed: bool) {
+        self.suppress_initial_crash_save = suppressed;
+    }
+
+    /// Captures the exact fields written by native `LevelSaveState`.
+    ///
+    /// The zone's `0x2000` restriction is checked before dereferencing Crash,
+    /// matching the source early return. `caller` supplies the optional
+    /// status-`0x200` translation override used by checkpoint objects.
+    pub fn save_level_state(
+        &mut self,
+        caller: RuntimeObjectHandle,
+        death_resets_counter: bool,
+    ) -> Result<RetailSaveStateOutcome, RetailLevelStateError> {
+        let outcome = Self::capture_level_state(
+            &self.arena,
+            &self.handles,
+            &self.machine,
+            self.level,
+            self.level_state_context.as_ref(),
+            caller,
+            death_resets_counter,
+        )?;
+        if let RetailSaveStateOutcome::Saved(snapshot) = &outcome {
+            self.saved_level_state = Some(snapshot.as_ref().clone());
+        }
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn capture_level_state(
+        arena: &ObjectArena,
+        handles: &HandleMap,
+        machine: &Machine,
+        level: Option<LevelId>,
+        context: Option<&RetailLevelStateContext>,
+        caller: RuntimeObjectHandle,
+        death_resets_counter: bool,
+    ) -> Result<RetailSaveStateOutcome, RetailLevelStateError> {
+        let context = context.ok_or(RetailLevelStateError::MissingContext)?;
+        if context.graphics_flags & SAVE_RESTRICTED_ZONE_FLAG != 0 {
+            return Ok(RetailSaveStateOutcome::RestrictedByZone);
+        }
+        if !handles.is_live_pair(caller) {
+            return Err(RetailLevelStateError::UnknownCaller(caller));
+        }
+        let level = level.ok_or(RetailLevelStateError::MissingLevel)?;
+        let main_arena = arena
+            .main_object()
+            .ok_or(RetailLevelStateError::MissingMainObject)?;
+        let main = handles
+            .for_arena(main_arena)
+            .ok_or(RetailLevelStateError::MissingMainObject)?;
+        let player = machine.object(main.vm).map_err(RetailLevelStateError::Vm)?;
+        let caller_object = machine
+            .object(caller.vm)
+            .map_err(RetailLevelStateError::Vm)?;
+        let read_vec = |object: &VmObject, indices: [usize; 3]| {
+            Ok::<[i32; 3], VmError>([
+                object.register(indices[0])?.cast_signed(),
+                object.register(indices[1])?.cast_signed(),
+                object.register(indices[2])?.cast_signed(),
+            ])
+        };
+        let mut player_translation = read_vec(
+            player,
+            [
+                process_register::TRANSLATION_X,
+                process_register::TRANSLATION_Y,
+                process_register::TRANSLATION_Z,
+            ],
+        )
+        .map_err(RetailLevelStateError::Vm)?;
+        if caller_object
+            .register(process_register::STATUS_B)
+            .map_err(RetailLevelStateError::Vm)?
+            & SAVE_TRANSLATION_FROM_CALLER_STATUS_B
+            != 0
+        {
+            player_translation = read_vec(
+                caller_object,
+                [
+                    process_register::TRANSLATION_X,
+                    process_register::TRANSLATION_Y,
+                    process_register::TRANSLATION_Z,
+                ],
+            )
+            .map_err(RetailLevelStateError::Vm)?;
+        }
+        // Misc 12/11 can reset checkpoint_id and then save again later in the
+        // same event/interpreter invocation, before the browser has a chance
+        // to publish a fresh host context. In that narrow synchronous window
+        // the VM global is authoritative; ordinary frames retain the supplied
+        // pointer-free context contract.
+        let checkpoint_id = if machine.level_globals_reset_since_context() {
+            machine
+                .global_word(CHECKPOINT_ID_GLOBAL)
+                .map_err(RetailLevelStateError::Vm)?
+                .cast_signed()
+        } else {
+            context.checkpoint_id
+        };
+        if checkpoint_id != -1 && checkpoint_id != 0 {
+            player_translation = context.checkpoint_translation;
+        }
+        let snapshot = RetailLevelSnapshot {
+            player_translation,
+            player_rotation_yxz: [0; 3],
+            player_scale: read_vec(
+                player,
+                [
+                    process_register::SCALE_X,
+                    process_register::SCALE_Y,
+                    process_register::SCALE_Z,
+                ],
+            )
+            .map_err(RetailLevelStateError::Vm)?,
+            location: context.location,
+            level,
+            death_resets_counter,
+            spawn_words: arena.spawn_table().snapshot(),
+            box_count: context.box_count,
+        };
+        Ok(RetailSaveStateOutcome::Saved(Box::new(snapshot)))
+    }
+
+    /// Reproduces the object/spawn half of native `LevelRestart`.
+    ///
+    /// The caller must preflight its pager/lifecycle `LevelUpdate` before this
+    /// irreversible method, then commit the returned location/flags before the
+    /// next spawn scan. Broadcast, zone teardown, spawn restore, and Crash
+    /// reset retain their source order here.
+    pub fn restart_saved_level<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+    ) -> Result<RetailRestartOutcome<H::Error>, RuntimeError<H::Error>> {
+        let snapshot = self
+            .saved_level_state
+            .clone()
+            .ok_or(RuntimeError::MissingSavedLevelState)?;
+        // Native clears bonus mode before even checking whether the saved
+        // level differs and returning the `-2` remount sentinel.
+        self.set_mount_global(BONUS_ROUND_GLOBAL, 0);
+        // Misc 12/1 stops the current interpreter/traversal immediately. The
+        // following native LevelRestart work is a fresh synchronous phase in
+        // which RESPAWN and TERM handlers must be allowed to execute.
+        self.machine.clear_level_restart_request();
+        if let Ok(value) = self.machine.global_word(RESPAWN_COUNT_GLOBAL) {
+            self.respawn_count = value;
+        }
+        if let Ok(value) = self.machine.global_word(DEATH_COUNT_GLOBAL) {
+            self.death_count = value;
+        }
+        let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
+        if snapshot.level != current_level {
+            let context = self
+                .level_state_context
+                .as_mut()
+                .ok_or(RuntimeError::MissingLevelStateContext)?;
+            context.first_spawn = true;
+            return Ok(RetailRestartOutcome::DifferentLevel {
+                saved_level: snapshot.level,
+                requested_level_sentinel: -2,
+            });
+        }
+        let mut context = self
+            .level_state_context
+            .clone()
+            .ok_or(RuntimeError::MissingLevelStateContext)?;
+        if self.machine.level_globals_reset_since_context() {
+            context.checkpoint_id = self
+                .machine
+                .global_word(CHECKPOINT_ID_GLOBAL)
+                .map_err(RuntimeError::Vm)?
+                .cast_signed();
+        }
+
+        // `GoolSendToColliders(..., type=0)` is an all-root postorder
+        // broadcast despite its name. Checked failures are retained while the
+        // source-order restart continues.
+        let recipients = self
+            .arena
+            .postorder_snapshot()
+            .map_err(RuntimeError::Tree)?
+            .into_iter()
+            .map(|arena| {
+                self.handles
+                    .for_arena(arena)
+                    .ok_or(RuntimeError::UnknownArenaObject(arena))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut respawn_event_failures = Vec::new();
+        for object in recipients {
+            if let Err(error) = self.dispatch_event(host, None, Some(object), RESPAWN_EVENT, None) {
+                respawn_event_failures.push(RetailRespawnEventFailure { object, error });
+            }
+        }
+
+        // `obj_zone = (entry *)-1` makes every eligible object die even when
+        // a TERM handler tries to migrate it. Zones retain current-header
+        // neighbor order, and each report retains native postorder.
+        let mut zone_reports = Vec::with_capacity(context.active_neighbor_zones.len());
+        for zone in context.active_neighbor_zones.iter().copied() {
+            let report =
+                self.terminate_zone_objects(zone, ZoneTerminationMode::HardRestart, host)?;
+            zone_reports.push((zone, report));
+        }
+
+        let first_spawn = context.first_spawn;
+        if first_spawn {
+            let mut words = snapshot.spawn_words;
+            if context.checkpoint_id != -1 {
+                let raw_index = context.checkpoint_id >> 8;
+                if let Ok(index) = usize::try_from(raw_index)
+                    && let Some(word) = words.get_mut(index)
+                {
+                    *word &= !SPAWN_CHECKPOINT_BLOCKED_BIT;
+                    *word |= SPAWN_CHECKPOINT_SEEN_BIT;
+                }
+            }
+            for word in &mut words {
+                *word &= !SPAWN_ACTIVE_BIT;
+            }
+            self.arena.spawn_table_mut().restore(words);
+        } else {
+            // Ordinary same-level death restart calls LevelUpdate with flag
+            // one. Before the following spawn scan it clears both transient
+            // checkpoint/load bits from every exact-width spawn word.
+            let mut words = self.arena.spawn_table().snapshot();
+            for word in &mut words {
+                *word &= !SPAWN_LEVEL_UPDATE_CLEAR_MASK;
+            }
+            self.arena.spawn_table_mut().restore(words);
+        }
+
+        // Hard restart preserves non-title Crash. It is an explicit checked
+        // boundary if no main object exists; fabricating a program without the
+        // source's handle-six create path would corrupt state silently.
+        let main_arena = self
+            .arena
+            .main_object()
+            .ok_or(RuntimeError::MissingMainObject)?;
+        let main = self
+            .handles
+            .for_arena(main_arena)
+            .ok_or(RuntimeError::MissingMainObject)?;
+        self.arena
+            .set_zone(main_arena, snapshot.location.path.zone)
+            .map_err(RuntimeError::Tree)?;
+        // Every ordinary zone object has just been killed. Clearing the
+        // remaining bounded set's collider slot removes both sides of Crash's
+        // pair without exposing a raw-link getter from the VM.
+        let surviving_vms = self
+            .handles
+            .arena_by_vm
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, _)| u16::try_from(index).ok().and_then(VmObjectHandle::new))
+            .collect::<Vec<_>>();
+        for survivor in surviving_vms {
+            self.machine
+                .object_mut(survivor)
+                .map_err(RuntimeError::Vm)?
+                .set_link(6, None)
+                .map_err(RuntimeError::Vm)?;
+        }
+        let player = self.machine.object_mut(main.vm).map_err(RuntimeError::Vm)?;
+        for (register, value) in [
+            (
+                process_register::TRANSLATION_X,
+                snapshot.player_translation[0],
+            ),
+            (
+                process_register::TRANSLATION_Y,
+                snapshot.player_translation[1],
+            ),
+            (
+                process_register::TRANSLATION_Z,
+                snapshot.player_translation[2],
+            ),
+            (
+                process_register::ROTATION_Y,
+                snapshot.player_rotation_yxz[0],
+            ),
+            (
+                process_register::ROTATION_X,
+                snapshot.player_rotation_yxz[1],
+            ),
+            (
+                process_register::ROTATION_Z,
+                snapshot.player_rotation_yxz[2],
+            ),
+            (process_register::SCALE_X, snapshot.player_scale[0]),
+            (process_register::SCALE_Y, snapshot.player_scale[1]),
+            (process_register::SCALE_Z, snapshot.player_scale[2]),
+            (process_register::MISC_A_X, 0),
+            (process_register::MISC_A_Y, 0),
+            (process_register::MISC_A_Z, 0),
+            (process_register::SPEED, 0),
+            (process_register::FLOOR_IMPACT_STAMP, 0),
+            // `target_rot.x = rot.x`; target X aliases misc-B X.
+            (process_register::MISC_B_X, snapshot.player_rotation_yxz[1]),
+        ] {
+            player
+                .set_register(register, value.cast_unsigned())
+                .map_err(RuntimeError::Vm)?;
+        }
+        player.set_link(6, None).map_err(RuntimeError::Vm)?;
+        self.draw_count = 0;
+        self.machine.set_draw_count(0);
+        self.set_mount_global(SCREEN_SHAKE_GLOBAL, 0);
+        if self.machine.global_word(NEXT_DISPLAY_GLOBAL).is_ok() {
+            self.machine
+                .set_global_word(NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK)
+                .map_err(RuntimeError::Vm)?;
+        }
+        if !first_spawn {
+            self.respawn_count = self.respawn_count.wrapping_add(0x100);
+            if snapshot.death_resets_counter {
+                self.death_count = 0;
+            } else {
+                self.death_count = self.death_count.wrapping_add(0x100);
+            }
+        }
+        self.set_mount_global(RESPAWN_COUNT_GLOBAL, self.respawn_count);
+        self.set_mount_global(DEATH_COUNT_GLOBAL, self.death_count);
+        self.apply_level_init_misc_zero(current_level);
+        let restored_box_count = if first_spawn && context.checkpoint_id != -1 {
+            snapshot.box_count.wrapping_sub(0x100)
+        } else if first_spawn {
+            snapshot.box_count
+        } else {
+            0
+        };
+        self.set_mount_global(BOX_COUNT_GLOBAL, restored_box_count.cast_unsigned());
+        if let Some(live_context) = self.level_state_context.as_mut() {
+            live_context.location = snapshot.location;
+            live_context.box_count = restored_box_count;
+            live_context.checkpoint_id = context.checkpoint_id;
+            live_context.first_spawn = false;
+        }
+        self.machine.acknowledge_level_state_context();
+        Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
+
+        Ok(RetailRestartOutcome::Restarted(Box::new(
+            RetailRestartReport {
+                snapshot,
+                level_update_flags: u8::from(!first_spawn),
+                respawn_event_failures,
+                zone_reports,
+                respawn_count: self.respawn_count,
+                death_count: self.death_count,
+                restored_box_count,
+            },
+        )))
     }
 
     /// Installs one port's complete retail pad history before object
@@ -984,6 +2356,127 @@ impl RetailRuntime {
         self.handles.for_vm(vm)
     }
 
+    /// Drains platform-owned cleanup emitted by synchronous object reclaim.
+    ///
+    /// Actions retain native recursive release order (children before parent)
+    /// and must be consumed before advancing another browser simulation
+    /// boundary that could associate audio with a recycled VM handle.
+    pub fn take_cleanup_actions(&mut self) -> Vec<RuntimeCleanupAction> {
+        std::mem::take(&mut self.pending_cleanup_actions)
+    }
+
+    /// Drains ordered TERM recipients whose reclaim handler faulted.
+    ///
+    /// Native ignores the handler's return value and still releases the
+    /// object. Keeping this diagnostic separate preserves that lifecycle while
+    /// making every checked fault observable.
+    pub fn take_reclaim_event_faults(&mut self) -> Vec<RuntimeReclaimEventFault> {
+        std::mem::take(&mut self.reclaim_event_faults)
+    }
+
+    /// Completes native `CoreFrame`'s pre-remount level transition phase.
+    ///
+    /// `requested_lid` is the signed value retained before event delivery.
+    /// Every live object is then sent `GOOL_EVENT_LEVEL_END` in eight-root
+    /// postorder. Ordinary level writes made by handlers remain observable in
+    /// `next_lid_after_event`, but only a final `-2` overrides the requested
+    /// destination with the saved snapshot's level.
+    ///
+    /// A same-level load request is returned as a checked restart boundary:
+    /// it needs the full in-stream RESPAWN/zone/Crash transaction and cannot
+    /// be represented by the remount carry used for a different-level load.
+    pub fn finish_level_transition<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        requested_lid: i32,
+    ) -> Result<RetailLevelEndReport<H::Error>, RuntimeError<H::Error>> {
+        if self.machine.level_restart_requested() {
+            return Err(RuntimeError::PendingLevelRestartAtLevelEnd);
+        }
+        let effects_start = self.machine.effects().len();
+        let recipients = self
+            .arena
+            .postorder_snapshot()
+            .map_err(RuntimeError::Tree)?
+            .into_iter()
+            .map(|arena| {
+                self.handles
+                    .for_arena(arena)
+                    .ok_or(RuntimeError::UnknownArenaObject(arena))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut next_lid_after_event = requested_lid;
+        let mut event_failures = Vec::new();
+
+        for object in recipients {
+            let effect_cursor = self.machine.effects().len();
+            let result = self.dispatch_event_mode(
+                host,
+                None,
+                Some(object),
+                LEVEL_END_EVENT,
+                None,
+                EventLoadStateMode::ContinueDifferentLevel,
+            );
+            let emitted = self.machine.effects()[effect_cursor..].to_vec();
+            let mut consumed_restart = false;
+            for effect in &emitted {
+                match effect {
+                    VmEffect::Transition(level) => next_lid_after_event = *level,
+                    VmEffect::LoadState(_) => {
+                        self.consume_different_level_restart_at_level_end()?;
+                        next_lid_after_event = -2;
+                        consumed_restart = true;
+                    }
+                    _ => {}
+                }
+            }
+            if self.machine.level_restart_requested() && !consumed_restart {
+                return Err(RuntimeError::PendingLevelRestartAtLevelEnd);
+            }
+            if let Err(error) = result {
+                event_failures.push(RetailLevelEndEventFailure { object, error });
+            }
+        }
+
+        let resolved = resolve_retail_level_transition(
+            requested_lid,
+            next_lid_after_event,
+            self.saved_level_state
+                .as_ref()
+                .map(|snapshot| snapshot.level),
+        )
+        .map_err(RuntimeError::Transition)?;
+        let effects = self.machine.effects()[effects_start..].to_vec();
+        let carry = self.export_session_carry();
+        Ok(RetailLevelEndReport {
+            requested_lid,
+            next_lid_after_event,
+            resolved,
+            event_failures,
+            effects,
+            carry,
+        })
+    }
+
+    fn consume_different_level_restart_at_level_end<E>(&mut self) -> Result<(), RuntimeError<E>> {
+        let saved_level = self
+            .saved_level_state
+            .as_ref()
+            .ok_or(RuntimeError::MissingSavedLevelState)?
+            .level;
+        let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
+        if saved_level == current_level {
+            return Err(RuntimeError::SameLevelRestartDuringLevelEnd(current_level));
+        }
+        self.pending_first_spawn = true;
+        if let Some(context) = &mut self.level_state_context {
+            context.first_spawn = true;
+        }
+        self.machine.clear_level_restart_request();
+        Ok(())
+    }
+
     /// Delivers one event through the checked VM and resolves any returned
     /// state program before control is returned to the caller.
     ///
@@ -1000,20 +2493,49 @@ impl RetailRuntime {
         event: u32,
         arguments: Option<&[u32]>,
     ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        self.dispatch_event_mode(
+            host,
+            sender,
+            recipient,
+            event,
+            arguments,
+            EventLoadStateMode::RequestRestart,
+        )
+    }
+
+    fn dispatch_event_mode<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        load_state_mode: EventLoadStateMode,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
         let mut spawned_children = Vec::new();
         let Self {
             arena,
             machine,
             handles,
             pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
             transition_zone_context,
             ..
         } = self;
-        Self::dispatch_event_parts(
+        Self::dispatch_event_parts_mode(
             arena,
             handles,
             machine,
             pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            *level,
+            level_state_context.as_ref(),
+            saved_level_state,
             *transition_zone_context,
             host,
             sender,
@@ -1021,15 +2543,18 @@ impl RetailRuntime {
             event,
             arguments,
             &mut spawned_children,
+            load_state_mode,
+            None,
         )
     }
 
     /// Sends the native terminate event to every eligible live object from
     /// `zone`, then tears down objects that did not migrate away.
     ///
-    /// The forest is snapshotted in retail postorder before delivery begins.
-    /// Any recursive subtree release uses [`ObjectArena::despawn_subtree`]'s
-    /// returned order to remove VM state and produce platform audio actions.
+    /// Every root uses a live, mutation-aware postorder cursor. Siblings are
+    /// captured before descent exactly as the source does, while generational
+    /// handles reject any freed-pointer ABA instead of reproducing C undefined
+    /// behavior. Platform audio is released before compact handles are reused.
     pub fn terminate_zone_objects<H: ProgramHost>(
         &mut self,
         zone: Eid,
@@ -1037,17 +2562,77 @@ impl RetailRuntime {
         host: &mut H,
     ) -> Result<ZoneTerminationReport<H::Error>, RuntimeError<H::Error>> {
         let context = match mode {
-            ZoneTerminationMode::Departure { target } => TransitionZoneContext::Target(target),
-            ZoneTerminationMode::HardRestart => TransitionZoneContext::HardRestartSentinel,
+            ZoneTerminationMode::Departure { target } => ObjectZoneContext::Target(target),
+            ZoneTerminationMode::HardRestart => ObjectZoneContext::HardRestartSentinel,
         };
-        let previous_context = self.transition_zone_context.replace(context);
-        let result = self.terminate_zone_objects_with(zone, mode, |runtime, object| {
-            runtime
-                .dispatch_event(host, None, Some(object), TERMINATE_EVENT, None)
-                .map(|_| ())
-        });
-        self.transition_zone_context = previous_context;
+        self.transition_zone_context = context;
+        let mut spawned_children = Vec::new();
+        let Self {
+            arena,
+            machine,
+            handles,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            faulted_objects,
+            displayed_objects,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            ..
+        } = self;
+        let result = Self::terminate_zone_roots_live_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            *level,
+            level_state_context.as_ref(),
+            saved_level_state,
+            *transition_zone_context,
+            host,
+            zone,
+            &mut spawned_children,
+            false,
+        );
+        faulted_objects.retain(|object| handles.is_live_pair(*object));
+        displayed_objects.retain(|object, _| handles.is_live_pair(*object));
         result
+    }
+
+    /// Implements title `TitleTerminateObjects`: signal and kill every object
+    /// in eight-root postorder without zone/immunity gates.
+    pub fn terminate_all_objects<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+    ) -> Result<ZoneTerminationReport<H::Error>, RuntimeError<H::Error>> {
+        let snapshot = self
+            .arena
+            .postorder_snapshot()
+            .map_err(RuntimeError::Tree)?;
+        let mut report = ZoneTerminationReport::new();
+        for arena_handle in snapshot {
+            let Some(object) = self.handles.for_arena(arena_handle) else {
+                continue;
+            };
+            if let Err(error) = self.dispatch_event(host, None, Some(object), TERMINATE_EVENT, None)
+            {
+                report
+                    .event_failures
+                    .push(ZoneTerminationEventFailure { object, error });
+            }
+            if self.arena.get(arena_handle).is_some() {
+                self.remove_runtime_subtree(arena_handle, &mut report)?;
+            }
+        }
+        if !report.terminated.is_empty() {
+            self.machine.clear_frame_bounds();
+            Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
+        }
+        Ok(report)
     }
 
     /// Whether an object has failed during a program/VM invocation and is no
@@ -1145,6 +2730,11 @@ impl RetailRuntime {
                         .register(process_register::SIZE)
                         .map_err(RenderObjectsError::Vm)? as i32,
                     colors: *vm_object.retail_colors(),
+                    text_font_override_word_offset: vm_object
+                        .register(process_register::INVINCIBILITY_STATE)
+                        .map_err(RenderObjectsError::Vm)?
+                        >> 8,
+                    text_arguments: retail_text_arguments(vm_object.stack()),
                     display_eligible,
                 });
             }
@@ -1190,40 +2780,27 @@ impl RetailRuntime {
         neighbors: &[NeighborZone<'_, ZoneEntity>],
         host: &mut H,
     ) -> Vec<RuntimeSpawnAttempt<H::Error>> {
-        let attempts = self.arena.spawn_current_zone_neighbors(neighbors);
-        attempts
-            .into_iter()
-            .map(|attempt| {
-                let result = match attempt.result {
-                    Err(error) => Err(RuntimeError::Spawn(error)),
-                    Ok(arena_handle) => {
-                        let entity = neighbors
-                            .get(attempt.neighbor_index)
-                            .and_then(|neighbor| neighbor.entities.get(attempt.entity_index));
-                        if let Some(entity) = entity {
-                            self.bind_new_entity(arena_handle, attempt.zone, entity, host)
-                        } else {
-                            let error = RuntimeError::EntityIndexUnavailable {
-                                neighbor_index: attempt.neighbor_index,
-                                entity_index: attempt.entity_index,
-                            };
-                            if let Err(tree_error) = self.arena.despawn_subtree(arena_handle) {
-                                Err(RuntimeError::Tree(tree_error))
-                            } else {
-                                Err(error)
-                            }
-                        }
-                    }
-                };
-                RuntimeSpawnAttempt {
-                    neighbor_index: attempt.neighbor_index,
-                    entity_index: attempt.entity_index,
-                    zone: attempt.zone,
-                    descriptor: attempt.descriptor,
-                    result,
+        let mut attempts = Vec::new();
+        for (neighbor_index, neighbor) in neighbors.iter().enumerate() {
+            if neighbor.display_flags & ACTIVE_ZONE_DISPLAY_BIT == 0 {
+                continue;
+            }
+            for (entity_index, entity) in neighbor.entities.iter().enumerate() {
+                let descriptor = EntitySpawnDescriptor::from(entity);
+                if descriptor.group != SPAWNABLE_ENTITY_GROUP {
+                    continue;
                 }
-            })
-            .collect()
+                let result = self.bind_entity_with_native_reclaim(neighbor.eid, entity, host);
+                attempts.push(RuntimeSpawnAttempt {
+                    neighbor_index,
+                    entity_index,
+                    zone: neighbor.eid,
+                    descriptor,
+                    result,
+                });
+            }
+        }
+        attempts
     }
 
     /// Spawns the current zone and executes its initially bound objects once.
@@ -1258,6 +2835,7 @@ impl RetailRuntime {
         host: &mut H,
         instruction_budget_per_object: usize,
     ) -> Result<RuntimeFrame<H::Error>, RuntimeError<H::Error>> {
+        self.refresh_current_solid_environment(host)?;
         for index in 0..SPAWN_TABLE_CAPACITY {
             let id = u16::try_from(index)
                 .map_err(|_| RuntimeError::Spawn(SpawnError::InvalidSpawnId(u16::MAX)))?;
@@ -1284,7 +2862,7 @@ impl RetailRuntime {
             spawned_children: Vec::new(),
         };
 
-        for root_index in 0..ROOT_HANDLE_COUNT {
+        'roots: for root_index in 0..ROOT_HANDLE_COUNT {
             let root_index_u8 =
                 u8::try_from(root_index).map_err(|_| RuntimeError::InvalidRootIndex(root_index))?;
             let root =
@@ -1300,18 +2878,36 @@ impl RetailRuntime {
                 };
                 let sibling = spawned.next_sibling();
                 self.visit_object(arena_handle, host, instruction_budget_per_object, &mut work)?;
+                if self.machine.level_restart_requested() {
+                    break 'roots;
+                }
                 child = sibling;
             }
         }
 
+        let handles = &self.handles;
+        self.faulted_objects
+            .retain(|object| handles.is_live_pair(*object));
+        self.displayed_objects
+            .retain(|object, _| handles.is_live_pair(*object));
+
         let frame_index = self.frame_index;
         self.frame_index = self.frame_index.wrapping_add(1);
-        self.finish_display_frame(false).map_err(RuntimeError::Vm)?;
+        if !self.machine.level_restart_requested() {
+            self.finish_display_frame(false).map_err(RuntimeError::Vm)?;
+        }
+        let effects = self.machine.take_effects();
+        if effects
+            .iter()
+            .any(|effect| matches!(effect, VmEffect::ResetLevelGlobals { .. }))
+        {
+            self.sync_level_reset_mirrors();
+        }
         Ok(RuntimeFrame {
             frame_index,
             executions: work.executions,
             spawned_children: work.spawned_children,
-            effects: self.machine.take_effects(),
+            effects,
         })
     }
 
@@ -1338,7 +2934,11 @@ impl RetailRuntime {
                                 instruction_budget_per_object,
                                 &mut work.spawned_children,
                             )?;
-                            self.finish_native_object_update(object)?;
+                            if !self.machine.level_restart_requested()
+                                && self.handles.is_live_pair(object)
+                            {
+                                self.finish_native_object_update(object, host)?;
+                            }
                             Ok(execution)
                         })
                     }
@@ -1363,6 +2963,9 @@ impl RetailRuntime {
             }
             work.executions.push(RuntimeExecution { object, result });
         }
+        if self.machine.level_restart_requested() {
+            return Ok(());
+        }
         if let Some(object) = self.handles.for_arena(arena_handle)
             && self.handles.is_live_pair(object)
         {
@@ -1382,6 +2985,9 @@ impl RetailRuntime {
             };
             let sibling = spawned.next_sibling();
             self.visit_object(child_handle, host, instruction_budget_per_object, work)?;
+            if self.machine.level_restart_requested() {
+                return Ok(());
+            }
             child = sibling;
         }
         Ok(())
@@ -1462,14 +3068,41 @@ impl RetailRuntime {
         Ok(None)
     }
 
-    fn finish_native_object_update<E>(
+    fn finish_native_object_update<H: ProgramHost>(
         &mut self,
         object: RuntimeObjectHandle,
-    ) -> Result<(), RuntimeError<E>> {
+        host: &mut H,
+    ) -> Result<(), RuntimeError<H::Error>> {
         let _physics = self
             .machine
             .run_retail_object_physics(object.vm)
             .map_err(RuntimeError::Vm)?;
+        if let Some(zone) = self
+            .machine
+            .object(object.vm)
+            .map_err(RuntimeError::Vm)?
+            .retail_solid_zone_eid()
+            && zone != Eid::NONE
+            && self
+                .arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?
+                .zone()
+                != zone
+        {
+            let environment = host
+                .solid_environment(zone)
+                .map_err(RuntimeError::Program)?;
+            self.arena
+                .set_zone(object.arena, zone)
+                .map_err(RuntimeError::Tree)?;
+            if let Some(environment) = environment {
+                self.machine
+                    .object_mut(object.vm)
+                    .map_err(RuntimeError::Vm)?
+                    .refresh_retail_object_zone_environment(environment);
+            }
+        }
         let vm_object = self
             .machine
             .object_mut(object.vm)
@@ -1480,6 +3113,29 @@ impl RetailRuntime {
         vm_object
             .set_register(process_register::STATUS_A, status_a & !FIRST_FRAME_STATUS_A)
             .map_err(RuntimeError::Vm)
+    }
+
+    fn refresh_current_solid_environment<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(zone) = self
+            .level_state_context
+            .as_ref()
+            .map(|context| context.location.path.zone)
+        else {
+            return Ok(());
+        };
+        if self.current_solid_zone == Some(zone) {
+            return Ok(());
+        }
+        let environment = host
+            .solid_environment(zone)
+            .map_err(RuntimeError::Program)?;
+        self.machine
+            .set_current_retail_solid_environment(environment);
+        self.current_solid_zone = Some(zone);
+        Ok(())
     }
 
     fn register_animation_bound<H: ProgramHost>(
@@ -1553,6 +3209,71 @@ impl RetailRuntime {
             .map_err(RuntimeError::Vm)
     }
 
+    fn bind_entity_with_native_reclaim<H: ProgramHost>(
+        &mut self,
+        zone: Eid,
+        entity: &ZoneEntity,
+        host: &mut H,
+    ) -> Result<RuntimeObjectHandle, RuntimeError<H::Error>> {
+        let descriptor = EntitySpawnDescriptor::from(entity);
+        loop {
+            match self.arena.spawn_entity(zone, descriptor) {
+                Ok(arena_handle) => return self.bind_new_entity(arena_handle, zone, entity, host),
+                Err(SpawnError::ObjectPoolFull) => {
+                    let candidate = self
+                        .arena
+                        .first_reclaimable()
+                        .map_err(RuntimeError::Tree)?
+                        .ok_or(RuntimeError::Spawn(SpawnError::ObjectPoolFull))?;
+                    let mut spawned_children = Vec::new();
+                    self.reclaim_runtime_subtree(candidate, host, &mut spawned_children)?;
+                }
+                Err(error) => return Err(RuntimeError::Spawn(error)),
+            }
+        }
+    }
+
+    fn reclaim_runtime_subtree<H: ProgramHost>(
+        &mut self,
+        root: ArenaObjectHandle,
+        host: &mut H,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Self {
+            arena,
+            machine,
+            handles,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            faulted_objects,
+            displayed_objects,
+            ..
+        } = self;
+        Self::reclaim_runtime_subtree_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            *level,
+            level_state_context.as_ref(),
+            saved_level_state,
+            *transition_zone_context,
+            host,
+            root,
+            spawned_children,
+        )?;
+        faulted_objects.retain(|object| handles.is_live_pair(*object));
+        displayed_objects.retain(|object, _| handles.is_live_pair(*object));
+        Ok(())
+    }
+
     fn bind_new_entity<H: ProgramHost>(
         &mut self,
         arena_handle: ArenaObjectHandle,
@@ -1578,6 +3299,16 @@ impl RetailRuntime {
             origin: ProgramOrigin::Entity(entity),
         };
         let result = self.materialize(binding, host);
+        if let Ok(object) = result.as_ref().copied()
+            && EntitySpawnDescriptor::from(entity).is_crash_program()
+            && !self.suppress_initial_crash_save
+            && self.level_state_context.is_some()
+        {
+            // `GoolObjectSpawn` establishes the initial death checkpoint as
+            // soon as Crash is bound unless native's temporary transition
+            // guard is active for the bonus-return pre-restart scan.
+            let _initial_save = self.save_level_state(object, true);
+        }
         let preserve_spawned_bit = matches!(&result, Err(RuntimeError::Program(_)));
         if result.is_err() {
             self.handles.release(object);
@@ -1614,6 +3345,12 @@ impl RetailRuntime {
         if !rebound_at_frame_start {
             self.run_frame_transition(object, host, spawned_children)?;
         }
+        if !self.handles.is_live_pair(object) {
+            return Ok(Execution {
+                reason: HaltReason::ObjectTerminated,
+                steps: 0,
+            });
+        }
         let mut remaining = budget;
         let mut total_steps = 0_usize;
         loop {
@@ -1624,6 +3361,11 @@ impl RetailRuntime {
                     machine,
                     handles,
                     pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
                     transition_zone_context,
                     ..
                 } = self;
@@ -1633,8 +3375,14 @@ impl RetailRuntime {
                         handles,
                         machine,
                         pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        *level,
+                        level_state_context.as_ref(),
+                        saved_level_state,
                         *transition_zone_context,
                         host,
+                        Some(object.vm),
                         request,
                         spawned_children,
                     );
@@ -1664,6 +3412,12 @@ impl RetailRuntime {
             // this same native update.
             self.pending_states.insert(object.vm, state);
             self.rebind_pending_state(object, host, spawned_children)?;
+            if !self.handles.is_live_pair(object) {
+                return Ok(Execution {
+                    reason: HaltReason::ObjectTerminated,
+                    steps: total_steps,
+                });
+            }
             if total_steps >= budget {
                 return Ok(Execution {
                     reason: HaltReason::StateChanged(state),
@@ -1690,6 +3444,11 @@ impl RetailRuntime {
                 machine,
                 handles,
                 pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
                 transition_zone_context,
                 ..
             } = self;
@@ -1699,8 +3458,14 @@ impl RetailRuntime {
                     handles,
                     machine,
                     pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    *level,
+                    level_state_context.as_ref(),
+                    saved_level_state,
                     *transition_zone_context,
                     host,
+                    Some(object.vm),
                     request,
                     spawned_children,
                 );
@@ -1764,6 +3529,11 @@ impl RetailRuntime {
                     machine,
                     handles,
                     pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
                     transition_zone_context,
                     ..
                 } = self;
@@ -1773,8 +3543,14 @@ impl RetailRuntime {
                         handles,
                         machine,
                         pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        *level,
+                        level_state_context.as_ref(),
+                        saved_level_state,
                         *transition_zone_context,
                         host,
+                        Some(object.vm),
                         request,
                         spawned_children,
                     );
@@ -1788,7 +3564,21 @@ impl RetailRuntime {
             if let Some(error) = callback_error {
                 return Err(error);
             }
-            once_execution.map_err(RuntimeError::Vm)?;
+            let once_execution = once_execution.map_err(RuntimeError::Vm)?;
+            if !self.handles.is_live_pair(object) {
+                return Ok(());
+            }
+            if self.machine.level_restart_requested() {
+                return Ok(());
+            }
+            if let Some(Execution {
+                reason: HaltReason::StateChanged(state),
+                ..
+            }) = once_execution
+            {
+                self.pending_states.insert(object.vm, state);
+                continue;
+            }
 
             let mut callback_error = None;
             let transition_execution = {
@@ -1797,6 +3587,11 @@ impl RetailRuntime {
                     machine,
                     handles,
                     pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
                     transition_zone_context,
                     ..
                 } = self;
@@ -1806,8 +3601,14 @@ impl RetailRuntime {
                         handles,
                         machine,
                         pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        *level,
+                        level_state_context.as_ref(),
+                        saved_level_state,
                         *transition_zone_context,
                         host,
+                        Some(object.vm),
                         request,
                         spawned_children,
                     );
@@ -1822,6 +3623,12 @@ impl RetailRuntime {
                 return Err(error);
             }
             let transition_execution = transition_execution.map_err(RuntimeError::Vm)?;
+            if !self.handles.is_live_pair(object) {
+                return Ok(());
+            }
+            if self.machine.level_restart_requested() {
+                return Ok(());
+            }
             if let Some(Execution {
                 reason: HaltReason::StateChanged(state),
                 ..
@@ -1853,19 +3660,131 @@ impl RetailRuntime {
         Ok(())
     }
 
+    fn validate_different_level_load_state<E>(
+        arena: &ObjectArena,
+        handles: &HandleMap,
+        machine: &Machine,
+        level: Option<LevelId>,
+        saved_level_state: Option<&RetailLevelSnapshot>,
+        vm: VmObjectHandle,
+    ) -> Result<(), RuntimeError<E>> {
+        let caller = handles
+            .for_vm(vm)
+            .ok_or(RuntimeError::UnknownVmObject(vm))?;
+        Self::validate_runtime_object(arena, handles, machine, caller)?;
+        let saved_level = saved_level_state
+            .ok_or(RuntimeError::MissingSavedLevelState)?
+            .level;
+        let current_level = level.ok_or(RuntimeError::MissingLevelStateContext)?;
+        if saved_level == current_level {
+            return Err(RuntimeError::SameLevelRestartDuringLevelEnd(current_level));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn dispatch_event_parts<H: ProgramHost>(
         arena: &mut ObjectArena,
         handles: &mut HandleMap,
         machine: &mut Machine,
         pending_states: &mut BTreeMap<VmObjectHandle, u16>,
-        transition_zone_context: Option<TransitionZoneContext>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
         host: &mut H,
         sender: Option<RuntimeObjectHandle>,
         recipient: Option<RuntimeObjectHandle>,
         event: u32,
         arguments: Option<&[u32]>,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        Self::dispatch_event_parts_mode(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            host,
+            sender,
+            recipient,
+            event,
+            arguments,
+            spawned_children,
+            EventLoadStateMode::RequestRestart,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_event_parts_current<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        current_object: Option<VmObjectHandle>,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        Self::dispatch_event_parts_mode(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            host,
+            sender,
+            recipient,
+            event,
+            arguments,
+            spawned_children,
+            EventLoadStateMode::RequestRestart,
+            current_object,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_event_parts_mode<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        load_state_mode: EventLoadStateMode,
+        current_object: Option<VmObjectHandle>,
     ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
         if let Some(sender) = sender {
             Self::validate_runtime_object(arena, handles, machine, sender)?;
@@ -1874,7 +3793,6 @@ impl RetailRuntime {
             Self::validate_runtime_object(arena, handles, machine, recipient)?;
         }
 
-        let effect_start = machine.effects().len();
         let mut callback_error = None;
         let outcome = machine.send_event_with_host_requests(
             sender.map(RuntimeObjectHandle::vm),
@@ -1882,16 +3800,36 @@ impl RetailRuntime {
             event,
             arguments,
             |machine, request| {
-                let result = Self::apply_host_request(
-                    arena,
-                    handles,
-                    machine,
-                    pending_states,
-                    transition_zone_context,
-                    host,
-                    request,
-                    spawned_children,
-                );
+                let result = match request {
+                    VmHostRequest::Effect(VmEffect::LoadState(vm))
+                        if load_state_mode == EventLoadStateMode::ContinueDifferentLevel =>
+                    {
+                        Self::validate_different_level_load_state(
+                            arena,
+                            handles,
+                            machine,
+                            level,
+                            saved_level_state.as_ref(),
+                            vm,
+                        )
+                    }
+                    request => Self::apply_host_request(
+                        arena,
+                        handles,
+                        machine,
+                        pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        level,
+                        level_state_context,
+                        saved_level_state,
+                        transition_zone_context,
+                        host,
+                        current_object,
+                        request,
+                        spawned_children,
+                    ),
+                };
                 if let Err(error) = result {
                     callback_error = Some(error);
                     return Err(VmError::MissingHostEffect);
@@ -1903,22 +3841,8 @@ impl RetailRuntime {
             return Err(error);
         }
         let outcome = outcome.map_err(RuntimeError::Vm)?;
-        let synchronous_effects = machine.effects()[effect_start..]
-            .iter()
-            .filter(|effect| matches!(effect, VmEffect::SetObjectZoneToTransitionTarget { .. }))
-            .cloned()
-            .collect::<Vec<_>>();
-        for effect in &synchronous_effects {
-            Self::apply_host_effect(
-                arena,
-                handles,
-                machine,
-                pending_states,
-                transition_zone_context,
-                host,
-                effect,
-                spawned_children,
-            )?;
+        if machine.level_restart_requested() {
+            return Ok(outcome);
         }
         if let Some(change) = &outcome.state_change {
             Self::rebind_event_state_change_parts(
@@ -1926,10 +3850,16 @@ impl RetailRuntime {
                 handles,
                 machine,
                 pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
                 transition_zone_context,
                 host,
                 change,
                 spawned_children,
+                current_object,
             )?;
         }
         Ok(outcome)
@@ -1941,164 +3871,470 @@ impl RetailRuntime {
         handles: &mut HandleMap,
         machine: &mut Machine,
         pending_states: &mut BTreeMap<VmObjectHandle, u16>,
-        transition_zone_context: Option<TransitionZoneContext>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
         host: &mut H,
         change: &EventStateChange,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
+        current_object: Option<VmObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
         let object = handles
             .for_vm(change.recipient)
             .ok_or(RuntimeError::UnknownVmObject(change.recipient))?;
         Self::validate_runtime_object(arena, handles, machine, object)?;
-        let spawned = arena
-            .get(object.arena)
-            .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
-        let program = host
-            .bind_state_program(StateProgramBinding {
-                object,
-                zone: spawned.zone(),
-                executable: spawned.origin().executable(),
-                state: change.state,
-            })
-            .map_err(RuntimeError::Program)?;
-        machine
-            .rebind_state_program(object.vm, &program, &change.arguments)
-            .map_err(RuntimeError::Vm)?;
-        pending_states.remove(&object.vm);
-        arena
-            .set_state_flags(
-                object.arena,
-                machine
-                    .object(object.vm)
-                    .map_err(RuntimeError::Vm)?
-                    .state_flags(),
-            )
-            .map_err(RuntimeError::Tree)?;
+        let mut state = change.state;
+        let mut use_event_arguments = true;
 
-        // Native GoolObjectChangeState runs an armed once block during event
-        // delivery even though the recipient is not the current frame object.
-        // It does not run the new transition block in this context.
-        let mut callback_error = None;
-        let once = machine.run_pending_once_with_host_requests(object.vm, |machine, request| {
-            let result = Self::apply_host_request(
+        for _ in 0..MAX_SYNCHRONOUS_STATE_CHANGES {
+            let spawned = arena
+                .get(object.arena)
+                .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
+            let program = host
+                .bind_state_program(StateProgramBinding {
+                    object,
+                    zone: spawned.zone(),
+                    executable: spawned.origin().executable(),
+                    state,
+                })
+                .map_err(RuntimeError::Program)?;
+            let arguments = if use_event_arguments {
+                change.arguments.as_slice()
+            } else {
+                &[]
+            };
+            machine
+                .rebind_state_program(object.vm, &program, arguments)
+                .map_err(RuntimeError::Vm)?;
+            pending_states.remove(&object.vm);
+            arena
+                .set_state_flags(
+                    object.arena,
+                    machine
+                        .object(object.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .state_flags(),
+                )
+                .map_err(RuntimeError::Tree)?;
+
+            // An armed once block always runs inside GoolObjectChangeState.
+            // A state link from that block immediately replaces the just-bound
+            // state and restarts this synchronous transaction with no argv.
+            let mut callback_error = None;
+            let once =
+                machine.run_pending_once_with_host_requests(object.vm, |machine, request| {
+                    let result = Self::apply_host_request(
+                        arena,
+                        handles,
+                        machine,
+                        pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        level,
+                        level_state_context,
+                        saved_level_state,
+                        transition_zone_context,
+                        host,
+                        current_object,
+                        request,
+                        spawned_children,
+                    );
+                    if let Err(error) = result {
+                        callback_error = Some(error);
+                        return Err(VmError::MissingHostEffect);
+                    }
+                    Ok(())
+                });
+            if let Some(error) = callback_error {
+                return Err(error);
+            }
+            let once = once.map_err(RuntimeError::Vm)?;
+            if !handles.is_live_pair(object) || machine.level_restart_requested() {
+                return Ok(());
+            }
+            if let Some(Execution {
+                reason: HaltReason::StateChanged(next_state),
+                ..
+            }) = once
+            {
+                state = next_state;
+                use_event_arguments = false;
+                continue;
+            }
+
+            // `cur_obj` remains the outer frame object while nested event
+            // interpreters run. Only a state change targeting that identity
+            // enters the new transition block before event-stack cleanup.
+            if current_object == Some(object.vm) {
+                let mut callback_error = None;
+                let transition =
+                    machine.run_transition_with_host_requests(object.vm, |machine, request| {
+                        let result = Self::apply_host_request(
+                            arena,
+                            handles,
+                            machine,
+                            pending_states,
+                            pending_cleanup_actions,
+                            reclaim_event_faults,
+                            level,
+                            level_state_context,
+                            saved_level_state,
+                            transition_zone_context,
+                            host,
+                            current_object,
+                            request,
+                            spawned_children,
+                        );
+                        if let Err(error) = result {
+                            callback_error = Some(error);
+                            return Err(VmError::MissingHostEffect);
+                        }
+                        Ok(())
+                    });
+                if let Some(error) = callback_error {
+                    return Err(error);
+                }
+                let transition = transition.map_err(RuntimeError::Vm)?;
+                if !handles.is_live_pair(object) || machine.level_restart_requested() {
+                    return Ok(());
+                }
+                if let Some(Execution {
+                    reason: HaltReason::StateChanged(next_state),
+                    ..
+                }) = transition
+                {
+                    state = next_state;
+                    use_event_arguments = false;
+                    continue;
+                }
+            }
+
+            return arena
+                .set_state_flags(
+                    object.arena,
+                    machine
+                        .object(object.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .state_flags(),
+                )
+                .map_err(RuntimeError::Tree);
+        }
+
+        Err(RuntimeError::Vm(
+            VmError::SynchronousStateChangeBudgetExhausted(object.vm),
+        ))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn terminate_zone_roots_live_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        object_zone_context: ObjectZoneContext,
+        host: &mut H,
+        zone: Eid,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        queue_cleanup_actions: bool,
+    ) -> Result<ZoneTerminationReport<H::Error>, RuntimeError<H::Error>> {
+        let mut report = ZoneTerminationReport::new();
+        for root_index in 0..ROOT_HANDLE_COUNT {
+            let root_index =
+                u8::try_from(root_index).map_err(|_| RuntimeError::InvalidRootIndex(root_index))?;
+            let root = RootHandle::new(root_index)
+                .ok_or(RuntimeError::InvalidRootIndex(usize::from(root_index)))?;
+            let mut child = arena.root_first_child(root);
+            while let Some(arena_handle) = child {
+                let Some(spawned) = arena.get(arena_handle) else {
+                    // A previously captured raw C sibling may have been freed
+                    // by a TERM handler. Generational Rust handles reject that
+                    // ABA case instead of following its free-list links.
+                    break;
+                };
+                let sibling = spawned.next_sibling();
+                Self::terminate_zone_subtree_live_parts(
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
+                    object_zone_context,
+                    host,
+                    zone,
+                    arena_handle,
+                    spawned_children,
+                    queue_cleanup_actions,
+                    &mut report,
+                )?;
+                child = sibling;
+            }
+        }
+        if !report.terminated.is_empty() {
+            machine.clear_frame_bounds();
+        }
+        Ok(report)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn terminate_zone_subtree_live_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        object_zone_context: ObjectZoneContext,
+        host: &mut H,
+        zone: Eid,
+        arena_handle: ArenaObjectHandle,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        queue_cleanup_actions: bool,
+        report: &mut ZoneTerminationReport<H::Error>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(spawned) = arena.get(arena_handle) else {
+            return Ok(());
+        };
+        // Native reads the first child at recursive entry, then captures each
+        // sibling immediately before descending. Borrows end before TERM so a
+        // later sibling's current descendants remain observable.
+        let mut child = spawned.first_child();
+        while let Some(child_handle) = child {
+            let Some(spawned_child) = arena.get(child_handle) else {
+                break;
+            };
+            let sibling = spawned_child.next_sibling();
+            Self::terminate_zone_subtree_live_parts(
                 arena,
                 handles,
                 machine,
                 pending_states,
-                transition_zone_context,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
+                object_zone_context,
                 host,
-                request,
+                zone,
+                child_handle,
                 spawned_children,
-            );
-            if let Err(error) = result {
-                callback_error = Some(error);
-                return Err(VmError::MissingHostEffect);
-            }
-            Ok(())
-        });
-        if let Some(error) = callback_error {
-            return Err(error);
+                queue_cleanup_actions,
+                report,
+            )?;
+            child = sibling;
         }
-        once.map_err(RuntimeError::Vm)?;
-        arena
-            .set_state_flags(
-                object.arena,
-                machine
-                    .object(object.vm)
-                    .map_err(RuntimeError::Vm)?
-                    .state_flags(),
-            )
-            .map_err(RuntimeError::Tree)
+
+        Self::terminate_zone_candidate_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            object_zone_context,
+            host,
+            zone,
+            arena_handle,
+            spawned_children,
+            queue_cleanup_actions,
+            report,
+        )
     }
 
-    fn terminate_zone_objects_with<E, F>(
-        &mut self,
+    #[allow(clippy::too_many_arguments)]
+    fn terminate_zone_candidate_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        object_zone_context: ObjectZoneContext,
+        host: &mut H,
         zone: Eid,
-        mode: ZoneTerminationMode,
-        mut dispatch_terminate: F,
-    ) -> Result<ZoneTerminationReport<E>, RuntimeError<E>>
-    where
-        F: FnMut(&mut Self, RuntimeObjectHandle) -> Result<(), RuntimeError<E>>,
-    {
-        let snapshot = self
-            .arena
-            .postorder_snapshot()
+        arena_handle: ArenaObjectHandle,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        queue_cleanup_actions: bool,
+        report: &mut ZoneTerminationReport<H::Error>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(spawned) = arena.get(arena_handle) else {
+            return Ok(());
+        };
+        if spawned.zone() != zone {
+            return Ok(());
+        }
+        let original_zone = spawned.zone();
+        // Retail's `crash` pointer names the dedicated main allocation for
+        // every main-selecting entity (including IDs 1..4 and the 0x2c/0x30
+        // subtype-zero specials), not only executable-zero Crash.
+        let is_crash = arena_handle.is_dedicated_main();
+        let object = handles
+            .for_arena(arena_handle)
+            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        Self::validate_runtime_object(arena, handles, machine, object)?;
+        let vm_object = machine.object(object.vm).map_err(RuntimeError::Vm)?;
+        let status_b = vm_object
+            .register(process_register::STATUS_B)
+            .map_err(RuntimeError::Vm)?;
+        if status_b & ZONE_TERMINATION_STATUS_B_IMMUNE != 0
+            || vm_object.state_flags() & ZONE_TERMINATION_STATE_IMMUNE != 0
+        {
+            return Ok(());
+        }
+
+        let event_failure = Self::dispatch_event_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            object_zone_context,
+            host,
+            None,
+            Some(object),
+            TERMINATE_EVENT,
+            None,
+            spawned_children,
+        )
+        .err();
+
+        if let Some(error) = event_failure {
+            report
+                .event_failures
+                .push(ZoneTerminationEventFailure { object, error });
+        }
+        // Nested TERM/misc work may already have reclaimed this exact
+        // generation. Native then has no remaining lifecycle work for it.
+        if handles.for_arena(arena_handle) != Some(object) || arena.get(arena_handle).is_none() {
+            return Ok(());
+        }
+        let current_zone = arena
+            .get(arena_handle)
+            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?
+            .zone();
+        if object_zone_context != ObjectZoneContext::HardRestartSentinel
+            && current_zone != original_zone
+        {
+            report.migrated.push(object);
+            return Ok(());
+        }
+        if is_crash && level != Some(LevelId::TITLE) {
+            return Ok(());
+        }
+
+        Self::kill_runtime_subtree_with_host_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            host,
+            arena_handle,
+            spawned_children,
+            queue_cleanup_actions,
+            report,
+        )?;
+        Self::refresh_tree_links(arena, handles, machine)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn kill_runtime_subtree_with_host_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        host: &mut H,
+        arena_handle: ArenaObjectHandle,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        queue_cleanup_actions: bool,
+        report: &mut ZoneTerminationReport<H::Error>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(spawned) = arena.get(arena_handle) else {
+            return Ok(());
+        };
+        let mut child = spawned.first_child();
+        while let Some(child_handle) = child {
+            let sibling = arena
+                .get(child_handle)
+                .and_then(SpawnedObject::next_sibling);
+            Self::kill_runtime_subtree_with_host_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                host,
+                child_handle,
+                spawned_children,
+                queue_cleanup_actions,
+                report,
+            )?;
+            child = sibling;
+        }
+
+        let Some(object) = handles.for_arena(arena_handle) else {
+            return Ok(());
+        };
+        let spawn_id = arena
+            .get(arena_handle)
+            .map(|spawned| {
+                spawned
+                    .entity_descriptor()
+                    .map_or(0, |descriptor| descriptor.id)
+            })
+            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        machine
+            .remove_object_for_host_termination(object.vm)
+            .map_err(RuntimeError::Vm)?;
+        pending_states.remove(&object.vm);
+        let audio_freed = host.free_object_audio(object);
+        handles.release(object);
+        arena
+            .despawn_leaf(arena_handle)
             .map_err(RuntimeError::Tree)?;
-        let mut report = ZoneTerminationReport::new();
-
-        for arena_handle in snapshot {
-            let Some(spawned) = self.arena.get(arena_handle) else {
-                // A prior recursive parent release cannot invalidate a later
-                // postorder item. A synchronous handler may, however, have
-                // removed an object through a future host extension, so treat
-                // that as already handled rather than dereferencing stale data.
-                continue;
-            };
-            if spawned.zone() != zone {
-                continue;
+        let spawn_flags = arena
+            .spawn_table()
+            .flags(spawn_id)
+            .ok_or(RuntimeError::Spawn(SpawnError::InvalidSpawnId(spawn_id)))?;
+        machine
+            .set_spawn_flags(spawn_id, spawn_flags)
+            .map_err(RuntimeError::Vm)?;
+        spawned_children.retain(|spawned| *spawned != object);
+        report.terminated.push(object);
+        if !audio_freed {
+            let action = RuntimeCleanupAction::FreeObjectAudio(object);
+            report.cleanup_actions.push(action);
+            if queue_cleanup_actions {
+                pending_cleanup_actions.push(action);
             }
-            let original_zone = spawned.zone();
-            let is_crash = arena_handle.is_dedicated_main()
-                && spawned.origin().executable() == 0
-                && spawned.origin().subtype() == 0;
-            let object = self
-                .handles
-                .for_arena(arena_handle)
-                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
-            Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, object)?;
-            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
-            let status_b = vm_object
-                .register(process_register::STATUS_B)
-                .map_err(RuntimeError::Vm)?;
-            if status_b & ZONE_TERMINATION_STATUS_B_IMMUNE != 0
-                || vm_object.state_flags() & ZONE_TERMINATION_STATE_IMMUNE != 0
-            {
-                continue;
-            }
-
-            let event_failure = dispatch_terminate(self, object).err();
-            Self::validate_runtime_object(&self.arena, &self.handles, &self.machine, object)?;
-            let current_zone = self
-                .arena
-                .get(arena_handle)
-                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?
-                .zone();
-            if matches!(mode, ZoneTerminationMode::Departure { .. })
-                && current_zone != original_zone
-            {
-                if event_failure.is_some() {
-                    self.pending_states.remove(&object.vm);
-                    self.faulted_objects.insert(object);
-                }
-                report.migrated.push(object);
-                if let Some(error) = event_failure {
-                    report
-                        .event_failures
-                        .push(ZoneTerminationEventFailure { object, error });
-                }
-                continue;
-            }
-            if let Some(error) = event_failure {
-                report
-                    .event_failures
-                    .push(ZoneTerminationEventFailure { object, error });
-            }
-            if is_crash && self.level != Some(LevelId::TITLE) {
-                continue;
-            }
-
-            self.remove_runtime_subtree(arena_handle, &mut report)?;
         }
-
-        if !report.terminated.is_empty() {
-            // Frame bounds are immutable traversal snapshots and currently do
-            // not expose targeted retention. Clearing the complete bounded
-            // list prevents a removed VM handle from surviving until the next
-            // normal frame rebuild.
-            self.machine.clear_frame_bounds();
-            Self::refresh_tree_links(&self.arena, &self.handles, &mut self.machine)?;
-        }
-        Ok(report)
+        Ok(())
     }
 
     fn remove_runtime_subtree<E>(
@@ -2192,17 +4428,301 @@ impl RetailRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn reclaim_runtime_subtree_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        root: ArenaObjectHandle,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        Self::reclaim_runtime_object_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            host,
+            root,
+            spawned_children,
+        )?;
+
+        // Bounds are keyed by compact VM handle. Native frees every voice and
+        // object field before returning the slot to the free-list; clearing
+        // this bounded snapshot prevents the replacement from inheriting the
+        // prior identity's collision record.
+        machine.clear_frame_bounds();
+        Self::refresh_tree_links(arena, handles, machine)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reclaim_runtime_object_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        arena_handle: ArenaObjectHandle,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(object) = handles.for_arena(arena_handle) else {
+            // A TERM handler may synchronously trigger another reclaim. If it
+            // already removed this exact generation, its lifecycle is done.
+            return Ok(());
+        };
+        Self::validate_runtime_object(arena, handles, machine, object)?;
+
+        // `GoolObjectKill(sig=1)` signals the current object before reading
+        // its child pointer, then recurses head-to-tail. The event return is
+        // ignored; retain only the ordered recipient identity for diagnostics.
+        if Self::dispatch_event_parts(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            host,
+            None,
+            Some(object),
+            TERMINATE_EVENT,
+            None,
+            spawned_children,
+        )
+        .is_err()
+        {
+            reclaim_event_faults.push(RuntimeReclaimEventFault { object });
+        }
+
+        let Some(spawned) = arena.get(arena_handle) else {
+            return Ok(());
+        };
+        let mut child = spawned.first_child();
+        while let Some(child_handle) = child {
+            let sibling = arena
+                .get(child_handle)
+                .and_then(SpawnedObject::next_sibling);
+            Self::reclaim_runtime_object_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
+                transition_zone_context,
+                host,
+                child_handle,
+                spawned_children,
+            )?;
+            child = sibling;
+        }
+
+        let Some(object) = handles.for_arena(arena_handle) else {
+            return Ok(());
+        };
+        let spawn_id = arena
+            .get(arena_handle)
+            .map(|spawned| {
+                spawned
+                    .entity_descriptor()
+                    .map_or(0, |descriptor| descriptor.id)
+            })
+            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        machine.remove_object(object.vm).map_err(RuntimeError::Vm)?;
+        pending_states.remove(&object.vm);
+        let audio_freed = host.free_object_audio(object);
+        handles.release(object);
+        arena
+            .despawn_leaf(arena_handle)
+            .map_err(RuntimeError::Tree)?;
+        let spawn_flags = arena
+            .spawn_table()
+            .flags(spawn_id)
+            .ok_or(RuntimeError::Spawn(SpawnError::InvalidSpawnId(spawn_id)))?;
+        machine
+            .set_spawn_flags(spawn_id, spawn_flags)
+            .map_err(RuntimeError::Vm)?;
+        spawned_children.retain(|spawned| *spawned != object);
+        if !audio_freed {
+            pending_cleanup_actions.push(RuntimeCleanupAction::FreeObjectAudio(object));
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn apply_send_event_request_parts<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        current_object: Option<VmObjectHandle>,
+        request: SendEventRequest,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        let Some(sender) = handles.for_vm(request.sender) else {
+            // A servicing request whose sender was reclaimed is completed by
+            // the VM's incarnation guard after this no-op host boundary.
+            return Ok(());
+        };
+        if !handles.is_live_pair(sender)
+            || arena.get(sender.arena).is_none()
+            || machine.object(sender.vm).is_err()
+        {
+            return Ok(());
+        }
+
+        match request.target {
+            SendEventTarget::Direct { recipient } => {
+                let Some(recipient) = handles.for_vm(recipient) else {
+                    return Ok(());
+                };
+                // Native GoolOpSendEvent ignores the per-recipient return
+                // value, but its non-null argv pointer is retained at argc 0.
+                let _ = Self::dispatch_event_parts_current(
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
+                    transition_zone_context,
+                    host,
+                    current_object,
+                    Some(sender),
+                    Some(recipient),
+                    request.event,
+                    Some(request.arguments()),
+                    spawned_children,
+                );
+            }
+            SendEventTarget::AllRoots { mode } => {
+                let mut traversal = SendEventTraversal {
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
+                    transition_zone_context,
+                    host,
+                    spawned_children,
+                    current_object,
+                    sender,
+                    event: request.event,
+                    arguments: request.arguments(),
+                    mode,
+                    count: 0,
+                };
+                for index in 0..ROOT_HANDLE_COUNT {
+                    let root = RootHandle::new(index as u8)
+                        .expect("the fixed root count always fits a root handle");
+                    traversal.traverse_root(root).map_err(RuntimeError::Vm)?;
+                }
+            }
+            SendEventTarget::LinkedChildren { root, mode } => {
+                let Some(root) = handles.for_vm(root) else {
+                    return Ok(());
+                };
+                let mut traversal = SendEventTraversal {
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
+                    transition_zone_context,
+                    host,
+                    spawned_children,
+                    current_object,
+                    sender,
+                    event: request.event,
+                    arguments: request.arguments(),
+                    mode,
+                    count: 0,
+                };
+                traversal
+                    .traverse_children(root.arena)
+                    .map_err(RuntimeError::Vm)?;
+            }
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn apply_host_request<H: ProgramHost>(
         arena: &mut ObjectArena,
         handles: &mut HandleMap,
         machine: &mut Machine,
         pending_states: &mut BTreeMap<VmObjectHandle, u16>,
-        transition_zone_context: Option<TransitionZoneContext>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
         host: &mut H,
+        current_object: Option<VmObjectHandle>,
         request: VmHostRequest,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
         match request {
+            VmHostRequest::SendEvent(request) => Self::apply_send_event_request_parts(
+                arena,
+                handles,
+                machine,
+                pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
+                transition_zone_context,
+                host,
+                current_object,
+                request,
+                spawned_children,
+            ),
             VmHostRequest::Audio(request) => {
                 let response = host
                     .handle_audio_request(request)
@@ -2211,11 +4731,34 @@ impl RetailRuntime {
                     .complete_audio_host_request(response)
                     .map_err(RuntimeError::Vm)
             }
+            VmHostRequest::Card(request) => {
+                let current = machine.retail_card_save_data().map_err(RuntimeError::Vm)?;
+                let response = host
+                    .handle_card_request(request, current)
+                    .map_err(RuntimeError::Program)?;
+                machine
+                    .complete_card_host_request(request, response.result)
+                    .map_err(RuntimeError::Vm)?;
+                if let Some(loaded) = response.loaded {
+                    machine
+                        .restore_retail_card_save_data(loaded)
+                        .map_err(RuntimeError::Vm)?;
+                    machine.record_completed_card_load(loaded);
+                }
+                machine
+                    .publish_retail_card_state(response.published)
+                    .map_err(RuntimeError::Vm)
+            }
             VmHostRequest::Effect(effect) => Self::apply_host_effect(
                 arena,
                 handles,
                 machine,
                 pending_states,
+                pending_cleanup_actions,
+                reclaim_event_faults,
+                level,
+                level_state_context,
+                saved_level_state,
                 transition_zone_context,
                 host,
                 &effect,
@@ -2230,11 +4773,60 @@ impl RetailRuntime {
         handles: &mut HandleMap,
         machine: &mut Machine,
         pending_states: &mut BTreeMap<VmObjectHandle, u16>,
-        transition_zone_context: Option<TransitionZoneContext>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
         host: &mut H,
         effect: &VmEffect,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<(), RuntimeError<H::Error>> {
+        if let VmEffect::ResetLevelGlobals { object } = effect {
+            let object = handles
+                .for_vm(*object)
+                .ok_or(RuntimeError::UnknownVmObject(*object))?;
+            Self::validate_runtime_object(arena, handles, machine, object)?;
+            machine
+                .reset_retail_level_globals()
+                .map_err(RuntimeError::Vm)?;
+            return Ok(());
+        }
+
+        if let VmEffect::SaveState(vm) = effect {
+            let caller = handles
+                .for_vm(*vm)
+                .ok_or(RuntimeError::UnknownVmObject(*vm))?;
+            Self::validate_runtime_object(arena, handles, machine, caller)?;
+            let outcome = Self::capture_level_state(
+                arena,
+                handles,
+                machine,
+                level,
+                level_state_context,
+                caller,
+                false,
+            )
+            .map_err(RuntimeError::LevelState)?;
+            if let RetailSaveStateOutcome::Saved(snapshot) = outcome {
+                *saved_level_state = Some(*snapshot);
+            }
+            return Ok(());
+        }
+
+        if let VmEffect::LoadState(vm) = effect {
+            let caller = handles
+                .for_vm(*vm)
+                .ok_or(RuntimeError::UnknownVmObject(*vm))?;
+            Self::validate_runtime_object(arena, handles, machine, caller)?;
+            if saved_level_state.is_none() {
+                return Err(RuntimeError::MissingSavedLevelState);
+            }
+            machine.request_level_restart();
+            return Ok(());
+        }
+
         if let VmEffect::ReparentToRoot { object, root } = effect {
             let object = handles
                 .for_vm(*object)
@@ -2254,16 +4846,294 @@ impl RetailRuntime {
                 .ok_or(RuntimeError::UnknownVmObject(*object))?;
             Self::validate_runtime_object(arena, handles, machine, object)?;
             return match transition_zone_context {
-                Some(TransitionZoneContext::Target(target)) => arena
+                ObjectZoneContext::Target(target) => arena
                     .set_zone(object.arena, target)
                     .map_err(RuntimeError::Tree),
                 // Native writes the `(entry *)-1` sentinel to the object. The
                 // arena admits only validated EIDs, and hard restart kills the
                 // object immediately regardless, so no persistent zone value
                 // is needed here.
-                Some(TransitionZoneContext::HardRestartSentinel) => Ok(()),
-                None => Err(RuntimeError::MissingTransitionZoneTarget),
+                ObjectZoneContext::HardRestartSentinel => Ok(()),
+                ObjectZoneContext::Null => arena
+                    .set_zone(object.arena, Eid::NONE)
+                    .map_err(RuntimeError::Tree),
             };
+        }
+
+        if let VmEffect::TerminateCurrentZoneNeighbors { requester } = effect {
+            let requester = handles
+                .for_vm(*requester)
+                .ok_or(RuntimeError::UnknownVmObject(*requester))?;
+            Self::validate_runtime_object(arena, handles, machine, requester)?;
+            let Some(current_zone) = level_state_context.map(|context| context.location.path.zone)
+            else {
+                // Native case 12/7 is a no-op while `cur_zone` is null.
+                return Ok(());
+            };
+            let neighbors = host
+                .current_zone_neighbors(current_zone)
+                .map_err(RuntimeError::Program)?;
+            for zone in neighbors {
+                let report = Self::terminate_zone_roots_live_parts(
+                    arena,
+                    handles,
+                    machine,
+                    pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
+                    transition_zone_context,
+                    host,
+                    zone,
+                    spawned_children,
+                    true,
+                )?;
+                reclaim_event_faults.extend(report.event_failures.iter().map(|failure| {
+                    RuntimeReclaimEventFault {
+                        object: failure.object,
+                    }
+                }));
+            }
+            return Ok(());
+        }
+
+        if let VmEffect::SetLinkZoneFromPoint {
+            requester,
+            target,
+            point,
+        } = effect
+        {
+            let requester = handles
+                .for_vm(*requester)
+                .ok_or(RuntimeError::UnknownVmObject(*requester))?;
+            Self::validate_runtime_object(arena, handles, machine, requester)?;
+            let target = handles
+                .for_vm(*target)
+                .ok_or(RuntimeError::UnknownVmObject(*target))?;
+            Self::validate_runtime_object(arena, handles, machine, target)?;
+            let current_zone = level_state_context
+                .ok_or(RuntimeError::MissingLevelStateContext)?
+                .location
+                .path
+                .zone;
+            let selected = match point {
+                Some(point) => host
+                    .find_neighbor_zone(current_zone, *point)
+                    .map_err(RuntimeError::Program)?,
+                None => Some(current_zone),
+            };
+            if let Some(zone) = selected {
+                arena
+                    .set_zone(target.arena, zone)
+                    .map_err(RuntimeError::Tree)?;
+            }
+            return Ok(());
+        }
+
+        if let VmEffect::SpawnFlagsChanged { object, id, flags } = effect {
+            let object = handles
+                .for_vm(*object)
+                .ok_or(RuntimeError::UnknownVmObject(*object))?;
+            Self::validate_runtime_object(arena, handles, machine, object)?;
+            arena
+                .spawn_table_mut()
+                .set_flags(*id, *flags)
+                .map_err(RuntimeError::Spawn)?;
+            return Ok(());
+        }
+
+        if let VmEffect::FindSpawnedObject {
+            requester,
+            pid_flags,
+        } = effect
+        {
+            let requester = handles
+                .for_vm(*requester)
+                .ok_or(RuntimeError::UnknownVmObject(*requester))?;
+            Self::validate_runtime_object(arena, handles, machine, requester)?;
+            let mut found = None;
+            for root in [ZONE_OBJECT_ROOT, ENEMY_OBJECT_ROOT] {
+                for arena_handle in arena
+                    .preorder(TreeParent::Root(root))
+                    .map_err(RuntimeError::Tree)?
+                {
+                    let candidate = handles
+                        .for_arena(arena_handle)
+                        .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+                    if machine
+                        .object(candidate.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .register(process_register::PID_FLAGS)
+                        .map_err(RuntimeError::Vm)?
+                        == *pid_flags
+                    {
+                        found = Some(candidate.vm);
+                        break;
+                    }
+                }
+                if found.is_some() {
+                    break;
+                }
+            }
+            return machine
+                .complete_find_spawned_object(requester.vm, found)
+                .map_err(RuntimeError::Vm);
+        }
+
+        if let VmEffect::FindNearestObject {
+            requester,
+            origin,
+            categories,
+            event,
+        } = effect
+        {
+            let requester = handles
+                .for_vm(*requester)
+                .ok_or(RuntimeError::UnknownVmObject(*requester))?;
+            let origin = handles
+                .for_vm(*origin)
+                .ok_or(RuntimeError::UnknownVmObject(*origin))?;
+            Self::validate_runtime_object(arena, handles, machine, requester)?;
+            Self::validate_runtime_object(arena, handles, machine, origin)?;
+
+            // Status-query interrupts are allowed to run arbitrary GOOL and
+            // mutate the forest, so retain the source preorder as checked
+            // generational handles before entering any candidate code.
+            let candidates = arena
+                .preorder(TreeParent::Root(ENEMY_OBJECT_ROOT))
+                .map_err(RuntimeError::Tree)?
+                .collect::<Vec<_>>();
+            let mut nearest = None;
+            let mut nearest_distance = i32::MAX;
+            for arena_handle in candidates {
+                let candidate = handles
+                    .for_arena(arena_handle)
+                    .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+                let classification = machine
+                    .classify_nearest_object_candidate(origin.vm, candidate.vm, *categories, *event)
+                    .map_err(RuntimeError::Vm)?;
+                let (distance, interrupt_offset) = match classification {
+                    NearestObjectCandidate::Ineligible => continue,
+                    NearestObjectCandidate::Eligible { distance } => (distance, None),
+                    NearestObjectCandidate::StatusInterrupt { distance, offset } => {
+                        (distance, Some(offset))
+                    }
+                };
+                // Native checks distance before consulting the event map. A
+                // tie therefore retains the first preorder object and never
+                // invokes the later candidate's STATUS interrupt.
+                if distance >= nearest_distance {
+                    continue;
+                }
+
+                let eligible = if let Some(offset) = interrupt_offset {
+                    let mut callback_error = None;
+                    let state_change = machine.run_nearest_status_interrupt_with_host_requests(
+                        origin.vm,
+                        candidate.vm,
+                        offset,
+                        |machine, request| {
+                            let result = Self::apply_host_request(
+                                arena,
+                                handles,
+                                machine,
+                                pending_states,
+                                pending_cleanup_actions,
+                                reclaim_event_faults,
+                                level,
+                                level_state_context,
+                                saved_level_state,
+                                transition_zone_context,
+                                host,
+                                Some(origin.vm),
+                                request,
+                                spawned_children,
+                            );
+                            if let Err(error) = result {
+                                callback_error = Some(error);
+                                return Err(VmError::MissingHostEffect);
+                            }
+                            Ok(())
+                        },
+                    );
+                    if let Some(error) = callback_error {
+                        return Err(error);
+                    }
+                    let state_change = state_change.map_err(RuntimeError::Vm)?;
+                    if machine.level_restart_requested() {
+                        return Ok(());
+                    }
+                    if let Some(change) = state_change {
+                        Self::rebind_event_state_change_parts(
+                            arena,
+                            handles,
+                            machine,
+                            pending_states,
+                            pending_cleanup_actions,
+                            reclaim_event_faults,
+                            level,
+                            level_state_context,
+                            saved_level_state,
+                            transition_zone_context,
+                            host,
+                            &change,
+                            spawned_children,
+                            Some(origin.vm),
+                        )?;
+                    }
+                    if machine.level_restart_requested() {
+                        return Ok(());
+                    }
+                    machine
+                        .object(candidate.vm)
+                        .map_err(RuntimeError::Vm)?
+                        .register(process_register::ACK)
+                        .map_err(RuntimeError::Vm)?
+                        != 0
+                } else {
+                    true
+                };
+                if eligible {
+                    nearest = Some(candidate.vm);
+                    nearest_distance = distance;
+                }
+            }
+            return machine
+                .complete_find_nearest_object(requester.vm, nearest)
+                .map_err(RuntimeError::Vm);
+        }
+
+        if let VmEffect::TransformModelVertex {
+            requester,
+            link,
+            output_vector,
+            model_eid,
+            frame_index,
+            vertex_index,
+        } = effect
+        {
+            let requester = handles
+                .for_vm(*requester)
+                .ok_or(RuntimeError::UnknownVmObject(*requester))?;
+            let link = handles
+                .for_vm(*link)
+                .ok_or(RuntimeError::UnknownVmObject(*link))?;
+            Self::validate_runtime_object(arena, handles, machine, requester)?;
+            Self::validate_runtime_object(arena, handles, machine, link)?;
+            let source = host
+                .model_vertex_source(ModelVertexBinding {
+                    requester,
+                    link,
+                    model_eid: *model_eid,
+                    frame_index: *frame_index,
+                    vertex_index: *vertex_index,
+                })
+                .map_err(RuntimeError::Program)?;
+            return machine
+                .complete_model_vertex_transform(requester.vm, link.vm, *output_vector, source)
+                .map_err(RuntimeError::Vm);
         }
 
         if let VmEffect::Event {
@@ -2284,6 +5154,11 @@ impl RetailRuntime {
                     handles,
                     machine,
                     pending_states,
+                    pending_cleanup_actions,
+                    reclaim_event_faults,
+                    level,
+                    level_state_context,
+                    saved_level_state,
                     transition_zone_context,
                     host,
                     Some(sender),
@@ -2313,6 +5188,11 @@ impl RetailRuntime {
                         handles,
                         machine,
                         pending_states,
+                        pending_cleanup_actions,
+                        reclaim_event_faults,
+                        level,
+                        level_state_context,
+                        saved_level_state,
                         transition_zone_context,
                         host,
                         Some(sender),
@@ -2346,9 +5226,52 @@ impl RetailRuntime {
             .zone();
 
         for _ in 0..*count {
-            let arena_handle = arena
-                .create_child(parent.arena, zone, *executable, *subtype, *allow_reclaim)
-                .map_err(RuntimeError::Create)?;
+            let arena_handle = loop {
+                let allocation = match arena.create_child(
+                    parent.arena,
+                    zone,
+                    *executable,
+                    *subtype,
+                    *allow_reclaim,
+                ) {
+                    Ok(arena_handle) => Some(arena_handle),
+                    Err(RuntimeCreateError::ReclaimRequired(candidate)) => {
+                        Self::reclaim_runtime_subtree_parts(
+                            arena,
+                            handles,
+                            machine,
+                            pending_states,
+                            pending_cleanup_actions,
+                            reclaim_event_faults,
+                            level,
+                            level_state_context,
+                            saved_level_state,
+                            transition_zone_context,
+                            host,
+                            candidate,
+                            spawned_children,
+                        )?;
+                        continue;
+                    }
+                    Err(RuntimeCreateError::ObjectPoolFull) => {
+                        // Native `GoolOpSpawnChildren` treats allocation failure
+                        // as an ordinary null `misc_child`, not an interpreter
+                        // error. The caller keeps executing after either 0x8a or
+                        // an exhausted 0x91 reclaim search.
+                        machine
+                            .object_mut(parent.vm)
+                            .map_err(RuntimeError::Vm)?
+                            .set_register(process_register::MISC_VALUE, 0)
+                            .map_err(RuntimeError::Vm)?;
+                        None
+                    }
+                    Err(error) => return Err(RuntimeError::Create(error)),
+                };
+                break allocation;
+            };
+            let Some(arena_handle) = arena_handle else {
+                continue;
+            };
             handles.prune_stale(arena);
             let existing = handles.for_arena(arena_handle);
             let is_new_binding = existing.is_none();
@@ -2423,10 +5346,15 @@ impl RetailRuntime {
                             .state_flags(),
                     )
                     .map_err(RuntimeError::Tree)?;
-                machine
-                    .object_mut(parent.vm)
-                    .map_err(RuntimeError::Vm)?
+                let parent_vm = machine.object_mut(parent.vm).map_err(RuntimeError::Vm)?;
+                parent_vm
                     .set_link(3, Some(object.vm))
+                    .map_err(RuntimeError::Vm)?;
+                parent_vm
+                    .set_register(
+                        process_register::MISC_VALUE,
+                        CollisionObjectReference::new(object.vm).to_word(),
+                    )
                     .map_err(RuntimeError::Vm)?;
                 Self::refresh_player_links(arena, handles, machine)
             })();
@@ -2653,6 +5581,8 @@ mod tests {
 
     const ZONE: Eid = Eid::from_raw(0x1234_5679);
     const ZONE_B: Eid = Eid::from_raw(0x2234_5679);
+    const ZONE_C: Eid = Eid::from_raw(0x3234_5679);
+    const CURRENT_ZONE: Eid = Eid::from_raw(0x4234_5679);
     const RETURN: u32 = 0x8289_4000;
     const MODERN_NSD_HEADER_SIZE: usize = 0x520;
 
@@ -2661,6 +5591,67 @@ mod tests {
             | ((primary & 0x0f) << 20)
             | (((secondary as u32) & 0x1f) << 15)
             | (operand as u32 & 0x0fff)
+    }
+
+    const fn event_service_return() -> u32 {
+        // Opcode 0x88, guarded-null return used by the synthetic ESR tests.
+        0x8880_0000
+    }
+
+    fn zone_rect(origin: [i32; 3], dimensions: [u32; 3]) -> ZoneRect {
+        ZoneRect {
+            origin,
+            dimensions,
+            unknown: 0,
+            octree_root: 0,
+            octree_max_depth: [0; 3],
+        }
+    }
+
+    #[test]
+    fn szon_neighbor_selection_is_reverse_ordered_and_inclusive() {
+        let first = zone_rect([1, 2, 3], [4, 5, 6]);
+        let last = zone_rect([1, 2, 3], [4, 5, 6]);
+        let neighbors = [ZONE, ZONE_B];
+        let mut resolved = Vec::new();
+
+        assert_eq!(
+            find_retail_neighbor_zone(&neighbors, [1 << 8, 2 << 8, 3 << 8], |zone| {
+                resolved.push(zone);
+                Ok::<_, ()>(if zone == ZONE { first } else { last })
+            },),
+            Ok(Some(ZONE_B)),
+            "the last serialized matching neighbor wins"
+        );
+        assert_eq!(
+            resolved,
+            [ZONE_B],
+            "an earlier serialized neighbor is never resolved after a match"
+        );
+        assert_eq!(
+            find_retail_neighbor_zone(&neighbors, [5 << 8, 7 << 8, 9 << 8], |zone| {
+                Ok::<_, ()>(if zone == ZONE { first } else { last })
+            }),
+            Ok(Some(ZONE_B)),
+            "all upper faces are inclusive"
+        );
+        assert_eq!(
+            find_retail_neighbor_zone(
+                &neighbors,
+                [(5 << 8) + 1, 7 << 8, 9 << 8],
+                |zone| Ok::<_, ()>(if zone == ZONE { first } else { last }),
+            ),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn szon_bounds_use_wrapping_q24_8_arithmetic() {
+        let rect = zone_rect([i32::MAX, 0, 0], [1, 0, 0]);
+
+        assert!(retail_zone_rect_contains(rect, [-256, 0, 0]));
+        assert!(retail_zone_rect_contains(rect, [0, 0, 0]));
+        assert!(!retail_zone_rect_contains(rect, [1, 0, 0]));
     }
 
     #[test]
@@ -2681,6 +5672,365 @@ mod tests {
                 .machine()
                 .global_word(CURRENT_DISPLAY_GLOBAL)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn level_transition_resolver_preserves_requested_target_except_for_minus_two() {
+        let requested = LevelId::new_const(0x2d);
+        let saved = LevelId::new_const(0x09);
+        assert_eq!(
+            resolve_retail_level_transition(0x2d, 0x19, Some(saved)),
+            Ok(ResolvedRetailLevelTransition {
+                level: requested,
+                bonus_return: false,
+            })
+        );
+        assert_eq!(
+            resolve_retail_level_transition(0x19, -2, Some(saved)),
+            Ok(ResolvedRetailLevelTransition {
+                level: saved,
+                bonus_return: true,
+            })
+        );
+        assert_eq!(
+            resolve_retail_level_transition(0x19, -2, None),
+            Err(RetailTransitionError::MissingSavedLevelState)
+        );
+        assert_eq!(
+            resolve_retail_level_transition(-2, 0x19, Some(saved)),
+            Err(RetailTransitionError::InvalidRequestedLevel(-2))
+        );
+    }
+
+    #[test]
+    fn session_mount_preserves_scalars_snapshot_rng_and_card_but_clears_pair_state() {
+        let old_level = LevelId::new_const(0x03);
+        let target = LevelId::new_const(0x17);
+        let mut runtime = RetailRuntime::new_for_level(119, old_level);
+        let old_object = spawn_test_object(&mut runtime, ZONE, 11, 2, 0);
+        runtime.set_global_word(21, 0x1122_3344).unwrap();
+        runtime.set_global_word(GAME_STATE_GLOBAL, 0x300).unwrap();
+        runtime.set_global_word(46, 17).unwrap();
+        runtime.set_global_word(59, 0x55).unwrap();
+        runtime.set_global_word(61, 3).unwrap();
+        runtime.set_global_word(82, 0xaabb_ccdd).unwrap();
+        runtime.set_global_word(79, 77).unwrap();
+        for index in POINTER_GLOBALS {
+            runtime.set_global_word(index, 0x8000_0001).unwrap();
+        }
+        runtime.machine.set_random_seed(0xdead_beef);
+        runtime
+            .set_global_word(RESPAWN_COUNT_GLOBAL, 0x200)
+            .unwrap();
+        runtime.set_global_word(DEATH_COUNT_GLOBAL, 0x300).unwrap();
+        // GOOL global stores occur inside Machine and can make the runtime's
+        // operation-time mirrors stale between restart boundaries. Carry
+        // export must retain the actual native words.
+        runtime.respawn_count = 0x111;
+        runtime.death_count = 0x222;
+        runtime.saved_level_state = Some(level_snapshot(old_level));
+        runtime.set_level_state_context(level_context(ZONE, true, vec![ZONE]));
+        runtime.arena.spawn_table_mut().set_flags(42, 0xff).unwrap();
+        runtime
+            .machine
+            .set_retail_level_spawn_tag(0, u16::try_from((target.get() << 9) | 0x2a).unwrap());
+
+        let carry = runtime.export_session_carry();
+        let snapshot = carry.saved_level_state.clone();
+        let mut mounted = RetailRuntime::new_from_session(119, target, carry).unwrap();
+
+        assert_eq!(mounted.level(), Some(target));
+        assert_eq!(mounted.global_word(CURRENT_LEVEL_GLOBAL), Ok(0x1700));
+        assert_eq!(mounted.global_word(21), Ok(0x1122_3344));
+        assert_eq!(mounted.global_word(GAME_STATE_GLOBAL), Ok(0x300));
+        assert_eq!(mounted.global_word(46), Ok(17));
+        assert_eq!(mounted.global_word(59), Ok(0x55));
+        assert_eq!(mounted.global_word(61), Ok(3));
+        assert_eq!(mounted.global_word(82), Ok(0xaabb_ccdd));
+        assert_eq!(
+            mounted.global_word(NEXT_DISPLAY_GLOBAL),
+            Ok(INITIAL_DISPLAY_MASK)
+        );
+        assert_eq!(
+            mounted.global_word(CURRENT_DISPLAY_GLOBAL),
+            Ok(INITIAL_DISPLAY_MASK)
+        );
+        assert_eq!(mounted.global_word(79), Ok(0));
+        assert_eq!(mounted.global_word(117), Ok(0x19000));
+        for index in POINTER_GLOBALS {
+            assert_eq!(mounted.global_word(index), Ok(0), "global {index}");
+        }
+        assert_eq!(mounted.machine.random_seed(), 0xdead_beef);
+        assert_eq!(mounted.saved_level_state(), snapshot.as_ref());
+        assert_eq!(mounted.respawn_count, 0x200);
+        assert_eq!(mounted.death_count, 0x300);
+        assert!(mounted.arena().is_empty());
+        assert!(mounted.object_for_vm(old_object.vm).is_none());
+        assert_eq!(mounted.arena.spawn_table().flags(42), Some(8));
+        assert_eq!(mounted.machine.spawn_flags(42), Ok(8));
+        assert_eq!(mounted.frame_index(), 0);
+        assert_eq!(mounted.draw_count(), 0);
+        mounted.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
+        assert!(mounted.level_state_context().unwrap().first_spawn);
+
+        let mismatch = RetailRuntime::new_from_session(118, target, mounted.export_session_carry());
+        assert_eq!(
+            mismatch,
+            Err(RetailSessionImportError::GlobalWordCount {
+                expected: 118,
+                actual: 119,
+            })
+        );
+    }
+
+    #[test]
+    fn destination_crash_spawn_replaces_snapshot_except_during_bonus_guard() {
+        let old_level = LevelId::new_const(0x03);
+        let target = LevelId::new_const(0x17);
+        let mut source = RetailRuntime::new_for_level(119, old_level);
+        source.saved_level_state = Some(level_snapshot(old_level));
+        let carry = source.export_session_carry();
+        let crash_entities = [entity(5, 0, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE_B,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &crash_entities,
+        }];
+
+        let mut ordinary = RetailRuntime::new_from_session(119, target, carry.clone()).unwrap();
+        ordinary.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
+        let attempts = ordinary.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        assert!(attempts[0].result.is_ok());
+        assert_eq!(ordinary.saved_level_state().unwrap().level, target);
+        assert_eq!(
+            ordinary.saved_level_state().unwrap().location.path.zone,
+            ZONE_B
+        );
+
+        let mut bonus_return = RetailRuntime::new_from_session(119, target, carry).unwrap();
+        let carried_snapshot = bonus_return.saved_level_state().cloned().unwrap();
+        bonus_return.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
+        bonus_return.set_initial_crash_save_suppressed(true);
+        let attempts = bonus_return.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+        bonus_return.set_initial_crash_save_suppressed(false);
+        assert!(attempts[0].result.is_ok());
+        assert_eq!(
+            bonus_return.saved_level_state(),
+            Some(&carried_snapshot),
+            "the bonus pre-restart scan must not overwrite its return snapshot"
+        );
+    }
+
+    #[test]
+    fn title_session_mount_applies_only_core_title_counter_resets() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x17));
+        runtime.respawn_count = 0x300;
+        runtime.death_count = 0x400;
+        for (index, value) in [
+            (RESPAWN_COUNT_GLOBAL, 0x300),
+            (DEATH_COUNT_GLOBAL, 0x400),
+            (CORTEX_COUNT_GLOBAL, 0x500),
+            (BRIO_COUNT_GLOBAL, 0x600),
+            (TAWNA_COUNT_GLOBAL, 0x700),
+            (CHECKPOINT_ID_GLOBAL, 0x800),
+            (46, 19),
+            (63, 0x1234),
+        ] {
+            runtime.set_global_word(index, value).unwrap();
+        }
+
+        let mounted =
+            RetailRuntime::new_from_session(119, LevelId::TITLE, runtime.export_session_carry())
+                .unwrap();
+
+        assert_eq!(mounted.respawn_count, 0);
+        assert_eq!(mounted.death_count, 0);
+        for index in [
+            RESPAWN_COUNT_GLOBAL,
+            DEATH_COUNT_GLOBAL,
+            CORTEX_COUNT_GLOBAL,
+            BRIO_COUNT_GLOBAL,
+            TAWNA_COUNT_GLOBAL,
+        ] {
+            assert_eq!(mounted.global_word(index), Ok(0));
+        }
+        assert_eq!(mounted.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
+        assert_eq!(mounted.global_word(46), Ok(19));
+        assert_eq!(mounted.global_word(63), Ok(0x1234));
+    }
+
+    #[test]
+    fn level_end_broadcast_is_all_root_postorder_and_preserves_requested_target() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x03));
+        let root_zero = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let root_seven_parent = spawn_test_object(&mut runtime, ZONE, 11, 2, 0);
+        let root_seven_child = attach_test_child(&mut runtime, root_seven_parent, ZONE, 2);
+        runtime
+            .arena
+            .reparent_to_root(root_zero.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(root_seven_parent.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        configure_level_end_transition(&mut runtime, root_zero, 0x05);
+        configure_level_end_transition(&mut runtime, root_seven_child, 0x06);
+        configure_level_end_transition(&mut runtime, root_seven_parent, 0x07);
+
+        let report = runtime
+            .finish_level_transition(&mut SnapshotHost, 0x09)
+            .unwrap();
+
+        assert_eq!(
+            report.effects,
+            [
+                VmEffect::Transition(0x05),
+                VmEffect::Transition(0x06),
+                VmEffect::Transition(0x07),
+            ]
+        );
+        assert_eq!(report.next_lid_after_event, 0x07);
+        assert_eq!(
+            report.resolved,
+            ResolvedRetailLevelTransition {
+                level: LevelId::new_const(0x09),
+                bonus_return: false,
+            }
+        );
+        assert!(report.event_failures.is_empty());
+    }
+
+    #[test]
+    fn level_end_broadcast_continues_after_checked_event_failure() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x03));
+        let malformed = spawn_test_object(&mut runtime, ZONE, 12, 2, 0);
+        let later = spawn_test_object(&mut runtime, ZONE, 13, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(malformed.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(later.arena, RootHandle::new(1).unwrap())
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(malformed.vm)
+            .unwrap()
+            .configure_test_event_interrupt(LEVEL_END_EVENT, vec![0xff00_0000])
+            .unwrap();
+        configure_level_end_transition(&mut runtime, later, 0x17);
+
+        let report = runtime
+            .finish_level_transition(&mut SnapshotHost, 0x09)
+            .unwrap();
+
+        assert_eq!(report.effects, [VmEffect::Transition(0x17)]);
+        assert_eq!(report.next_lid_after_event, 0x17);
+        assert_eq!(report.resolved.level, LevelId::new_const(0x09));
+        assert!(matches!(
+            report.event_failures.as_slice(),
+            [RetailLevelEndEventFailure {
+                object,
+                error: RuntimeError::Vm(VmError::UnknownOpcode(0xff)),
+            }] if *object == malformed
+        ));
+    }
+
+    #[test]
+    fn level_end_load_state_selects_saved_level_and_keeps_broadcasting() {
+        let current = LevelId::new_const(0x26);
+        let saved = LevelId::new_const(0x09);
+        let mut runtime = RetailRuntime::new_for_level(119, current);
+        let loader = spawn_test_object(&mut runtime, ZONE, 14, 2, 0);
+        let later = spawn_test_object(&mut runtime, ZONE, 15, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(loader.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(later.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        runtime.saved_level_state = Some(level_snapshot(saved));
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .machine
+            .object_mut(loader.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                LEVEL_END_EVENT,
+                vec![misc(12, 1, 0x0be0), misc(12, 6, 0x0e00), 0x8280_0000],
+            )
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(loader.vm)
+            .unwrap()
+            .set_register(0, 0x4321)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(later.vm)
+            .unwrap()
+            .configure_test_event_interrupt(LEVEL_END_EVENT, vec![misc(12, 6, 0x0e00), 0x8280_0000])
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(later.vm)
+            .unwrap()
+            .set_register(0, 0x1234)
+            .unwrap();
+
+        let report = runtime
+            .finish_level_transition(&mut SnapshotHost, 0x19)
+            .unwrap();
+
+        assert_eq!(
+            report.effects,
+            [
+                VmEffect::LoadState(loader.vm),
+                VmEffect::MidiTogglePlayback {
+                    object: loader.vm,
+                    value: 0x4321,
+                },
+                VmEffect::MidiTogglePlayback {
+                    object: later.vm,
+                    value: 0x1234,
+                },
+            ]
+        );
+        assert_eq!(report.next_lid_after_event, -2);
+        assert_eq!(
+            report.resolved,
+            ResolvedRetailLevelTransition {
+                level: saved,
+                bonus_return: true,
+            }
+        );
+        assert!(report.event_failures.is_empty());
+        assert!(report.carry.first_spawn);
+        assert!(runtime.level_state_context().unwrap().first_spawn);
+        assert!(!runtime.machine.level_restart_requested());
+    }
+
+    #[test]
+    fn same_level_load_during_level_end_is_a_checked_restart_boundary() {
+        let level = LevelId::new_const(0x09);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let loader = spawn_test_object(&mut runtime, ZONE, 16, 2, 0);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        runtime
+            .machine
+            .object_mut(loader.vm)
+            .unwrap()
+            .configure_test_event_interrupt(LEVEL_END_EVENT, vec![misc(12, 1, 0x0be0), 0x8280_0000])
+            .unwrap();
+
+        assert_eq!(
+            runtime.finish_level_transition(&mut SnapshotHost, 0x17),
+            Err(RuntimeError::SameLevelRestartDuringLevelEnd(level))
         );
     }
 
@@ -2864,6 +6214,65 @@ mod tests {
         assert_eq!(runtime.draw_count(), 1, "paused GLUpdate never increments");
     }
 
+    #[test]
+    fn stop_at_zone_propagates_typed_eid_to_arena_and_object_environment() {
+        let level = LevelId::N_SANITY_BEACH;
+        let mut runtime = RetailRuntime::new_for_level(256, level);
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: RetailCameraLocation {
+                path: crust_formats::stream::RetailPathId {
+                    zone: ZONE,
+                    index: 0,
+                },
+                progress: crate::retail_frame::PathProgress::ZERO,
+            },
+            graphics_flags: 0,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: vec![ZONE, ZONE_B],
+        });
+        let mut host = SolidZoneHost::default();
+        let entities = [entity(1, 0, 3)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let object = *runtime.spawn_current_zone_neighbors(&neighbors, &mut host)[0]
+            .result
+            .as_ref()
+            .unwrap();
+        let vm = runtime.machine.object_mut(object.vm).unwrap();
+        vm.set_register(
+            process_register::STATUS_B,
+            crate::retail_physics::STATUS_B_TRANSLATION_MOTION
+                | crate::retail_physics::STATUS_B_STOPPED_BY_SOLID,
+        )
+        .unwrap();
+        vm.set_register(process_register::TRANSLATION_X, 150 * 0x100)
+            .unwrap();
+        vm.set_register(process_register::TRANSLATION_Y, 10_000)
+            .unwrap();
+        vm.set_register(process_register::TRANSLATION_Z, 50 * 0x100)
+            .unwrap();
+        vm.set_register(process_register::MISC_A_X, 1_024).unwrap();
+
+        runtime.run_frame(&mut host, 8).unwrap();
+
+        assert_eq!(runtime.arena.get(object.arena).unwrap().zone(), ZONE_B);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .retail_solid_zone_eid(),
+            Some(ZONE_B)
+        );
+        assert_eq!(host.calls, [ZONE, ZONE, ZONE_B]);
+    }
+
     struct SnapshotHost;
 
     impl ProgramHost for SnapshotHost {
@@ -2878,6 +6287,515 @@ mod tests {
             _binding: StateProgramBinding,
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
+        }
+    }
+
+    struct SzonHost {
+        selected: Option<Eid>,
+        queries: Vec<(Eid, [i32; 3])>,
+    }
+
+    #[derive(Default)]
+    struct SolidZoneHost {
+        calls: Vec<Eid>,
+    }
+
+    impl SolidZoneHost {
+        fn environment(object_zone: Eid) -> RetailSolidEnvironment {
+            let zone = |eid, origin| {
+                RetailSolidZone::new(origin, [100; 3], 0, [0; 3], vec![0; 36])
+                    .unwrap()
+                    .with_eid(eid)
+            };
+            RetailSolidEnvironment::new(
+                0,
+                [u16::try_from(object_zone.raw() & 0xffff).unwrap(); 24],
+                [u16::try_from(object_zone.raw() & 0xffff).unwrap(); 24],
+                vec![zone(ZONE, [0, 0, 0]), zone(ZONE_B, [100, 0, 0])],
+            )
+            .with_runtime_context(Some(object_zone), SolidLevelQuirks::default())
+        }
+    }
+
+    impl ProgramHost for SolidZoneHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn solid_environment(
+            &mut self,
+            zone: Eid,
+        ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+            self.calls.push(zone);
+            Ok(Some(Self::environment(zone)))
+        }
+    }
+
+    impl ProgramHost for SzonHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn find_neighbor_zone(
+            &mut self,
+            current_zone: Eid,
+            point: [i32; 3],
+        ) -> Result<Option<Eid>, Self::Error> {
+            self.queries.push((current_zone, point));
+            Ok(self.selected)
+        }
+    }
+
+    struct CardLoadHost {
+        loaded: SaveData,
+        requests: Vec<(CardHostRequest, SaveData)>,
+    }
+
+    impl ProgramHost for CardLoadHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let mut object = VmObject::new(binding.object.vm(), vec![misc(15, 4, 0x0e00), RETURN])
+                .map_err(|_| ())?;
+            object.set_register(0, 2).map_err(|_| ())?;
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn handle_card_request(
+            &mut self,
+            request: CardHostRequest,
+            current: SaveData,
+        ) -> Result<CardHostResponse, Self::Error> {
+            self.requests.push((request, current));
+            Ok(CardHostResponse {
+                result: 0,
+                loaded: Some(self.loaded),
+                published: CardPublishedState {
+                    flags: crate::card::CardFlags::NEW_DEVICE,
+                    part_count: 1,
+                    partinfos: std::array::from_fn(
+                        |index| {
+                            if index == 0 { 0x1234_0009 } else { 0 }
+                        },
+                    ),
+                },
+            })
+        }
+    }
+
+    #[test]
+    fn card_load_is_synchronous_resets_globals_and_publishes_metadata() {
+        let loaded = SaveData {
+            level_count: 12,
+            initial_lives: 7 << 8,
+            unknown_6190c: 0x1122_3344,
+            mono: true,
+            sfx_volume: 87,
+            music_volume: 65,
+            item_pool_1: 0xa1,
+            item_pool_2: 0xb2,
+            gem_count: 9,
+            key_count: 2,
+        };
+        let mut host = CardLoadHost {
+            loaded,
+            requests: Vec::new(),
+        };
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::new_const(0x03));
+        let entities = [entity(5, 1, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let object = runtime.spawn_current_zone_neighbors(&neighbors, &mut host)[0]
+            .result
+            .as_ref()
+            .copied()
+            .unwrap();
+        runtime.arena.spawn_table_mut().set_flags(42, 0xab).unwrap();
+        runtime.machine.set_spawn_flags(42, 0xab).unwrap();
+        runtime.machine.set_retail_level_spawn_tag(0, 0x1234);
+        runtime.saved_level_state = Some(level_snapshot(LevelId::new_const(0x03)));
+        let saved = runtime.saved_level_state.clone();
+        runtime.transition_zone_context = ObjectZoneContext::Target(ZONE_B);
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.box_count = 0x500;
+        context.checkpoint_id = 6 << 8;
+        context.checkpoint_translation = [1, 2, 3];
+        runtime.set_level_state_context(context);
+
+        let frame = runtime.run_frame(&mut host, 4).unwrap();
+        assert!(frame.executions[0].result.is_ok());
+        assert_eq!(host.requests.len(), 1);
+        assert_eq!(host.requests[0].0.operation, 4);
+        assert_eq!(host.requests[0].0.part_index, 2);
+        assert_eq!(
+            runtime
+                .machine
+                .object(object.vm)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0)
+        );
+        assert_eq!(runtime.card_save_data(), Ok(loaded));
+        assert_eq!(runtime.global_word(24), Ok(loaded.initial_lives));
+        assert_eq!(runtime.global_word(47), Ok(loaded.level_count));
+        assert_eq!(runtime.global_word(20), Ok(loaded.level_count));
+        assert_eq!(runtime.global_word(59), Ok(0x10));
+        assert_eq!(runtime.global_word(61), Ok(1));
+        assert_eq!(runtime.global_word(82), Ok(0x1234_0009));
+        assert_eq!(runtime.arena.spawn_table().flags(42), Some(0xab));
+        assert_eq!(runtime.machine.spawn_flags(42), Ok(0xab));
+        assert_eq!(runtime.saved_level_state, saved);
+        assert!(
+            runtime
+                .machine
+                .retail_level_spawn_tags()
+                .iter()
+                .all(|tag| *tag == 0)
+        );
+
+        assert_eq!(runtime.take_card_load(), Some(loaded));
+        assert_eq!(runtime.take_card_load(), None);
+        let context = runtime.level_state_context().unwrap();
+        assert_eq!(context.box_count, 0x500);
+        assert_eq!(context.checkpoint_id, -1);
+        assert_eq!(context.checkpoint_translation, [1, 2, 3]);
+        assert!(!context.first_spawn);
+        assert_eq!(
+            runtime.transition_zone_context,
+            ObjectZoneContext::Target(ZONE_B)
+        );
+        assert_eq!(runtime.saved_level_state, saved);
+    }
+
+    #[test]
+    fn misc_level_reset_runs_inside_interpreter_and_preserves_runtime_state() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime
+            .machine
+            .upsert_object(
+                VmObject::new(
+                    main.vm,
+                    vec![
+                        misc(12, 11, 0x0be0),
+                        Instruction::encode(0x11, 0x0805, 0x0e08),
+                        RETURN,
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        runtime.saved_level_state = Some(level_snapshot(level));
+        let saved = runtime.saved_level_state.clone();
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.checkpoint_id = 7 << 8;
+        runtime.set_level_state_context(context);
+        runtime.arena.spawn_table_mut().set_flags(42, 0xab).unwrap();
+        runtime.machine.set_spawn_flags(42, 0xab).unwrap();
+        runtime.machine.set_retail_level_spawn_tag(0, 0x1234);
+        runtime
+            .set_global_word(crate::gool::INITIAL_LIFE_COUNT_GLOBAL, 7 << 8)
+            .unwrap();
+        runtime.set_global_word(GAME_STATE_GLOBAL, 0x600).unwrap();
+        runtime
+            .set_global_word(RESPAWN_COUNT_GLOBAL, 0x300)
+            .unwrap();
+        runtime.set_global_word(DEATH_COUNT_GLOBAL, 0x400).unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            frame.effects,
+            [VmEffect::ResetLevelGlobals { object: main.vm }]
+        );
+        assert_eq!(
+            runtime.machine.object(main.vm).unwrap().register(8),
+            Ok(0x500),
+            "the following GOOL instruction executes after the synchronous reset"
+        );
+        assert_eq!(runtime.global_word(RESPAWN_COUNT_GLOBAL), Ok(0));
+        assert_eq!(runtime.global_word(DEATH_COUNT_GLOBAL), Ok(0));
+        assert_eq!(
+            runtime.global_word(crate::gool::LIFE_COUNT_GLOBAL),
+            Ok(7 << 8)
+        );
+        assert_eq!(runtime.global_word(GAME_STATE_GLOBAL), Ok(0x600));
+        assert_eq!(runtime.arena.spawn_table().flags(42), Some(0xab));
+        assert_eq!(runtime.machine.spawn_flags(42), Ok(0xab));
+        assert_eq!(runtime.saved_level_state, saved);
+        assert!(
+            runtime
+                .machine
+                .retail_level_spawn_tags()
+                .iter()
+                .all(|tag| *tag == 0)
+        );
+        assert_eq!(runtime.level_state_context().unwrap().checkpoint_id, -1);
+        assert_eq!(runtime.respawn_count, 0);
+        assert_eq!(runtime.death_count, 0);
+    }
+
+    #[test]
+    fn reset_then_save_in_one_handler_uses_the_reset_checkpoint_word() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let mut player = VmObject::new(
+            main.vm,
+            vec![misc(12, 11, 0x0be0), misc(12, 0, 0x0be0), RETURN],
+        )
+        .unwrap();
+        for (register, value) in [
+            (process_register::TRANSLATION_X, 111),
+            (process_register::TRANSLATION_Y, 222),
+            (process_register::TRANSLATION_Z, 333),
+            (process_register::SCALE_X, 0x1000),
+            (process_register::SCALE_Y, 0x1000),
+            (process_register::SCALE_Z, 0x1000),
+        ] {
+            player.set_register(register, value).unwrap();
+        }
+        runtime.machine.upsert_object(player).unwrap();
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.checkpoint_id = 7 << 8;
+        context.checkpoint_translation = [700, 701, 702];
+        runtime.set_level_state_context(context);
+        runtime
+            .set_global_word(CHECKPOINT_ID_GLOBAL, 7 << 8)
+            .unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            frame.effects,
+            [
+                VmEffect::ResetLevelGlobals { object: main.vm },
+                VmEffect::SaveState(main.vm),
+            ]
+        );
+        assert_eq!(
+            runtime.saved_level_state().unwrap().player_translation,
+            [111, 222, 333],
+            "the reset -1 checkpoint wins over the stale host mirror"
+        );
+        assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
+    }
+
+    #[test]
+    fn protected_title_resume_reapplies_payload_without_destroying_level_state() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        let saved = runtime.saved_level_state.clone();
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.checkpoint_id = 6 << 8;
+        runtime.set_level_state_context(context);
+        runtime.arena.spawn_table_mut().set_flags(42, 0xab).unwrap();
+        runtime.machine.set_spawn_flags(42, 0xab).unwrap();
+        runtime.machine.set_retail_level_spawn_tag(0, 0x1234);
+
+        runtime.reset_level_globals().unwrap();
+        assert_eq!(runtime.arena.spawn_table().flags(42), Some(0xab));
+        assert_eq!(runtime.machine.spawn_flags(42), Ok(0xab));
+        assert_eq!(runtime.saved_level_state, saved);
+        assert!(
+            runtime
+                .machine
+                .retail_level_spawn_tags()
+                .iter()
+                .all(|tag| *tag == 0)
+        );
+
+        // Prove the protected payload path performs its own second native
+        // reset before restoring only progression/options fields.
+        runtime.machine.set_retail_level_spawn_tag(0, 0x4321);
+        let resume = SaveData {
+            level_count: 12,
+            initial_lives: 7 << 8,
+            unknown_6190c: 0x1122_3344,
+            mono: true,
+            sfx_volume: 87,
+            music_volume: 65,
+            item_pool_1: 0xa1,
+            item_pool_2: 0xb2,
+            gem_count: 9,
+            key_count: 2,
+        };
+        runtime.restore_resume_after_title_reset(resume).unwrap();
+
+        assert_eq!(runtime.card_save_data(), Ok(resume));
+        assert_eq!(
+            runtime.global_word(crate::gool::LEVELS_UNLOCKED_GLOBAL),
+            Ok(12)
+        );
+        assert_eq!(
+            runtime.global_word(crate::gool::CURRENT_MAP_LEVEL_GLOBAL),
+            Ok(12)
+        );
+        assert_eq!(runtime.arena.spawn_table().flags(42), Some(0xab));
+        assert_eq!(runtime.machine.spawn_flags(42), Ok(0xab));
+        assert_eq!(runtime.saved_level_state, saved);
+        assert!(
+            runtime
+                .machine
+                .retail_level_spawn_tags()
+                .iter()
+                .all(|tag| *tag == 0)
+        );
+        assert_eq!(runtime.level_state_context().unwrap().checkpoint_id, -1);
+    }
+
+    #[test]
+    fn direct_card_restore_preserves_live_level_and_savestate() {
+        let level = LevelId::new_const(0x03);
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        runtime.saved_level_state = Some(level_snapshot(level));
+        let saved = runtime.saved_level_state.clone();
+        runtime.arena.spawn_table_mut().set_flags(42, 0xab).unwrap();
+        runtime.machine.set_spawn_flags(42, 0xab).unwrap();
+        runtime.machine.set_retail_level_spawn_tag(0, 0x1234);
+        runtime.transition_zone_context = ObjectZoneContext::Target(ZONE_B);
+        let mut context = level_context(ZONE, true, vec![ZONE]);
+        context.box_count = 0x500;
+        context.checkpoint_id = 7 << 8;
+        context.checkpoint_translation = [700, 701, 702];
+        runtime.set_level_state_context(context);
+        let loaded = SaveData {
+            level_count: 14,
+            initial_lives: 9 << 8,
+            unknown_6190c: 0x1234_5678,
+            mono: false,
+            sfx_volume: 123,
+            music_volume: 45,
+            item_pool_1: 0xaa,
+            item_pool_2: 0xbb,
+            gem_count: 11,
+            key_count: 2,
+        };
+
+        runtime.restore_card_save_data(loaded).unwrap();
+
+        assert_eq!(runtime.card_save_data(), Ok(loaded));
+        assert_eq!(runtime.arena.spawn_table().flags(42), Some(0xab));
+        assert_eq!(runtime.machine.spawn_flags(42), Ok(0xab));
+        assert_eq!(runtime.saved_level_state, saved);
+        assert_eq!(
+            runtime.transition_zone_context,
+            ObjectZoneContext::Target(ZONE_B)
+        );
+        let context = runtime.level_state_context().unwrap();
+        assert_eq!(context.box_count, 0x500);
+        assert_eq!(context.checkpoint_id, -1);
+        assert_eq!(context.checkpoint_translation, [700, 701, 702]);
+        assert!(context.first_spawn);
+        assert!(
+            runtime
+                .machine
+                .retail_level_spawn_tags()
+                .iter()
+                .all(|tag| *tag == 0)
+        );
+    }
+
+    #[derive(Default)]
+    struct ReclaimHost {
+        freed_audio: Vec<RuntimeObjectHandle>,
+    }
+
+    impl ProgramHost for ReclaimHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let code = match binding.executable {
+                // Establish one descendant before the ordinary pool fills.
+                1 => vec![0x8a00_5001, RETURN],
+                // Native reclaiming child creation with zero arguments.
+                12 => vec![0x9100_5001, RETURN],
+                _ => vec![RETURN],
+            };
+            VmObject::new(binding.object.vm(), code).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn free_object_audio(&mut self, object: RuntimeObjectHandle) -> bool {
+            self.freed_audio.push(object);
+            true
+        }
+    }
+
+    struct NeighborTerminationHost {
+        neighbors: Vec<Eid>,
+        neighbor_queries: Vec<Eid>,
+        freed_audio: Vec<RuntimeObjectHandle>,
+    }
+
+    impl NeighborTerminationHost {
+        fn new(neighbors: Vec<Eid>) -> Self {
+            Self {
+                neighbors,
+                neighbor_queries: Vec::new(),
+                freed_audio: Vec::new(),
+            }
+        }
+    }
+
+    impl ProgramHost for NeighborTerminationHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn current_zone_neighbors(&mut self, current_zone: Eid) -> Result<Vec<Eid>, Self::Error> {
+            self.neighbor_queries.push(current_zone);
+            Ok(self.neighbors.clone())
+        }
+
+        fn free_object_audio(&mut self, object: RuntimeObjectHandle) -> bool {
+            self.freed_audio.push(object);
+            true
         }
     }
 
@@ -3007,6 +6925,364 @@ mod tests {
             .unwrap()
     }
 
+    fn install_szon_program(
+        runtime: &mut RetailRuntime,
+        requester: RuntimeObjectHandle,
+        target: RuntimeObjectHandle,
+        point: Option<[i32; 3]>,
+    ) {
+        let operand = point.map_or(0x0be0, |_| 0x0e00);
+        let mut object =
+            VmObject::new(requester.vm, vec![misc(9, 0, operand) | (3 << 12), RETURN]).unwrap();
+        object.set_link(0, Some(requester.vm)).unwrap();
+        object.set_link(3, Some(target.vm)).unwrap();
+        if let Some(point) = point {
+            for (register, coordinate) in point.into_iter().enumerate() {
+                object
+                    .set_register(register, coordinate.cast_unsigned())
+                    .unwrap();
+            }
+        }
+        runtime.machine.upsert_object(object).unwrap();
+    }
+
+    #[test]
+    fn szon_runtime_assigns_validated_match_null_current_and_no_match() {
+        let point = [0x1234, -0x5678, 0x7fff_ffff];
+        let mut matched = RetailRuntime::new(0);
+        let requester = spawn_test_object(&mut matched, ZONE, 210, 2, 0);
+        let target = spawn_test_object(&mut matched, ZONE, 211, 2, 0);
+        matched.set_level_state_context(level_context(ZONE, false, vec![ZONE, ZONE_B]));
+        install_szon_program(&mut matched, requester, target, Some(point));
+        let mut host = SzonHost {
+            selected: Some(ZONE_B),
+            queries: Vec::new(),
+        };
+
+        matched.run_frame(&mut host, 4).unwrap();
+
+        assert_eq!(host.queries, [(ZONE, point)]);
+        assert_eq!(matched.arena.get(target.arena).unwrap().zone(), ZONE_B);
+
+        let mut unmatched = RetailRuntime::new(0);
+        let requester = spawn_test_object(&mut unmatched, ZONE, 212, 2, 0);
+        let target = spawn_test_object(&mut unmatched, ZONE_B, 213, 2, 0);
+        unmatched.set_level_state_context(level_context(ZONE, false, vec![ZONE, ZONE_B]));
+        install_szon_program(&mut unmatched, requester, target, Some(point));
+        let mut host = SzonHost {
+            selected: None,
+            queries: Vec::new(),
+        };
+
+        unmatched.run_frame(&mut host, 4).unwrap();
+
+        assert_eq!(host.queries, [(ZONE, point)]);
+        assert_eq!(
+            unmatched.arena.get(target.arena).unwrap().zone(),
+            ZONE_B,
+            "no containing neighbor leaves the linked object's zone unchanged"
+        );
+
+        let mut null_point = RetailRuntime::new(0);
+        let requester = spawn_test_object(&mut null_point, ZONE_B, 214, 2, 0);
+        let target = spawn_test_object(&mut null_point, ZONE_B, 215, 2, 0);
+        null_point.set_level_state_context(level_context(ZONE, false, vec![ZONE, ZONE_B]));
+        install_szon_program(&mut null_point, requester, target, None);
+        let mut host = SzonHost {
+            selected: Some(ZONE_B),
+            queries: Vec::new(),
+        };
+
+        null_point.run_frame(&mut host, 4).unwrap();
+
+        assert!(host.queries.is_empty(), "null never dereferences a point");
+        assert_eq!(null_point.arena.get(target.arena).unwrap().zone(), ZONE);
+    }
+
+    fn mark_reclaimable(runtime: &mut RetailRuntime, object: RuntimeObjectHandle) {
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_register(process_register::STATE_FLAGS, 0x0008_0000)
+            .unwrap();
+        runtime
+            .arena
+            .set_state_flags(object.arena, 0x0008_0000)
+            .unwrap();
+    }
+
+    fn set_test_translation(object: &mut VmObject, translation: [i32; 3]) {
+        for (register, value) in [
+            (process_register::TRANSLATION_X, translation[0]),
+            (process_register::TRANSLATION_Y, translation[1]),
+            (process_register::TRANSLATION_Z, translation[2]),
+        ] {
+            object.set_register(register, value as u32).unwrap();
+        }
+    }
+
+    #[test]
+    fn misc_nearest_search_uses_root_four_preorder_category_distance_and_first_tie() {
+        let mut runtime = RetailRuntime::new(0);
+        let requester = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let origin = spawn_test_object(&mut runtime, ZONE, 11, 2, 0);
+        let filtered = spawn_test_object(&mut runtime, ZONE, 12, 2, 0);
+        let first_tie = spawn_test_object(&mut runtime, ZONE, 13, 2, 0);
+        let later_tie = spawn_test_object(&mut runtime, ZONE, 14, 2, 0);
+
+        let instruction = misc(13, 0b0_1000, 0x0e00) | (3 << 12);
+        let mut requester_vm = VmObject::new(requester.vm, vec![instruction, RETURN]).unwrap();
+        requester_vm.set_link(3, Some(origin.vm)).unwrap();
+        requester_vm.set_register(0, 0xff).unwrap();
+        set_test_translation(&mut requester_vm, [10_000, 0, 0]);
+        runtime.machine.upsert_object(requester_vm).unwrap();
+        set_test_translation(runtime.machine.object_mut(origin.vm).unwrap(), [0; 3]);
+
+        for (object, category, translation) in [
+            (filtered, 0x200, [1, 0, 0]),
+            (first_tie, 0x300, [100, 0, 0]),
+            (later_tie, 0x300, [-100, 0, 0]),
+        ] {
+            let vm = runtime.machine.object_mut(object.vm).unwrap();
+            vm.configure_test_program_identity(category);
+            set_test_translation(vm, translation);
+        }
+        // Root insertion is at the head, so reparent in reverse desired
+        // order. The two matching candidates have equal ApxDist.
+        for object in [later_tie, first_tie, filtered] {
+            runtime
+                .arena
+                .reparent_to_root(object.arena, ENEMY_OBJECT_ROOT)
+                .unwrap();
+        }
+        let root_order = runtime
+            .arena
+            .preorder(TreeParent::Root(ENEMY_OBJECT_ROOT))
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            root_order,
+            [filtered.arena, first_tie.arena, later_tie.arena]
+        );
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+        assert!(
+            frame
+                .executions
+                .iter()
+                .find(|execution| execution.object == requester)
+                .unwrap()
+                .result
+                .is_ok()
+        );
+        assert_eq!(
+            runtime.machine.object(requester.vm).unwrap().stack(),
+            &[CollisionObjectReference::new(first_tie.vm).to_word()]
+        );
+    }
+
+    #[test]
+    fn misc_nearest_status_interrupt_skips_rejected_candidate_and_accepts_ack() {
+        const STATUS_EVENT: u32 = 0x0f00;
+
+        let mut runtime = RetailRuntime::new(0);
+        let requester = spawn_test_object(&mut runtime, ZONE, 20, 2, 0);
+        let rejected = spawn_test_object(&mut runtime, ZONE, 21, 2, 0);
+        let accepted = spawn_test_object(&mut runtime, ZONE, 22, 2, 0);
+        let mut requester_vm =
+            VmObject::new(requester.vm, vec![misc(13, 0b0_1000, 0x0e00), RETURN]).unwrap();
+        requester_vm.set_register(0, STATUS_EVENT).unwrap();
+        set_test_translation(&mut requester_vm, [0; 3]);
+        runtime.machine.upsert_object(requester_vm).unwrap();
+
+        let ack_register = 0x0e00 | process_register::ACK as u16;
+        {
+            let vm = runtime.machine.object_mut(rejected.vm).unwrap();
+            vm.configure_test_program_identity(0x300);
+            set_test_translation(vm, [10, 0, 0]);
+            vm.configure_test_event_interrupt(
+                STATUS_EVENT,
+                vec![Instruction::encode(0x11, 0x0800, ack_register), 0x8280_0000],
+            )
+            .unwrap();
+        }
+        {
+            let vm = runtime.machine.object_mut(accepted.vm).unwrap();
+            vm.configure_test_program_identity(0x300);
+            set_test_translation(vm, [20, 0, 0]);
+            vm.configure_test_event_interrupt(
+                STATUS_EVENT,
+                vec![Instruction::encode(0x11, 0x0b7f, ack_register), 0x8280_0000],
+            )
+            .unwrap();
+        }
+        for object in [accepted, rejected] {
+            runtime
+                .arena
+                .reparent_to_root(object.arena, ENEMY_OBJECT_ROOT)
+                .unwrap();
+        }
+
+        runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+        assert_eq!(
+            runtime
+                .machine
+                .object(rejected.vm)
+                .unwrap()
+                .register(process_register::ACK),
+            Ok(0)
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(accepted.vm)
+                .unwrap()
+                .register(process_register::ACK),
+            Ok(0x100)
+        );
+        assert_eq!(
+            runtime.machine.object(requester.vm).unwrap().stack(),
+            &[CollisionObjectReference::new(accepted.vm).to_word()]
+        );
+    }
+
+    #[test]
+    fn opcode_91_reclaim_signals_and_cleans_descendants_before_vm_handle_reuse() {
+        let mut runtime = RetailRuntime::new(0);
+        let mut host = ReclaimHost::default();
+        let candidate_entities = [entity(10, 1, 0)];
+        let candidate_neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &candidate_entities,
+        }];
+        let candidate = *runtime.spawn_current_zone_neighbors(&candidate_neighbors, &mut host)[0]
+            .result
+            .as_ref()
+            .unwrap();
+        let first = runtime.run_frame(&mut host, 2).unwrap();
+        let descendant = first.spawned_children[0];
+
+        for object in [candidate, descendant] {
+            runtime
+                .machine
+                .object_mut(object.vm)
+                .unwrap()
+                .configure_test_event_interrupt(TERMINATE_EVENT, vec![0x8280_0000])
+                .unwrap();
+            runtime.pending_states.insert(object.vm, 7);
+            runtime.faulted_objects.insert(object);
+            runtime.displayed_objects.insert(object, true);
+        }
+        mark_reclaimable(&mut runtime, candidate);
+
+        let fillers = (0..94)
+            .map(|index| {
+                let executable = if index == 93 { 12 } else { 2 };
+                entity(20 + index, executable, 0)
+            })
+            .collect::<Vec<_>>();
+        let filler_neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &fillers,
+        }];
+        let attempts = runtime.spawn_current_zone_neighbors(&filler_neighbors, &mut host);
+        assert!(attempts.iter().all(|attempt| attempt.result.is_ok()));
+        assert_eq!(runtime.arena.remaining_pool_capacity(), 0);
+        let parent = *attempts.last().unwrap().result.as_ref().unwrap();
+
+        let frame = runtime.run_frame(&mut host, 2).unwrap();
+        let replacement = frame.spawned_children[0];
+        assert!(
+            frame
+                .executions
+                .iter()
+                .find(|execution| execution.object == parent)
+                .unwrap()
+                .result
+                .is_ok()
+        );
+        assert_eq!(replacement.vm, candidate.vm);
+        assert_ne!(replacement.arena, candidate.arena);
+        assert!(runtime.arena.get(candidate.arena).is_none());
+        assert!(runtime.arena.get(descendant.arena).is_none());
+        assert_eq!(runtime.handles.for_vm(candidate.vm), Some(replacement));
+        assert!(runtime.handles.for_vm(descendant.vm).is_none());
+        assert!(!runtime.pending_states.contains_key(&candidate.vm));
+        assert!(!runtime.pending_states.contains_key(&descendant.vm));
+        assert!(!runtime.faulted_objects.contains(&candidate));
+        assert!(!runtime.faulted_objects.contains(&descendant));
+        assert!(!runtime.displayed_objects.contains_key(&candidate));
+        assert!(!runtime.displayed_objects.contains_key(&descendant));
+        assert_eq!(host.freed_audio, [descendant, candidate]);
+        assert!(runtime.take_cleanup_actions().is_empty());
+        assert!(runtime.take_reclaim_event_faults().is_empty());
+        assert_eq!(
+            runtime.arena.len(),
+            crate::object_arena::OBJECT_POOL_CAPACITY - 1
+        );
+        assert_eq!(runtime.arena.remaining_pool_capacity(), 1);
+    }
+
+    #[test]
+    fn full_pool_zone_spawn_reclaims_and_surfaces_a_faulted_term_handler() {
+        let mut runtime = RetailRuntime::new(0);
+        let candidate = spawn_test_object(&mut runtime, ZONE, 200, 2, 0);
+        mark_reclaimable(&mut runtime, candidate);
+        runtime
+            .machine
+            .object_mut(candidate.vm)
+            .unwrap()
+            .configure_test_event_interrupt(TERMINATE_EVENT, vec![0xff00_0000])
+            .unwrap();
+
+        let fillers = (100..195).map(|id| entity(id, 2, 0)).collect::<Vec<_>>();
+        let filler_neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &fillers,
+        }];
+        assert!(
+            runtime
+                .spawn_current_zone_neighbors(&filler_neighbors, &mut SnapshotHost)
+                .iter()
+                .all(|attempt| attempt.result.is_ok())
+        );
+        assert_eq!(runtime.arena.remaining_pool_capacity(), 0);
+
+        let replacement_entities = [entity(250, 2, 0)];
+        let replacement_neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: 2,
+            entities: &replacement_entities,
+        }];
+        let replacement = *runtime
+            .spawn_current_zone_neighbors(&replacement_neighbors, &mut SnapshotHost)[0]
+            .result
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(replacement.vm, candidate.vm);
+        assert_ne!(replacement.arena, candidate.arena);
+        assert!(runtime.arena.get(candidate.arena).is_none());
+        assert_eq!(runtime.arena.spawn_table().flags(200), Some(0));
+        assert_eq!(runtime.arena.spawn_table().flags(250), Some(1));
+        assert_eq!(
+            runtime.take_cleanup_actions(),
+            [RuntimeCleanupAction::FreeObjectAudio(candidate)]
+        );
+        assert_eq!(
+            runtime.take_reclaim_event_faults(),
+            [RuntimeReclaimEventFault { object: candidate }]
+        );
+        assert_eq!(
+            runtime.arena.len(),
+            crate::object_arena::OBJECT_POOL_CAPACITY
+        );
+    }
+
     fn attach_test_child(
         runtime: &mut RetailRuntime,
         parent: RuntimeObjectHandle,
@@ -3025,6 +7301,17 @@ mod tests {
         object
     }
 
+    fn configure_level_end_transition(
+        runtime: &mut RetailRuntime,
+        object: RuntimeObjectHandle,
+        target: i32,
+    ) {
+        let vm = runtime.machine.object_mut(object.vm).unwrap();
+        vm.configure_test_event_interrupt(LEVEL_END_EVENT, vec![misc(12, 9, 0x0e00), 0x8280_0000])
+            .unwrap();
+        vm.set_register(0, target.cast_unsigned() << 8).unwrap();
+    }
+
     fn arm_zone_migration_terminate_handler(
         runtime: &mut RetailRuntime,
         object: RuntimeObjectHandle,
@@ -3035,6 +7322,281 @@ mod tests {
             .unwrap()
             .configure_test_event_interrupt(TERMINATE_EVENT, vec![misc(12, 4, 0x0e00), 0x8280_0000])
             .unwrap();
+    }
+
+    fn install_neighbor_termination_program(
+        runtime: &mut RetailRuntime,
+        requester: RuntimeObjectHandle,
+        trailing_code: &[u32],
+    ) {
+        let mut code = vec![misc(12, 7, 0x0be0)];
+        code.extend_from_slice(trailing_code);
+        code.push(RETURN);
+        let mut vm = VmObject::new(requester.vm, code).unwrap();
+        vm.set_link(0, Some(requester.vm)).unwrap();
+        runtime.machine.upsert_object(vm).unwrap();
+    }
+
+    fn arm_counting_terminate_handler(
+        runtime: &mut RetailRuntime,
+        object: RuntimeObjectHandle,
+        register: u16,
+    ) {
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                TERMINATE_EVENT,
+                vec![
+                    Instruction::encode(0x00, 0x0801, 0x0e00 | register),
+                    Instruction::encode(0x11, 0x0e1f, 0x0e00 | register),
+                    0x8280_0000,
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn misc_twelve_seven_preserves_neighbor_root_and_postorder_lifecycle() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let parent = spawn_test_object(&mut runtime, ZONE, 70, 2, 0);
+        let child = attach_test_child(&mut runtime, parent, ZONE, 3);
+        let root_seven = spawn_test_object(&mut runtime, ZONE, 71, 2, 0);
+        let zone_b = spawn_test_object(&mut runtime, ZONE_B, 72, 2, 0);
+        let migrant = spawn_test_object(&mut runtime, ZONE_B, 73, 2, 0);
+        let status_immune = spawn_test_object(&mut runtime, ZONE, 74, 2, 0);
+        let state_immune = spawn_test_object(&mut runtime, ZONE, 75, 2, 0);
+        let crash = spawn_test_object(&mut runtime, ZONE, 76, 0, 0);
+        let requester = spawn_test_object(&mut runtime, CURRENT_ZONE, 77, 2, 0);
+
+        runtime
+            .arena
+            .reparent_to_root(parent.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(status_immune.arena, RootHandle::new(2).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(state_immune.arena, RootHandle::new(2).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(zone_b.arena, RootHandle::new(4).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(migrant.arena, RootHandle::new(5).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(root_seven.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(status_immune.vm)
+            .unwrap()
+            .set_register(process_register::STATUS_B, ZONE_TERMINATION_STATUS_B_IMMUNE)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(state_immune.vm)
+            .unwrap()
+            .set_register(process_register::STATE_FLAGS, ZONE_TERMINATION_STATE_IMMUNE)
+            .unwrap();
+        arm_zone_migration_terminate_handler(&mut runtime, migrant);
+        arm_counting_terminate_handler(&mut runtime, crash, 10);
+        runtime.transition_zone_context = ObjectZoneContext::Target(ZONE_C);
+        runtime.set_level_state_context(level_context(CURRENT_ZONE, false, Vec::new()));
+        install_neighbor_termination_program(
+            &mut runtime,
+            requester,
+            &[Instruction::encode(0x11, 0x0805, 0x0e0a)],
+        );
+        let mut host = NeighborTerminationHost::new(vec![ZONE, ZONE_B, ZONE]);
+
+        let frame = runtime.run_frame(&mut host, 8).unwrap();
+
+        assert_eq!(host.neighbor_queries, [CURRENT_ZONE]);
+        assert_eq!(host.neighbors, [ZONE, ZONE_B, ZONE]);
+        assert_eq!(host.freed_audio, [child, parent, root_seven, zone_b]);
+        assert_eq!(runtime.take_cleanup_actions(), []);
+        for (object, spawn_id) in [(parent, 70), (root_seven, 71), (zone_b, 72)] {
+            assert_eq!(runtime.object_for_vm(object.vm), None);
+            assert_eq!(runtime.arena.spawn_table().flags(spawn_id), Some(0));
+        }
+        for object in [status_immune, state_immune, crash, migrant, requester] {
+            assert_eq!(runtime.object_for_vm(object.vm), Some(object));
+        }
+        assert_eq!(runtime.arena.get(migrant.arena).unwrap().zone(), ZONE_C);
+        assert_eq!(
+            runtime.machine.object(crash.vm).unwrap().register(10),
+            Ok(0x200)
+        );
+        assert_eq!(
+            runtime.machine.object(requester.vm).unwrap().register(10),
+            Ok(0x500),
+            "the requester resumes only after synchronous teardown"
+        );
+        assert_eq!(
+            runtime.transition_zone_context,
+            ObjectZoneContext::Target(ZONE_C)
+        );
+        assert!(frame.effects.iter().any(|effect| matches!(
+            effect,
+            VmEffect::TerminateCurrentZoneNeighbors { requester: effect_requester }
+                if *effect_requester == requester.vm
+        )));
+    }
+
+    #[test]
+    fn misc_twelve_seven_rescans_objects_migrated_into_a_later_neighbor() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let migrant = spawn_test_object(&mut runtime, ZONE_B, 80, 2, 0);
+        let requester = spawn_test_object(&mut runtime, CURRENT_ZONE, 81, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        arm_zone_migration_terminate_handler(&mut runtime, migrant);
+        runtime.transition_zone_context = ObjectZoneContext::Target(ZONE);
+        runtime.set_level_state_context(level_context(CURRENT_ZONE, false, Vec::new()));
+        install_neighbor_termination_program(
+            &mut runtime,
+            requester,
+            &[Instruction::encode(0x11, 0x0805, 0x0e0a)],
+        );
+        let mut host = NeighborTerminationHost::new(vec![ZONE_B, ZONE]);
+
+        let frame = runtime.run_frame(&mut host, 8).unwrap();
+
+        assert_eq!(host.neighbor_queries, [CURRENT_ZONE]);
+        assert_eq!(host.freed_audio, [migrant]);
+        assert_eq!(runtime.object_for_vm(migrant.vm), None);
+        assert_eq!(runtime.arena.spawn_table().flags(80), Some(0));
+        assert_eq!(
+            runtime.machine.object(requester.vm).unwrap().register(10),
+            Ok(0x500)
+        );
+        assert_eq!(
+            frame
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, VmEffect::SetObjectZoneToTransitionTarget { object } if *object == migrant.vm))
+                .count(),
+            2,
+            "the migrated object is visited again when the later neighbor begins"
+        );
+    }
+
+    #[test]
+    fn misc_twelve_seven_can_reclaim_its_active_requester_cleanly() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let requester = spawn_test_object(&mut runtime, CURRENT_ZONE, 82, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime.set_level_state_context(level_context(CURRENT_ZONE, false, Vec::new()));
+        install_neighbor_termination_program(&mut runtime, requester, &[misc(12, 5, 0x0be0)]);
+        let mut host = NeighborTerminationHost::new(vec![CURRENT_ZONE]);
+
+        let frame = runtime.run_frame(&mut host, 8).unwrap();
+
+        assert_eq!(host.neighbor_queries, [CURRENT_ZONE]);
+        assert_eq!(host.freed_audio, [requester]);
+        assert_eq!(runtime.object_for_vm(requester.vm), None);
+        assert_eq!(runtime.arena.spawn_table().flags(82), Some(0));
+        assert!(runtime.faulted_objects.is_empty());
+        assert!(matches!(
+            frame.executions.as_slice(),
+            [RuntimeExecution {
+                object,
+                result: Ok(Execution {
+                    reason: HaltReason::ObjectTerminated,
+                    ..
+                }),
+            }] if *object == requester
+        ));
+        assert_eq!(
+            frame.effects,
+            [VmEffect::TerminateCurrentZoneNeighbors {
+                requester: requester.vm,
+            }],
+            "the instruction after misc 12/7 must not resume a reclaimed requester"
+        );
+    }
+
+    #[test]
+    fn misc_twelve_seven_is_a_no_op_when_the_current_zone_is_null() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let requester = spawn_test_object(&mut runtime, CURRENT_ZONE, 83, 2, 0);
+        let untouched = spawn_test_object(&mut runtime, ZONE, 84, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(untouched.arena, RootHandle::new(1).unwrap())
+            .unwrap();
+        install_neighbor_termination_program(
+            &mut runtime,
+            requester,
+            &[Instruction::encode(0x11, 0x0805, 0x0e0a)],
+        );
+        let mut host = NeighborTerminationHost::new(vec![ZONE]);
+
+        runtime.run_frame(&mut host, 8).unwrap();
+
+        assert!(host.neighbor_queries.is_empty());
+        assert!(host.freed_audio.is_empty());
+        assert_eq!(runtime.object_for_vm(untouched.vm), Some(untouched));
+        assert_eq!(
+            runtime.machine.object(requester.vm).unwrap().register(10),
+            Ok(0x500)
+        );
+    }
+
+    #[test]
+    fn misc_twelve_seven_clears_the_machine_spawn_bit_before_trailing_spawn_writes() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let terminated = spawn_test_object(&mut runtime, ZONE, 70, 2, 0);
+        let requester = spawn_test_object(&mut runtime, CURRENT_ZONE, 85, 2, 0);
+        runtime
+            .arena
+            .reparent_to_root(requester.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime.set_level_state_context(level_context(CURRENT_ZONE, false, Vec::new()));
+        install_neighbor_termination_program(&mut runtime, requester, &[misc(10, 1, 0x0e00)]);
+        runtime
+            .machine
+            .object_mut(requester.vm)
+            .unwrap()
+            .set_register(0, 70 << 8)
+            .unwrap();
+        let mut host = NeighborTerminationHost::new(vec![ZONE]);
+
+        let frame = runtime.run_frame(&mut host, 8).unwrap();
+
+        assert_eq!(host.freed_audio, [terminated]);
+        assert_eq!(runtime.object_for_vm(terminated.vm), None);
+        assert_eq!(runtime.machine.spawn_flags(70), Ok(4));
+        assert_eq!(runtime.arena.spawn_table().flags(70), Some(4));
+        assert!(frame.effects.iter().any(|effect| matches!(
+            effect,
+            VmEffect::SpawnFlagsChanged {
+                object,
+                id: 70,
+                flags: 4,
+            } if *object == requester.vm
+        )));
     }
 
     #[test]
@@ -3159,14 +7721,23 @@ mod tests {
         opcode: u8,
         event: u32,
     ) {
-        let link = usize::from(recipient.is_some());
+        let link = usize::from(recipient.is_some() && opcode != 0x90);
         let operand_a = u16::try_from(link << 9).unwrap();
         let mut object = VmObject::new(
             sender.vm,
             vec![Instruction::encode(opcode, operand_a, 0x0e00), RETURN],
         )
         .unwrap();
-        object.set_link(0, Some(sender.vm)).unwrap();
+        object
+            .set_link(
+                0,
+                if link == 0 {
+                    recipient.map_or(Some(sender.vm), |recipient| Some(recipient.vm))
+                } else {
+                    Some(sender.vm)
+                },
+            )
+            .unwrap();
         if let Some(recipient) = recipient {
             object.set_link(link, Some(recipient.vm)).unwrap();
         }
@@ -3178,31 +7749,73 @@ mod tests {
     fn event_opcodes_dispatch_synchronously_through_the_runtime_host() {
         const EVENT: u32 = 0x1500;
 
-        for opcode in [0x87, 0x90] {
-            let mut runtime = RetailRuntime::new(0);
-            let recipient = spawn_test_object(&mut runtime, ZONE, u16::from(opcode), 2, 0);
-            let sender = spawn_test_object(&mut runtime, ZONE, u16::from(opcode) + 1, 2, 0);
+        let mut runtime = RetailRuntime::new(0);
+        let recipient = spawn_test_object(&mut runtime, ZONE, 0x87, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 0x88, 2, 0);
+        runtime
+            .machine
+            .object_mut(recipient.vm)
+            .unwrap()
+            .configure_test_event_interrupt(EVENT, vec![0x8280_0000])
+            .unwrap();
+        install_test_event_sender(&mut runtime, sender, Some(recipient), 0x87, EVENT);
+
+        runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(recipient.vm)
+                .unwrap()
+                .register(process_register::EVENT),
+            Ok(EVENT)
+        );
+        assert!(!runtime.faulted_objects.contains(&sender));
+
+        let mut runtime = RetailRuntime::new(0);
+        let root = spawn_test_object(&mut runtime, ZONE, 0x90, 2, 0);
+        let descendant = spawn_test_object(&mut runtime, ZONE, 0x91, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 0x92, 2, 0);
+        for recipient in [root, descendant] {
             runtime
                 .machine
                 .object_mut(recipient.vm)
                 .unwrap()
                 .configure_test_event_interrupt(EVENT, vec![0x8280_0000])
                 .unwrap();
-            install_test_event_sender(&mut runtime, sender, Some(recipient), opcode, EVENT);
-
-            runtime.run_frame(&mut SnapshotHost, 8).unwrap();
-
-            assert_eq!(
-                runtime
-                    .machine
-                    .object(recipient.vm)
-                    .unwrap()
-                    .register(process_register::EVENT),
-                Ok(EVENT),
-                "opcode {opcode:#x} did not synchronously reach its recipient"
-            );
-            assert!(!runtime.faulted_objects.contains(&sender));
         }
+        runtime
+            .arena
+            .add_child(TreeParent::Object(root.arena), descendant.arena)
+            .unwrap();
+        RetailRuntime::refresh_tree_links::<()>(
+            &runtime.arena,
+            &runtime.handles,
+            &mut runtime.machine,
+        )
+        .unwrap();
+        install_test_event_sender(&mut runtime, sender, Some(root), 0x90, EVENT);
+
+        runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(root.vm)
+                .unwrap()
+                .register(process_register::EVENT),
+            Ok(0),
+            "opcode 0x90 must exclude its linked root"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(descendant.vm)
+                .unwrap()
+                .register(process_register::EVENT),
+            Ok(EVENT)
+        );
+        assert!(!runtime.faulted_objects.contains(&sender));
 
         let mut runtime = RetailRuntime::new(0);
         let first = spawn_test_object(&mut runtime, ZONE, 200, 2, 0);
@@ -3231,6 +7844,382 @@ mod tests {
             );
         }
         assert!(!runtime.faulted_objects.contains(&sender));
+    }
+
+    fn event_transition_state() -> VmStateProgram {
+        VmStateProgram::new(
+            7,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: GOOL_PC_NONE,
+            },
+            vec![Instruction::encode(0x11, 0x0805, 0x0e08), 0x8280_0000],
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn self_and_nested_back_send_run_the_outer_current_objects_transition() {
+        const OUTER_EVENT: u32 = 0x1500;
+        const STATE_EVENT: u32 = 0x0f00;
+
+        let mut runtime = RetailRuntime::new(0);
+        let object = spawn_test_object(&mut runtime, ZONE, 220, 2, 0);
+        let mut vm = VmObject::new(object.vm, vec![0x8700_080f, RETURN]).unwrap();
+        vm.configure_test_event_state(STATE_EVENT, 7);
+        runtime.machine.upsert_object(vm).unwrap();
+        let mut host = AudioRecordingHost::new(Some(event_transition_state()));
+
+        let frame = runtime.run_frame(&mut host, 2).unwrap();
+
+        assert!(frame.executions[0].result.is_ok(), "{frame:?}");
+        assert_eq!(
+            runtime.machine.object(object.vm).unwrap().register(8),
+            Ok(0x500),
+            "a direct self-send must enter the rebound transition before KEEP cleanup"
+        );
+
+        let mut runtime = RetailRuntime::new(0);
+        let outer = spawn_test_object(&mut runtime, ZONE, 221, 2, 0);
+        let nested = spawn_test_object(&mut runtime, ZONE, 222, 2, 0);
+        let mut outer_vm = VmObject::new(outer.vm, vec![0x8720_0815, RETURN]).unwrap();
+        outer_vm.set_link(1, Some(nested.vm)).unwrap();
+        outer_vm.configure_test_event_state(STATE_EVENT, 7);
+        runtime.machine.upsert_object(outer_vm).unwrap();
+        let mut nested_vm = VmObject::new(nested.vm, vec![RETURN]).unwrap();
+        nested_vm.set_link(1, Some(outer.vm)).unwrap();
+        nested_vm
+            .configure_test_event_interrupt(OUTER_EVENT, vec![0x8720_080f, 0x8280_0000])
+            .unwrap();
+        runtime.machine.upsert_object(nested_vm).unwrap();
+        let mut host = AudioRecordingHost::new(Some(event_transition_state()));
+
+        let frame = runtime.run_frame(&mut host, 2).unwrap();
+
+        assert!(frame.executions[0].result.is_ok(), "{frame:?}");
+        assert_eq!(
+            runtime.machine.object(outer.vm).unwrap().register(8),
+            Ok(0x500),
+            "cur_obj must remain the outer updater across a nested recipient back-send"
+        );
+        assert!(!runtime.faulted_objects.contains(&outer));
+        assert!(!runtime.faulted_objects.contains(&nested));
+    }
+
+    #[test]
+    fn direct_send_delivers_argv_and_empty_opcode_argv_is_non_null_and_contained() {
+        const EVENT: u32 = 0x0f00;
+        const EARG_ZERO: u32 = 0x1c00_5b7f;
+
+        let mut runtime = RetailRuntime::new(0);
+        let recipient = spawn_test_object(&mut runtime, ZONE, 230, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 231, 2, 0);
+        runtime
+            .machine
+            .object_mut(recipient.vm)
+            .unwrap()
+            .configure_test_event_interrupt(
+                EVENT,
+                vec![Instruction::encode(0x11, 0x0b7f, 0x0e08), 0x8280_0000],
+            )
+            .unwrap();
+        let mut sender_vm =
+            VmObject::new(sender.vm, vec![0x16be_0804, 0x8724_080f, RETURN]).unwrap();
+        sender_vm.set_link(1, Some(recipient.vm)).unwrap();
+        runtime.machine.upsert_object(sender_vm).unwrap();
+
+        runtime.run_frame(&mut SnapshotHost, 3).unwrap();
+
+        assert_eq!(
+            runtime.machine.object(recipient.vm).unwrap().register(8),
+            Ok(0x400)
+        );
+        assert!(
+            runtime
+                .machine
+                .object(sender.vm)
+                .unwrap()
+                .stack()
+                .is_empty()
+        );
+
+        let mut runtime = RetailRuntime::new(0);
+        let recipient = spawn_test_object(&mut runtime, ZONE, 232, 2, 0);
+        let mut recipient_vm = VmObject::new(
+            recipient.vm,
+            vec![
+                EARG_ZERO,
+                Instruction::encode(0x11, 0x0e1f, 0x0e08),
+                event_service_return(),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        recipient_vm
+            .configure_test_event_service(
+                vec![
+                    EARG_ZERO,
+                    Instruction::encode(0x11, 0x0e1f, 0x0e08),
+                    event_service_return(),
+                    RETURN,
+                ],
+                0,
+            )
+            .unwrap();
+        recipient_vm.restart(3).unwrap();
+        runtime.machine.upsert_object(recipient_vm).unwrap();
+
+        runtime
+            .dispatch_event(&mut SnapshotHost, None, Some(recipient), EVENT, None)
+            .unwrap();
+        assert_eq!(
+            runtime.machine.object(recipient.vm).unwrap().register(8),
+            Ok(0)
+        );
+        runtime
+            .machine
+            .object_mut(recipient.vm)
+            .unwrap()
+            .set_register(8, 0xdead_beef)
+            .unwrap();
+        assert!(
+            runtime
+                .dispatch_event(&mut SnapshotHost, None, Some(recipient), EVENT, Some(&[]),)
+                .is_err(),
+            "Some(&[]) must install a real zero-length argv token"
+        );
+        assert_eq!(
+            runtime.machine.object(recipient.vm).unwrap().register(8),
+            Ok(0xdead_beef)
+        );
+
+        let sender = spawn_test_object(&mut runtime, ZONE, 233, 2, 0);
+        let mut sender_vm = VmObject::new(
+            sender.vm,
+            vec![
+                0x8720_080f,
+                Instruction::encode(0x11, 0x0805, 0x0e09),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        sender_vm.set_link(1, Some(recipient.vm)).unwrap();
+        runtime.machine.upsert_object(sender_vm).unwrap();
+        runtime
+            .arena
+            .reparent_to_root(sender.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(recipient.arena, RootHandle::new(7).unwrap())
+            .unwrap();
+        RetailRuntime::refresh_tree_links::<()>(
+            &runtime.arena,
+            &runtime.handles,
+            &mut runtime.machine,
+        )
+        .unwrap();
+
+        runtime.run_frame(&mut SnapshotHost, 3).unwrap();
+
+        assert_eq!(
+            runtime.machine.object(sender.vm).unwrap().register(9),
+            Ok(0x500)
+        );
+        assert!(
+            !runtime.faulted_objects.contains(&sender),
+            "direct GoolSendEvent errors are ignored by opcode 0x87"
+        );
+    }
+
+    fn audio_request_objects(requests: &[AudioHostRequest]) -> Vec<VmObjectHandle> {
+        requests
+            .iter()
+            .map(|request| match request {
+                AudioHostRequest::CreateVoice(request) => request.object,
+                AudioHostRequest::Control(_) => panic!("event test emitted audio control"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn send_event_mode_four_applies_category_and_asymmetric_face_bounds() {
+        const EVENT: u32 = 0x0f00;
+        let local_bound = Bounds3 {
+            min: Vec3 { x: 0, y: 0, z: 0 },
+            max: Vec3 {
+                x: 10,
+                y: 10,
+                z: 10,
+            },
+        };
+        let mut runtime = RetailRuntime::new(0);
+        let accepted = spawn_test_object(&mut runtime, ZONE, 240, 2, 0);
+        let rejected_face = spawn_test_object(&mut runtime, ZONE, 241, 2, 0);
+        let wrong_category = spawn_test_object(&mut runtime, ZONE, 242, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 243, 2, 0);
+        let mut sender_vm = VmObject::new(sender.vm, vec![0x8f80_080f, RETURN]).unwrap();
+        sender_vm.set_retail_local_bound(local_bound);
+        runtime.machine.upsert_object(sender_vm).unwrap();
+
+        for (object, category, translation) in [
+            (accepted, 0x300, [10, 0, 0]),
+            (rejected_face, 0x400, [-10, 0, 0]),
+            (wrong_category, 0x200, [0, 0, 0]),
+        ] {
+            let vm = runtime.machine.object_mut(object.vm).unwrap();
+            vm.configure_test_program_identity(category);
+            vm.set_retail_local_bound(local_bound);
+            set_test_translation(vm, translation);
+            vm.configure_test_event_interrupt(EVENT, vec![audio_create(), 0x8280_0000])
+                .unwrap();
+            prepare_audio_registers(&mut runtime, object);
+        }
+        let mut host = AudioRecordingHost::new(None);
+
+        runtime.run_frame(&mut host, 2).unwrap();
+
+        assert_eq!(audio_request_objects(&host.requests), [accepted.vm]);
+        assert!(!runtime.faulted_objects.contains(&sender));
+
+        let mut runtime = RetailRuntime::new(0);
+        let wrong_category = spawn_test_object(&mut runtime, ZONE, 244, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 245, 2, 0);
+        runtime
+            .machine
+            .object_mut(wrong_category.vm)
+            .unwrap()
+            .configure_test_program_identity(0x200);
+        let mut sender_vm = VmObject::new(sender.vm, vec![0x8f80_080f, RETURN]).unwrap();
+        sender_vm
+            .set_register(process_register::MISC_VALUE, 0xdead_beef)
+            .unwrap();
+        runtime.machine.upsert_object(sender_vm).unwrap();
+
+        runtime.run_frame(&mut SnapshotHost, 2).unwrap();
+
+        assert_eq!(
+            runtime
+                .machine
+                .object(sender.vm)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0xdead_beef),
+            "an eligible broadcast with no matches preserves prior ACK/MISC"
+        );
+    }
+
+    #[test]
+    fn send_event_mode_five_uses_global_cadence_and_continues_after_handler_error() {
+        const EVENT: u32 = 0x0f00;
+        let local_bound = Bounds3 {
+            min: Vec3 {
+                x: -1,
+                y: -1,
+                z: -1,
+            },
+            max: Vec3 { x: 1, y: 1, z: 1 },
+        };
+        let mut runtime = RetailRuntime::new(0);
+        let candidates = (0..11)
+            .map(|index| spawn_test_object(&mut runtime, ZONE, 250 + index, 2, 0))
+            .collect::<Vec<_>>();
+        let sender = spawn_test_object(&mut runtime, ZONE, 270, 2, 0);
+        for candidate in &candidates {
+            let vm = runtime.machine.object_mut(candidate.vm).unwrap();
+            vm.configure_test_program_identity(0x300);
+            vm.set_retail_local_bound(local_bound);
+            vm.configure_test_event_interrupt(EVENT, vec![audio_create(), 0x8280_0000])
+                .unwrap();
+            prepare_audio_registers(&mut runtime, *candidate);
+        }
+        let order = runtime
+            .arena
+            .postorder_snapshot()
+            .unwrap()
+            .into_iter()
+            .filter_map(|arena| runtime.handles.for_arena(arena))
+            .filter(|object| candidates.contains(object))
+            .collect::<Vec<_>>();
+        assert_eq!(order.len(), 11);
+        runtime
+            .machine
+            .object_mut(order[2].vm)
+            .unwrap()
+            .configure_test_event_interrupt(EVENT, vec![0xff00_0000])
+            .unwrap();
+        let mut sender_vm = VmObject::new(sender.vm, vec![0x8fa0_080f, RETURN]).unwrap();
+        for register in [
+            process_register::MISC_B_Y,
+            process_register::MISC_B_X,
+            process_register::MISC_B_Z,
+        ] {
+            sender_vm.set_register(register, 100).unwrap();
+        }
+        runtime.machine.upsert_object(sender_vm).unwrap();
+        let mut host = AudioRecordingHost::new(None);
+
+        runtime.run_frame(&mut host, 2).unwrap();
+
+        assert_eq!(
+            audio_request_objects(&host.requests),
+            [order[0].vm, order[1].vm, order[5].vm, order[10].vm],
+            "matching ordinals 1,2,3,6,11 are selected and failed ordinal 3 still advances count"
+        );
+        assert!(!runtime.faulted_objects.contains(&sender));
+    }
+
+    #[test]
+    fn all_root_send_event_observes_live_reparenting_into_a_later_root() {
+        const EVENT: u32 = 0x0f00;
+        let mut runtime = RetailRuntime::new(0);
+        let mover = spawn_test_object(&mut runtime, ZONE, 280, 2, 0);
+        let sender = spawn_test_object(&mut runtime, ZONE, 281, 2, 0);
+        let mover_vm = runtime.machine.object_mut(mover.vm).unwrap();
+        mover_vm.set_register(0, 7 << 8).unwrap();
+        mover_vm
+            .configure_test_event_interrupt(
+                EVENT,
+                vec![audio_create(), misc(12, 2, 0x0e00), 0x8280_0000],
+            )
+            .unwrap();
+        prepare_audio_registers(&mut runtime, mover);
+        runtime
+            .machine
+            .upsert_object(VmObject::new(sender.vm, vec![0x8f00_080f, RETURN]).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(mover.arena, RootHandle::new(0).unwrap())
+            .unwrap();
+        runtime
+            .arena
+            .reparent_to_root(sender.arena, RootHandle::new(1).unwrap())
+            .unwrap();
+        RetailRuntime::refresh_tree_links::<()>(
+            &runtime.arena,
+            &runtime.handles,
+            &mut runtime.machine,
+        )
+        .unwrap();
+        let mut host = AudioRecordingHost::new(None);
+
+        runtime.run_frame(&mut host, 2).unwrap();
+
+        assert_eq!(
+            audio_request_objects(&host.requests),
+            [mover.vm, mover.vm],
+            "root zero delivery moves the object into root seven, which the live cursor visits later"
+        );
+        assert_eq!(
+            runtime.arena.get(mover.arena).unwrap().parent(),
+            TreeParent::Root(RootHandle::new(7).unwrap())
+        );
     }
 
     #[test]
@@ -3413,8 +8402,48 @@ mod tests {
         assert!(title.object_for_vm(crash.vm).is_none());
     }
 
+    #[test]
+    fn every_dedicated_main_special_is_crash_immune_outside_title() {
+        let mut gameplay = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let special = spawn_test_object(&mut gameplay, ZONE, 1, 4, 8);
+        assert!(special.arena.is_dedicated_main());
+
+        let report = gameplay
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+
+        assert!(report.terminated.is_empty());
+        assert_eq!(gameplay.object_for_vm(special.vm), Some(special));
+
+        let mut title = RetailRuntime::new_for_level(0, LevelId::TITLE);
+        let special = spawn_test_object(&mut title, ZONE, 1, 4, 8);
+        let report = title
+            .terminate_zone_objects(
+                ZONE,
+                ZoneTerminationMode::Departure { target: ZONE_B },
+                &mut SnapshotHost,
+            )
+            .unwrap();
+        assert_eq!(report.terminated, [special]);
+    }
+
     fn configure_render_state(runtime: &mut RetailRuntime, object: RuntimeObjectHandle, seed: u8) {
         let vm_object = runtime.machine.object_mut(object.vm()).unwrap();
+        vm_object.initialize_arguments(&[0; 12]).unwrap();
+        let stack_origin = usize::try_from(vm_object.initial_stack_pointer()).unwrap();
+        let stack_len = vm_object.stack().len();
+        for index in 0..stack_len {
+            vm_object
+                .set_register(
+                    stack_origin + index,
+                    (u32::from(seed) << 16) | u32::try_from(index).unwrap(),
+                )
+                .unwrap();
+        }
         vm_object.bind_animation_data(&[0; 16]);
         vm_object
             .set_register(
@@ -3446,6 +8475,12 @@ mod tests {
             .unwrap();
         vm_object
             .set_register(process_register::SIZE, (-i32::from(seed)) as u32)
+            .unwrap();
+        vm_object
+            .set_register(
+                process_register::INVINCIBILITY_STATE,
+                0x0000_ab00 | u32::from(seed),
+            )
             .unwrap();
         vm_object.set_retail_colors([u16::from(seed); COLOR_COUNT]);
     }
@@ -3674,6 +8709,11 @@ mod tests {
         assert_eq!(snapshot.state_flags, 0x4000_0003);
         assert_eq!(snapshot.size, -3);
         assert_eq!(snapshot.colors, [3; COLOR_COUNT]);
+        assert_eq!(snapshot.text_font_override_word_offset, 0xab);
+        assert_eq!(
+            snapshot.text_arguments,
+            std::array::from_fn(|index| Some((3_u32 << 16) | (14 - index) as u32))
+        );
     }
 
     #[test]
@@ -4022,5 +9062,493 @@ mod tests {
         let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
         let mut host = NsfProgramHost::new(&metadata, &nsf, &nsf_bytes);
         assert_eq!(host.animation_bound_source(binding), Ok(None));
+    }
+
+    fn level_location(zone: Eid, path: u16, progress: i32) -> RetailCameraLocation {
+        RetailCameraLocation {
+            path: crust_formats::stream::RetailPathId {
+                zone,
+                index: u32::from(path),
+            },
+            progress: crate::retail_frame::PathProgress::clamped(
+                progress,
+                core::num::NonZeroU16::new(32).unwrap(),
+            ),
+        }
+    }
+
+    fn level_context(
+        zone: Eid,
+        first_spawn: bool,
+        active_neighbor_zones: Vec<Eid>,
+    ) -> RetailLevelStateContext {
+        RetailLevelStateContext {
+            location: level_location(zone, 2, 0x345),
+            graphics_flags: 0,
+            box_count: 0x900,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn,
+            active_neighbor_zones,
+        }
+    }
+
+    fn level_snapshot(level: LevelId) -> RetailLevelSnapshot {
+        RetailLevelSnapshot {
+            player_translation: [11, 22, 33],
+            player_rotation_yxz: [0; 3],
+            player_scale: [0x1000, 0x1100, 0x1200],
+            location: level_location(ZONE, 2, 0x345),
+            level,
+            death_resets_counter: true,
+            spawn_words: std::array::from_fn(|index| u32::try_from(index).unwrap()),
+            box_count: 0x900,
+        }
+    }
+
+    #[test]
+    fn retail_demo_start_preflights_then_installs_seed_snapshot_bound_and_globals() {
+        let level = LevelId::new(0x09).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .set_global_word(CHECKPOINT_ID_GLOBAL, 7 << 8)
+            .unwrap();
+        let snapshot = level_snapshot(level);
+        let bound = Bounds3 {
+            min: Vec3 {
+                x: -10,
+                y: -20,
+                z: -30,
+            },
+            max: Vec3 {
+                x: 40,
+                y: 50,
+                z: 60,
+            },
+        };
+
+        runtime
+            .install_retail_demo_start(snapshot.clone(), 0x1234_5678, bound)
+            .unwrap();
+
+        assert_eq!(runtime.saved_level_state(), Some(&snapshot));
+        assert_eq!(runtime.machine.random_seed(), 0x1234_5678);
+        assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(2));
+        assert_eq!(
+            runtime
+                .level_state_context()
+                .expect("demo start preserves the checked context")
+                .checkpoint_id,
+            -1
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .retail_local_bound(),
+            bound
+        );
+    }
+
+    #[test]
+    fn retail_demo_start_rejects_a_foreign_snapshot_before_mutation() {
+        let mounted = LevelId::new(0x09).unwrap();
+        let recorded = LevelId::new(0x0f).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(PBAK_STATE_GLOBAL + 1, mounted);
+        spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+
+        assert_eq!(
+            runtime.install_retail_demo_start(
+                level_snapshot(recorded),
+                0x1234_5678,
+                Bounds3::default(),
+            ),
+            Err(RetailDemoStartError::LevelMismatch { mounted, recorded })
+        );
+        assert_eq!(runtime.saved_level_state(), None);
+        assert_eq!(runtime.machine.random_seed(), 12_345);
+        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
+    }
+
+    #[test]
+    fn level_save_captures_native_fields_and_translation_overrides() {
+        let level = LevelId::new(0x03).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(CURRENT_DISPLAY_GLOBAL + 1, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let caller = spawn_test_object(&mut runtime, ZONE, 6, 2, 0);
+        for (register, value) in [
+            (process_register::TRANSLATION_X, 11_i32),
+            (process_register::TRANSLATION_Y, 22),
+            (process_register::TRANSLATION_Z, 33),
+            (process_register::ROTATION_Y, 0x111),
+            (process_register::ROTATION_X, 0x222),
+            (process_register::ROTATION_Z, 0x333),
+            (process_register::SCALE_X, 0x1000),
+            (process_register::SCALE_Y, 0x1100),
+            (process_register::SCALE_Z, 0x1200),
+        ] {
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .set_register(register, value.cast_unsigned())
+                .unwrap();
+        }
+        for (register, value) in [
+            (process_register::TRANSLATION_X, -101_i32),
+            (process_register::TRANSLATION_Y, -202),
+            (process_register::TRANSLATION_Z, -303),
+            (
+                process_register::STATUS_B,
+                SAVE_TRANSLATION_FROM_CALLER_STATUS_B as i32,
+            ),
+        ] {
+            runtime
+                .machine
+                .object_mut(caller.vm)
+                .unwrap()
+                .set_register(register, value.cast_unsigned())
+                .unwrap();
+        }
+        runtime.arena.spawn_table_mut().set_flags(42, 0xa5).unwrap();
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+
+        let RetailSaveStateOutcome::Saved(caller_save) =
+            runtime.save_level_state(caller, false).unwrap()
+        else {
+            panic!("unrestricted zone must save");
+        };
+        assert_eq!(caller_save.player_translation, [-101, -202, -303]);
+        assert_eq!(caller_save.player_rotation_yxz, [0; 3]);
+        assert_eq!(caller_save.player_scale, [0x1000, 0x1100, 0x1200]);
+        assert_eq!(caller_save.location, level_location(ZONE, 2, 0x345));
+        assert_eq!(caller_save.level, level);
+        assert!(!caller_save.death_resets_counter);
+        assert_eq!(caller_save.spawn_words[42], 0xa5);
+        assert_eq!(caller_save.box_count, 0x900);
+
+        let context = runtime.level_state_context.as_mut().unwrap();
+        context.checkpoint_id = 7 << 8;
+        context.checkpoint_translation = [700, 701, 702];
+        let RetailSaveStateOutcome::Saved(checkpoint_save) =
+            runtime.save_level_state(caller, true).unwrap()
+        else {
+            panic!("checkpoint save must succeed");
+        };
+        assert_eq!(checkpoint_save.player_translation, [700, 701, 702]);
+        assert!(checkpoint_save.death_resets_counter);
+
+        runtime.level_state_context.as_mut().unwrap().graphics_flags = SAVE_RESTRICTED_ZONE_FLAG;
+        assert_eq!(
+            runtime.save_level_state(caller, false),
+            Ok(RetailSaveStateOutcome::RestrictedByZone)
+        );
+        assert_eq!(runtime.saved_level_state(), Some(checkpoint_save.as_ref()));
+    }
+
+    #[test]
+    fn misc_save_and_load_are_synchronous_and_abort_the_remainder_of_the_frame() {
+        let level = LevelId::new(0x03).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(CURRENT_DISPLAY_GLOBAL + 1, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let child = attach_test_child(&mut runtime, main, ZONE, 2);
+
+        let mut main_vm = VmObject::new(
+            main.vm,
+            vec![
+                misc(12, 0, 0x0be0),
+                Instruction::encode(0x11, 0x0805, 0x0e08),
+                misc(12, 1, 0x0be0),
+                Instruction::encode(0x11, 0x0807, 0x0e09),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        main_vm
+            .set_register(process_register::TRANSLATION_X, 0x111)
+            .unwrap();
+        main_vm
+            .set_register(process_register::TRANSLATION_Y, 0x222)
+            .unwrap();
+        for register in [
+            process_register::SCALE_X,
+            process_register::SCALE_Y,
+            process_register::SCALE_Z,
+        ] {
+            main_vm.set_register(register, 0x1000).unwrap();
+        }
+        runtime.machine.upsert_object(main_vm).unwrap();
+
+        let mut child_vm = VmObject::new(
+            child.vm,
+            vec![Instruction::encode(0x11, 0x0809, 0x0e00), RETURN],
+        )
+        .unwrap();
+        child_vm.set_register(0, 0x1234).unwrap();
+        runtime.machine.upsert_object(child_vm).unwrap();
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, 0)
+            .unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            frame.executions.len(),
+            1,
+            "children and later roots do not run"
+        );
+        assert_eq!(frame.executions[0].object, main);
+        assert_eq!(
+            frame.executions[0].result.as_ref().unwrap(),
+            &Execution {
+                reason: HaltReason::HostEffect,
+                steps: 3,
+            }
+        );
+        assert_eq!(
+            frame.effects,
+            vec![VmEffect::SaveState(main.vm), VmEffect::LoadState(main.vm)]
+        );
+        assert!(runtime.machine.level_restart_requested());
+        assert_eq!(
+            runtime
+                .saved_level_state()
+                .expect("misc 12/0 saved before continuing")
+                .player_translation[0],
+            0x111
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_X),
+            Ok(0x500),
+            "the instruction between save and load executes"
+        );
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_Y),
+            Ok(0x222),
+            "the instruction after load does not execute"
+        );
+        assert_eq!(
+            runtime.machine.object(child.vm).unwrap().register(0),
+            Ok(0x1234)
+        );
+        assert_eq!(
+            runtime.machine.global_word(CURRENT_DISPLAY_GLOBAL),
+            Ok(INITIAL_DISPLAY_MASK),
+            "the aborted frame does not latch its pending display mask"
+        );
+
+        runtime.restart_saved_level(&mut SnapshotHost).unwrap();
+        assert!(!runtime.machine.level_restart_requested());
+    }
+
+    #[test]
+    fn hard_restart_broadcasts_then_terminates_zones_and_resets_crash() {
+        let level = LevelId::new(0x03).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let old_a = spawn_test_object(&mut runtime, ZONE, 6, 2, 0);
+        let old_b = spawn_test_object(&mut runtime, ZONE_B, 7, 3, 0);
+        for (register, value) in [
+            (process_register::TRANSLATION_X, 100_i32),
+            (process_register::TRANSLATION_Y, 200),
+            (process_register::TRANSLATION_Z, 300),
+            (process_register::ROTATION_Y, 0x111),
+            (process_register::ROTATION_X, 0x222),
+            (process_register::ROTATION_Z, 0x333),
+            (process_register::SCALE_X, 0x1000),
+            (process_register::SCALE_Y, 0x1001),
+            (process_register::SCALE_Z, 0x1002),
+        ] {
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .set_register(register, value.cast_unsigned())
+                .unwrap();
+        }
+        runtime.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B, ZONE]));
+        runtime.save_level_state(main, false).unwrap();
+        runtime.arena.spawn_table_mut().set_flags(42, 0x0f).unwrap();
+        for (index, value) in [
+            (SCREEN_SHAKE_GLOBAL, 0x11),
+            (AMBIANCE_OBJECT_GLOBAL, 0x22),
+            (BONUS_ROUND_GLOBAL, 0x100),
+            (BOX_COUNT_GLOBAL, 0x900),
+            (GEM_STAMP_GLOBAL, 0x33),
+            (ISLAND_CAMERA_STATE_GLOBAL, 0x44),
+            (IS_FIRST_ZONE_GLOBAL, 0),
+            (TITLE_PAUSE_STATE_GLOBAL, 0x55),
+            (CAPTION_OBJECT_GLOBAL, 0x66),
+            (PBAK_STATE_GLOBAL, 0),
+            (FADE_COUNTER_GLOBAL, 0x77),
+            (FADE_STEP_GLOBAL, 0x88),
+            (GAME_STATE_GLOBAL, 0x100),
+        ] {
+            runtime.set_global_word(index, value).unwrap();
+        }
+        for register in [
+            process_register::TRANSLATION_X,
+            process_register::TRANSLATION_Y,
+            process_register::TRANSLATION_Z,
+            process_register::SCALE_X,
+            process_register::SCALE_Y,
+            process_register::SCALE_Z,
+            process_register::MISC_A_X,
+            process_register::MISC_A_Y,
+            process_register::MISC_A_Z,
+            process_register::SPEED,
+            process_register::FLOOR_IMPACT_STAMP,
+        ] {
+            runtime
+                .machine
+                .object_mut(main.vm)
+                .unwrap()
+                .set_register(register, 0xdead_beef)
+                .unwrap();
+        }
+        runtime.draw_count = 99;
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level save must restart locally");
+        };
+        assert_eq!(report.level_update_flags, 1);
+        assert_eq!(
+            report
+                .zone_reports
+                .iter()
+                .map(|(zone, _)| *zone)
+                .collect::<Vec<_>>(),
+            [ZONE_B, ZONE]
+        );
+        assert!(report.respawn_event_failures.is_empty());
+        assert!(runtime.object_for_arena(old_a.arena).is_none());
+        assert!(runtime.object_for_arena(old_b.arena).is_none());
+        assert_eq!(runtime.object_for_arena(main.arena), Some(main));
+        assert_eq!(runtime.arena.get(main.arena).unwrap().zone(), ZONE_B);
+        let player = runtime.machine.object(main.vm).unwrap();
+        for (register, expected) in [
+            (process_register::TRANSLATION_X, 100_i32),
+            (process_register::TRANSLATION_Y, 200),
+            (process_register::TRANSLATION_Z, 300),
+            (process_register::ROTATION_Y, 0),
+            (process_register::ROTATION_X, 0),
+            (process_register::ROTATION_Z, 0),
+            (process_register::SCALE_X, 0x1000),
+            (process_register::SCALE_Y, 0x1001),
+            (process_register::SCALE_Z, 0x1002),
+            (process_register::MISC_A_X, 0),
+            (process_register::MISC_A_Y, 0),
+            (process_register::MISC_A_Z, 0),
+            (process_register::SPEED, 0),
+            (process_register::FLOOR_IMPACT_STAMP, 0),
+            (process_register::MISC_B_X, 0),
+        ] {
+            assert_eq!(player.register(register).unwrap().cast_signed(), expected);
+        }
+        assert_eq!(runtime.draw_count(), 0);
+        assert_eq!(runtime.respawn_count, 0x100);
+        assert_eq!(runtime.death_count, 0x100);
+        assert_eq!(report.restored_box_count, 0);
+        assert_eq!(runtime.level_state_context().unwrap().box_count, 0);
+        for (index, expected) in [
+            (SCREEN_SHAKE_GLOBAL, 0),
+            (AMBIANCE_OBJECT_GLOBAL, 0),
+            (BONUS_ROUND_GLOBAL, 0),
+            (BOX_COUNT_GLOBAL, 0),
+            (GEM_STAMP_GLOBAL, 0),
+            (ISLAND_CAMERA_STATE_GLOBAL, 0),
+            (IS_FIRST_ZONE_GLOBAL, 1),
+            (TITLE_PAUSE_STATE_GLOBAL, 0),
+            (CAPTION_OBJECT_GLOBAL, 0),
+            (FADE_COUNTER_GLOBAL, 288),
+            (FADE_STEP_GLOBAL, 32),
+            (NEXT_DISPLAY_GLOBAL, INITIAL_DISPLAY_MASK),
+        ] {
+            assert_eq!(runtime.global_word(index), Ok(expected), "global {index}");
+        }
+        assert_eq!(
+            runtime.arena.spawn_table().flags(42),
+            Some(0x09),
+            "LevelUpdate flag one clears spawn bits one and two"
+        );
+    }
+
+    #[test]
+    fn first_spawn_restart_restores_spawn_words_and_checkpoint_box_count() {
+        let level = LevelId::new(0x03).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(119, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let mut context = level_context(ZONE, true, Vec::new());
+        context.checkpoint_id = 7 << 8;
+        runtime.set_level_state_context(context);
+        runtime.save_level_state(main, true).unwrap();
+        let snapshot = runtime.saved_level_state.as_mut().unwrap();
+        snapshot.spawn_words[7] = 0xffff_ffff;
+        snapshot.spawn_words[8] = 0x11;
+        snapshot.box_count = 0x900;
+        runtime.arena.spawn_table_mut().set_flags(7, 0).unwrap();
+        runtime.arena.spawn_table_mut().set_flags(8, 0).unwrap();
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
+        runtime
+            .set_global_word(CAPTION_OBJECT_GLOBAL, 0x1234)
+            .unwrap();
+
+        let RetailRestartOutcome::Restarted(report) =
+            runtime.restart_saved_level(&mut SnapshotHost).unwrap()
+        else {
+            panic!("same-level first spawn must restart locally");
+        };
+        assert_eq!(report.level_update_flags, 0);
+        assert_eq!(runtime.arena.spawn_table().flags(7), Some(0xffff_fffc));
+        assert_eq!(runtime.arena.spawn_table().flags(8), Some(0x10));
+        assert_eq!(report.restored_box_count, 0x800);
+        assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x800));
+        assert_eq!(runtime.global_word(CAPTION_OBJECT_GLOBAL), Ok(0x1234));
+        assert!(!runtime.level_state_context().unwrap().first_spawn);
+        assert_eq!(runtime.respawn_count, 0);
+        assert_eq!(runtime.death_count, 0);
+    }
+
+    #[test]
+    fn different_level_restart_clears_bonus_before_early_return_only() {
+        let current = LevelId::new_const(0x03);
+        let saved = LevelId::new_const(0x09);
+        let mut runtime = RetailRuntime::new_for_level(119, current);
+        runtime.saved_level_state = Some(level_snapshot(saved));
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime.set_global_word(BONUS_ROUND_GLOBAL, 0x100).unwrap();
+        runtime.set_global_word(BOX_COUNT_GLOBAL, 0x900).unwrap();
+
+        assert_eq!(
+            runtime.restart_saved_level(&mut SnapshotHost),
+            Ok(RetailRestartOutcome::DifferentLevel {
+                saved_level: saved,
+                requested_level_sentinel: -2,
+            })
+        );
+        assert_eq!(runtime.global_word(BONUS_ROUND_GLOBAL), Ok(0));
+        assert!(runtime.level_state_context().unwrap().first_spawn);
+        assert_eq!(
+            runtime.global_word(BOX_COUNT_GLOBAL),
+            Ok(0x900),
+            "LevelInitMisc(0) runs only after the same-level path"
+        );
     }
 }

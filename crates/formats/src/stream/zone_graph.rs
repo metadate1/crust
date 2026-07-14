@@ -164,6 +164,21 @@ impl RetailZoneGraph {
     /// Builds the reachable zone graph with a breadth-first traversal starting
     /// at the playable LDAT spawn zone.
     pub fn from_pair(metadata: &Nsd, nsf: &Nsf, nsf_bytes: &[u8]) -> Result<Self, FormatError> {
+        Self::from_pair_with_roots(metadata, nsf, nsf_bytes, core::iter::empty())
+    }
+
+    /// Builds the LDAT graph plus validated zones opened directly by runtime
+    /// code rather than serialized neighbor links.
+    ///
+    /// The title runtime uses this for `TitleLoadScreen`'s named screen zones.
+    /// Every supplied root is parsed through the same NSD/PTE and ZDAT checks;
+    /// no unvalidated entry is admitted merely because its EID was requested.
+    pub fn from_pair_with_roots(
+        metadata: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        additional_roots: impl IntoIterator<Item = Eid>,
+    ) -> Result<Self, FormatError> {
         let ldat = metadata
             .ldat()
             .ok_or_else(|| FormatError::global("index-only NSD has no playable zone graph"))?;
@@ -180,6 +195,11 @@ impl RetailZoneGraph {
 
         let mut queue = VecDeque::from([ldat.spawn_zone]);
         let mut queued = BTreeSet::from([ldat.spawn_zone]);
+        for root in additional_roots {
+            if queued.insert(root) {
+                queue.push_back(root);
+            }
+        }
         let mut nodes = Vec::new();
         while let Some(eid) = queue.pop_front() {
             let entry = nsf.resolve_entry(metadata, eid)?;

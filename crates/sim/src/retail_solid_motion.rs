@@ -5,6 +5,8 @@
 //! the serialized child links as validated little-endian byte offsets and makes
 //! every piece of mutable scratch state caller-owned.
 
+use crust_formats::binary::Eid;
+
 use crate::math::{Bounds3, Vec3};
 
 const ZDAT_RECT_BYTES: usize = 36;
@@ -155,6 +157,18 @@ impl<'a> SolidZoneView<'a> {
         self
     }
 
+    /// Retains only the object-zone rectangle/header fields read by retail
+    /// when `obj->zone` is no longer in global `cur_zone`'s neighborhood.
+    #[must_use]
+    pub const fn boundary(self) -> SolidZoneBoundary {
+        SolidZoneBoundary {
+            origin: self.origin,
+            dimensions: self.dimensions,
+            graphics_flags: self.graphics_flags,
+            water_y: self.water_y,
+        }
+    }
+
     fn child_table(self, offset: u16, level: u16) -> Result<&'a [u8], SolidMotionError> {
         let offset = usize::from(offset);
         if offset < ZDAT_RECT_BYTES {
@@ -173,6 +187,25 @@ impl<'a> SolidZoneView<'a> {
             .ok_or(SolidMotionError::MalformedOctreeOffset { offset })
     }
 
+    fn scaled_rect(self) -> Result<ScaledRect, SolidMotionError> {
+        self.boundary().scaled_rect()
+    }
+}
+
+/// Lightweight object-owned ZDAT rectangle/header context.
+///
+/// Octree queries always use global `cur_zone`'s ordered neighbors. Retail
+/// nevertheless keeps `obj->zone` alive outside that neighborhood and reads
+/// its rectangle and graphics fields for ceiling, bottom, and water rules.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SolidZoneBoundary {
+    pub origin: [i32; 3],
+    pub dimensions: [u32; 3],
+    pub graphics_flags: u32,
+    pub water_y: i32,
+}
+
+impl SolidZoneBoundary {
     fn scaled_rect(self) -> Result<ScaledRect, SolidMotionError> {
         let mut origin = [0_i32; 3];
         let mut dimensions = [0_i32; 3];
@@ -200,6 +233,42 @@ impl<'a> SolidZoneView<'a> {
                 z: dimensions[2],
             },
         })
+    }
+}
+
+/// Source-exact relationship between `obj->zone` and global `cur_zone`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum SolidObjectZone {
+    /// The object has no bound zone, matching a null `obj->zone`.
+    #[default]
+    Missing,
+    /// The object zone is one validated member of the current query slice.
+    CurrentNeighbor(usize),
+    /// The object zone remains valid but is outside the current query slice.
+    Detached {
+        eid: Eid,
+        boundary: SolidZoneBoundary,
+    },
+}
+
+impl SolidObjectZone {
+    fn boundary(
+        self,
+        zones: &[SolidZoneView<'_>],
+    ) -> Result<Option<SolidZoneBoundary>, SolidMotionError> {
+        match self {
+            Self::Missing => Ok(None),
+            Self::CurrentNeighbor(index) => zones
+                .get(index)
+                .copied()
+                .map(SolidZoneView::boundary)
+                .map(Some)
+                .ok_or(SolidMotionError::InvalidObjectZoneIndex {
+                    index,
+                    zone_count: zones.len(),
+                }),
+            Self::Detached { boundary, .. } => Ok(Some(boundary)),
+        }
     }
 }
 
@@ -287,8 +356,8 @@ impl Default for SolidLevelQuirks {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SolidMotionContext {
     pub frame_stamp: i32,
-    /// Index in the ordered neighbor slice corresponding to the object's zone.
-    pub object_zone: Option<usize>,
+    /// Validated object-owned zone, whether attached to `cur_zone` or detached.
+    pub object_zone: SolidObjectZone,
     /// Graphics flags of global `cur_zone`, which controls wall plotting.
     pub current_world_graphics_flags: u32,
     pub quirks: SolidLevelQuirks,
@@ -345,7 +414,7 @@ pub enum SolidEffect {
         reason: SolidEventReason,
     },
     ZoneChanged {
-        previous: Option<usize>,
+        previous: SolidObjectZone,
         current: usize,
     },
     MissingZone,
@@ -364,7 +433,7 @@ pub struct SolidQuerySummary {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SolidMotionOutcome {
     pub state: SolidMotionState,
-    pub object_zone: Option<usize>,
+    pub object_zone: SolidObjectZone,
     pub smooth_stop: SmoothStopMemory,
     pub summary: SolidQuerySummary,
     pub floor: Option<i32>,
@@ -379,6 +448,8 @@ pub enum SolidMotionError {
     ArithmeticOverflow,
     InvalidDimensions { axis: usize },
     InvalidDepth { axis: usize, depth: u16 },
+    InvalidObjectZoneIndex { index: usize, zone_count: usize },
+    MissingObjectZone,
     MalformedOctreeOffset { offset: usize },
     OctreeDepthExceeded,
     QueryCapacityExceeded,
@@ -781,7 +852,7 @@ fn stop_at_solid(
     translation: Vec3,
     displacement: Vec3,
     query_cache: &mut Option<SolidQuery>,
-    object_zone: &mut Option<usize>,
+    object_zone: &mut SolidObjectZone,
     context: SolidMotionContext,
     effects: &mut Vec<SolidEffect>,
 ) -> Result<StepOutcome, SolidMotionError> {
@@ -1277,7 +1348,7 @@ fn stop_at_ceiling(
     candidates: &[SolidObjectCandidate],
     next_translation: Vec3,
     query: &SolidQuery,
-    object_zone: Option<usize>,
+    object_zone: SolidObjectZone,
     effects: &mut Vec<SolidEffect>,
 ) -> Result<Option<i32>, SolidMotionError> {
     let object_probe = checked_translate_bound(TEST_BOUND_OBJECT_TOP, next_translation)?;
@@ -1296,10 +1367,10 @@ fn stop_at_ceiling(
     }
     let static_probe = checked_translate_bound(TEST_BOUND_CEILING, next_translation)?;
     let mut ceiling = find_ceiling_y(query, static_probe, 2, 1)?;
-    if let Some(zone_index) = object_zone
-        && let Some(zone) = zones.get(zone_index).copied()
-        && zone.graphics_flags & 0x0002_0000 != 0
-    {
+    let zone = object_zone
+        .boundary(zones)?
+        .ok_or(SolidMotionError::MissingObjectZone)?;
+    if zone.graphics_flags & 0x0002_0000 != 0 {
         let point_above = Vec3 {
             x: next_translation.x,
             y: static_probe.max.y,
@@ -1361,59 +1432,54 @@ fn stop_at_zone(
     zones: &[SolidZoneView<'_>],
     state: &mut SolidMotionState,
     next_translation: &mut Vec3,
-    object_zone: &mut Option<usize>,
+    object_zone: &mut SolidObjectZone,
     context: SolidMotionContext,
     effects: &mut Vec<SolidEffect>,
 ) -> Result<(), SolidMotionError> {
     if let Some(containing) = find_containing_zone(zones, *next_translation)? {
-        if *object_zone != Some(containing) {
+        if *object_zone != SolidObjectZone::CurrentNeighbor(containing) {
             effects.push(SolidEffect::ZoneChanged {
                 previous: *object_zone,
                 current: containing,
             });
         }
-        *object_zone = Some(containing);
-    } else if let Some(zone_index) = *object_zone {
-        if let Some(zone) = zones.get(zone_index).copied() {
-            let bottom = zone.scaled_rect()?.origin.y;
-            let object_bottom = next_translation
-                .y
-                .checked_add(state.local_bound.min.y)
-                .ok_or(SolidMotionError::ArithmeticOverflow)?;
-            if object_bottom < bottom {
-                if context.quirks.drown_when_below_zone {
-                    effects.push(SolidEffect::SendEvent {
-                        target: SolidEventTarget::MovingObject,
-                        event: EVENT_DROWN,
-                        argument: 0,
-                        reason: SolidEventReason::OutsideZone,
-                    });
-                }
-                if zone.graphics_flags & 2 != 0 && state.invincibility_state != 2 {
-                    effects.push(SolidEffect::SendEvent {
-                        target: SolidEventTarget::MovingObject,
-                        event: EVENT_FALL_KILL,
-                        argument: 0x6400,
-                        reason: SolidEventReason::OutsideZone,
-                    });
-                } else {
-                    next_translation.y = bottom
-                        .checked_sub(state.local_bound.min.y)
-                        .ok_or(SolidMotionError::ArithmeticOverflow)?;
-                    state.floor_impact_velocity = state.velocity.y;
-                    state.velocity.y = 0;
-                    state.status_a |= STATUS_GROUNDLAND;
-                    state.floor_impact_stamp = context.frame_stamp;
-                }
+        *object_zone = SolidObjectZone::CurrentNeighbor(containing);
+    } else if let Some(zone) = object_zone.boundary(zones)? {
+        let bottom = zone.scaled_rect()?.origin.y;
+        let object_bottom = next_translation
+            .y
+            .checked_add(state.local_bound.min.y)
+            .ok_or(SolidMotionError::ArithmeticOverflow)?;
+        if object_bottom < bottom {
+            if context.quirks.drown_when_below_zone {
+                effects.push(SolidEffect::SendEvent {
+                    target: SolidEventTarget::MovingObject,
+                    event: EVENT_DROWN,
+                    argument: 0,
+                    reason: SolidEventReason::OutsideZone,
+                });
             }
-        } else {
-            effects.push(SolidEffect::MissingZone);
+            if zone.graphics_flags & 2 != 0 && state.invincibility_state != 2 {
+                effects.push(SolidEffect::SendEvent {
+                    target: SolidEventTarget::MovingObject,
+                    event: EVENT_FALL_KILL,
+                    argument: 0x6400,
+                    reason: SolidEventReason::OutsideZone,
+                });
+            } else {
+                next_translation.y = bottom
+                    .checked_sub(state.local_bound.min.y)
+                    .ok_or(SolidMotionError::ArithmeticOverflow)?;
+                state.floor_impact_velocity = state.velocity.y;
+                state.velocity.y = 0;
+                state.status_a |= STATUS_GROUNDLAND;
+                state.floor_impact_stamp = context.frame_stamp;
+            }
         }
     } else {
         effects.push(SolidEffect::MissingZone);
     }
-    if let Some(zone_index) = *object_zone
-        && let Some(zone) = zones.get(zone_index).copied()
+    if let Some(zone) = object_zone.boundary(zones)?
         && zone.graphics_flags & 4 != 0
         && state.translation.y < zone.water_y
         && context.quirks.lethal_river_water
@@ -2138,7 +2204,7 @@ mod tests {
                 z: 0,
             },
             SolidMotionContext {
-                object_zone: Some(0),
+                object_zone: SolidObjectZone::CurrentNeighbor(0),
                 frame_stamp: 17,
                 ..SolidMotionContext::default()
             },
@@ -2151,6 +2217,77 @@ mod tests {
         assert_eq!(outcome.state.floor_impact_velocity, -200_000);
         assert_eq!(outcome.state.floor_impact_stamp, 17);
         assert_ne!(outcome.state.status_a & STATUS_GROUNDLAND, 0);
+    }
+
+    #[test]
+    fn detached_object_zone_supplies_bottom_fallback_without_joining_queries() {
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let current_zone =
+            SolidZoneView::new([1_000, 1_000, 1_000], [100; 3], 0, [0; 3], &bytes).unwrap();
+        let detached = SolidObjectZone::Detached {
+            eid: Eid::from_name("0c_hZ").unwrap(),
+            boundary: SolidZoneBoundary {
+                origin: [0, 0, 0],
+                dimensions: [100; 3],
+                graphics_flags: 0,
+                water_y: i32::MIN,
+            },
+        };
+        let state = moving_state(
+            Vec3 { x: 0, y: 100, z: 0 },
+            Vec3 {
+                x: 0,
+                y: -200_000,
+                z: 0,
+            },
+        );
+        let outcome = solve_retail_solid_motion(
+            &[current_zone],
+            &[],
+            state,
+            Vec3 {
+                x: 0,
+                y: -200,
+                z: 0,
+            },
+            SolidMotionContext {
+                object_zone: detached,
+                frame_stamp: 23,
+                ..SolidMotionContext::default()
+            },
+            SmoothStopMemory::default(),
+        )
+        .unwrap();
+
+        assert_eq!(outcome.object_zone, detached);
+        assert_eq!(outcome.state.translation.y, 0);
+        assert_eq!(outcome.state.velocity.y, 0);
+        assert_eq!(outcome.state.floor_impact_velocity, -200_000);
+        assert_eq!(outcome.state.floor_impact_stamp, 23);
+        assert_ne!(outcome.state.status_a & STATUS_GROUNDLAND, 0);
+        assert!(!outcome.effects.iter().any(|effect| matches!(
+            effect,
+            SolidEffect::NodeContact { .. } | SolidEffect::ZoneChanged { .. }
+        )));
+    }
+
+    #[test]
+    fn missing_object_zone_is_checked_before_ceiling_header_read() {
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let zone = leaf_zone(0x0003, &bytes);
+        let state = moving_state(Vec3 { x: 0, y: 100, z: 0 }, Vec3::ZERO);
+
+        assert_eq!(
+            solve_retail_solid_motion(
+                &[zone],
+                &[],
+                state,
+                Vec3 { x: 0, y: -1, z: 0 },
+                SolidMotionContext::default(),
+                SmoothStopMemory::default(),
+            ),
+            Err(SolidMotionError::MissingObjectZone)
+        );
     }
 
     #[test]
@@ -2235,7 +2372,7 @@ mod tests {
                 z: 0,
             },
             SolidMotionContext {
-                object_zone: Some(0),
+                object_zone: SolidObjectZone::CurrentNeighbor(0),
                 ..SolidMotionContext::default()
             },
             SmoothStopMemory::default(),
@@ -2271,7 +2408,7 @@ mod tests {
                 z: 0,
             },
             SolidMotionContext {
-                object_zone: Some(0),
+                object_zone: SolidObjectZone::CurrentNeighbor(0),
                 ..SolidMotionContext::default()
             },
             SmoothStopMemory::default(),

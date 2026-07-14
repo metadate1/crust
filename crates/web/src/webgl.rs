@@ -30,6 +30,8 @@ pub struct VisualState {
     pub show_title_image: bool,
     pub show_retail_scene: bool,
     pub show_loading_image: bool,
+    /// Nonlinear black-overlay alpha selected by the native title fade.
+    pub title_overlay_alpha: u8,
 }
 
 /// Work performed while replacing one camera-projected retail scene.
@@ -213,18 +215,21 @@ impl GlStage {
     pub fn render(&mut self, state: VisualState) -> Result<(), JsValue> {
         self.ordering.clear();
 
+        // Type-three retail title screens use the MDAT image as a backdrop.
+        // Submit it before same-depth GOOL commands so FIFO ordering matches
+        // the source's image-then-object composition.
+        if state.show_title_image
+            && let Some([width, height]) = self.title_image_dimensions
+        {
+            self.submit_image(TITLE_IMAGE_HANDLE, TITLE_IMAGE_DEPTH, width, height)?;
+        }
+
         if state.show_retail_scene {
             for command in &self.retail_scene_commands {
                 self.ordering
                     .submit(command.depth, command.source, command.primitive.clone())
                     .map_err(|error| command_error(&error))?;
             }
-        }
-
-        if state.show_title_image
-            && let Some([width, height]) = self.title_image_dimensions
-        {
-            self.submit_image(TITLE_IMAGE_HANDLE, TITLE_IMAGE_DEPTH, width, height)?;
         }
 
         if state.show_loading_image
@@ -240,6 +245,7 @@ impl GlStage {
                 &frame,
                 RenderOptions {
                     clear_color: Some([0.0, 0.0, 0.0, 1.0]),
+                    black_overlay_alpha: state.title_overlay_alpha,
                     ..RenderOptions::default()
                 },
             )

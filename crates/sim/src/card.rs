@@ -197,6 +197,8 @@ impl CardFlags {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CardOperation {
+    /// Any operation number not otherwise represented, including retail op 0.
+    Unsupported(i32),
     ClearFlag6,
     SaveSelected,
     LoadSelected,
@@ -206,6 +208,29 @@ pub enum CardOperation {
     ProbePresent,
     ForgetCurrent,
     Rescan,
+}
+
+impl CardOperation {
+    #[must_use]
+    pub const fn from_retail(operation: i32) -> Self {
+        match operation {
+            2 => Self::ClearFlag6,
+            3 => Self::SaveSelected,
+            4 => Self::LoadSelected,
+            5 => Self::Format,
+            6 => Self::SaveCurrent,
+            7 => Self::ProbeName,
+            8 => Self::ProbePresent,
+            9 => Self::ForgetCurrent,
+            10 => Self::Rescan,
+            other => Self::Unsupported(other),
+        }
+    }
+
+    #[must_use]
+    pub const fn mutates_storage(self) -> bool {
+        matches!(self, Self::SaveSelected | Self::Format | Self::SaveCurrent)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -221,6 +246,8 @@ pub enum CardError {
     NoCurrentSlot,
     MissingSaveData,
     CorruptSlot,
+    StorageUnavailable,
+    UnsupportedOperation,
     NameProbeUnsupported,
     CardFull,
 }
@@ -241,6 +268,19 @@ struct CardSnapshot {
     part_count: usize,
 }
 
+/// Immutable card metadata exposed to authored GOOL globals.
+///
+/// Native publishes the fifteen part words first, then the part count as the
+/// readiness marker, and finally lets scripts observe the current flag word.
+/// Keeping the snapshot typed prevents browser persistence details from
+/// leaking into the interpreter.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CardPublishedState {
+    pub flags: CardFlags,
+    pub part_count: u32,
+    pub partinfos: [u32; CARD_SLOT_COUNT],
+}
+
 impl CardSnapshot {
     const EMPTY: Self = Self {
         slot_map: [None; CARD_SLOT_COUNT],
@@ -259,6 +299,7 @@ pub struct VirtualCard {
     current_slot: Option<usize>,
     scan_ticks: u8,
     flags: CardFlags,
+    storage_available: bool,
 }
 
 impl VirtualCard {
@@ -271,6 +312,7 @@ impl VirtualCard {
             current_slot: None,
             scan_ticks: 0,
             flags: CardFlags(0),
+            storage_available: true,
         }
     }
 
@@ -295,9 +337,28 @@ impl VirtualCard {
         &self.published.partinfos
     }
 
+    /// Returns one coherent snapshot for the GOOL global publication phase.
+    #[must_use]
+    pub const fn published_state(&self) -> CardPublishedState {
+        CardPublishedState {
+            flags: self.flags,
+            part_count: self.published.part_count as u32,
+            partinfos: self.published.partinfos,
+        }
+    }
+
     #[must_use]
     pub const fn slots(&self) -> &[Slot; CARD_SLOT_COUNT] {
         &self.slots
+    }
+
+    /// Controls whether the modeled backing store can service card operations.
+    ///
+    /// Browser storage failures happen outside the retail payload format. Keeping
+    /// this transport state separate lets the synchronous GOOL handshake expose
+    /// the native failure flags without inventing an on-card slot encoding.
+    pub fn set_storage_available(&mut self, available: bool) {
+        self.storage_available = available;
     }
 
     /// Imports a physical slot. Call `Rescan` before expecting published parts.
@@ -314,6 +375,7 @@ impl VirtualCard {
         current: Option<SaveData>,
     ) -> Result<CardOutcome, CardError> {
         match operation {
+            CardOperation::Unsupported(_) => Err(CardError::UnsupportedOperation),
             CardOperation::ClearFlag6 => {
                 self.flags.remove(CardFlags::FLAG_6);
                 if self.staged.is_some() && !self.flags.contains(CardFlags::CHECKING) {
@@ -323,24 +385,37 @@ impl VirtualCard {
             }
             CardOperation::SaveSelected => {
                 self.reject_if_busy()?;
-                let data = current.ok_or(CardError::MissingSaveData)?;
+                let data = current.ok_or_else(|| {
+                    self.set_failure(false);
+                    CardError::MissingSaveData
+                })?;
                 let slot = self.resolve_write_slot(part_index)?;
-                self.save_slot(slot, data);
-                Ok(CardOutcome::Complete)
+                self.save_slot(slot, data)
             }
             CardOperation::LoadSelected => {
                 self.reject_if_busy()?;
                 let slot = self.resolve_read_slot(part_index)?;
                 self.flags.insert(CardFlags::PENDING);
+                if !self.storage_available {
+                    self.set_failure(false);
+                    return Err(CardError::StorageUnavailable);
+                }
                 match self.slots[slot] {
                     Slot::Valid(payload) => {
-                        let data = payload.decode().map_err(|_| CardError::CorruptSlot)?;
+                        let Ok(data) = payload.decode() else {
+                            self.set_failure(true);
+                            return Err(CardError::CorruptSlot);
+                        };
                         self.current_slot = Some(slot);
                         self.operation_success(false);
                         Ok(CardOutcome::Loaded(data))
                     }
-                    Slot::Empty | Slot::Corrupt => {
+                    Slot::Corrupt => {
                         self.set_failure(true);
+                        Err(CardError::CorruptSlot)
+                    }
+                    Slot::Empty => {
+                        self.set_failure(false);
                         Err(CardError::CorruptSlot)
                     }
                 }
@@ -353,9 +428,14 @@ impl VirtualCard {
                     return Err(CardError::Busy);
                 }
                 self.flags.insert(CardFlags::PENDING);
+                if !self.storage_available {
+                    self.set_failure(false);
+                    return Err(CardError::StorageUnavailable);
+                }
                 self.slots = [Slot::Empty; CARD_SLOT_COUNT];
                 self.current_slot = None;
                 self.staged = None;
+                self.scan_ticks = 0;
                 self.published = CardSnapshot::EMPTY;
                 self.flags = CardFlags(self.flags.0 & CardFlags::NEW_DEVICE.0);
                 self.flags.insert(CardFlags::CHECK_NEEDED);
@@ -363,13 +443,15 @@ impl VirtualCard {
             }
             CardOperation::SaveCurrent => {
                 self.reject_if_busy()?;
-                let data = current.ok_or(CardError::MissingSaveData)?;
                 let slot = self.current_slot.ok_or_else(|| {
                     self.set_failure(false);
                     CardError::NoCurrentSlot
                 })?;
-                self.save_slot(slot, data);
-                Ok(CardOutcome::Complete)
+                let data = current.ok_or_else(|| {
+                    self.set_failure(false);
+                    CardError::MissingSaveData
+                })?;
+                self.save_slot(slot, data)
             }
             CardOperation::ProbeName => Err(CardError::NameProbeUnsupported),
             CardOperation::ProbePresent => Ok(CardOutcome::Complete),
@@ -379,9 +461,14 @@ impl VirtualCard {
             }
             CardOperation::Rescan => {
                 self.staged = None;
-                self.published = CardSnapshot::EMPTY;
-                self.staged = Some(self.build_snapshot());
                 self.scan_ticks = 0;
+                self.published = CardSnapshot::EMPTY;
+                if !self.storage_available {
+                    self.current_slot = None;
+                    self.set_failure(true);
+                    return Err(CardError::StorageUnavailable);
+                }
+                self.staged = Some(self.build_snapshot());
                 self.flags = CardFlags(self.flags.0 & CardFlags::NEW_DEVICE.0);
                 self.flags.insert(CardFlags::PENDING);
                 self.flags.insert(CardFlags::CHECKING);
@@ -451,12 +538,17 @@ impl VirtualCard {
             })
     }
 
-    fn save_slot(&mut self, slot: usize, data: SaveData) {
+    fn save_slot(&mut self, slot: usize, data: SaveData) -> Result<CardOutcome, CardError> {
         self.flags.insert(CardFlags::PENDING);
+        if !self.storage_available {
+            self.set_failure(false);
+            return Err(CardError::StorageUnavailable);
+        }
         self.slots[slot] = Slot::Valid(CardPayload::encode(data));
         self.current_slot = Some(slot);
         self.published = self.build_snapshot();
         self.operation_success(true);
+        Ok(CardOutcome::Complete)
     }
 
     fn build_snapshot(&self) -> CardSnapshot {
@@ -472,6 +564,12 @@ impl VirtualCard {
                 }
                 Slot::Valid(payload) => {
                     let part = snapshot.part_count;
+                    if !payload.is_valid() {
+                        snapshot.slot_map[part] = Some(slot);
+                        snapshot.partinfos[part] = 1 | (1 << 1);
+                        snapshot.part_count += 1;
+                        continue;
+                    }
                     let progress = read_u32(payload.as_bytes(), PROGRESS_OFFSET);
                     snapshot.slot_valid[slot] = true;
                     snapshot.slot_map[part] = Some(slot);
@@ -687,6 +785,17 @@ mod tests {
         }
     }
 
+    fn finish_rescan(card: &mut VirtualCard) {
+        card.update();
+        card.update();
+        card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+    }
+
+    fn scan_and_finish(card: &mut VirtualCard) {
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        finish_rescan(card);
+    }
+
     #[test]
     fn payload_layout_and_checksum_match_source_contract() {
         let data = sample_data();
@@ -700,23 +809,443 @@ mod tests {
     }
 
     #[test]
-    fn rescan_exposes_retail_flag_sequence() {
+    fn storage_identity_and_retail_payload_size_are_version_stable() {
+        assert_eq!(CARD_SLOT_COUNT, 15);
+        assert_eq!(CARD_PAYLOAD_SIZE, 128);
+        assert_eq!(CARD_STORAGE_KEY, "c1.virtual-memory-card.v1");
+        assert_eq!(CARD_SCHEMA, "c1-virtual-memory-card");
+        assert_eq!(CARD_VERSION, 1);
+    }
+
+    #[test]
+    fn unsupported_probe_name_and_probe_present_do_not_mutate_card_state() {
         let mut card = VirtualCard::new();
-        assert_eq!(
-            card.control(CardOperation::Rescan, 0, None),
-            Ok(CardOutcome::Complete)
-        );
-        assert_eq!(card.flags().bits(), 0x29);
-        card.update();
-        assert_eq!(card.flags().bits(), 0x29);
+        card.set_slot(3, Slot::Valid(CardPayload::encode(sample_data())))
+            .unwrap();
+        card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::ERROR.bits());
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+
+        for (operation, expected) in [
+            (
+                CardOperation::Unsupported(0),
+                Err(CardError::UnsupportedOperation),
+            ),
+            (
+                CardOperation::Unsupported(11),
+                Err(CardError::UnsupportedOperation),
+            ),
+            (
+                CardOperation::ProbeName,
+                Err(CardError::NameProbeUnsupported),
+            ),
+            (CardOperation::ProbePresent, Ok(CardOutcome::Complete)),
+        ] {
+            let before = card.clone();
+            assert_eq!(card.control(operation, usize::MAX, None), expected);
+            assert_eq!(card, before);
+        }
+    }
+
+    #[test]
+    fn clear_flag_6_only_clears_the_latch_without_an_active_scan() {
+        let mut card = VirtualCard::new();
+        card.flags = CardFlags(0x3f);
         assert_eq!(
             card.control(CardOperation::ClearFlag6, 0, None),
             Ok(CardOutcome::Complete)
         );
+        assert_eq!(card.flags().bits(), 0x1f);
+    }
+
+    #[test]
+    fn rescan_exposes_retail_flag_sequence() {
+        let mut card = VirtualCard::new();
+        card.set_slot(2, Slot::Valid(CardPayload::encode(sample_data())))
+            .unwrap();
+        card.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            card.control(CardOperation::Rescan, 0, None),
+            Ok(CardOutcome::Complete)
+        );
+        assert_eq!(card.flags().bits(), 0x39);
+        assert_eq!(card.part_count(), 0);
+        card.update();
+        assert_eq!(card.flags().bits(), 0x39);
+        assert_eq!(card.part_count(), 0);
+        card.update();
+        assert_eq!(card.flags().bits(), 0x31);
+        assert_eq!(card.part_count(), 0);
+        assert_eq!(
+            card.control(CardOperation::ClearFlag6, 0, None),
+            Ok(CardOutcome::Complete)
+        );
+        assert_eq!(card.flags().bits(), CardFlags::NEW_DEVICE.bits());
+        assert_eq!(card.part_count(), 1);
+    }
+
+    #[test]
+    fn clear_latch_waits_for_checking_then_publishes_in_update() {
+        let mut card = VirtualCard::new();
+        card.set_slot(5, Slot::Valid(CardPayload::encode(sample_data())))
+            .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        card.update();
+        card.control(CardOperation::ClearFlag6, 0, None).unwrap();
         assert_eq!(card.flags().bits(), 0x09);
+        assert_eq!(card.part_count(), 0);
         card.update();
         assert_eq!(card.flags().bits(), 0);
+        assert_eq!(card.part_count(), 1);
+    }
+
+    #[test]
+    fn a_new_rescan_cancels_the_prior_snapshot_and_publishes_only_the_latest() {
+        let first = sample_data();
+        let mut second = first;
+        second.level_count += 1;
+        let mut card = VirtualCard::new();
+        card.set_slot(0, Slot::Valid(CardPayload::encode(first)))
+            .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
+        card.update();
+        card.set_slot(0, Slot::Valid(CardPayload::encode(second)))
+            .unwrap();
+        card.control(CardOperation::Rescan, 0, None).unwrap();
         assert_eq!(card.part_count(), 0);
+        finish_rescan(&mut card);
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 0, None),
+            Ok(CardOutcome::Loaded(second))
+        );
+    }
+
+    #[test]
+    fn rescan_storage_failure_clears_metadata_and_sets_exact_failure_flags() {
+        let data = sample_data();
+        let mut card = VirtualCard::new();
+        card.set_slot(0, Slot::Valid(CardPayload::encode(data)))
+            .unwrap();
+        scan_and_finish(&mut card);
+        card.control(CardOperation::LoadSelected, 0, None).unwrap();
+        assert_eq!(card.current_slot(), Some(0));
+        card.flags.insert(CardFlags::NEW_DEVICE);
+        card.set_storage_available(false);
+
+        assert_eq!(
+            card.control(CardOperation::Rescan, 0, None),
+            Err(CardError::StorageUnavailable)
+        );
+        assert_eq!(card.flags().bits(), 0x16);
+        assert_eq!(card.part_count(), 0);
+        assert_eq!(card.partinfos(), &[0; CARD_SLOT_COUNT]);
+        assert_eq!(card.current_slot(), None);
+        card.update();
+        assert_eq!(card.flags().bits(), 0x16);
+    }
+
+    #[test]
+    fn save_and_load_busy_gates_match_retail_flags() {
+        for operation in [
+            CardOperation::SaveSelected,
+            CardOperation::LoadSelected,
+            CardOperation::SaveCurrent,
+        ] {
+            for blocker in [
+                CardFlags::PENDING,
+                CardFlags::CHECK_NEEDED,
+                CardFlags::CHECKING,
+            ] {
+                let mut card = VirtualCard::new();
+                card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | blocker.bits());
+                let before_slots = card.slots;
+                let current = if matches!(operation, CardOperation::LoadSelected) {
+                    None
+                } else {
+                    Some(sample_data())
+                };
+                assert_eq!(card.control(operation, 0, current), Err(CardError::Busy));
+                assert_eq!(
+                    card.flags().bits(),
+                    CardFlags::NEW_DEVICE.bits() | blocker.bits() | CardFlags::ERROR.bits()
+                );
+                assert_eq!(card.slots, before_slots);
+                assert_eq!(card.part_count(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn save_selected_uses_mapped_then_first_unused_slots_and_clears_all_flags() {
+        let original = sample_data();
+        let mut replacement = original;
+        replacement.level_count = 9;
+        let mut inserted = original;
+        inserted.level_count = 10;
+        let mut card = VirtualCard::new();
+        card.set_slot(0, Slot::Corrupt).unwrap();
+        card.set_slot(2, Slot::Valid(CardPayload::encode(original)))
+            .unwrap();
+        scan_and_finish(&mut card);
+        assert_eq!(card.part_count(), 2);
+
+        card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::ERROR.bits());
+        card.control(CardOperation::SaveSelected, 1, Some(replacement))
+            .unwrap();
+        assert_eq!(card.flags().bits(), 0);
+        assert_eq!(card.current_slot(), Some(2));
+        assert_eq!(card.part_count(), 2);
+
+        card.flags.insert(CardFlags::NEW_DEVICE);
+        card.control(CardOperation::SaveSelected, 2, Some(inserted))
+            .unwrap();
+        assert_eq!(card.flags().bits(), 0);
+        assert_eq!(card.current_slot(), Some(0));
+        assert_eq!(card.part_count(), 2);
+        assert!(matches!(card.slots()[0], Slot::Valid(_)));
+        assert!(matches!(card.slots()[2], Slot::Valid(_)));
+    }
+
+    #[test]
+    fn save_failures_preserve_only_new_device_and_add_error() {
+        let cases = [
+            (
+                CardOperation::SaveSelected,
+                CARD_SLOT_COUNT,
+                Some(sample_data()),
+                true,
+                CardError::InvalidPart,
+            ),
+            (
+                CardOperation::SaveSelected,
+                0,
+                None,
+                true,
+                CardError::MissingSaveData,
+            ),
+            (
+                CardOperation::SaveSelected,
+                0,
+                Some(sample_data()),
+                false,
+                CardError::StorageUnavailable,
+            ),
+        ];
+
+        for (operation, part, data, available, expected) in cases {
+            let mut card = VirtualCard::new();
+            card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::ERROR.bits());
+            card.set_storage_available(available);
+            assert_eq!(card.control(operation, part, data), Err(expected));
+            assert_eq!(card.flags().bits(), 0x12);
+            assert_eq!(card.current_slot(), None);
+            assert_eq!(card.part_count(), 0);
+            assert!(card.slots().iter().all(|slot| *slot == Slot::Empty));
+        }
+    }
+
+    #[test]
+    fn load_success_preserves_only_new_device() {
+        let data = sample_data();
+        let mut card = VirtualCard::new();
+        card.set_slot(6, Slot::Valid(CardPayload::encode(data)))
+            .unwrap();
+        scan_and_finish(&mut card);
+        card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::ERROR.bits());
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 0, None),
+            Ok(CardOutcome::Loaded(data))
+        );
+        assert_eq!(card.flags().bits(), CardFlags::NEW_DEVICE.bits());
+        assert_eq!(card.current_slot(), Some(6));
+    }
+
+    #[test]
+    fn load_distinguishes_corrupt_checksum_empty_and_transport_failures() {
+        let data = sample_data();
+
+        let mut corrupt = VirtualCard::new();
+        corrupt.set_slot(0, Slot::Corrupt).unwrap();
+        scan_and_finish(&mut corrupt);
+        corrupt.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            corrupt.control(CardOperation::LoadSelected, 0, None),
+            Err(CardError::CorruptSlot)
+        );
+        assert_eq!(corrupt.flags().bits(), 0x16);
+
+        let mut bytes = CardPayload::encode(data).into_bytes();
+        bytes[MONO_OFFSET] ^= 1;
+        let mut bad_checksum = VirtualCard::new();
+        bad_checksum
+            .set_slot(1, Slot::Valid(CardPayload(bytes)))
+            .unwrap();
+        scan_and_finish(&mut bad_checksum);
+        assert_eq!(bad_checksum.partinfos()[0], 3);
+        bad_checksum.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            bad_checksum.control(CardOperation::LoadSelected, 0, None),
+            Err(CardError::CorruptSlot)
+        );
+        assert_eq!(bad_checksum.flags().bits(), 0x16);
+
+        let mut disappeared = VirtualCard::new();
+        disappeared
+            .set_slot(3, Slot::Valid(CardPayload::encode(data)))
+            .unwrap();
+        scan_and_finish(&mut disappeared);
+        disappeared.set_slot(3, Slot::Empty).unwrap();
+        disappeared.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            disappeared.control(CardOperation::LoadSelected, 0, None),
+            Err(CardError::CorruptSlot)
+        );
+        assert_eq!(disappeared.flags().bits(), 0x12);
+
+        let mut unavailable = VirtualCard::new();
+        unavailable
+            .set_slot(4, Slot::Valid(CardPayload::encode(data)))
+            .unwrap();
+        scan_and_finish(&mut unavailable);
+        unavailable.flags.insert(CardFlags::NEW_DEVICE);
+        unavailable.set_storage_available(false);
+        assert_eq!(
+            unavailable.control(CardOperation::LoadSelected, 0, None),
+            Err(CardError::StorageUnavailable)
+        );
+        assert_eq!(unavailable.flags().bits(), 0x12);
+    }
+
+    #[test]
+    fn format_gate_allows_check_needed_and_success_clears_card_metadata() {
+        let data = sample_data();
+        let mut card = VirtualCard::new();
+        card.control(CardOperation::SaveSelected, 0, Some(data))
+            .unwrap();
+        card.flags = CardFlags(
+            CardFlags::NEW_DEVICE.bits() | CardFlags::CHECK_NEEDED.bits() | CardFlags::ERROR.bits(),
+        );
+        assert_eq!(
+            card.control(CardOperation::Format, 0, None),
+            Ok(CardOutcome::Complete)
+        );
+        assert_eq!(card.flags().bits(), 0x14);
+        assert_eq!(card.current_slot(), None);
+        assert_eq!(card.part_count(), 0);
+        assert_eq!(card.partinfos(), &[0; CARD_SLOT_COUNT]);
+        assert!(card.slots().iter().all(|slot| *slot == Slot::Empty));
+    }
+
+    #[test]
+    fn format_is_busy_only_for_pending_or_checking() {
+        for blocker in [CardFlags::PENDING, CardFlags::CHECKING] {
+            let mut card = VirtualCard::new();
+            card.control(CardOperation::SaveSelected, 0, Some(sample_data()))
+                .unwrap();
+            card.flags = CardFlags(
+                CardFlags::NEW_DEVICE.bits() | CardFlags::CHECK_NEEDED.bits() | blocker.bits(),
+            );
+            let before = card.clone();
+            assert_eq!(
+                card.control(CardOperation::Format, 0, None),
+                Err(CardError::Busy)
+            );
+            assert_eq!(
+                card.flags().bits(),
+                before.flags().bits() | CardFlags::ERROR.bits()
+            );
+            assert_eq!(card.slots(), before.slots());
+            assert_eq!(card.partinfos(), before.partinfos());
+            assert_eq!(card.current_slot(), before.current_slot());
+        }
+    }
+
+    #[test]
+    fn format_storage_failure_preserves_content_and_sets_new_device_error() {
+        let data = sample_data();
+        let mut card = VirtualCard::new();
+        card.control(CardOperation::SaveSelected, 0, Some(data))
+            .unwrap();
+        card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::CHECK_NEEDED.bits());
+        card.set_storage_available(false);
+        let before_slots = card.slots;
+        let before_partinfos = card.published.partinfos;
+
+        assert_eq!(
+            card.control(CardOperation::Format, 0, None),
+            Err(CardError::StorageUnavailable)
+        );
+        assert_eq!(card.flags().bits(), 0x12);
+        assert_eq!(card.slots, before_slots);
+        assert_eq!(card.published.partinfos, before_partinfos);
+        assert_eq!(card.current_slot(), Some(0));
+    }
+
+    #[test]
+    fn save_current_requires_current_then_data_and_clears_all_flags_on_success() {
+        let data = sample_data();
+        let mut no_current = VirtualCard::new();
+        no_current.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            no_current.control(CardOperation::SaveCurrent, 0, None),
+            Err(CardError::NoCurrentSlot)
+        );
+        assert_eq!(no_current.flags().bits(), 0x12);
+
+        let mut card = VirtualCard::new();
+        card.control(CardOperation::SaveSelected, 0, Some(data))
+            .unwrap();
+        card.flags.insert(CardFlags::NEW_DEVICE);
+        assert_eq!(
+            card.control(CardOperation::SaveCurrent, 0, None),
+            Err(CardError::MissingSaveData)
+        );
+        assert_eq!(card.flags().bits(), 0x12);
+
+        let mut changed = data;
+        changed.level_count += 1;
+        card.control(CardOperation::SaveCurrent, 0, Some(changed))
+            .unwrap();
+        assert_eq!(card.flags().bits(), 0);
+        assert_eq!(
+            card.control(CardOperation::LoadSelected, 0, None),
+            Ok(CardOutcome::Loaded(changed))
+        );
+    }
+
+    #[test]
+    fn forget_current_clears_only_the_selected_handle() {
+        let mut card = VirtualCard::new();
+        card.control(CardOperation::SaveSelected, 0, Some(sample_data()))
+            .unwrap();
+        card.flags = CardFlags(CardFlags::NEW_DEVICE.bits() | CardFlags::ERROR.bits());
+        let slots = card.slots;
+        let published = card.published;
+        assert_eq!(
+            card.control(CardOperation::ForgetCurrent, usize::MAX, None),
+            Ok(CardOutcome::Complete)
+        );
+        assert_eq!(card.current_slot(), None);
+        assert_eq!(card.flags().bits(), 0x12);
+        assert_eq!(card.slots, slots);
+        assert_eq!(card.published, published);
+    }
+
+    #[test]
+    fn all_fifteen_physical_slots_are_scanned_in_order() {
+        let mut card = VirtualCard::new();
+        for slot in 0..CARD_SLOT_COUNT {
+            let mut data = sample_data();
+            data.level_count = u32::try_from(slot).unwrap();
+            card.set_slot(slot, Slot::Valid(CardPayload::encode(data)))
+                .unwrap();
+        }
+        scan_and_finish(&mut card);
+        assert_eq!(card.part_count(), CARD_SLOT_COUNT);
+        assert!(card.partinfos().iter().all(|part| *part & 9 == 9));
+        assert_eq!(
+            card.set_slot(CARD_SLOT_COUNT, Slot::Empty),
+            Err(CardError::InvalidPart)
+        );
     }
 
     #[test]

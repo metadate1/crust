@@ -392,6 +392,37 @@ impl RetailCameraRuntime {
         self.location
     }
 
+    /// Applies one explicit source `LevelUpdate` from title/restart logic.
+    ///
+    /// The target path is validated and raw progress is clamped exactly like
+    /// the native function. `game_state` is deliberately unchanged: only
+    /// `CamUpdate`'s mode arms write that global. The ordered effect lets a
+    /// host update paging and zone activation before the next spawn scan.
+    pub fn level_update(
+        &mut self,
+        graph: &RetailZoneGraph,
+        path: RetailPathId,
+        raw_progress: i32,
+        flags: u8,
+    ) -> Result<RetailCameraStep, RetailCameraError> {
+        let point_count = retail_point_count(graph, path)?;
+        let before = self.location;
+        let after = RetailCameraLocation {
+            path,
+            progress: PathProgress::clamped(raw_progress, point_count),
+        };
+        self.location = after;
+        Ok(self.step(
+            before,
+            RetailCameraOutcome::Stationary,
+            vec![RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags,
+            }],
+        ))
+    }
+
     /// Current retail gameplay/cutscene state word.
     #[must_use]
     pub const fn game_state(&self) -> i32 {
@@ -681,10 +712,11 @@ impl RetailCameraRuntime {
                     Vec::new(),
                 )),
             },
-            mode => Err(RetailCameraError::UnsupportedMode {
-                path: before.path,
-                mode,
-            }),
+            // Retail's default switch arm returns success without touching
+            // either the camera location or `game_state`. In particular, the
+            // shipped streams use modes two and four as authored no-op camera
+            // paths; rejecting them would halt otherwise valid levels.
+            _ => Ok(self.step(before, RetailCameraOutcome::Stationary, Vec::new())),
         }
     }
 
@@ -1823,43 +1855,36 @@ fn validate_projected_progress(
 }
 
 fn follow_distance(delta: [i32; 3], path: RetailPathId) -> Result<u32, RetailCameraError> {
+    // The PS1 keeps the low 32 bits of the three integer products before its
+    // square-root instruction. Model that wrap explicitly as an unsigned
+    // radicand; rejecting bit 31 made the two hog paths terminate once their
+    // perfectly valid camera delta crossed the signed range.
     let squared = delta[0]
         .wrapping_mul(delta[0])
         .wrapping_add(delta[1].wrapping_mul(delta[1]))
-        .wrapping_add(delta[2].wrapping_mul(delta[2]));
-    if squared < 0 {
-        return Err(RetailCameraError::FollowArithmetic {
-            path,
-            operation: "32-bit squared distance",
-        });
-    }
-    retail_camera_sqrt(squared).map(|value| value as u32).ok_or(
-        RetailCameraError::FollowArithmetic {
-            path,
-            operation: "retail square root",
-        },
-    )
+        .wrapping_add(delta[2].wrapping_mul(delta[2])) as u32;
+    retail_camera_sqrt(squared).ok_or(RetailCameraError::FollowArithmetic {
+        path,
+        operation: "retail square root",
+    })
 }
 
-fn retail_camera_sqrt(value: i32) -> Option<i32> {
+fn retail_camera_sqrt(value: u32) -> Option<u32> {
     if value == 0 {
         return Some(0);
     }
-    if value < 0 {
-        return None;
-    }
     let leading = value.leading_zeros() & !1;
     let index = if leading < 24 {
-        (value as u32) >> (24 - leading)
+        value >> (24 - leading)
     } else {
-        (value as u32) << (leading - 24)
+        value << (leading - 24)
     };
     if !(64..=255).contains(&index) {
         return None;
     }
     let table = integer_sqrt(u64::from(index) << 18);
     let scaled = table.checked_shl((31 - leading) / 2)?;
-    i32::try_from(scaled >> 12).ok()
+    Some(scaled >> 12)
 }
 
 fn progress_delta(path: RetailPathId, left: i32, right: i32) -> Result<i32, RetailCameraError> {
@@ -2001,6 +2026,16 @@ mod tests {
     use super::*;
 
     const TEST_ZONE: Eid = Eid::from_raw(1);
+
+    #[test]
+    fn follow_distance_accepts_a_wrapped_unsigned_ps1_radicand() {
+        let path = RetailPathId {
+            zone: TEST_ZONE,
+            index: 0,
+        };
+        assert_eq!(follow_distance([50_000, 0, 0], path), Ok(49_992));
+        assert_eq!(retail_camera_sqrt(2_500_000_000), Some(49_992));
+    }
 
     fn retail_path(camera_mode: u16, point_count: usize, target: Option<(u8, u8, u8)>) -> ZonePath {
         let point = ZonePathPoint {
@@ -2405,6 +2440,56 @@ mod tests {
         assert_eq!(step.outcome, RetailCameraOutcome::Stationary);
         assert_eq!(step.game_state, GAME_STATE_PLAYING);
         assert!(step.effects.is_empty());
+    }
+
+    #[test]
+    fn retail_default_camera_modes_are_successful_no_ops() {
+        for mode in [2, 4, 9, u16::MAX] {
+            let graph = single_zone_graph(0, vec![retail_path(mode, 3, None)]);
+            let mut camera = RetailCameraRuntime::at_path(
+                &graph,
+                graph.spawn_path(),
+                0x180,
+                GAME_STATE_CUTSCENE,
+            )
+            .unwrap();
+            let before = camera;
+            let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+
+            assert_eq!(camera, before, "mode {mode}");
+            assert_eq!(step.before, before.location(), "mode {mode}");
+            assert_eq!(step.after, before.location(), "mode {mode}");
+            assert_eq!(step.outcome, RetailCameraOutcome::Stationary, "mode {mode}");
+            assert_eq!(step.game_state, GAME_STATE_CUTSCENE, "mode {mode}");
+            assert!(step.effects.is_empty(), "mode {mode}");
+        }
+    }
+
+    #[test]
+    fn explicit_level_update_clamps_and_preserves_flag_two_and_game_state() {
+        let graph = single_zone_graph(0, vec![retail_path(0, 3, None), retail_path(2, 2, None)]);
+        let mut camera =
+            RetailCameraRuntime::at_path(&graph, graph.spawn_path(), 0x100, GAME_STATE_CUTSCENE)
+                .unwrap();
+        let before = camera.location();
+        let target = RetailPathId {
+            zone: TEST_ZONE,
+            index: 1,
+        };
+        let step = camera.level_update(&graph, target, i32::MAX, 2).unwrap();
+
+        assert_eq!(step.before, before);
+        assert_eq!(step.after.path, target);
+        assert_eq!(step.after.progress.raw(), 0x1ff);
+        assert_eq!(step.game_state, GAME_STATE_CUTSCENE);
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before,
+                after: step.after,
+                flags: 2,
+            }]
+        );
     }
 
     #[test]

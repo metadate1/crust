@@ -56,8 +56,9 @@ impl StorageState {
 
     pub fn persist_card(&mut self, card: &VirtualCard) -> Result<(), JsValue> {
         let timestamp = now_timestamp();
+        let mut next_record = self.card_record.clone();
         for (index, slot) in card.slots().iter().copied().enumerate() {
-            self.card_record.slots[index] = match slot {
+            next_record.slots[index] = match slot {
                 Slot::Empty => CardSlot::Empty,
                 Slot::Valid(payload) => CardSlot::Valid {
                     payload: Box::new(payload.into_bytes()),
@@ -78,10 +79,12 @@ impl StorageState {
                 },
             };
         }
-        self.card_record.updated_at = timestamp;
-        let json = encode_virtual_card(&self.card_record)
+        next_record.updated_at = timestamp;
+        let json = encode_virtual_card(&next_record)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
-        self.storage.set_item(CARD_STORAGE_KEY, &json)
+        self.storage.set_item(CARD_STORAGE_KEY, &json)?;
+        self.card_record = next_record;
+        Ok(())
     }
 
     pub fn load_resume(

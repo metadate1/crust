@@ -21,11 +21,11 @@ pub const AXIS_DEADZONE: f32 = 16_000.0 / 32_767.0;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PadSnapshot {
-    pub held: u16,
-    pub tapped: u16,
-    pub held_previous: u16,
-    pub held_previous_2: u16,
-    pub tapped_previous: u16,
+    pub held: u32,
+    pub tapped: u32,
+    pub held_previous: u32,
+    pub held_previous_2: u32,
+    pub tapped_previous: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -39,21 +39,21 @@ impl PadState {
         self.snapshot
     }
 
-    pub fn update(&mut self, physical: u16, touch: u16, demo_override: Option<u16>) {
-        let mut held = demo_override.unwrap_or(physical | touch);
+    pub fn update(&mut self, physical: u16, touch: u16, demo_override: Option<u32>) {
+        let mut held = demo_override.unwrap_or_else(|| u32::from(physical | touch));
         // The console resolves impossible opposing inputs in a stable direction.
-        if held & PAD_UP != 0 {
-            held &= !PAD_DOWN;
+        if held & u32::from(PAD_UP) != 0 {
+            held &= !u32::from(PAD_DOWN);
         }
-        if held & PAD_LEFT != 0 {
-            held &= !PAD_RIGHT;
+        if held & u32::from(PAD_LEFT) != 0 {
+            held &= !u32::from(PAD_RIGHT);
         }
         let previous = self.snapshot.held;
         self.snapshot.held_previous_2 = self.snapshot.held_previous;
         self.snapshot.tapped_previous = self.snapshot.tapped;
         self.snapshot.held_previous = previous;
         self.snapshot.held = held;
-        self.snapshot.tapped = (!previous & held) & TAP_MASK;
+        self.snapshot.tapped = (!previous & held) & u32::from(TAP_MASK);
     }
 
     pub fn clear(&mut self) {
@@ -199,25 +199,33 @@ mod tests {
     fn up_and_left_win_opposing_inputs() {
         let mut pad = PadState::default();
         pad.update(PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT, 0, None);
-        assert_eq!(pad.snapshot().held, PAD_UP | PAD_LEFT);
+        assert_eq!(pad.snapshot().held, u32::from(PAD_UP | PAD_LEFT));
     }
 
     #[test]
     fn tap_edges_exclude_stick_clicks() {
         let mut pad = PadState::default();
         pad.update(PAD_CROSS | PAD_L3 | PAD_R3, 0, None);
-        assert_eq!(pad.snapshot().tapped, PAD_CROSS);
+        assert_eq!(pad.snapshot().tapped, u32::from(PAD_CROSS));
         pad.update(PAD_CROSS, 0, None);
         assert_eq!(pad.snapshot().tapped, 0);
         pad.clear();
         pad.update(PAD_CROSS, 0, None);
-        assert_eq!(pad.snapshot().tapped, PAD_CROSS);
+        assert_eq!(pad.snapshot().tapped, u32::from(PAD_CROSS));
     }
 
     #[test]
     fn demo_replaces_live_sources() {
         let mut pad = PadState::default();
-        pad.update(PAD_CROSS, PAD_SQUARE, Some(PAD_START));
-        assert_eq!(pad.snapshot().held, PAD_START);
+        pad.update(PAD_CROSS, PAD_SQUARE, Some(u32::from(PAD_START)));
+        assert_eq!(pad.snapshot().held, u32::from(PAD_START));
+    }
+
+    #[test]
+    fn demo_preserves_non_controller_word_bits_for_retail_gool() {
+        let mut pad = PadState::default();
+        pad.update(0, 0, Some(0x0010_0040));
+        assert_eq!(pad.snapshot().held, 0x0010_0040);
+        assert_eq!(pad.snapshot().tapped, u32::from(PAD_CROSS));
     }
 }

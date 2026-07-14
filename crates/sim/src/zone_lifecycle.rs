@@ -8,7 +8,11 @@
 //! host can validate against its object and paging registries before committing
 //! the lifecycle state with [`ZoneLifecycle::commit_transition`].
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    fmt,
+};
 
 use crust_formats::{
     binary::{Eid, PageIndex},
@@ -177,6 +181,49 @@ pub struct ZoneTransitionPlan {
     actions: Vec<ZoneTransitionAction>,
     next_frame_spawn_scan: Vec<SpawnScanZone>,
     resulting_display_flags: Vec<u32>,
+}
+
+/// Fully validated `LevelRestart` teardown followed by its null-origin
+/// `LevelUpdate`. Unlike an ordinary transition, restart terminates every
+/// active neighbor of the old current zone even when it is also present in the
+/// restored band.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ZoneHardRestartPlan {
+    base_revision: u64,
+    next_revision: u64,
+    previous_zone: Option<Eid>,
+    next_zone: Eid,
+    activation_marker: bool,
+    actions: Vec<ZoneTransitionAction>,
+    next_frame_spawn_scan: Vec<SpawnScanZone>,
+    resulting_display_flags: Vec<u32>,
+}
+
+impl ZoneHardRestartPlan {
+    #[must_use]
+    pub const fn previous_zone(&self) -> Option<Eid> {
+        self.previous_zone
+    }
+
+    #[must_use]
+    pub const fn next_zone(&self) -> Eid {
+        self.next_zone
+    }
+
+    #[must_use]
+    pub const fn activation_marker(&self) -> bool {
+        self.activation_marker
+    }
+
+    #[must_use]
+    pub fn actions(&self) -> &[ZoneTransitionAction] {
+        &self.actions
+    }
+
+    #[must_use]
+    pub fn next_frame_spawn_scan(&self) -> &[SpawnScanZone] {
+        &self.next_frame_spawn_scan
+    }
 }
 
 impl ZoneTransitionPlan {
@@ -476,6 +523,127 @@ impl ZoneLifecycle {
         })
     }
 
+    /// Plans the exact zone/paging half of native `LevelRestart`.
+    ///
+    /// The trace first visits every active neighbor in the old current
+    /// header's serialized order, clears bits zero/one, unloads the old
+    /// current zone's complete load list, then performs a null-origin
+    /// `LevelUpdate` to the saved zone. Shared resources are deliberately
+    /// closed and reopened, and shared zones are deliberately terminated and
+    /// reactivated.
+    pub fn plan_hard_restart(
+        &self,
+        next_zone: Eid,
+        activation_marker: bool,
+    ) -> Result<ZoneHardRestartPlan, ZoneLifecycleError> {
+        let next_index = self
+            .zone_indices
+            .get(&next_zone)
+            .copied()
+            .ok_or(ZoneLifecycleError::UnknownZone(next_zone))?;
+        let next = &self.zones[next_index];
+        let next_revision = self
+            .revision
+            .checked_add(1)
+            .ok_or(ZoneLifecycleError::RevisionOverflow)?;
+        let mut resulting_display_flags = self.current_display_flags();
+        let mut actions = Vec::new();
+
+        if let Some(previous_eid) = self.current_zone {
+            let previous = self
+                .zone(previous_eid)
+                .ok_or(ZoneLifecycleError::UnknownZone(previous_eid))?;
+            for neighbor in previous.neighbors.iter().copied() {
+                let neighbor_index = self.zone_indices[&neighbor];
+                let before = resulting_display_flags[neighbor_index];
+                if before & ZONE_OBJECTS_ACTIVE == 0 {
+                    continue;
+                }
+                let after = before & !DEPARTED_ZONE_CLEAR_MASK;
+                actions.push(ZoneTransitionAction::TerminateZoneObjects(neighbor));
+                actions.push(ZoneTransitionAction::SetDisplayFlags {
+                    zone: neighbor,
+                    before,
+                    after,
+                });
+                resulting_display_flags[neighbor_index] = after;
+            }
+            for entry in previous.load_list.entries.iter().copied() {
+                actions.push(ZoneTransitionAction::CloseEntry(entry));
+            }
+            for page in previous.load_list.pages.iter().copied() {
+                actions.push(ZoneTransitionAction::ClosePage(page));
+            }
+        }
+
+        for entry in next.load_list.entries.iter().copied() {
+            actions.push(ZoneTransitionAction::OpenEntry(entry));
+        }
+        for page in next.load_list.pages.iter().copied() {
+            actions.push(ZoneTransitionAction::OpenPage(page));
+        }
+        for neighbor in next.neighbors.iter().copied() {
+            let neighbor_index = self.zone_indices[&neighbor];
+            let before = resulting_display_flags[neighbor_index];
+            let mut after = before;
+            if after & ZONE_OBJECTS_ACTIVE == 0 {
+                after |= TRANSITION_ACTIVATION_FLAGS;
+            }
+            if activation_marker {
+                after |= ZONE_INITIAL_ACTIVATION;
+            } else {
+                after &= !ZONE_INITIAL_ACTIVATION;
+            }
+            if after != before {
+                actions.push(ZoneTransitionAction::SetDisplayFlags {
+                    zone: neighbor,
+                    before,
+                    after,
+                });
+                resulting_display_flags[neighbor_index] = after;
+            }
+        }
+
+        let next_frame_spawn_scan = spawn_scan(next, &resulting_display_flags, &self.zone_indices);
+        Ok(ZoneHardRestartPlan {
+            base_revision: self.revision,
+            next_revision,
+            previous_zone: self.current_zone,
+            next_zone,
+            activation_marker,
+            actions,
+            next_frame_spawn_scan,
+            resulting_display_flags,
+        })
+    }
+
+    /// Commits one preflighted hard-restart plan atomically.
+    pub fn commit_hard_restart(
+        &mut self,
+        plan: &ZoneHardRestartPlan,
+    ) -> Result<(), ZoneLifecycleError> {
+        if plan.base_revision != self.revision {
+            return Err(ZoneLifecycleError::StalePlan {
+                expected_revision: self.revision,
+                plan_revision: plan.base_revision,
+            });
+        }
+        let expected = self.plan_hard_restart(plan.next_zone, plan.activation_marker)?;
+        if expected != *plan {
+            return Err(ZoneLifecycleError::InvalidPlan(plan.next_zone));
+        }
+        for (zone, display_flags) in self
+            .zones
+            .iter_mut()
+            .zip(plan.resulting_display_flags.iter().copied())
+        {
+            zone.display_flags = display_flags;
+        }
+        self.current_zone = Some(plan.next_zone);
+        self.revision = plan.next_revision;
+        Ok(())
+    }
+
     /// Atomically commits a plan after revalidating it against current state.
     ///
     /// Callers can first validate or execute fallible external work described
@@ -537,6 +705,30 @@ impl ZoneLifecycle {
             return Vec::new();
         };
         spawn_scan(current, &self.current_display_flags(), &self.zone_indices)
+    }
+
+    /// Current header neighbors whose native display bit zero is set, in
+    /// serialized first-occurrence order. Repeated EIDs appear only once
+    /// because `LevelRestart` clears their low flags on the first visit.
+    #[must_use]
+    pub fn active_neighbor_zones(&self) -> Vec<Eid> {
+        let Some(current) = self.current_zone.and_then(|eid| self.zone(eid)) else {
+            return Vec::new();
+        };
+        let mut visited = BTreeSet::new();
+        current
+            .neighbors
+            .iter()
+            .copied()
+            .filter(|neighbor| {
+                // The native restart clears an active neighbor's low flags
+                // immediately. A repeated serialized EID is therefore
+                // dormant by the time its later occurrence is visited.
+                visited.insert(*neighbor)
+                    && self.zones[self.zone_indices[neighbor]].display_flags & ZONE_OBJECTS_ACTIVE
+                        != 0
+            })
+            .collect()
     }
 
     fn current_display_flags(&self) -> Vec<u32> {
@@ -724,6 +916,98 @@ mod tests {
                 ZoneTransitionAction::OpenPage(PageIndex::new(2)),
                 ZoneTransitionAction::OpenPage(PageIndex::new(3)),
             ]
+        );
+    }
+
+    #[test]
+    fn hard_restart_terminates_shared_band_before_close_reopen_and_reactivation() {
+        let mut lifecycle = ZoneLifecycle::new([
+            zone(
+                "old00",
+                0,
+                &["shar0", "old00", "dorm0"],
+                &["share", "oldld"],
+                &[2, 3],
+            ),
+            zone(
+                "new00",
+                0,
+                &["shar0", "new00"],
+                &["share", "newld"],
+                &[2, 4],
+            ),
+            zone("shar0", 0, &[], &[], &[]),
+            zone("dorm0", 0, &[], &[], &[]),
+        ])
+        .unwrap();
+        lifecycle.transition(eid("old00")).unwrap();
+        // Make one serialized old neighbor dormant; restart must skip it.
+        let dormant_index = lifecycle.zone_indices[&eid("dorm0")];
+        lifecycle.zones[dormant_index].display_flags &= !ZONE_OBJECTS_ACTIVE;
+
+        let before = lifecycle.clone();
+        let plan = lifecycle.plan_hard_restart(eid("new00"), true).unwrap();
+        assert_eq!(lifecycle, before, "planning remains transactional");
+        assert_eq!(
+            plan.actions(),
+            [
+                ZoneTransitionAction::TerminateZoneObjects(eid("shar0")),
+                ZoneTransitionAction::SetDisplayFlags {
+                    zone: eid("shar0"),
+                    before: 7,
+                    after: 4,
+                },
+                ZoneTransitionAction::TerminateZoneObjects(eid("old00")),
+                ZoneTransitionAction::SetDisplayFlags {
+                    zone: eid("old00"),
+                    before: 7,
+                    after: 4,
+                },
+                ZoneTransitionAction::CloseEntry(eid("share")),
+                ZoneTransitionAction::CloseEntry(eid("oldld")),
+                ZoneTransitionAction::ClosePage(PageIndex::new(2)),
+                ZoneTransitionAction::ClosePage(PageIndex::new(3)),
+                ZoneTransitionAction::OpenEntry(eid("share")),
+                ZoneTransitionAction::OpenEntry(eid("newld")),
+                ZoneTransitionAction::OpenPage(PageIndex::new(2)),
+                ZoneTransitionAction::OpenPage(PageIndex::new(4)),
+                ZoneTransitionAction::SetDisplayFlags {
+                    zone: eid("shar0"),
+                    before: 4,
+                    after: 7,
+                },
+                ZoneTransitionAction::SetDisplayFlags {
+                    zone: eid("new00"),
+                    before: 0,
+                    after: 7,
+                },
+            ]
+        );
+        assert_eq!(
+            plan.next_frame_spawn_scan(),
+            [
+                SpawnScanZone {
+                    neighbor_index: 0,
+                    zone: eid("shar0"),
+                    display_flags: 7,
+                },
+                SpawnScanZone {
+                    neighbor_index: 1,
+                    zone: eid("new00"),
+                    display_flags: 7,
+                },
+            ]
+        );
+        assert_eq!(
+            lifecycle.active_neighbor_zones(),
+            [eid("shar0"), eid("old00")]
+        );
+
+        lifecycle.commit_hard_restart(&plan).unwrap();
+        assert_eq!(lifecycle.current_zone(), Some(eid("new00")));
+        assert_eq!(
+            lifecycle.active_neighbor_zones(),
+            [eid("shar0"), eid("new00")]
         );
     }
 
@@ -943,6 +1227,11 @@ mod tests {
                 .count(),
             2,
             "the duplicate scan entry must not duplicate the flag mutation"
+        );
+        assert_eq!(
+            lifecycle.active_neighbor_zones(),
+            [eid("near0"), eid("zone0")],
+            "restart visits the repeated active zone only before its first low-flag clear"
         );
     }
 }

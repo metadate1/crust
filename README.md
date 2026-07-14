@@ -16,8 +16,11 @@ the 30 Hz state machine, menu/options/password/load/map shells, direct boot, loc
 input, WebGL2, WebAudio, and substantial native engine subsystems are implemented. The live browser
 host retains and remounts each validated destination stream pair, decodes retail LDAT loading
 images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, and drives the
-renderer command backend. The former data-independent diagnostic landscape/player geometry has
-been removed. For the 40 world-bearing playable starts, gameplay presents bounds-checked
+renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
+latches display/animate at the authored boundary and draws the native 16-level nonlinear black
+overlay; once an authored object scene is active, the browser removes its diagnostic DOM overlay
+from the 4:3 output. The former data-independent diagnostic landscape/player geometry has been
+removed. For the 40 world-bearing playable starts, gameplay presents bounds-checked
 ZDAT/SLST/WGEO path snapshots with decoded TPAG textures and retail camera/depth math. The
 loading-image path follows the observed two-tick presentation gate and uses the first presented
 path point and texture-animation count; N. Sanity Beach resolves to 679 visible polygons at that
@@ -27,7 +30,8 @@ automatic modes 0/1/3, tapped transition skipping and path/zone crossings are li
 the hosted main object's typed transform, camera zoom, held pad and frame stamp into the checked
 `CamFollow` projection/neighbor/smoothing path whenever that object is available.
 
-The browser now owns a checked retail object runtime for gameplay, bonus, boss and ending states.
+The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
+complete, intro and ending states.
 At the cooperative 30 Hz boundary it scans displayed current-zone neighbors, spawns group-three
 ZDAT entities into the bounded arena, binds their GOOL programs from the mounted NSF, applies hosted
 child-spawn effects, and preserves typed arena/VM links. Entity objects now receive their
@@ -39,23 +43,45 @@ normal updates continue into newly bound state code in that same native update. 
 share the bounded
 process word array at `init_sp`, state links apply target-state guards, and checked failures
 quarantine only the affected object. Checked aligned code/storage/entry tags, paging operations,
-five-word pad history, camera-relative movement, gravity, rotation, entity-path orientation, color
-seeking and the source-defined static/object solid paths exercised by the legal trace are
-implemented without native pointers or C undefined
-behavior. The WebGL stage transactionally replaces the camera/path scene while reusing shared
+five-word pad history, camera-relative movement, gravity, rotation, every source selector in the
+`0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
+neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
+performs the distinct forward current-header neighbor TERM sweep through the typed object host.
+The WebGL stage transactionally replaces the camera/path scene while reusing shared
 immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
-TGEO plus 3D SVTX/CVTX frames; post-GOOL object snapshots drive fixed-point projection, lighting,
-culling, ordering and the same resident TPAG cache as the world. Eligible animation frames also
+TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
+fixed 63-glyph type-three font resource. Post-GOOL object snapshots drive their fixed-point
+projection, lighting/color modulation, ordering and the same resident TPAG cache as the world;
+the status-B 2D CVTX path uses the shared retail sprite matrix. Eligible animation frames also
 register an ordered, bounded collision snapshot before execution, allowing the checked solid query
-to cross the former N. Sanity animation-bound boundary without emulating undefined C locals. This
-now produces an interactive data-backed N. Sanity scene with Crash, retail entrance timing, floor
-response, camera following and pad-driven movement. It is not yet a complete retail playthrough:
-sprite/font/text/fragment and 2D-CVTX presentation, full progression, several GOOL host operations
-and save-state handshakes remain incomplete. Source-ordered zone lifetime/paging, synchronous event
-and audio calls, display-mask latching and local ADIO SFX are now connected. Retail MIDI/INST music
-is not yet connected, so the browser still uses its software-generated sequence for music. See
-[compatibility](docs/COMPATIBILITY.md) for the exact gaps and [verification](docs/VERIFICATION.md)
-for checks actually performed.
+to cross the former N. Sanity animation-bound boundary without emulating undefined C locals.
+Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
+bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
+rectangle/graphics/water fallback, never extra geometry candidates. A strict 18,000-frame
+forward-input trace carries both the camera and Crash from `e0_9Z` through `a0_9Z` into `a1_9Z`,
+reaches the valid path-zero solid wall, and reports no VM errors, faulted objects or terminal fall.
+This is a real data-backed progression path, but it does not certify a completed retail level or
+playthrough. Full progression, several GOOL host operations, dynamic rendering effects and the
+nested same-level restart continuation remain incomplete. Source-ordered zone lifetime/paging,
+synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
+connected. Zone graphics now select local
+retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
+fades, the native all-bus master fade and GOOL-controlled alternate tracks. Authored `next_lid`
+writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
+fresh destination runtime, and restore bonus returns from the saved zone/path/progress. The native
+3,592-halfword encountered-object registry is retained separately from each mount's fresh 304-word
+active spawn table. Exact `LevelResetGlobals(1)` and `CardRestorePayload` ordering preserves the
+active table and savestate while resetting the documented scalar globals and encounter registry.
+Retail object shader modes two and three, including their source depth rejection/ramp behavior,
+are live; zone-graphics flag `0x1000` substitutes the fixed Q24.8 bobbing camera and pitch for GOOL
+objects only. Mode four is implemented as a checked pure renderer operation but is not connected
+until the runtime snapshot carries the live pause-object/player selection and `dark_dist` value.
+Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
+snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
+(10,966 frames) pass the adapter characterization; the final caption-object event `0xE00` handshake
+is the remaining attract-mode end gap.
+See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
+[verification](docs/VERIFICATION.md) for checks actually performed.
 
 ## Run locally
 
@@ -82,8 +108,11 @@ entry/state graphs can be validated and bound natively. Zone entities and their 
 flags are instantiated into a checked 96-object arena and run by the live browser at 30 Hz. This
 execution slice supplies the live follow camera and camera-selected WebGL scene and is observable
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
-camera-selected world; Crash accepts retail pad input and collides with the decoded zone, but later
-progression and save/checkpoint behavior are not yet complete enough to certify a full level.
+camera-selected world; Crash accepts retail pad input and has a clean 18,000-frame characterized
+route across the opening three N. Sanity zones, but no authored level completion has been
+certified. Save/checkpoint behavior is not yet playthrough-certified, and a
+same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
+local scan of all 44 retail pairs found zero authored occurrences of that nested case.
 
 ## Controls
 
@@ -119,15 +148,16 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
 ## Workspace
 
 - `crust-formats` — endian-explicit ISO9660, raw-sector, NSD/NSF, page, entry, EID, GOOL program and
-  animation descriptors, TGEO/SVTX/CVTX object models, ZDAT entity/path, stateful SLST visibility,
-  scene metadata and tagged-reference validation.
+  animation descriptors, PBAK recordings, TGEO/SVTX/CVTX object models, ZDAT entity/path, stateful
+  SLST visibility, scene metadata and tagged-reference validation.
 - `crust-sim` — deterministic 30 Hz clock/presentation contract, checked GOOL program
   binding/word machine, hosted retail entity runtime with state rebinding, bounded object arena,
   source-ordered movement/solid physics, level/title flow, collision, camera, paging, demos, and
-  retail card payload/state handshakes.
+  exact level-global reset, encountered-object registry and retail card payload/state handshakes.
 - `crust-renderer` — PSX texture/TPAG/UV decoding and cache, world and object fixed-point
-  projection/lighting/culling, ordering, clipping, blend passes, title composition and
-  WebGL2-ready commands.
+  projection/lighting/culling, safe GOOL sprite/fragment/text layout and projection, ordering,
+  zone shader modes, object-only fixed-camera substitution, clipping, blend passes, title
+  composition and WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, retail 24-voice SFX control/cache/mixer, sequence events and a
   44.1 kHz software synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.

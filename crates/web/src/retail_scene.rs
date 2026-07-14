@@ -7,24 +7,30 @@ use std::sync::Arc;
 use crust_formats::binary::Eid;
 use crust_formats::stream::structs::ZonePathPoint;
 use crust_formats::stream::{
-    Entry, GoolAnimationDescriptor, Nsd, Nsf, NsfPage, ObjectMaterial, ObjectModelFrame,
-    ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader, ZonePath,
-    ZoneRect, load_object_model_frame, parse_gool_animation_descriptor, parse_object_frame,
-    parse_world_geometry,
+    Entry, GoolAnimationDescriptor, GoolFontAnimation, GoolFragmentAnimation, GoolSpriteAnimation,
+    GoolTextAnimation, GoolTextureInfo, GoolVertexAnimation, Nsd, Nsf, NsfPage, ObjectMaterial,
+    ObjectModelFrame, ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry, ZoneHeader,
+    ZonePath, ZoneRect, load_object_model_frame, parse_gool_animation_descriptor,
+    parse_object_frame, parse_world_geometry,
 };
 use crust_renderer::cache::{TextureCache, TextureHandle};
 use crust_renderer::command::{
     BlendMode, ColoredTriangle, ColoredVertex, CommandSource, PrimitiveCommand, PrimitiveStyle,
-    TexturedTriangle, TexturedVertex, Uv,
+    TexturedQuad, TexturedTriangle, TexturedVertex, Uv,
 };
 use crust_renderer::projection::{Matrix3, Vec3i, project, rotate};
 use crust_renderer::retail_texture::{
     RetailTextureReference, TextureInfo2, TpagReference, resolve_texture_page,
 };
+use crust_renderer::sprite::{
+    ProjectedSpriteQuad, RetailSpriteCamera, RetailSpriteTransform, RetailSpriteVectors,
+    project_retail_fragment, project_retail_sprite, retail_sprite_shrink,
+};
+use crust_renderer::text::{RetailTextProjection, project_retail_text};
 use crust_renderer::texture::{DecodedTexture, Rgba8};
 use crust_renderer::{
     GoolObjectLighting, ObjectProjectionParameters, ObjectProjectionTransform,
-    ProjectedObjectPolygon, project_object_model,
+    ProjectedObjectPolygon, apply_object_zone_shader, project_object_model,
 };
 use crust_sim::Angle12;
 use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
@@ -70,6 +76,7 @@ pub struct RetailSceneStats {
     pub skipped_textured_polygons: usize,
     pub visible_objects: usize,
     pub submitted_object_polygons: usize,
+    pub submitted_object_quads: usize,
     pub saturated_object_polygons: usize,
     pub culled_object_polygons: usize,
     pub skipped_object_animations: usize,
@@ -286,6 +293,7 @@ impl RetailSceneBuilder {
             &[],
             None,
             RETAIL_INITIAL_DISPLAY_FLAGS,
+            None,
         )
     }
 
@@ -352,6 +360,43 @@ impl RetailSceneBuilder {
             objects,
             main_object,
             display_mask,
+            None,
+        )
+    }
+
+    /// Builds a post-GOOL scene with the title runtime's state-specific FOV.
+    ///
+    /// Retail mutates the title LDAT projection before loading each menu state;
+    /// the mounted NSD stays immutable here, so the browser passes that checked
+    /// scalar explicitly instead of rewriting parsed game data.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same checked scene and asset errors as
+    /// [`Self::build_at_progress_with_objects_and_display_mask`], including an
+    /// unsupported field of view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_progress_with_objects_display_mask_and_fov(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+        display_mask: u32,
+        field_of_view: u32,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(
+            self,
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            objects,
+            main_object,
+            display_mask,
+            Some(field_of_view),
         )
     }
 }
@@ -439,6 +484,7 @@ fn build_retail_scene_cached(
     render_objects: &[RetailRenderObject],
     main_object: Option<RuntimeObjectHandle>,
     display_mask: u32,
+    field_of_view_override: Option<u32>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -508,11 +554,19 @@ fn build_retail_scene_cached(
         location.path_progress,
     )?;
     let camera_translation = camera.translation;
-    let raw_camera_matrix =
+    let raw_world_camera_matrix =
         raw_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
-    let camera_matrix = adjusted_camera_matrix(raw_camera_matrix);
-    let projection_distance = projection_distance(ldat.field_of_view)?;
-    let prepared_objects = prepare_vertex_objects(
+    let camera_matrix = adjusted_camera_matrix(raw_world_camera_matrix);
+    let object_camera = object_camera_sample(camera, graph.zone_header.graphics.flags, draw_count);
+    let raw_object_camera_matrix = raw_camera_matrix(
+        object_camera.rotation_y,
+        object_camera.rotation_x,
+        object_camera.rotation_z,
+    );
+    let object_camera_matrix = adjusted_camera_matrix(raw_object_camera_matrix);
+    let projection_distance =
+        projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
+    let prepared_objects = prepare_objects(
         nsd,
         nsf,
         nsf_bytes,
@@ -521,9 +575,9 @@ fn build_retail_scene_cached(
         &graph.zone_header,
         render_objects,
         main_object,
-        camera,
-        raw_camera_matrix,
-        camera_matrix,
+        object_camera,
+        raw_object_camera_matrix,
+        object_camera_matrix,
         projection_distance,
         display_mask,
     )?;
@@ -554,6 +608,9 @@ fn build_retail_scene_cached(
                 page_ids.insert(texture_page.raw());
             }
         }
+    }
+    for quad in &prepared_objects.quads {
+        page_ids.insert(quad.texture_page.raw());
     }
     let resident_texture_pages = resident_texture_pages(nsd, nsf, &graph.zone_header)?;
     page_ids.retain(|page| resident_texture_pages.contains(page));
@@ -722,7 +779,7 @@ fn build_retail_scene_cached(
     let mut object_commands = Vec::new();
     let mut skipped_object_textured_polygons = 0_usize;
     for object in &prepared_objects.objects {
-        for polygon in &object.polygons {
+        for (emission_index, polygon) in object.polygons.iter().enumerate() {
             let primitive = match polygon.material {
                 ObjectMaterial::Color(color) => {
                     PrimitiveCommand::ColoredTriangle(ColoredTriangle {
@@ -787,22 +844,88 @@ fn build_retail_scene_cached(
                     })
                 }
             };
-            object_commands.push(RetailSceneCommand {
-                depth: polygon.ordering_depth,
-                source: CommandSource::Object {
-                    handle: object.handle,
-                    part: polygon.source_part,
+            object_commands.push((
+                object.render_index,
+                emission_index,
+                RetailSceneCommand {
+                    depth: polygon.ordering_depth,
+                    source: CommandSource::Object {
+                        handle: object.handle,
+                        part: polygon.source_part,
+                    },
+                    primitive,
                 },
-                primitive,
-            });
+            ));
         }
     }
     let submitted_object_polygons = object_commands.len();
+    let mut submitted_object_quads = 0_usize;
+    for quad in &prepared_objects.quads {
+        if !resident_texture_pages.contains(&quad.texture_page.raw()) {
+            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
+            continue;
+        }
+        let reference =
+            RetailTextureReference::new(TpagReference::new(quad.texture_page), quad.texture);
+        let Ok(layout) = reference.layout() else {
+            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
+            continue;
+        };
+        let Ok(cached) = builder.texture_cache.load(layout.request) else {
+            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
+            continue;
+        };
+        let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
+            *handle
+        } else {
+            let next = u64::try_from(texture_handles.len())
+                .ok()
+                .and_then(|value| value.checked_add(1))
+                .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
+            let handle = TextureHandle::new(next);
+            texture_handles.insert(layout.request, handle);
+            handle
+        };
+        textures
+            .entry(output_handle)
+            .or_insert_with(|| Arc::clone(&cached.pixels));
+        let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+        object_commands.push((
+            quad.render_index,
+            usize::from(quad.part),
+            RetailSceneCommand {
+                depth: quad.projected.ordering_depth,
+                source: CommandSource::Object {
+                    handle: quad.handle,
+                    part: quad.part,
+                },
+                primitive: PrimitiveCommand::TexturedQuad(TexturedQuad {
+                    vertices: std::array::from_fn(|index| TexturedVertex {
+                        position: quad.projected.vertices[index],
+                        color: quad.colors[index],
+                        uv: Uv {
+                            u: uvs[index][0],
+                            v: uvs[index][1],
+                        },
+                    }),
+                    texture: output_handle,
+                    blend: layout.request.blend_mode,
+                }),
+            },
+        ));
+        submitted_object_quads = submitted_object_quads.saturating_add(1);
+    }
     // Source object primitives are head-inserted after all world primitives.
     // The Rust ordering table is FIFO inside a depth bucket, so reverse the
     // complete object insertion stream and place it before the compensated
     // world stream.
-    object_commands.reverse();
+    object_commands
+        .sort_by_key(|(render_index, emission_index, _)| (*render_index, *emission_index));
+    let mut object_commands = object_commands
+        .into_iter()
+        .rev()
+        .map(|(_, _, command)| command)
+        .collect::<Vec<_>>();
     object_commands.extend(world_commands);
     let commands = object_commands;
     let textures = textures
@@ -832,6 +955,7 @@ fn build_retail_scene_cached(
             skipped_textured_polygons,
             visible_objects: prepared_objects.visible_objects,
             submitted_object_polygons,
+            submitted_object_quads,
             saturated_object_polygons: prepared_objects.saturated_polygons,
             culled_object_polygons: prepared_objects.culled_polygons,
             skipped_object_animations: prepared_objects.skipped_animations,
@@ -849,13 +973,26 @@ fn build_retail_scene_cached(
 
 #[derive(Debug)]
 struct PreparedVertexObject {
+    render_index: usize,
     handle: u32,
     polygons: Vec<ProjectedObjectPolygon>,
 }
 
+#[derive(Debug)]
+struct PreparedObjectQuad {
+    render_index: usize,
+    handle: u32,
+    part: u16,
+    texture_page: Eid,
+    texture: TextureInfo2,
+    projected: ProjectedSpriteQuad,
+    colors: [Rgba8; 4],
+}
+
 #[derive(Debug, Default)]
-struct PreparedVertexObjects {
+struct PreparedObjects {
     objects: Vec<PreparedVertexObject>,
+    quads: Vec<PreparedObjectQuad>,
     visible_objects: usize,
     saturated_polygons: usize,
     culled_polygons: usize,
@@ -863,7 +1000,7 @@ struct PreparedVertexObjects {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn prepare_vertex_objects(
+fn prepare_objects(
     nsd: &Nsd,
     nsf: &Nsf,
     nsf_bytes: &[u8],
@@ -877,9 +1014,9 @@ fn prepare_vertex_objects(
     adjusted_camera_matrix: Matrix3,
     projection_distance: u32,
     display_flags: u32,
-) -> Result<PreparedVertexObjects, RetailSceneError> {
-    let mut prepared = PreparedVertexObjects::default();
-    for object in render_objects {
+) -> Result<PreparedObjects, RetailSceneError> {
+    let mut prepared = PreparedObjects::default();
+    for (render_index, object) in render_objects.iter().enumerate() {
         if !object.display_eligible {
             continue;
         }
@@ -899,140 +1036,495 @@ fn prepare_vertex_objects(
                 .map_err(|_| scene_error("GOOL animation offset does not fit the host"))?,
         )
         .map_err(|error| scene_error(format!("GOOL object animation: {error}")))?;
-        let GoolAnimationDescriptor::Vertex(animation) = descriptor else {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        };
-        let Ok(frame_index) = u16::try_from(object.animation_frame >> 8) else {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        };
-
-        // Retail NSLookup simply declines a dormant frame whose model is not
-        // resident in the mounted pair. Never fall back to another pair with
-        // the same EID.
-        if nsd.pte(animation.model_eid).is_none() {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        }
-        let vertex_entry = nsf
-            .resolve_entry(nsd, animation.model_eid)
-            .map_err(|error| scene_error(format!("GOOL object frame entry: {error}")))?;
-        let vertex_kind = ObjectVertexKind::from_entry_type(vertex_entry.entry_type)
-            .map_err(|error| scene_error(format!("GOOL object frame type: {error}")))?;
-        let Some(frame_item) = vertex_entry.item(usize::from(frame_index)) else {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        };
-        let frame = parse_object_frame(
-            frame_item
-                .bytes(nsf_bytes)
-                .map_err(|error| scene_error(format!("GOOL object frame bytes: {error}")))?,
-            vertex_kind,
-        )
-        .map_err(|error| scene_error(format!("GOOL object frame: {error}")))?;
-        if nsd.pte(frame.header.geometry_eid).is_none() {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
-        }
-        let cache_key = (animation.model_eid, frame_index);
-        let model = if let Some(model) = model_cache.get(&cache_key) {
-            touch_object_model_lru(model_lru, cache_key);
-            Arc::clone(model)
-        } else {
-            let model = Arc::new(
-                load_object_model_frame(nsd, nsf, nsf_bytes, animation.model_eid, frame_index)
-                    .map_err(|error| scene_error(format!("GOOL object model: {error}")))?,
-            );
-            while model_cache.len() >= RETAIL_OBJECT_MODEL_CACHE_FRAMES {
-                let Some(evicted) = model_lru.pop_front() else {
-                    break;
-                };
-                model_cache.remove(&evicted);
+        match descriptor {
+            GoolAnimationDescriptor::Vertex(animation) => prepare_vertex_animation(
+                nsd,
+                nsf,
+                nsf_bytes,
+                model_cache,
+                model_lru,
+                zone_header,
+                object,
+                main_object,
+                camera,
+                raw_camera_matrix,
+                adjusted_camera_matrix,
+                projection_distance,
+                display_flags,
+                animation,
+                render_index,
+                &mut prepared,
+            )?,
+            GoolAnimationDescriptor::Sprite(animation) => prepare_sprite_animation(
+                object,
+                camera,
+                adjusted_camera_matrix,
+                projection_distance,
+                &animation,
+                render_index,
+                &mut prepared,
+            )?,
+            GoolAnimationDescriptor::Fragment(animation) => prepare_fragment_animation(
+                object,
+                camera,
+                adjusted_camera_matrix,
+                projection_distance,
+                &animation,
+                render_index,
+                &mut prepared,
+            )?,
+            GoolAnimationDescriptor::Text(animation) => prepare_text_animation(
+                animations,
+                object,
+                camera,
+                adjusted_camera_matrix,
+                projection_distance,
+                &animation,
+                render_index,
+                &mut prepared,
+            )?,
+            // Fonts are packed resources selected by type-four descriptors.
+            GoolAnimationDescriptor::Font(_) => {
+                prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
             }
-            model_cache.insert(cache_key, Arc::clone(&model));
-            model_lru.push_back(cache_key);
-            model
-        };
-
-        // The separate source path for 2D CVTX uses a ZXY sprite matrix. It
-        // remains an explicitly counted animation boundary in this vertex
-        // slice rather than being drawn with the wrong 3D transform.
-        if model.frame.kind == ObjectVertexKind::Colored && object.status_b & 0x200 != 0 {
-            prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
-            continue;
         }
+    }
+    Ok(prepared)
+}
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_vertex_animation(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    model_cache: &mut HashMap<(Eid, u16), Arc<ObjectModelFrame>>,
+    model_lru: &mut VecDeque<(Eid, u16)>,
+    zone_header: &ZoneHeader,
+    object: &RetailRenderObject,
+    main_object: Option<RuntimeObjectHandle>,
+    camera: CameraSample,
+    raw_camera_matrix: Matrix3,
+    adjusted_camera_matrix: Matrix3,
+    projection_distance: u32,
+    display_flags: u32,
+    animation: GoolVertexAnimation,
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
+    let Ok(frame_index) = u16::try_from(object.animation_frame >> 8) else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+
+    // Retail NSLookup simply declines a dormant frame whose model is not
+    // resident in the mounted pair. Never fall back to another pair with the
+    // same EID.
+    if nsd.pte(animation.model_eid).is_none() {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    }
+    let vertex_entry = nsf
+        .resolve_entry(nsd, animation.model_eid)
+        .map_err(|error| scene_error(format!("GOOL object frame entry: {error}")))?;
+    let vertex_kind = ObjectVertexKind::from_entry_type(vertex_entry.entry_type)
+        .map_err(|error| scene_error(format!("GOOL object frame type: {error}")))?;
+    let Some(frame_item) = vertex_entry.item(usize::from(frame_index)) else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+    let frame = parse_object_frame(
+        frame_item
+            .bytes(nsf_bytes)
+            .map_err(|error| scene_error(format!("GOOL object frame bytes: {error}")))?,
+        vertex_kind,
+    )
+    .map_err(|error| scene_error(format!("GOOL object frame: {error}")))?;
+    if nsd.pte(frame.header.geometry_eid).is_none() {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    }
+    let cache_key = (animation.model_eid, frame_index);
+    let model = if let Some(model) = model_cache.get(&cache_key) {
+        touch_object_model_lru(model_lru, cache_key);
+        Arc::clone(model)
+    } else {
+        let model = Arc::new(
+            load_object_model_frame(nsd, nsf, nsf_bytes, animation.model_eid, frame_index)
+                .map_err(|error| scene_error(format!("GOOL object model: {error}")))?,
+        );
+        while model_cache.len() >= RETAIL_OBJECT_MODEL_CACHE_FRAMES {
+            let Some(evicted) = model_lru.pop_front() else {
+                break;
+            };
+            model_cache.remove(&evicted);
+        }
+        model_cache.insert(cache_key, Arc::clone(&model));
+        model_lru.push_back(cache_key);
+        model
+    };
+
+    let is_2d_cvtx = model.frame.kind == ObjectVertexKind::Colored && object.status_b & 0x200 != 0;
+    let (transform, colored_shift, lighting) = if is_2d_cvtx {
+        let sprite =
+            RetailSpriteTransform::screen_2d(object_sprite_vectors(object), 0, projection_distance)
+                .map_err(|error| scene_error(format!("2D CVTX transform: {error}")))?;
+        (
+            ObjectProjectionTransform {
+                matrix: sprite.matrix,
+                translation: sprite.translation,
+            },
+            0,
+            None,
+        )
+    } else {
         let relative = Vec3i {
-            x: object.transform.translation[0].wrapping_sub(camera.translation.x.wrapping_shl(8))
-                >> 8,
-            y: object.transform.translation[1].wrapping_sub(camera.translation.y.wrapping_shl(8))
-                >> 8,
-            z: object.transform.translation[2].wrapping_sub(camera.translation.z.wrapping_shl(8))
-                >> 8,
+            x: object.transform.translation[0].wrapping_sub(camera.translation_fixed[0]) >> 8,
+            y: object.transform.translation[1].wrapping_sub(camera.translation_fixed[1]) >> 8,
+            z: object.transform.translation[2].wrapping_sub(camera.translation_fixed[2]) >> 8,
         };
         let camera_translation = rotate(relative, adjusted_camera_matrix).point;
+        // Retail's generic visibility-depth rejection is disabled in the
+        // executable. Only the near-plane check here and the mode-two/three
+        // shader cutoffs below may reject the object origin by depth.
         if display_flags & 0x1_0000 == 0
             && object.status_b & 0x4_0000 == 0
             && i32::try_from(projection_distance).unwrap_or(i32::MAX) >= camera_translation.z
         {
-            continue;
+            return Ok(());
         }
-        let transform = ObjectProjectionTransform::from_retail(
-            raw_camera_matrix,
-            object.transform.rotation_yxz,
-            Vec3i {
-                x: object.transform.scale[0],
-                y: object.transform.scale[1],
-                z: object.transform.scale[2],
-            },
-            model.geometry.header.scale,
-            camera_translation,
-        );
         let is_main = main_object == Some(object.object);
-        let colored_shift = object_colored_shift(
-            nsd,
-            zone_header,
-            display_flags,
-            camera_translation.z,
-            object,
-            is_main,
-        );
-        let ordering_far = object
-            .size
-            .wrapping_add(0x800)
-            .wrapping_sub(i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
-            .cast_unsigned();
-        let projected = project_object_model(
-            &model,
-            transform,
-            ObjectProjectionParameters {
-                screen_offset: [0, 0],
-                projection_distance,
-                ordering_far,
-                cull_face: object.transform.scale[0],
-                colored_shift,
-            },
+        let mut effective_colors = object.colors;
+        let mut colored_shift = 0;
+        if display_flags & 0x1_0000 == 0
+            && !is_main
+            && object.status_b & 0x400 == 0
+            && matches!(zone_header.graphics.unknown_a, 2 | 3)
+        {
+            let Some(shading) = apply_object_zone_shader(
+                zone_header.graphics.unknown_a,
+                model.frame.kind,
+                object.colors,
+                zone_header.graphics.object_colors.words,
+                camera_translation.z,
+                object_zone_depth_anchor(nsd, zone_header),
+                None,
+            )
+            .map_err(|error| scene_error(format!("GOOL object zone shader: {error}")))?
+            else {
+                return Ok(());
+            };
+            effective_colors = shading.colors;
+            colored_shift = shading.colored_shift;
+        }
+        // Mode four also runs here in the source, but it consumes the live
+        // pause/player reference and the `dark_dist` scalar advanced by
+        // ShaderParamsUpdate. Neither value is part of the immutable render
+        // snapshot yet, so retaining the object's authored colors is the only
+        // non-invented behavior at this boundary.
+        (
+            ObjectProjectionTransform::from_retail(
+                raw_camera_matrix,
+                object.transform.rotation_yxz,
+                Vec3i {
+                    x: object.transform.scale[0],
+                    y: object.transform.scale[1],
+                    z: object.transform.scale[2],
+                },
+                model.geometry.header.scale,
+                camera_translation,
+            ),
+            colored_shift,
             Some(GoolObjectLighting {
-                words: object.colors,
+                words: effective_colors,
                 rotation_yxz: object.transform.rotation_yxz,
                 scale_x: object.transform.scale[0],
             }),
         )
-        .map_err(|error| scene_error(format!("GOOL object projection: {error}")))?;
+    };
+    let ordering_far = object
+        .size
+        .wrapping_add(0x800)
+        .wrapping_sub(i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
+        .cast_unsigned();
+    let projected = project_object_model(
+        &model,
+        transform,
+        ObjectProjectionParameters {
+            screen_offset: [0, 0],
+            projection_distance,
+            ordering_far,
+            cull_face: object.transform.scale[0],
+            colored_shift,
+        },
+        lighting,
+    )
+    .map_err(|error| scene_error(format!("GOOL object projection: {error}")))?;
+    prepared.visible_objects = prepared.visible_objects.saturating_add(1);
+    prepared.saturated_polygons = prepared
+        .saturated_polygons
+        .saturating_add(projected.skipped_saturated as usize);
+    prepared.culled_polygons = prepared
+        .culled_polygons
+        .saturating_add(projected.skipped_culled as usize);
+    prepared.objects.push(PreparedVertexObject {
+        render_index,
+        handle: u32::from(object.object.vm().get()),
+        polygons: projected.polygons,
+    });
+    Ok(())
+}
+
+fn prepare_sprite_animation(
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    animation: &GoolSpriteAnimation,
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
+    let frame_index = usize::try_from(object.animation_frame >> 8)
+        .map_err(|_| scene_error("GOOL sprite frame index does not fit the host"))?;
+    let Some(texture) = animation.frames.get(frame_index).copied() else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+    let shrink = retail_sprite_shrink(object.transform.scale[0])
+        .map_err(|error| scene_error(format!("GOOL sprite shrink: {error}")))?;
+    let transform =
+        object_sprite_transform(object, camera, camera_matrix, projection_distance, shrink)?;
+    let half_size = i32::try_from(200_i64 << u32::from(shrink))
+        .map_err(|_| scene_error("GOOL sprite half-size exceeds signed transform space"))?;
+    let ordering_far = object
+        .size
+        .wrapping_add(0x800)
+        .wrapping_sub(i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
+        .cast_unsigned();
+    let Some(projected) =
+        project_retail_sprite(transform, half_size, projection_distance, ordering_far)
+    else {
+        return Ok(());
+    };
+    prepared.visible_objects = prepared.visible_objects.saturating_add(1);
+    prepared.quads.push(prepared_object_quad(
+        object,
+        render_index,
+        0,
+        animation.texture_page,
+        texture,
+        projected,
+    ));
+    Ok(())
+}
+
+fn prepare_fragment_animation(
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    animation: &GoolFragmentAnimation,
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
+    let frame_index = usize::try_from(object.animation_frame >> 8)
+        .map_err(|_| scene_error("GOOL fragment frame index does not fit the host"))?;
+    let Some(fragments) = animation.frame(frame_index) else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+    let shrink = retail_sprite_shrink(object.transform.scale[0])
+        .map_err(|error| scene_error(format!("GOOL fragment shrink: {error}")))?;
+    let transform =
+        object_sprite_transform(object, camera, camera_matrix, projection_distance, shrink)?;
+    let mut emitted = false;
+    for (part, fragment) in fragments.iter().enumerate() {
+        let part =
+            u16::try_from(part).map_err(|_| scene_error("GOOL fragment part index exceeds u16"))?;
+        let bounds = fragment
+            .bounds
+            .map(|value| scaled_fragment_bound(value, shrink))
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let bounds: [i32; 4] = bounds
+            .try_into()
+            .map_err(|_| scene_error("GOOL fragment lost a validated bound"))?;
+        let Some(projected) =
+            project_retail_fragment(transform, bounds, projection_distance, object.size)
+        else {
+            continue;
+        };
+        prepared.quads.push(prepared_object_quad(
+            object,
+            render_index,
+            part,
+            animation.texture_page,
+            fragment.texture,
+            projected,
+        ));
+        emitted = true;
+    }
+    if emitted {
         prepared.visible_objects = prepared.visible_objects.saturating_add(1);
-        prepared.saturated_polygons = prepared
-            .saturated_polygons
-            .saturating_add(projected.skipped_saturated as usize);
-        prepared.culled_polygons = prepared
-            .culled_polygons
-            .saturating_add(projected.skipped_culled as usize);
-        prepared.objects.push(PreparedVertexObject {
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_animation(
+    animations: &[u8],
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    animation: &GoolTextAnimation,
+    render_index: usize,
+    prepared: &mut PreparedObjects,
+) -> Result<(), RetailSceneError> {
+    let term_index = usize::try_from(object.animation_frame >> 8)
+        .map_err(|_| scene_error("GOOL text term index does not fit the host"))?;
+    let Some(term) = animation.terms.get(term_index) else {
+        prepared.skipped_animations = prepared.skipped_animations.saturating_add(1);
+        return Ok(());
+    };
+    let font = resolve_text_font(
+        animations,
+        animation.font_word_offset,
+        object.text_font_override_word_offset,
+    )?;
+    let shrink = retail_sprite_shrink(object.transform.scale[0])
+        .map_err(|error| scene_error(format!("GOOL text shrink: {error}")))?;
+    let transform =
+        object_sprite_transform(object, camera, camera_matrix, projection_distance, shrink)?;
+    let vertex_colors = std::array::from_fn(|vertex| {
+        let start = 12 + vertex * 3;
+        [
+            object.colors[start],
+            object.colors[start + 1],
+            object.colors[start + 2],
+        ]
+    });
+    let rendered = project_retail_text(RetailTextProjection {
+        term,
+        font: &font,
+        negative_stack_arguments: &object.text_arguments,
+        transform,
+        shrink,
+        projection_distance,
+        object_size: object.size,
+        center_by_width: object.status_b & 0x400 != 0,
+        center_backdrop: object.status_b & 0x0400_0000 != 0,
+        vertex_colors,
+    })
+    .map_err(|error| scene_error(format!("GOOL text rendering: {error}")))?;
+    if !rendered.quads.is_empty() {
+        prepared.visible_objects = prepared.visible_objects.saturating_add(1);
+    }
+    for quad in rendered.quads {
+        prepared.quads.push(PreparedObjectQuad {
+            render_index,
             handle: u32::from(object.object.vm().get()),
-            polygons: projected.polygons,
+            part: quad.source_part,
+            texture_page: font.texture_page,
+            texture: TextureInfo2 {
+                color: quad.texture.color,
+                region: quad.texture.region,
+            },
+            projected: quad.projected,
+            colors: quad.colors,
         });
     }
-    Ok(prepared)
+    Ok(())
+}
+
+fn resolve_text_font(
+    animations: &[u8],
+    default_font_word_offset: u32,
+    override_font_word_offset: u32,
+) -> Result<GoolFontAnimation, RetailSceneError> {
+    let font_word_offset = if override_font_word_offset == 0 {
+        default_font_word_offset
+    } else {
+        override_font_word_offset
+    };
+    let font_offset = usize::try_from(font_word_offset)
+        .ok()
+        .and_then(|offset| offset.checked_mul(4))
+        .ok_or_else(|| scene_error("GOOL text font word offset exceeds the animation item"))?;
+    match parse_gool_animation_descriptor(animations, font_offset)
+        .map_err(|error| scene_error(format!("GOOL text font: {error}")))?
+    {
+        GoolAnimationDescriptor::Font(font) => Ok(font),
+        _ => Err(scene_error(
+            "GOOL text font override is not a font descriptor",
+        )),
+    }
+}
+
+fn object_sprite_vectors(object: &RetailRenderObject) -> RetailSpriteVectors {
+    RetailSpriteVectors {
+        translation: object.transform.translation,
+        rotation_yxz: object.transform.rotation_yxz,
+        scale: object.transform.scale,
+    }
+}
+
+fn object_sprite_transform(
+    object: &RetailRenderObject,
+    camera: CameraSample,
+    camera_matrix: Matrix3,
+    projection_distance: u32,
+    shrink: u8,
+) -> Result<RetailSpriteTransform, RetailSceneError> {
+    let vectors = object_sprite_vectors(object);
+    if object.status_b & 0x200 != 0 {
+        RetailSpriteTransform::screen_2d(vectors, shrink, projection_distance)
+            .map_err(|error| scene_error(format!("2D GOOL sprite transform: {error}")))
+    } else {
+        // The immutable scene snapshot is taken against the completed camera
+        // update, which is the browser runtime's `cam_prev` render sample.
+        RetailSpriteTransform::world(
+            vectors,
+            RetailSpriteCamera {
+                translation: camera.translation_fixed,
+                rotation_yxz: [camera.rotation_y, camera.rotation_x, camera.rotation_z],
+                matrix: camera_matrix,
+            },
+            shrink,
+        )
+        .map_err(|error| scene_error(format!("world GOOL sprite transform: {error}")))
+    }
+}
+
+fn scaled_fragment_bound(value: i16, shrink: u8) -> Result<i32, RetailSceneError> {
+    i32::try_from(i64::from(value) << u32::from(shrink))
+        .map_err(|_| scene_error("GOOL fragment bound exceeds signed transform space"))
+}
+
+fn prepared_object_quad(
+    object: &RetailRenderObject,
+    render_index: usize,
+    part: u16,
+    texture_page: Eid,
+    texture: GoolTextureInfo,
+    projected: ProjectedSpriteQuad,
+) -> PreparedObjectQuad {
+    PreparedObjectQuad {
+        render_index,
+        handle: u32::from(object.object.vm().get()),
+        part,
+        texture_page,
+        texture: TextureInfo2 {
+            color: texture.color,
+            region: texture.region,
+        },
+        projected,
+        colors: [Rgba8 {
+            r: texture.color.red(),
+            g: texture.color.green(),
+            b: texture.color.blue(),
+            a: u8::MAX,
+        }; 4],
+    }
 }
 
 fn touch_object_model_lru(lru: &mut VecDeque<(Eid, u16)>, key: (Eid, u16)) {
@@ -1042,24 +1534,9 @@ fn touch_object_model_lru(lru: &mut VecDeque<(Eid, u16)>, key: (Eid, u16)) {
     lru.push_back(key);
 }
 
-fn object_colored_shift(
-    nsd: &Nsd,
-    zone_header: &ZoneHeader,
-    display_flags: u32,
-    camera_z: i32,
-    object: &RetailRenderObject,
-    is_main: bool,
-) -> u8 {
-    if zone_header.graphics.unknown_a != 3
-        || is_main
-        || object.status_b & 0x400 != 0
-        || object.status_b & 0x200 != 0
-        || display_flags & 0x1_0000 != 0
-    {
-        return 0;
-    }
+fn object_zone_depth_anchor(nsd: &Nsd, zone_header: &ZoneHeader) -> i32 {
     let visibility = i32::try_from(zone_header.graphics.visibility_depth >> 8).unwrap_or(i32::MAX);
-    let anchor = if matches!(nsd.level().get(), 0x14 | 0x16) {
+    if matches!(nsd.level().get(), 0x14 | 0x16) {
         // `fog_z` is zero in the current runtime, matching source LevelInit.
         visibility.wrapping_add(400)
     } else {
@@ -1068,10 +1545,7 @@ fn object_colored_shift(
         } else {
             1200
         })
-    };
-    u8::try_from(camera_z.wrapping_sub(anchor).max(0) / 200)
-        .unwrap_or(u8::MAX)
-        .min(8)
+    }
 }
 
 fn resident_texture_pages(
@@ -1294,9 +1768,38 @@ fn validate_visibility(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CameraSample {
     translation: Vec3i,
+    translation_fixed: [i32; 3],
     rotation_y: i32,
     rotation_x: i32,
     rotation_z: i32,
+}
+
+fn object_camera_sample(
+    camera: CameraSample,
+    graphics_flags: u32,
+    frame_stamp: u32,
+) -> CameraSample {
+    if graphics_flags & 0x1000 == 0 {
+        return camera;
+    }
+    // GfxInitMatrices seeds cam_prev to (0, 921600, 6144000). In these
+    // zones GfxUpdateMatrices deliberately retains X/Z, replaces Y with a
+    // 128-frame triangular path, and substitutes a fixed 125-angle pitch for
+    // GOOL objects only. World geometry continues to use `camera` above.
+    let phase = i32::try_from(frame_stamp % 128).expect("a modulo-128 frame fits i32");
+    let y = 901_600 + (phase - 64).abs() * 800;
+    let translation_fixed = [0, y, 6_144_000];
+    CameraSample {
+        translation: Vec3i {
+            x: translation_fixed[0] >> 8,
+            y: translation_fixed[1] >> 8,
+            z: translation_fixed[2] >> 8,
+        },
+        translation_fixed,
+        rotation_y: 125,
+        rotation_x: 0,
+        rotation_z: 0,
+    }
 }
 
 fn sample_camera(
@@ -1396,10 +1899,15 @@ fn interpolate_camera(
         path_coordinate(next_origin[1], next.y)?,
         path_coordinate(next_origin[2], next.z)?,
     ];
+    let translation_fixed = [
+        interpolate_coordinate_fixed(current_coordinates[0], next_coordinates[0], fraction)?,
+        interpolate_coordinate_fixed(current_coordinates[1], next_coordinates[1], fraction)?,
+        interpolate_coordinate_fixed(current_coordinates[2], next_coordinates[2], fraction)?,
+    ];
     let translation = Vec3i {
-        x: interpolate_coordinate(current_coordinates[0], next_coordinates[0], fraction)?,
-        y: interpolate_coordinate(current_coordinates[1], next_coordinates[1], fraction)?,
-        z: interpolate_coordinate(current_coordinates[2], next_coordinates[2], fraction)?,
+        x: translation_fixed[0] >> 8,
+        y: translation_fixed[1] >> 8,
+        z: translation_fixed[2] >> 8,
     };
     let yaw_difference = i32::from(
         Angle12::new(i32::from(point.rotation_y))
@@ -1407,6 +1915,7 @@ fn interpolate_camera(
     );
     Ok(CameraSample {
         translation,
+        translation_fixed,
         rotation_y: i32::from(point.rotation_y) + ((yaw_difference * fraction) >> 8),
         rotation_x: interpolate_rotation(point.rotation_x, next.rotation_x, fraction),
         rotation_z: interpolate_rotation(point.rotation_z, next.rotation_z, fraction),
@@ -1419,7 +1928,16 @@ fn path_coordinate(origin: i32, point: i16) -> Result<i32, RetailSceneError> {
         .ok_or_else(|| scene_error("camera path coordinate overflows signed world space"))
 }
 
+#[cfg(test)]
 fn interpolate_coordinate(current: i32, next: i32, fraction: i32) -> Result<i32, RetailSceneError> {
+    Ok(interpolate_coordinate_fixed(current, next, fraction)? >> 8)
+}
+
+fn interpolate_coordinate_fixed(
+    current: i32,
+    next: i32,
+    fraction: i32,
+) -> Result<i32, RetailSceneError> {
     debug_assert!((0..=0xff).contains(&fraction));
     let fixed = i64::from(current)
         .checked_shl(8)
@@ -1430,8 +1948,8 @@ fn interpolate_coordinate(current: i32, next: i32, fraction: i32) -> Result<i32,
                 .and_then(|delta| base.checked_add(delta))
         })
         .ok_or_else(|| scene_error("interpolated camera coordinate overflows fixed space"))?;
-    i32::try_from(fixed >> 8)
-        .map_err(|_| scene_error("interpolated camera coordinate exceeds signed world space"))
+    i32::try_from(fixed)
+        .map_err(|_| scene_error("interpolated fixed camera coordinate exceeds signed Q24.8 space"))
 }
 
 fn interpolate_rotation(current: i16, next: i16, fraction: i32) -> i32 {
@@ -1530,6 +2048,35 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
+    fn text_font_resolution_prefers_the_validated_dynamic_word_offset() {
+        let font_len = crust_formats::stream::GOOL_MAX_FONT_ANIMATION_LEN;
+        let override_offset = font_len;
+        let mut animations = vec![0_u8; font_len * 2];
+        let default_page = Eid::from_name("font1").unwrap();
+        let override_page = Eid::from_name("font2").unwrap();
+        for (offset, page, header_length) in [
+            (0, default_page, 64_u8),
+            (override_offset, override_page, 95_u8),
+        ] {
+            animations[offset..offset + 4].copy_from_slice(&[3, 0, header_length, 0]);
+            animations[offset + 4..offset + 8].copy_from_slice(&page.raw().to_le_bytes());
+        }
+        let override_word_offset = u32::try_from(override_offset / 4).unwrap();
+
+        assert_eq!(
+            resolve_text_font(&animations, 0, 0).unwrap().texture_page,
+            default_page
+        );
+        assert_eq!(
+            resolve_text_font(&animations, 0, override_word_offset)
+                .unwrap()
+                .texture_page,
+            override_page
+        );
+        assert!(resolve_text_font(&animations, 0, u32::MAX).is_err());
+    }
+
+    #[test]
     fn zero_rotation_camera_matches_retail_world_adjustment() {
         assert_eq!(
             world_camera_matrix(0, 0, 0).values,
@@ -1545,6 +2092,45 @@ mod tests {
             matrix.values[1][2],
             wrapping_i16((-5 * -i32::from(source)) >> 3)
         );
+    }
+
+    #[test]
+    fn graphics_flag_1000_substitutes_the_fixed_object_camera_only() {
+        let world = CameraSample {
+            translation: Vec3i {
+                x: 100,
+                y: 200,
+                z: 300,
+            },
+            translation_fixed: [100 << 8, 200 << 8, 300 << 8],
+            rotation_y: 10,
+            rotation_x: 20,
+            rotation_z: 30,
+        };
+        assert_eq!(object_camera_sample(world, 0, 64), world);
+
+        let start = object_camera_sample(world, 0x1000, 0);
+        assert_eq!(start.translation_fixed, [0, 952_800, 6_144_000]);
+        assert_eq!(
+            start.translation,
+            Vec3i {
+                x: 0,
+                y: 3_721,
+                z: 24_000
+            }
+        );
+        assert_eq!(
+            [start.rotation_y, start.rotation_x, start.rotation_z],
+            [125, 0, 0]
+        );
+
+        let trough = object_camera_sample(world, 0x1000, 64);
+        assert_eq!(trough.translation_fixed, [0, 901_600, 6_144_000]);
+        assert_eq!(
+            raw_camera_matrix(trough.rotation_y, trough.rotation_x, trough.rotation_z),
+            raw_camera_matrix(125, 0, 0)
+        );
+        assert_eq!(object_camera_sample(world, 0x1000, 128), start);
     }
 
     #[test]
@@ -1594,10 +2180,12 @@ mod tests {
         assert_eq!(sample.rotation_y, 0x1000);
         assert_eq!(sample.rotation_x, 0);
         assert_eq!(sample.rotation_z, 0);
+        assert_eq!(sample.translation_fixed, [0, 112 << 8, -115 << 8]);
 
         // The C implementation keeps 24.8 precision until the graphics-side
         // arithmetic shift, so a negative fraction rounds toward -infinity.
         assert_eq!(interpolate_coordinate(-1, 0, 1).unwrap(), -1);
+        assert_eq!(interpolate_coordinate_fixed(-1, 0, 1).unwrap(), -255);
     }
 
     #[test]
@@ -2301,5 +2889,195 @@ mod tests {
         assert!(peak.submitted_object_polygons > 0);
         assert!(builder.object_models.len() <= RETAIL_OBJECT_MODEL_CACHE_FRAMES);
         assert_eq!(builder.object_models.len(), builder.object_model_lru.len());
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn characterizes_live_non_vertex_commands_across_local_retail_boots() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+        const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+        const FRAMES_PER_LEVEL: u32 = 180;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let mut live_sprites = 0_usize;
+        let mut live_fragments = 0_usize;
+        let mut live_texts = 0_usize;
+        let mut live_dynamic_fonts = 0_usize;
+        let mut live_2d_cvtx = 0_usize;
+        let mut emitted_sprite_quads = 0_usize;
+        let mut emitted_fragment_quads = 0_usize;
+        let mut emitted_text_quads = 0_usize;
+        let mut observed_levels = std::collections::BTreeSet::new();
+
+        for known in KNOWN_LEVELS
+            .iter()
+            .filter(|known| known.bootable && known.id != LevelId::TITLE)
+        {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = std::fs::read(&nsd_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+            let nsf_bytes = std::fs::read(&nsf_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let ldat = nsd.ldat().unwrap();
+            let current =
+                typed_entry(&nsf, &nsd, ldat.spawn_zone, ZDAT_ENTRY_TYPE, "spawn ZDAT").unwrap();
+            let current_header =
+                ZoneHeader::parse(entry_item(current, &nsf_bytes, 0, "spawn ZDAT header").unwrap())
+                    .unwrap();
+            let mut owned_neighbors = Vec::new();
+            for eid in current_header.neighbors {
+                let entry = typed_entry(&nsf, &nsd, eid, ZDAT_ENTRY_TYPE, "neighbor ZDAT").unwrap();
+                let header = ZoneHeader::parse(
+                    entry_item(entry, &nsf_bytes, 0, "neighbor ZDAT header").unwrap(),
+                )
+                .unwrap();
+                let entities = (0..header.entity_count)
+                    .map(|entity_index| {
+                        let item_index =
+                            usize::try_from(header.entity_item_index(entity_index).unwrap())
+                                .unwrap();
+                        ZoneEntity::parse(
+                            entry_item(entry, &nsf_bytes, item_index, "neighbor ZDAT entity")
+                                .unwrap(),
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                owned_neighbors.push((eid, header.display_flags | 3, entities));
+            }
+            let neighbors = owned_neighbors
+                .iter()
+                .map(|(eid, display_flags, entities)| NeighborZone {
+                    eid: *eid,
+                    display_flags: *display_flags,
+                    entities,
+                })
+                .collect::<Vec<_>>();
+            let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+            let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+            let mut runtime = RetailRuntime::new(RETAIL_GLOBAL_WORDS);
+            let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+            let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+            if !attempts.iter().any(|attempt| attempt.result.is_ok()) {
+                continue;
+            }
+            let mut builder = RetailSceneBuilder::new();
+            for draw_count in 0..FRAMES_PER_LEVEL {
+                let camera_step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+                runtime
+                    .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                    .unwrap_or_else(|error| panic!("{} frame {draw_count}: {error:?}", known.name));
+                let objects = runtime.render_objects().unwrap();
+                let mut has_live_non_vertex = false;
+                let mut sprite_handles = std::collections::BTreeSet::new();
+                let mut fragment_handles = std::collections::BTreeSet::new();
+                let mut text_handles = std::collections::BTreeSet::new();
+                for object in objects.iter().filter(|object| object.display_eligible) {
+                    let (Some(program), Some(reference)) =
+                        (object.program, object.animation_reference)
+                    else {
+                        continue;
+                    };
+                    let global =
+                        typed_entry(&nsf, &nsd, program.global_eid(), 11, "GOOL program").unwrap();
+                    let animations = entry_item(global, &nsf_bytes, 5, "GOOL animations").unwrap();
+                    let descriptor = parse_gool_animation_descriptor(
+                        animations,
+                        usize::try_from(reference.offset()).unwrap(),
+                    )
+                    .unwrap();
+                    match descriptor {
+                        GoolAnimationDescriptor::Sprite(_) => {
+                            live_sprites += 1;
+                            has_live_non_vertex = true;
+                            sprite_handles.insert(u32::from(object.object.vm().get()));
+                        }
+                        GoolAnimationDescriptor::Fragment(_) => {
+                            live_fragments += 1;
+                            has_live_non_vertex = true;
+                            fragment_handles.insert(u32::from(object.object.vm().get()));
+                        }
+                        GoolAnimationDescriptor::Text(_) => {
+                            live_texts += 1;
+                            live_dynamic_fonts +=
+                                usize::from(object.text_font_override_word_offset != 0);
+                            has_live_non_vertex = true;
+                            text_handles.insert(u32::from(object.object.vm().get()));
+                        }
+                        GoolAnimationDescriptor::Vertex(vertex)
+                            if object.status_b & 0x200 != 0
+                                && nsf
+                                    .resolve_entry(&nsd, vertex.model_eid)
+                                    .is_ok_and(|entry| entry.entry_type == 20) =>
+                        {
+                            live_2d_cvtx += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                if !has_live_non_vertex {
+                    continue;
+                }
+                let main_object = runtime
+                    .arena()
+                    .main_object()
+                    .and_then(|arena| runtime.object_for_arena(arena));
+                let scene = builder
+                    .build_at_progress_with_objects(
+                        &nsd,
+                        &nsf,
+                        &nsf_bytes,
+                        RetailSceneProgressLocation {
+                            zone: camera_step.after.path.zone,
+                            path_index: camera_step.after.path.index,
+                            path_progress: camera_step.after.progress.raw(),
+                            draw_count,
+                        },
+                        &objects,
+                        main_object,
+                    )
+                    .unwrap_or_else(|error| panic!("{} frame {draw_count}: {error}", known.name));
+                let mut frame_quads = 0_usize;
+                for command in &scene.commands {
+                    let CommandSource::Object { handle, .. } = command.source else {
+                        continue;
+                    };
+                    if !matches!(&command.primitive, PrimitiveCommand::TexturedQuad(_)) {
+                        continue;
+                    }
+                    if sprite_handles.contains(&handle) {
+                        emitted_sprite_quads += 1;
+                    }
+                    if fragment_handles.contains(&handle) {
+                        emitted_fragment_quads += 1;
+                    }
+                    if text_handles.contains(&handle) {
+                        emitted_text_quads += 1;
+                    }
+                    frame_quads += 1;
+                }
+                if frame_quads > 0 {
+                    observed_levels.insert(known.name);
+                }
+            }
+        }
+
+        eprintln!(
+            "live non-vertex boot frames: sprites={live_sprites}, fragments={live_fragments}, texts={live_texts} ({live_dynamic_fonts} dynamic-font overrides), 2D CVTX={live_2d_cvtx}, sprite quads={emitted_sprite_quads}, fragment quads={emitted_fragment_quads}, text quads={emitted_text_quads}, levels={observed_levels:?}"
+        );
+        assert!(live_sprites > 0);
+        assert!(live_fragments > 0);
+        assert!(emitted_sprite_quads > 0);
+        assert!(emitted_fragment_quads > 0);
+        assert!(live_texts > 0);
+        assert!(emitted_text_quads > 0);
+        // Fragment/2D-CVTX descriptors are corpus-covered by renderer tests;
+        // an idle direct boot is not guaranteed to enter those object states.
     }
 }

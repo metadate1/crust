@@ -44,6 +44,14 @@ impl Sample {
     pub fn is_empty(&self) -> bool {
         self.pcm.is_empty()
     }
+
+    pub(crate) fn sample(&self, index: usize) -> Option<i16> {
+        self.pcm.get(index).copied()
+    }
+
+    pub(crate) const fn loop_start(&self) -> Option<usize> {
+        self.loop_start
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,8 +1,9 @@
 # Verification record
 
-This file records observed checks for the initial private rewrite delivery on 2026-07-12 and the
-stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13. It
-does not turn subsystem tests into a claim of retail gameplay parity.
+This file records observed checks for the initial private rewrite delivery on 2026-07-12, the
+stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13,
+and the title-overlay, PBAK, object-shader and current-zone collision slices on 2026-07-14. It does
+not turn subsystem tests into a claim of retail gameplay parity.
 
 ## Reference characterization
 
@@ -40,6 +41,12 @@ validated all 29,611 pair-resident frames containing 42,983,073 vertex reference
 dormant frames consistently named one cross-pair EID and were retained as controlled unavailable
 assets rather than resolved through another mounted pair.
 
+The type-19 PBAK census found exactly nine recordings and 10,966 controller frames. Eight use the
+304-spawn-word layout; the Upstream recording uses the observed 511-word layout and its extended
+frame offset. The checked browser adapter prepared all nine, validated each recorded level/path,
+accepted Upstream only because its extra active-spawn tail is zero, and preserved the one legal pad
+word containing a bit above the 16-bit physical-controller range.
+
 The real N. Sanity Crash program was then executed through its first retail host boundaries. Tests
 verified absolute global call word `0x8609806e` to global PC 110, return at global PC 131, the exact
 optional-pointer word `0x16be0e1f`, and both initial child-spawn requests with synchronous callbacks
@@ -47,10 +54,10 @@ and argument cleanup in one 67-instruction invocation, without treating any seri
 native pointer. A negative dynamic child count was also verified as a non-spawning argument-pop
 rather than an overflow error.
 
-## Hosted retail-runtime slice
+## Hosted retail-runtime slices
 
-The 2026-07-13 opt-in tests used the same legally owned raw BIN in place and did not copy any disc
-or stream bytes into the repository:
+The 2026-07-13 and 2026-07-14 opt-in tests used the same legally owned raw BIN in place and did not
+copy any disc or stream bytes into the repository:
 
 - The fractional camera/scene test discovered the complete retail catalog and successfully built a
   signed-8.8 progress snapshot for all 43 bootable pairs directly from the raw image. The three
@@ -90,6 +97,36 @@ or stream bytes into the repository:
   worlds, five visible 3D objects, 621 world polygons and 568 submitted object polygons, with 63
   shared decoded textures, zero undeclared or skipped object texture references, 84 saturated
   object polygons and 444 face-culled polygons.
+- The fixed-layout type-three font sweep found 19 validated text/font pairs containing 1,214 terms.
+  All terms passed bounded four-argument formatting; 1,182 projected safely into 4,265 glyph or
+  backdrop quads and 64 representative glyph textures decoded. The remaining 32 are unused
+  lowercase sentinel terms that Rust rejects instead of indexing beyond retail's 63-glyph table.
+  Across 42 non-title idle boots, 531 live type-four text frames emitted 3,894 textured quads; the
+  same trace also exercised 50,714 sprite and 177 fragment frames. No dynamic-font override became
+  live in that idle window, so default-vs-override selection remains covered by a focused unit test.
+- The exact title MDAT runtime test loaded the legal title pair directly from the raw image and
+  confirmed type-17 source-vs-object-zone binding, source-ordered state changes and the type-zero
+  display masks `0x22_3ff0` at load and `0x22_3ffc` when active. Focused tests cover the complete
+  nonlinear overlay-alpha sequence, including opaque blank/swap phases and the pre-quantization
+  counter step used by the WebGL pass.
+- The strict goal-directed N. Sanity survey completed its default 18,000 frames with
+  `terminal=None`, `next_lid=None`, 11 live objects (peak 16), 199,200 GOOL executions, zero VM
+  errors and zero faulted objects. It recorded 13 successful spawns from 143,842 attempts, zero
+  unexpected spawn failures, two zone transitions, ten camera-path changes, four save handshakes
+  and no restart. Straight Up with periodic jump/spin carried both the camera and Crash object zone
+  through `e0_9Z → a0_9Z → a1_9Z`; the trace settled at path-zero progress 16,384 against a
+  valid solid wall near frame 377 and recorded neither a below-zero player position nor the
+  terminal-fall velocity. This proves a clean authored progression window, not a completed level.
+- A separate strict 360-frame Hog Wild boundary trace completed with 1,175 GOOL executions, zero
+  execution errors, zero faulted objects and no checked issues while the camera crossed ten zones
+  through `0n_hZ`. Crash retained the typed detached object zone `0c_hZ`; its rectangle, graphics
+  and water fallback remained available without adding detached octree geometry. The trace still
+  entered a terminal fall at frame 179 and reached Y `-18,441,204` by frame 360, so this is evidence
+  for safe boundary semantics rather than playable Hog Wild parity.
+- Focused renderer tests exercise mode-two dual color ramps and cutoff, mode-three SVTX fade and
+  CVTX shift/cutoff, the checked pure mode-four lighting calculation and malformed-coordinate
+  rejection. Web scene tests confirm modes two/three are gated into live object rendering and that
+  graphics flag `0x1000` substitutes the Q24.8 bobbing/fixed-pitch camera for objects only.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
@@ -181,8 +218,13 @@ user's click, so this newest retail-SFX build is not claimed as manually auditio
 
 - `cargo fmt --all -- --check`: passed.
 - workspace Clippy with `-D warnings`: passed.
-- locked native workspace suite: 471 asset-free tests passed, zero failed; 25 legally local tests
-  remain ignored by default.
+- locked native workspace suite: 644 asset-free tests passed, zero failed; 43 legally local tests
+  remain ignored by default (687 tests total across all targets).
+- post-fix legal-data gates passed against the supplied raw BIN and read-only extracted streams:
+  88 exact streams/44 pairs and 229,312,048 extracted bytes; all nine PBAK recordings/10,966
+  controller frames; the exact title-MDAT runtime check; all 43 bootable pairs for 360 strict
+  frames; N. Sanity for 17,000 strict idle frames and 18,000 goal-directed frames; and the focused
+  Hog Wild detached-zone trace.
 - the previously recorded 24-test opt-in sweep passed with `C1_DISC_IMAGE` and `C1_STREAM_DIR`:
   raw-disc/catalog,
   all-pair parsing, entity/program binding, GOOL graph/boot execution, exhaustive SLST traversal,
@@ -194,8 +236,8 @@ user's click, so this newest retail-SFX build is not claimed as manually auditio
   raw BIN alone in the earlier sweep.
 - locked optimized native workspace build: passed.
 - locked optimized `wasm32-unknown-unknown` web build: passed.
-- generated web release: passed; Wasm payload was 936,652 bytes (SHA-256
-  `f443dc150e8b697fc542dbc47d63e0761cfa93aba15a2da3f8cac7af0b5018c9`).
+- generated web release: passed; Wasm payload was 1,136,400 bytes (SHA-256
+  `4bf2d6bd59197e67ef008b57d1a065c1e8ef586b30d7fe9011115c024981887e`).
 
 ## Reproducible commands
 
@@ -209,6 +251,17 @@ C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-renderer --test local_loading_images -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test --workspace --all-targets --locked -- --ignored --nocapture
+C1_DISC_IMAGE=/path/to/disc.bin \
+  cargo test -p crust-formats --test local_pbak --locked -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  prepares_every_legally_local_recording_without_copying_game_data -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
+  C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-sim --test local_retail_runtime --locked -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \

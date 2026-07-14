@@ -12,11 +12,15 @@ mod assets;
 mod disc_import;
 #[cfg(target_arch = "wasm32")]
 mod dom;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
+mod pbak_runtime;
+#[cfg(any(target_arch = "wasm32", test))]
 pub mod renderer_backend;
 pub mod retail_scene;
 #[cfg(target_arch = "wasm32")]
 mod storage;
+#[cfg(any(target_arch = "wasm32", test))]
+mod title_runtime;
 #[cfg(target_arch = "wasm32")]
 mod webaudio;
 #[cfg(target_arch = "wasm32")]

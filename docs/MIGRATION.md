@@ -42,7 +42,9 @@ An external `git archive` copy produced these results:
   and expose `0x91`'s bounded reclaim permission rather than an alternate parent.
 - Retail GOOL animation item five is retained as owned bytes. All five descriptor families are
   bounds-checked at unaligned byte offsets, and vertex descriptors resolve TGEO plus exact
-  SVTX/CVTX frames through the mounted pair only. State-change yields resolve the requested state
+  SVTX/CVTX frames through the mounted pair only. Type-three fonts always consume the source
+  `gool_font` layout of 63 glyphs plus one backdrop; their header length byte remains animation
+  metadata and is not reused as an array count. State-change yields resolve the requested state
   through NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping
   frame/draw stamps; serialized state PCs and animation offsets never become native pointers.
 - ZDAT runtime pointer slots are treated as opaque serialization fields. Zone/world/path EIDs,
@@ -51,25 +53,77 @@ An external `git archive` copy produced these results:
 - ZDAT entities retain the exact 20-byte header and six-byte signed path points. The 304 entity
   spawn flags, 96 ordinary objects, dedicated main slot and eight roots are fixed-size Rust state;
   generations reject stale object references after despawn.
+- GOOL `0x85` implements every source selector with checked process vectors and typed hosts: path
+  orientation, projection, velocity aiming, the source no-op hole, scaled/unscaled transforms,
+  model-vertex lookup and camera-relative audio coordinates. `0x8e` likewise implements static and
+  object solid response, every directional surface variant, entity-color scaling and its source
+  no-op hole. GOP translation, stack consumption, aliases and wrapping fixed-point arithmetic stay
+  explicit even in selectors whose native observable work is only operand translation.
+- Misc primary nine (`SZON`) never stores a relocated ZDAT pointer. The stream host resolves the
+  current header, scans neighbor EIDs in reverse serialized order, parses rectangles lazily and
+  applies the source's inclusive wrapping Q24.8 containment test. No match leaves the linked
+  object's typed zone handle unchanged; a null point selects the current zone.
+- Type-17 title MDAT remains the owned source of each entity descriptor, but it is not an object
+  zone. After the title `LevelUpdate`, the browser mirrors `GoolObjectSpawn` by assigning native
+  `cur_zone` as the arena/VM zone and resolving origin and colors from that ZDAT. This also makes
+  those objects visible to current-header neighbor TERM traversal.
+- Misc 12/7 retains the source's distinct forward current-header walk with no display filter,
+  sorting or deduplication. Each listed EID drives a live roots-zero-through-seven postorder TERM
+  traversal, so handler mutations, immunity flags, migrations and non-title Crash survival remain
+  observable. Persistent typed `ObjectZoneContext` runtime state carries the transition target or
+  hard-restart sentinel without storing a native pointer. Browser object-audio and typed tree/link
+  ownership are cleaned synchronously. The arena's spawn flag clears at teardown and remains
+  authoritative until the VM mirror refreshes at the next frame boundary. A null current zone is a
+  no-op; duplicate EIDs are preserved and every later entry traverses the tree as mutated by earlier
+  TERM handlers. Same-slot replacement during the host callback is not yet generation-aware when
+  deciding whether the requester may resume.
 - SLST visibility is reconstructed from the nearest raw endpoint with the retail midpoint tie-break.
   Every adjacent delta is bounds-checked in both directions, and a failed seek rolls back both the
   point index and ordered visibility list.
 - Direct-loading presentation uses the observed two-step draw skip: tick one executes but is
   discarded, while tick two presents gameplay with path progress `0x200` and draw count one.
+- A level request is latched during GOOL and consumed at the start of the next cooperative frame.
+  The requested signed value is retained while `LEVEL_END` visits all eight roots in postorder;
+  only a final `-2` selects the saved level. Remount carry owns globals, RNG, savestate, counters and
+  the 3,592-halfword encountered-object registry, while every object identity, pointer global,
+  pair-backed cache and active 304-word spawn table is rebuilt for the destination. Bonus return
+  substitutes the saved zone/path/progress during destination initialization and protects the one
+  pre-restart Crash spawn exactly as native `next_lid = -2` does.
+- `LevelSaveState` and `LevelRestart` use an owned fixed-layout snapshot containing only fields the
+  source actually copies. The browser preflights pager/lifecycle/camera work before irreversible
+  RESPAWN/TERM delivery, then publishes restored spawn words, player transform, counters and box
+  count. A same-level load nested inside `LEVEL_END` remains an explicit resumable-host boundary;
+  Rust does not silently skip the remainder of that handler. A legally local scan of all 44 retail
+  pairs found zero authored occurrences of this nested case.
+- `LevelResetGlobals(1)` preflights and writes the documented scalar words, then clears the native
+  3,592-halfword encountered-object registry. It does not own live objects, savestate or the
+  separate 304-word active spawn table. Misc-ten cases four/five maintain that registry's
+  zero-terminated, one-as-hole encoding and deliberately fall through to the active-table bit
+  update; a destination mount rebuilds active bit eight from retained tags for its own level. Misc
+  12/11 runs this reset synchronously, so later instructions in the same handler see the new words.
+- Retail card restore writes `init_life_count`, executes that exact globals reset, then restores the
+  128-byte payload's progression/options words and derived map/unlock mirrors. The browser's
+  main-menu reset wraps the same operation in the existing resume before/after hooks. Neither path
+  clears the retained savestate or separate active spawn table.
 - The live retail-object bridge scans displayed neighbor zones, uses separate typed generational
   arena and VM handles, traverses the mutation-aware spawn tree, and applies synchronous runtime
   child creation inside the same 30 Hz frame. Immutable post-GOOL snapshots now feed pair-scoped
-  3D vertex-object rendering, while pre-execution animation bounds feed the implemented solid-query
-  helpers. Camera crossings apply checked zone teardown/paging/activation, and typed ADIO requests
-  feed the retail SFX voice engine. Effects remain data rather than unchecked host pointers;
-  complete collision response, non-vertex rendering, retail music and progression are not implied.
+  3D vertex-object, sprite, fragment, type-four text/font and status-B 2D-CVTX rendering, while
+  pre-execution animation bounds feed the implemented solid-query helpers. Camera crossings apply
+  checked zone teardown/paging/activation, and typed ADIO requests feed the retail SFX voice
+  engine. Zone MIDI/INST/VAB/SEP assets decode to owned PCM/sequencer data, with source-timed fades
+  and typed GOOL track toggles. Effects remain data rather than unchecked host pointers; exact SPU
+  synthesis, complete collision response, dynamic rendering effects and full progression are not
+  implied.
 
 ## Deliberate corrections
 
 The rewrite rejects out-of-range item offsets, cyclic/unbounded bucket walks, invalid GOOL stack
 access, division by zero, oversized shift counts, unbounded collision result aggregation, bad
-texture/CLUT ranges, malformed audio banks/sequences, and PBAK frame overruns. These were undefined
-or insufficiently bounded in C and are not compatibility behavior.
+texture/CLUT ranges, malformed audio banks/sequences, and PBAK frame overruns. During a mutable TERM
+walk, a stale captured sibling generation ends that sibling chain instead of following a C
+free-list/ABA link. These were undefined or insufficiently bounded in C and are not compatibility
+behavior.
 
 No C runtime, C compatibility layer, copied header, or vendored C synthesizer remains in the
 current application build. Upstream attribution is retained because its observable behavior and

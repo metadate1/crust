@@ -1,38 +1,44 @@
 use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE, Sample};
 use crust_audio::output::OutputOptions;
 use crust_audio::retail::RetailAudioEngine;
-use crust_audio::sequencer::{EventKind, Sequence, SequenceEvent, Sequencer};
+use crust_audio::retail_music::RetailMusic;
+use crust_audio::retail_player::{
+    RetailMusicChange, RetailMusicPlayer, RetailMusicPlayerError, RetailMusicState,
+};
+use crust_formats::binary::Eid;
 use wasm_bindgen::JsValue;
 use web_sys::{AudioContext, GainNode};
 
 const CHUNK_FRAMES: usize = 1024;
 const SCHEDULE_AHEAD_SECONDS: f64 = 0.12;
+const BROWSER_OUTPUT_GAIN: f32 = 0.78;
 
 #[derive(Debug)]
 pub struct WebAudio {
     context: AudioContext,
     gain: GainNode,
     mixer: Mixer,
-    sequencer: Sequencer,
+    music: RetailMusicPlayer,
     output: OutputOptions,
+    muted: bool,
+    retail_master_gain: f32,
     next_time: f64,
 }
 
 impl WebAudio {
-    pub fn new(seed: u32) -> Result<Self, JsValue> {
+    pub fn new() -> Result<Self, JsValue> {
         let context = AudioContext::new()?;
         let gain = context.create_gain()?;
         gain.connect_with_audio_node(&context.destination())?;
-        gain.gain().set_value(0.78);
-        let mut sequencer = Sequencer::new();
-        sequencer.load(original_sequence(seed));
-        sequencer.set_playing(true);
+        gain.gain().set_value(BROWSER_OUTPUT_GAIN);
         Ok(Self {
             context,
             gain,
             mixer: Mixer::new(),
-            sequencer,
+            music: RetailMusicPlayer::new(),
             output: OutputOptions::new(u8::MAX, u8::MAX, false),
+            muted: false,
+            retail_master_gain: 1.0,
             next_time: 0.0,
         })
     }
@@ -41,8 +47,14 @@ impl WebAudio {
         let _ = self.context.resume();
     }
 
-    pub fn set_muted(&self, muted: bool) {
-        self.gain.gain().set_value(if muted { 0.0 } else { 0.78 });
+    pub fn set_muted(&mut self, muted: bool) {
+        self.muted = muted;
+        self.refresh_master_gain();
+    }
+
+    pub fn set_retail_master_gain(&mut self, gain: f32) {
+        self.retail_master_gain = gain.clamp(0.0, 1.0);
+        self.refresh_master_gain();
     }
 
     pub const fn set_output_options(&mut self, options: OutputOptions) {
@@ -56,6 +68,40 @@ impl WebAudio {
 
     pub fn tick_30_hz(&mut self) {
         self.mixer.tick_30_hz();
+        self.music.tick_30_hz();
+    }
+
+    pub fn start_retail_music(
+        &mut self,
+        eid: Eid,
+        music: RetailMusic,
+    ) -> Result<RetailMusicChange, RetailMusicPlayerError> {
+        self.music.start_immediate(eid, music)
+    }
+
+    pub fn request_retail_music(
+        &mut self,
+        target: Option<(Eid, RetailMusic)>,
+    ) -> Result<RetailMusicChange, RetailMusicPlayerError> {
+        self.music.request(target)
+    }
+
+    pub fn toggle_retail_music(&mut self, value: u32) -> RetailMusicChange {
+        self.music.toggle_secondary(value)
+    }
+
+    pub fn clear_retail_music(&mut self) -> RetailMusicChange {
+        self.music.stop_immediate()
+    }
+
+    #[must_use]
+    pub fn requested_retail_music_eid(&self) -> Option<Eid> {
+        self.music.requested_eid()
+    }
+
+    #[must_use]
+    pub const fn retail_music_state(&self) -> RetailMusicState {
+        self.music.state()
     }
 
     pub fn trigger_sfx(&mut self, pitch_seed: u8) {
@@ -80,7 +126,7 @@ impl WebAudio {
         }
         while self.next_time < now + SCHEDULE_AHEAD_SECONDS {
             let mut music = vec![0.0_f32; CHUNK_FRAMES * 2];
-            self.sequencer.render(&mut music);
+            self.music.render(&mut music);
             let mut sfx = vec![0_i16; CHUNK_FRAMES * 2];
             self.mixer.mix(&mut sfx);
             let mut retail_sfx = vec![0_i16; CHUNK_FRAMES * 2];
@@ -130,6 +176,14 @@ impl WebAudio {
     pub const fn metrics(&self) -> AudioMetrics {
         self.mixer.metrics()
     }
+
+    fn refresh_master_gain(&self) {
+        self.gain.gain().set_value(if self.muted {
+            0.0
+        } else {
+            BROWSER_OUTPUT_GAIN * self.retail_master_gain
+        });
+    }
 }
 
 fn sample_rate_f32() -> f32 {
@@ -141,65 +195,4 @@ fn sfx_sample(value: f32) -> i16 {
     // The oscillator and [0, 1] envelope bound this value to +/-12,000, inside `i16`; truncation
     // matches the mixer sample quantization used by the existing implementation.
     value as i16
-}
-
-fn original_sequence(seed: u32) -> Sequence {
-    const SCALE: [u8; 8] = [48, 51, 55, 58, 60, 63, 67, 70];
-    let rotation = usize::try_from(seed & 7).unwrap_or(0);
-    let mut events = Vec::with_capacity(512);
-    for step in 0..128_u64 {
-        let note = SCALE[(usize::try_from(step).unwrap_or(0) + rotation) % SCALE.len()];
-        let tick = step * 30;
-        events.push(SequenceEvent {
-            tick,
-            kind: EventKind::NoteOn {
-                channel: 0,
-                note,
-                velocity: 74,
-            },
-        });
-        events.push(SequenceEvent {
-            tick: tick + 23,
-            kind: EventKind::NoteOff { channel: 0, note },
-        });
-        if step % 4 == 0 {
-            let bass = note.saturating_sub(12);
-            events.push(SequenceEvent {
-                tick,
-                kind: EventKind::NoteOn {
-                    channel: 1,
-                    note: bass,
-                    velocity: 58,
-                },
-            });
-            events.push(SequenceEvent {
-                tick: tick + 52,
-                kind: EventKind::NoteOff {
-                    channel: 1,
-                    note: bass,
-                },
-            });
-        }
-    }
-    events.insert(
-        0,
-        SequenceEvent {
-            tick: 0,
-            kind: EventKind::Program {
-                channel: 0,
-                program: 0,
-            },
-        },
-    );
-    events.insert(
-        1,
-        SequenceEvent {
-            tick: 0,
-            kind: EventKind::Program {
-                channel: 1,
-                program: 1,
-            },
-        },
-    );
-    Sequence::new(60, events)
 }

@@ -12,12 +12,15 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use crust_audio::output::OutputOptions;
+use crust_audio::output::{OutputOptions, RetailMasterFade};
 use crust_audio::retail::{RetailAudioEngine, RetailAudioError};
-use crust_formats::binary::Eid;
+use crust_audio::retail_music::RetailMusic;
+use crust_audio::retail_player::RetailMusicChange;
+use crust_formats::binary::{Eid, FormatError};
 use crust_formats::stream::{
-    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, RetailZoneGraph, ZoneEntity,
-    ZoneHeader,
+    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, RetailPathId, RetailZoneGraph,
+    ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry, parse_retail_midi,
+    title_mdat_eid,
 };
 use crust_platform::input::{
     PAD_CIRCLE, PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_START, PAD_UP,
@@ -39,8 +42,12 @@ use crust_sim::flow::{
     TitleScreen,
 };
 use crust_sim::gool::{
-    AudioHostRequest, AudioHostResponse, RetailPadSnapshot, RetailSolidEnvironment,
-    RetailTransformVectorsCamera, VmObject, VmStateProgram, process_register,
+    AudioHostRequest, AudioHostResponse, CURRENT_DISPLAY_GLOBAL, CURRENT_MAP_LEVEL_GLOBAL,
+    CardHostRequest, GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL,
+    KEY_COUNT_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL, MONO_GLOBAL,
+    MUSIC_VOLUME_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot,
+    RetailSolidEnvironment, RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL,
+    VmEffect, VmObject, VmStateProgram, process_register,
 };
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
@@ -48,9 +55,10 @@ use crust_sim::paging::Pager;
 use crust_sim::player::PadState as SimPadState;
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
-    AnimationBoundBinding, NsfProgramError, NsfProgramHost, ProgramBinding, ProgramHost,
-    RetailRuntime, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame,
-    StateProgramBinding, ZoneTerminationMode,
+    AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
+    ProgramBinding, ProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
+    RetailSaveStateOutcome, RetailSessionCarry, RetailZoneEnvironment, RuntimeCleanupAction,
+    RuntimeError, RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -69,8 +77,15 @@ use web_sys::{
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
+use crate::pbak_runtime::{RetailPbakPlayback, prepare_pair_pbak};
 use crate::retail_scene::{RetailSceneBuilder, RetailSceneProgressLocation};
 use crate::storage::StorageState;
+use crate::title_runtime::{
+    RETAIL_CAMERA_UPDATE, RETAIL_ZONE_OBJECTS_ACTIVE, RetailTitleScreenProfile,
+    RetailTitleScreenType, retail_title_display_update, retail_title_mdat_binding,
+    retail_title_overlay_alpha, retail_title_screen_profile, title_mdat_entity_is_unlocked,
+    title_state_number_uses_image,
+};
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
 
@@ -78,6 +93,27 @@ const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
 const RETAIL_GLOBAL_WORDS: usize = 256;
 const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+const HEALTH_GLOBAL: usize = 25;
+const FRUIT_COUNT_GLOBAL: usize = 26;
+const BOX_COUNT_GLOBAL: usize = 62;
+const CHECKPOINT_ID_GLOBAL: usize = 69;
+const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
+const PBAK_STATE_GLOBAL: usize = 105;
+const TITLE_DIRECT_ZONE_NAMES: [&str; 10] = [
+    "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
+];
+
+fn retail_zone_graph(pair: &ValidatedPair) -> Result<RetailZoneGraph, FormatError> {
+    let direct_roots = (pair.level == FormatLevelId::TITLE)
+        .then(|| {
+            TITLE_DIRECT_ZONE_NAMES
+                .iter()
+                .map(|name| Eid::from_name(name).expect("fixed title zone EID is valid"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    RetailZoneGraph::from_pair_with_roots(&pair.nsd, &pair.nsf, &pair.nsf_bytes, direct_roots)
+}
 
 fn retail_screen_projection(field_of_view: u32) -> Option<u32> {
     match field_of_view {
@@ -377,20 +413,25 @@ impl std::error::Error for BrowserProgramError {}
 /// Short-lived stream borrows around the persistent audio engine owned by a
 /// mounted [`Runtime`]. GOOL can therefore suspend at an audio opcode and
 /// receive the engine's real stateful response before its next instruction.
-struct BrowserProgramHost<'assets, 'audio> {
+struct BrowserProgramHost<'assets, 'runtime> {
     program: NsfProgramHost<'assets>,
     metadata: &'assets Nsd,
     nsf: &'assets Nsf,
     nsf_bytes: &'assets [u8],
-    audio: &'audio mut RetailAudioEngine,
+    audio: &'runtime mut RetailAudioEngine,
+    card: &'runtime mut VirtualCard,
+    storage: &'runtime mut Option<StorageState>,
+    environmentless_mdat: Option<Eid>,
 }
 
-impl<'assets, 'audio> BrowserProgramHost<'assets, 'audio> {
+impl<'assets, 'runtime> BrowserProgramHost<'assets, 'runtime> {
     fn new(
         metadata: &'assets Nsd,
         nsf: &'assets Nsf,
         nsf_bytes: &'assets [u8],
-        audio: &'audio mut RetailAudioEngine,
+        audio: &'runtime mut RetailAudioEngine,
+        card: &'runtime mut VirtualCard,
+        storage: &'runtime mut Option<StorageState>,
     ) -> Self {
         Self {
             program: NsfProgramHost::new(metadata, nsf, nsf_bytes),
@@ -398,7 +439,24 @@ impl<'assets, 'audio> BrowserProgramHost<'assets, 'audio> {
             nsf,
             nsf_bytes,
             audio,
+            card,
+            storage,
+            environmentless_mdat: None,
         }
+    }
+
+    fn for_title_mdat(
+        metadata: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        audio: &'runtime mut RetailAudioEngine,
+        card: &'runtime mut VirtualCard,
+        storage: &'runtime mut Option<StorageState>,
+        mdat: Eid,
+    ) -> Self {
+        let mut host = Self::new(metadata, nsf, nsf_bytes, audio, card, storage);
+        host.environmentless_mdat = Some(mdat);
+        host
     }
 
     fn ensure_audio_sample(&mut self, eid: Eid) -> Result<(), BrowserProgramError> {
@@ -454,8 +512,32 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
         &mut self,
         zone: Eid,
     ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
+        if self.environmentless_mdat == Some(zone) {
+            // A type-17 entry is entity provenance, not a ZDAT environment.
+            // Native GoolObjectSpawn rewrites its object zone to `cur_zone`
+            // before reading colors, so the authored title path normally
+            // reaches the current ZDAT branch below. Keep this guard for any
+            // environmentless MDAT-origin binding that has not been rewritten.
+            return Ok(None);
+        }
         self.program
             .zone_environment(zone)
+            .map_err(BrowserProgramError::Program)
+    }
+
+    fn find_neighbor_zone(
+        &mut self,
+        current_zone: Eid,
+        point: [i32; 3],
+    ) -> Result<Option<Eid>, Self::Error> {
+        self.program
+            .find_neighbor_zone(current_zone, point)
+            .map_err(BrowserProgramError::Program)
+    }
+
+    fn current_zone_neighbors(&mut self, current_zone: Eid) -> Result<Vec<Eid>, Self::Error> {
+        self.program
+            .current_zone_neighbors(current_zone)
             .map_err(BrowserProgramError::Program)
     }
 
@@ -463,6 +545,9 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
         &mut self,
         zone: Eid,
     ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+        if self.environmentless_mdat == Some(zone) {
+            return Ok(None);
+        }
         self.program
             .solid_environment(zone)
             .map_err(BrowserProgramError::Program)
@@ -477,6 +562,15 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
             .map_err(BrowserProgramError::Program)
     }
 
+    fn model_vertex_source(
+        &mut self,
+        binding: ModelVertexBinding,
+    ) -> Result<Option<ModelVertexSource>, Self::Error> {
+        self.program
+            .model_vertex_source(binding)
+            .map_err(BrowserProgramError::Program)
+    }
+
     fn handle_audio_request(
         &mut self,
         request: AudioHostRequest,
@@ -488,6 +582,68 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
             .handle_request(request)
             .map_err(BrowserProgramError::Audio)
     }
+
+    fn free_object_audio(&mut self, object: RuntimeObjectHandle) -> bool {
+        self.audio.free_owner(object.vm());
+        true
+    }
+
+    fn handle_card_request(
+        &mut self,
+        request: CardHostRequest,
+        current: SaveData,
+    ) -> Result<CardHostResponse, Self::Error> {
+        let operation = CardOperation::from_retail(request.operation);
+        let part_index = usize::try_from(request.part_index).unwrap_or(usize::MAX);
+        let before = self.card.clone();
+        let mut candidate = before.clone();
+        candidate.set_storage_available(self.storage.is_some());
+        let outcome = candidate.control(operation, part_index, Some(current));
+
+        if outcome.is_ok() && operation.mutates_storage() {
+            let persisted = self
+                .storage
+                .as_mut()
+                .is_some_and(|storage| storage.persist_card(&candidate).is_ok());
+            if !persisted {
+                let mut failed = before;
+                failed.set_storage_available(false);
+                let _ = failed.control(operation, part_index, Some(current));
+                *self.card = failed;
+                return Ok(CardHostResponse {
+                    result: 1,
+                    loaded: None,
+                    published: self.card.published_state(),
+                });
+            }
+        }
+
+        let loaded = match outcome {
+            Ok(CardOutcome::Loaded(save)) => Some(save),
+            Ok(CardOutcome::Complete) | Err(_) => None,
+        };
+        let result = i32::from(outcome.is_err());
+        *self.card = candidate;
+        Ok(CardHostResponse {
+            result,
+            loaded,
+            published: self.card.published_state(),
+        })
+    }
+}
+
+enum PreparedRetailMusic {
+    Unchanged,
+    Silence,
+    Music(Eid, Box<RetailMusic>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetailPairMount {
+    target: FormatLevelId,
+    carry: RetailSessionCarry,
+    bonus_return: bool,
+    core_transition: bool,
 }
 
 struct Runtime {
@@ -511,6 +667,8 @@ struct Runtime {
     show_loading_image: bool,
     level_assets: ValidatedPair,
     retail_audio: RetailAudioEngine,
+    retail_master_fade: RetailMasterFade,
+    retail_pbak: Option<RetailPbakPlayback>,
     audio: Option<WebAudio>,
     storage: Option<StorageState>,
     card: VirtualCard,
@@ -521,8 +679,10 @@ struct Runtime {
     password_cursor: usize,
     last_title_state: Option<u8>,
     pending_buttons: u16,
-    pending_asset_level: Option<FormatLevelId>,
-    loading_asset_level: Option<FormatLevelId>,
+    pending_mount: Option<RetailPairMount>,
+    loading_mount: Option<RetailPairMount>,
+    next_lid: i32,
+    title_seen: bool,
     asset_load_error: Option<String>,
     muted: bool,
     last_gl_error: u32,
@@ -539,7 +699,6 @@ impl Runtime {
             .map_err(|_| JsValue::from_str("selected level does not fit the retail id"))?;
         let boot_level = LevelId::new(raw_level)
             .ok_or_else(|| JsValue::from_str("selected level is not in the retail catalog"))?;
-        let seed = hash_pair(&pair);
         let mut flow = GameFlow::new();
         flow.command(FlowCommand::Boot(boot_level))
             .map_err(|error| JsValue::from_str(&format!("could not boot level: {error:?}")))?;
@@ -560,7 +719,7 @@ impl Runtime {
             dom.log("Quarantined an invalid browser resume record.", true);
         }
 
-        let audio = match WebAudio::new(seed) {
+        let audio = match WebAudio::new() {
             Ok(mut audio) => {
                 audio.set_output_options(output_options(flow.options));
                 Some(audio)
@@ -590,8 +749,7 @@ impl Runtime {
         } else {
             false
         };
-        let retail_zone_graph = RetailZoneGraph::from_pair(&pair.nsd, &pair.nsf, &pair.nsf_bytes)
-            .map_err(|error| {
+        let retail_zone_graph = retail_zone_graph(&pair).map_err(|error| {
             JsValue::from_str(&format!(
                 "retail camera graph for {} is invalid: {error}",
                 pair.level
@@ -603,8 +761,11 @@ impl Runtime {
                 pair.level
             ))
         })?;
-        let (retail_zones, retail_zone_lifecycle) =
-            parse_retail_zone_catalog(&pair, &retail_zone_graph)?;
+        let (retail_zones, retail_zone_lifecycle) = parse_retail_zone_catalog(
+            &pair,
+            &retail_zone_graph,
+            retail_camera.location().path.zone,
+        )?;
         let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
         dom.log(
             &format!(
@@ -638,25 +799,6 @@ impl Runtime {
         } else {
             RetailFrameState::ready(retail_point_count, 0)
         };
-        let mut last_title_state = None;
-        if boot_level == LevelId::TITLE {
-            let state = flow.title().screen() as u8;
-            if title_state_uses_image(flow.title().screen()) {
-                let card = decode_title_card(&pair.nsd, &pair.nsf, &pair.nsf_bytes, state)
-                    .map_err(|error| {
-                        JsValue::from_str(&format!("retail title state {state}: {error}"))
-                    })?;
-                stage.install_title_image(&card.image)?;
-                dom.log(
-                    &format!(
-                        "Composed retail title state {state} from {}x{} MDAT tiles.",
-                        card.width_tiles, card.height_tiles
-                    ),
-                    false,
-                );
-            }
-            last_title_state = Some(state);
-        }
         dom.log(
             &format!(
                 "Validated {} pages and {} entries for {}.",
@@ -674,15 +816,37 @@ impl Runtime {
             false,
         );
         // Keep the checksum baseline synchronized even when the restored value was unchanged.
-        let _ = save;
-        Ok(Self {
+        let mut retail_objects = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, pair.level);
+        retail_objects
+            .restore_card_save_data(save)
+            .and_then(|()| retail_objects.publish_card_state(card.published_state()))
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not initialize retail card globals: {error:?}"
+                ))
+            })?;
+        retail_objects.set_level_state_context(build_retail_level_state_context(
+            &retail_zone_graph,
+            retail_camera.location(),
+            &retail_zone_lifecycle,
+            i32::from(flow.player.boxes) << 8,
+            flow.player.checkpoint.map_or(-1, |id| i32::from(id) << 8),
+            [
+                flow.player.translation.x,
+                flow.player.translation.y,
+                flow.player.translation.z,
+            ],
+            false,
+        )?);
+        let title_seen = pair.level == FormatLevelId::TITLE;
+        let mut runtime = Self {
             flow,
             scheduler: FrameScheduler::new(),
             previous_step_us: None,
             pad: PlatformPadState::default(),
             stage,
             retail_frame,
-            retail_objects: RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, pair.level),
+            retail_objects,
             retail_zones,
             retail_zone_lifecycle,
             retail_zone_pager,
@@ -696,6 +860,8 @@ impl Runtime {
             show_loading_image: after_loading_image,
             level_assets: pair,
             retail_audio,
+            retail_master_fade: RetailMasterFade::new(),
+            retail_pbak: None,
             audio,
             storage: storage.take(),
             card,
@@ -704,49 +870,121 @@ impl Runtime {
             menu_index: 0,
             password_digits: [0; 8],
             password_cursor: 0,
-            last_title_state,
+            // Even the first authored title screen enters through
+            // TitleLoadScreen's flag-two LevelUpdate. `sync_title_card` below
+            // applies that transaction before the runtime is returned.
+            last_title_state: None,
             pending_buttons: 0,
-            pending_asset_level: None,
-            loading_asset_level: None,
+            pending_mount: None,
+            loading_mount: None,
+            next_lid: -1,
+            title_seen,
             asset_load_error: None,
             muted: false,
             last_gl_error: 0,
-        })
+        };
+        runtime.seed_title_state_global()?;
+        runtime.sync_title_card(dom)?;
+        let initial_zone = runtime.retail_camera.location().path.zone;
+        let initial_music = runtime
+            .prepare_retail_music(&runtime.level_assets, initial_zone, false)
+            .map_err(|error| JsValue::from_str(&error))?;
+        runtime
+            .apply_prepared_retail_music(initial_music, true, initial_zone, dom)
+            .map_err(|error| JsValue::from_str(&error))?;
+        Ok(runtime)
     }
 
     fn take_asset_request(&mut self) -> Option<FormatLevelId> {
-        let level = self.pending_asset_level.take()?;
-        if level == self.level_assets.level {
+        let mount = self.pending_mount.take()?;
+        if !mount.core_transition && mount.target == self.level_assets.level {
             return None;
         }
-        self.loading_asset_level = Some(level);
+        let level = mount.target;
+        self.loading_mount = Some(mount);
         self.asset_load_error = None;
         self.scheduler.set_paused(true);
         Some(level)
     }
 
     fn install_level_assets(&mut self, pair: ValidatedPair, dom: &Dom) -> Result<(), JsValue> {
-        if self.loading_asset_level != Some(pair.level) {
+        let mount = self
+            .loading_mount
+            .clone()
+            .ok_or_else(|| JsValue::from_str("validated stream pair has no pending transition"))?;
+        if mount.target != pair.level {
             return Err(JsValue::from_str(
                 "validated stream pair does not match the pending transition",
             ));
         }
-        let retail_zone_graph = RetailZoneGraph::from_pair(&pair.nsd, &pair.nsf, &pair.nsf_bytes)
-            .map_err(|error| {
+        let retail_zone_graph = retail_zone_graph(&pair).map_err(|error| {
             JsValue::from_str(&format!(
                 "destination camera graph for {} is invalid: {error}",
                 pair.level
             ))
         })?;
-        let retail_camera = RetailCameraRuntime::new(&retail_zone_graph).map_err(|error| {
+        let mount_game_state = mount
+            .carry
+            .globals
+            .get(crust_sim::gool::GAME_STATE_GLOBAL)
+            .copied()
+            .ok_or_else(|| JsValue::from_str("retail session has no game-state global"))?
+            .cast_signed();
+        let title_attract_mount = mount.core_transition
+            && mount_game_state == 0x600
+            && pair.level != FormatLevelId::TITLE;
+        let prepared_pbak = title_attract_mount
+            .then(|| {
+                prepare_pair_pbak(&pair.nsd, &pair.nsf, &pair.nsf_bytes, &retail_zone_graph)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "could not prepare retail PBAK for {}: {error}",
+                            pair.level
+                        ))
+                    })
+            })
+            .transpose()?
+            .flatten();
+        let retail_camera = if mount.bonus_return {
+            let snapshot = mount.carry.saved_level_state.as_ref().ok_or_else(|| {
+                JsValue::from_str("bonus return has no carried retail level snapshot")
+            })?;
+            if snapshot.level != pair.level {
+                return Err(JsValue::from_str(&format!(
+                    "bonus return snapshot targets {}, not mounted {}",
+                    snapshot.level, pair.level
+                )));
+            }
+            RetailCameraRuntime::at_path(
+                &retail_zone_graph,
+                snapshot.location.path,
+                snapshot.location.progress.raw(),
+                mount_game_state,
+            )
+        } else {
+            RetailCameraRuntime::at_path(
+                &retail_zone_graph,
+                retail_zone_graph.spawn_path(),
+                0,
+                mount_game_state,
+            )
+        }
+        .map_err(|error| {
             JsValue::from_str(&format!(
                 "destination camera state for {} is invalid: {error}",
                 pair.level
             ))
         })?;
-        let (retail_zones, retail_zone_lifecycle) =
-            parse_retail_zone_catalog(&pair, &retail_zone_graph)?;
+        let (retail_zones, retail_zone_lifecycle) = parse_retail_zone_catalog(
+            &pair,
+            &retail_zone_graph,
+            retail_camera.location().path.zone,
+        )?;
         let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
+        let destination_zone = retail_camera.location().path.zone;
+        let destination_music = self
+            .prepare_retail_music(&pair, destination_zone, true)
+            .map_err(|error| JsValue::from_str(&error))?;
         dom.log(
             &format!(
                 "Parsed {} destination zones with {} owned retail entity descriptors.",
@@ -790,14 +1028,89 @@ impl Runtime {
         let pages = pair.nsf.pages.len();
         let entries = pair_entry_count(&pair);
         let level = pair.level;
+        let flow_level = u8::try_from(level.get())
+            .ok()
+            .and_then(LevelId::new)
+            .ok_or_else(|| JsValue::from_str("mounted retail level is not playable"))?;
+        let title_screen = (flow_level == LevelId::TITLE)
+            .then(|| self.title_screen_for_mount(&mount))
+            .transpose()?;
+        let mut retail_objects =
+            RetailRuntime::new_from_session(RETAIL_GLOBAL_WORDS, level, mount.carry.clone())
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not import retail session across mount: {error:?}"
+                    ))
+                })?;
+        retail_objects
+            .publish_card_state(self.card.published_state())
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not carry retail card globals across mount: {error:?}"
+                ))
+            })?;
+        if title_attract_mount {
+            retail_objects
+                .set_global_word(
+                    GAME_STATE_GLOBAL,
+                    if prepared_pbak.is_some() { 0x600 } else { 0 },
+                )
+                .and_then(|()| {
+                    retail_objects.set_global_word(
+                        PBAK_STATE_GLOBAL,
+                        if prepared_pbak.is_some() { 3 } else { 0 },
+                    )
+                })
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not initialize retail PBAK globals: {error:?}"
+                    ))
+                })?;
+        }
+        self.flow
+            .mount_retail_level(flow_level, title_screen)
+            .map_err(|error| {
+                JsValue::from_str(&format!("could not mirror mounted retail flow: {error:?}"))
+            })?;
+        if flow_level == LevelId::TITLE {
+            self.title_seen = true;
+        }
+        let read_mount_global = |index| {
+            retail_objects
+                .global_word(index)
+                .map(u32::cast_signed)
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not import retail mount global {index}: {error:?}"
+                    ))
+                })
+        };
+        let mounted_box_count = read_mount_global(BOX_COUNT_GLOBAL)?;
+        let mounted_checkpoint_id = read_mount_global(CHECKPOINT_ID_GLOBAL)?;
+        let mounted_checkpoint_translation = [
+            read_mount_global(CHECKPOINT_TRANSLATION_GLOBALS[0])?,
+            read_mount_global(CHECKPOINT_TRANSLATION_GLOBALS[1])?,
+            read_mount_global(CHECKPOINT_TRANSLATION_GLOBALS[2])?,
+        ];
+        retail_objects.set_level_state_context(build_retail_level_state_context(
+            &retail_zone_graph,
+            retail_camera.location(),
+            &retail_zone_lifecycle,
+            mounted_box_count,
+            mounted_checkpoint_id,
+            mounted_checkpoint_translation,
+            false,
+        )?);
         self.level_assets = pair;
         self.retail_scene_builder = retail_scene_builder;
         self.retail_zone_graph = retail_zone_graph;
         self.retail_camera = retail_camera;
-        self.retail_objects = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, level);
+        self.retail_objects = retail_objects;
         self.retail_zones = retail_zones;
         self.retail_zone_lifecycle = retail_zone_lifecycle;
         self.retail_zone_pager = retail_zone_pager;
+        self.retail_pbak = prepared_pbak.map(RetailPbakPlayback::new);
+        self.seed_title_state_global()?;
         self.retail_tick_state = RetailTickState::NeedsSpawn;
         self.retail_metrics = RetailRuntimeMetrics::default();
         self.retail_runtime_error = None;
@@ -806,7 +1119,37 @@ impl Runtime {
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         self.last_title_state = None;
-        self.loading_asset_level = None;
+        self.sync_title_card(dom)?;
+        self.apply_prepared_retail_music(destination_music, true, destination_zone, dom)
+            .map_err(|error| JsValue::from_str(&error))?;
+        if let Some(pbak) = &self.retail_pbak {
+            dom.log(
+                &format!(
+                    "Armed retail PBAK {} ({:?}, {} recorded frames); input remains locked until Crash is live.",
+                    pbak.eid(),
+                    pbak.layout(),
+                    pbak.frame_count(),
+                ),
+                false,
+            );
+        } else if title_attract_mount {
+            dom.log(
+                "The title attract transition has no PBAK entry; continuing as a cutscene.",
+                false,
+            );
+        }
+        if mount.bonus_return {
+            // Native creates the destination object infrastructure, performs
+            // one protected Crash spawn, then executes LevelRestart against
+            // the carried snapshot before the outer frame's normal scan.
+            self.retail_objects.set_initial_crash_save_suppressed(true);
+            let protected_spawn = self.spawn_retail_objects(dom, true);
+            self.retail_objects.set_initial_crash_save_suppressed(false);
+            protected_spawn.map_err(|error| JsValue::from_str(&error))?;
+            self.apply_retail_hard_restart(dom)
+                .map_err(|error| JsValue::from_str(&error))?;
+        }
+        self.loading_mount = None;
         self.asset_load_error = None;
         self.scheduler.set_paused(false);
         self.scheduler.reset_deadline();
@@ -823,13 +1166,18 @@ impl Runtime {
     }
 
     fn fail_level_assets(&mut self, level: FormatLevelId, message: &str) {
-        self.loading_asset_level = None;
+        if self.loading_mount.as_ref().map(|mount| mount.target) == Some(level) {
+            self.loading_mount = None;
+        }
         self.asset_load_error = Some(format!("Could not mount {level}: {message}"));
         self.scheduler.set_paused(true);
     }
 
     fn asset_transition_level(&self) -> Option<FormatLevelId> {
-        self.loading_asset_level.or(self.pending_asset_level)
+        self.loading_mount
+            .as_ref()
+            .or(self.pending_mount.as_ref())
+            .map(|mount| mount.target)
     }
 
     fn assets_stalled(&self) -> bool {
@@ -846,24 +1194,307 @@ impl Runtime {
             return;
         };
         if level != self.level_assets.level
-            && self.loading_asset_level != Some(level)
-            && self.pending_asset_level != Some(level)
+            && self.loading_mount.as_ref().map(|mount| mount.target) != Some(level)
+            && self.pending_mount.as_ref().map(|mount| mount.target) != Some(level)
         {
-            self.pending_asset_level = Some(level);
+            self.pending_mount = Some(RetailPairMount {
+                target: level,
+                carry: self.retail_objects.export_session_carry(),
+                bonus_return: false,
+                core_transition: false,
+            });
         }
+    }
+
+    fn title_screen_profile(&self) -> Option<RetailTitleScreenProfile> {
+        matches!(self.flow.state(), FlowState::Title).then(|| {
+            retail_title_screen_profile(
+                self.flow.title().screen(),
+                self.flow.progress.current_map_level,
+            )
+        })
+    }
+
+    fn authored_title_runtime_active(&self) -> bool {
+        matches!(self.flow.state(), FlowState::Title)
+            && self.level_assets.level == FormatLevelId::TITLE
+            && !self.retail_objects.arena().is_empty()
+    }
+
+    fn authored_scene_runtime_active(&self) -> bool {
+        !matches!(self.flow.state(), FlowState::Boot)
+            && !self.retail_objects.arena().is_empty()
+            && self.retail_runtime_error.is_none()
+    }
+
+    fn title_screen_for_mount(&self, mount: &RetailPairMount) -> Result<TitleScreen, JsValue> {
+        if !mount.core_transition && matches!(self.flow.state(), FlowState::Title) {
+            return Ok(self.flow.title().next_screen());
+        }
+        if !self.title_seen {
+            return Ok(TitleScreen::PublisherFirst);
+        }
+        let game_state = mount
+            .carry
+            .globals
+            .get(crust_sim::gool::GAME_STATE_GLOBAL)
+            .copied()
+            .ok_or_else(|| JsValue::from_str("retail session has no game-state global"))?;
+        match game_state {
+            0x200 => Ok(TitleScreen::GameOver),
+            0x600 => Ok(TitleScreen::MainMenu),
+            _ => {
+                let raw = mount
+                    .carry
+                    .globals
+                    .get(TITLE_STATE_GLOBAL)
+                    .copied()
+                    .ok_or_else(|| JsValue::from_str("retail session has no title-state global"))?;
+                TitleScreen::from_raw(raw).ok_or_else(|| {
+                    JsValue::from_str(&format!(
+                        "retail session requested invalid title state {raw:#x}"
+                    ))
+                })
+            }
+        }
+    }
+
+    fn seed_title_state_global(&mut self) -> Result<(), JsValue> {
+        if !matches!(self.flow.state(), FlowState::Title)
+            || self.level_assets.level != FormatLevelId::TITLE
+        {
+            return Ok(());
+        }
+        self.retail_objects
+            .set_global_word(TITLE_STATE_GLOBAL, self.flow.title().next_screen().raw())
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not seed retail title-state global: {error:?}"
+                ))
+            })
+    }
+
+    fn consume_authored_title_state(&mut self, dom: &Dom) -> Result<bool, JsValue> {
+        if !self.authored_title_runtime_active() {
+            return Ok(false);
+        }
+        let raw = self
+            .retail_objects
+            .global_word(TITLE_STATE_GLOBAL)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not read authored retail title state: {error:?}"
+                ))
+            })?;
+        let changed = self
+            .flow
+            .request_authored_title_state(raw)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "authored retail title state {raw:#x} is invalid: {error:?}"
+                ))
+            })?;
+        if changed {
+            dom.log(&format!("Retail GOOL requested title state {raw}."), false);
+        }
+        self.menu_index = 0;
+        Ok(true)
+    }
+
+    fn publish_title_state_global(&mut self) -> Result<(), JsValue> {
+        if !matches!(self.flow.state(), FlowState::Title)
+            || self.level_assets.level != FormatLevelId::TITLE
+        {
+            return Ok(());
+        }
+        self.retail_objects
+            .set_global_word(TITLE_STATE_GLOBAL, self.flow.title().next_screen().raw())
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not publish retail title-state global: {error:?}"
+                ))
+            })
+    }
+
+    fn apply_retail_title_display_update(
+        &mut self,
+        previous_phase: TitlePhase,
+    ) -> Result<(), JsValue> {
+        if !matches!(self.flow.state(), FlowState::Title)
+            || self.level_assets.level != FormatLevelId::TITLE
+        {
+            return Ok(());
+        }
+        let current_phase = self.flow.title().phase();
+        let Some(update) = retail_title_display_update(previous_phase, current_phase) else {
+            return Ok(());
+        };
+        let display_mask = self
+            .retail_objects
+            .global_word(NEXT_DISPLAY_GLOBAL)
+            .map(|display_mask| update.apply(display_mask))
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not read the retail title display word: {error:?}"
+                ))
+            })?;
+        // RetailRuntime completes its GLUpdate latch at the end of GOOL,
+        // while native TitleUpdate runs between GOOL and GLUpdate. Mirroring
+        // the exact two-bit mutation into both words here restores the source
+        // order without replacing any unrelated GOOL-authored display bits.
+        self.retail_objects
+            .set_global_word(NEXT_DISPLAY_GLOBAL, display_mask)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not update the retail title display word: {error:?}"
+                ))
+            })?;
+        self.retail_objects
+            .set_global_word(CURRENT_DISPLAY_GLOBAL, display_mask)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not latch the retail title display word: {error:?}"
+                ))
+            })
+    }
+
+    fn live_title_mdat_eid(&self) -> Option<Eid> {
+        self.title_screen_profile()
+            .filter(|profile| profile.uses_image())
+            .and_then(|_| title_mdat_eid(self.flow.title().screen() as u8).ok())
+    }
+
+    fn effective_retail_display_mask(&self) -> u32 {
+        // TitleLoadState seeds NEXT_DISPLAY_GLOBAL from the screen profile,
+        // but subsequent GOOL writes and the one-frame GLUpdate latch remain
+        // authoritative just as they are in gameplay.
+        self.retail_objects.current_display_mask()
+    }
+
+    fn effective_retail_field_of_view(&self) -> Result<u32, String> {
+        if let Some(profile) = self.title_screen_profile() {
+            return Ok(profile.field_of_view);
+        }
+        self.level_assets
+            .nsd
+            .ldat()
+            .map(|ldat| ldat.field_of_view)
+            .ok_or_else(|| "playable level has no LDAT camera projection".to_owned())
+    }
+
+    fn start_armed_retail_pbak(&mut self, dom: &Dom) -> Result<(), JsValue> {
+        let Some(pbak) = self.retail_pbak.as_ref() else {
+            return Ok(());
+        };
+        if !pbak.is_armed() || self.retail_objects.arena().main_object().is_none() {
+            return Ok(());
+        }
+        let eid = pbak.eid();
+        let (snapshot, seed, crash_bound) = pbak.start_payload();
+        self.retail_objects
+            .install_retail_demo_start(snapshot, seed, crash_bound)
+            .map_err(|error| {
+                JsValue::from_str(&format!("could not install retail PBAK {eid}: {error:?}"))
+            })?;
+        self.apply_retail_hard_restart(dom).map_err(|error| {
+            JsValue::from_str(&format!("could not start retail PBAK {eid}: {error}"))
+        })?;
+        self.retail_pbak
+            .as_mut()
+            .expect("PBAK remained mounted through its same-level restart")
+            .mark_started();
+        dom.log(
+            &format!(
+                "Started retail PBAK {eid}; restored its checked camera/player snapshot and gameplay RNG."
+            ),
+            false,
+        );
+        Ok(())
+    }
+
+    fn finish_retail_pbak_frame(&mut self, dom: &Dom) -> Result<(), JsValue> {
+        let Some(reason) = self
+            .retail_pbak
+            .as_mut()
+            .and_then(RetailPbakPlayback::take_end)
+        else {
+            return Ok(());
+        };
+        self.retail_objects
+            .set_global_word(PBAK_STATE_GLOBAL, 3)
+            .and_then(|()| {
+                self.retail_objects
+                    .set_global_word(GAME_STATE_GLOBAL, 0x600)
+            })
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not finish retail PBAK title handoff: {error:?}"
+                ))
+            })?;
+        self.next_lid = i32::try_from(FormatLevelId::TITLE.get())
+            .expect("retail title level fits signed 32-bit");
+        dom.log(
+            &format!(
+                "Retail PBAK input ended ({reason:?}); queued the native attract-mode return to the main menu."
+            ),
+            false,
+        );
+        Ok(())
     }
 
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
         if !self.assets_stalled() && self.scheduler.sample(now_us) == FrameDecision::Step {
-            let ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
+            let wall_ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
                 i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
             });
             self.previous_step_us = Some(now_us);
-            self.retail_objects
-                .set_frame_timing(ticks_current_frame, round_retail_ticks(ticks_current_frame));
-            self.pad.update(held | self.pending_buttons, 0, None);
+            self.start_armed_retail_pbak(dom)?;
+            let physical_held = held | self.pending_buttons;
             self.pending_buttons = 0;
+            let pbak_input = self
+                .retail_pbak
+                .as_mut()
+                .map(|pbak| pbak.advance_input(physical_held));
+            let pbak_owned_input = pbak_input.is_some();
+            if pbak_input.is_some_and(|input| input.end.is_some()) {
+                self.retail_objects
+                    .set_global_word(PBAK_STATE_GLOBAL, 0)
+                    .map_err(|error| {
+                        JsValue::from_str(&format!(
+                            "could not release retail PBAK input: {error:?}"
+                        ))
+                    })?;
+            }
+            let (ticks_current_frame, ticks_per_frame, demo_override) = pbak_input.map_or_else(
+                || {
+                    (
+                        wall_ticks_current_frame,
+                        round_retail_ticks(wall_ticks_current_frame),
+                        None,
+                    )
+                },
+                |input| {
+                    (
+                        17,
+                        input
+                            .ticks_per_frame
+                            .unwrap_or_else(|| round_retail_ticks(wall_ticks_current_frame)),
+                        Some(input.held),
+                    )
+                },
+            );
+            self.retail_objects
+                .set_frame_timing(ticks_current_frame, ticks_per_frame);
+            self.card.update();
+            self.retail_objects
+                .publish_card_state(self.card.published_state())
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not publish retail card frame state: {error:?}"
+                    ))
+                })?;
+            self.pad.update(physical_held, 0, demo_override);
             let snapshot = self.pad.snapshot();
             self.retail_objects
                 .set_pad_snapshot(0, retail_pad_snapshot(snapshot))
@@ -876,25 +1507,15 @@ impl Runtime {
             };
 
             let retail_state = is_retail_runtime_state(self.flow.state());
-            if retail_state && self.retail_runtime_error.is_none() {
-                // Native CoreFrame scans active zone descriptors before the
-                // pause-gated camera/GOOL section. New-zone entities still do
-                // not appear until the frame after LevelUpdate because that
-                // update happens later, during the camera step.
-                let log_spawn_scan = matches!(
-                    self.retail_tick_state,
-                    RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn
-                );
-                if let Err(error) = self.spawn_retail_objects(dom, log_spawn_scan) {
-                    let message = format!("retail spawn scan failed: {error}");
-                    dom.log(&message, true);
-                    self.retail_runtime_error = Some(message);
-                    self.retail_tick_state = RetailTickState::Paused;
-                }
-            }
-            if retail_state
-                && self.retail_runtime_error.is_none()
-                && snapshot.tapped & PAD_START != 0
+            if matches!(
+                self.flow.state(),
+                FlowState::Gameplay(_)
+                    | FlowState::Bonus(_)
+                    | FlowState::Boss(_)
+                    | FlowState::Ending
+            ) && self.retail_runtime_error.is_none()
+                && snapshot.tapped & u32::from(PAD_START) != 0
+                && !pbak_owned_input
             {
                 self.retail_tick_state = match self.retail_tick_state {
                     RetailTickState::NeedsSpawn => RetailTickState::PausedBeforeSpawn,
@@ -912,9 +1533,34 @@ impl Runtime {
                 );
             }
 
-            if retail_state && !self.paused() && self.retail_runtime_error.is_none() {
+            // CoreFrame consumes a level requested by the preceding GOOL
+            // frame before any destination spawn, camera, or object work.
+            // Browser pair validation is asynchronous, so this boundary queues
+            // an owned session carry and freezes the rest of this 30 Hz step.
+            let transition_queued = retail_state
+                && self.retail_runtime_error.is_none()
+                && self.process_retail_level_transition(dom)?;
+
+            if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
+                let log_spawn_scan = matches!(
+                    self.retail_tick_state,
+                    RetailTickState::NeedsSpawn | RetailTickState::PausedBeforeSpawn
+                );
+                if let Err(error) = self.spawn_retail_objects(dom, log_spawn_scan) {
+                    let message = format!("retail spawn scan failed: {error}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = RetailTickState::Paused;
+                }
+            }
+
+            if retail_state
+                && !transition_queued
+                && !self.paused()
+                && self.retail_runtime_error.is_none()
+            {
                 let mut scene_location = None;
-                let frame_display_mask = self.retail_objects.current_display_mask();
+                let frame_display_mask = self.effective_retail_display_mask();
                 let frame_draw_count = self.retail_objects.draw_count();
                 let camera_location = match self.update_retail_camera(snapshot, dom) {
                     Ok(step) => Some(step.after),
@@ -932,7 +1578,7 @@ impl Runtime {
                     self.tick_retail_runtime(dom);
                 }
                 if let Some(camera_location) = camera_location {
-                    let count_draws = self.retail_objects.current_display_mask() & 0x1000 != 0;
+                    let count_draws = self.effective_retail_display_mask() & 0x1000 != 0;
                     let trace = self.retail_frame.tick_with_draw_count_enabled(count_draws);
                     self.show_loading_image =
                         matches!(trace.presented(), PresentedFrame::LoadingImage);
@@ -964,33 +1610,68 @@ impl Runtime {
                 self.show_loading_image = matches!(trace.presented(), PresentedFrame::LoadingImage);
             }
 
-            self.handle_menu_input(sim_pad, dom)?;
-            // Menu commands can synchronously enter a different level. Drain
-            // that event first so the confirming button cannot advance the
-            // destination simulation against the previous stream pair.
-            self.handle_events(dom)?;
-            if self.pending_asset_level.is_none() {
-                if !is_retail_runtime_state(self.flow.state()) {
-                    self.flow.tick(sim_pad).map_err(|error| {
-                        JsValue::from_str(&format!("simulation flow failed: {error:?}"))
-                    })?;
+            if !transition_queued {
+                // A live title object owns navigation; the Rust menu/timer
+                // path is a malformed-stream fallback. Native TitleUpdate
+                // advances its fade branch before comparing the authored
+                // title-state word, so defer that comparison until after the
+                // presentation tick below.
+                let authored_title = self.authored_title_runtime_active();
+                if !authored_title {
+                    self.handle_menu_input(sim_pad, dom)?;
                 }
+                // Menu commands can synchronously enter a different level.
+                // Drain that event before advancing the destination flow.
                 self.handle_events(dom)?;
-            }
-            if !is_retail_runtime_state(self.flow.state())
-                && snapshot.tapped & (PAD_CROSS | PAD_SQUARE) != 0
-                && let Some(audio) = &mut self.audio
-            {
-                audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
-            }
-            if let Some(audio) = &mut self.audio {
-                audio.tick_30_hz();
-            }
-            self.retail_audio.tick_30_hz();
-            if let Some(payload) = self.resume.update(self.save_data())
-                && let Some(storage) = &self.storage
-            {
-                storage.persist_resume(payload)?;
+                if self.pending_mount.is_none() {
+                    let previous_title_phase = matches!(self.flow.state(), FlowState::Title)
+                        .then(|| self.flow.title().phase());
+                    if !is_retail_runtime_state(self.flow.state())
+                        || matches!(self.flow.state(), FlowState::Title)
+                    {
+                        if authored_title && matches!(self.flow.state(), FlowState::Title) {
+                            self.flow.tick_authored_title().map_err(|error| {
+                                JsValue::from_str(&format!(
+                                    "authored title presentation failed: {error:?}"
+                                ))
+                            })?;
+                        } else {
+                            self.flow.tick(sim_pad).map_err(|error| {
+                                JsValue::from_str(&format!("simulation flow failed: {error:?}"))
+                            })?;
+                        }
+                    }
+                    if let Some(previous_title_phase) = previous_title_phase {
+                        self.apply_retail_title_display_update(previous_title_phase)?;
+                    }
+                    if authored_title && matches!(self.flow.state(), FlowState::Title) {
+                        self.consume_authored_title_state(dom)?;
+                    }
+                    self.handle_events(dom)?;
+                    self.publish_title_state_global()?;
+                }
+                if (!is_retail_runtime_state(self.flow.state())
+                    || matches!(self.flow.state(), FlowState::Title))
+                    && !authored_title
+                    && snapshot.tapped & u32::from(PAD_CROSS | PAD_SQUARE) != 0
+                    && let Some(audio) = &mut self.audio
+                {
+                    audio.trigger_sfx((self.scheduler.frame_count() & 0xff) as u8);
+                }
+                if let Some(audio) = &mut self.audio {
+                    audio.tick_30_hz();
+                }
+                self.retail_audio.tick_30_hz();
+                self.retail_master_fade.tick_30_hz();
+                if let Some(audio) = &mut self.audio {
+                    audio.set_retail_master_gain(self.retail_master_fade.normalized_gain());
+                }
+                self.finish_retail_pbak_frame(dom)?;
+                if let Some(payload) = self.resume.update(self.save_data())
+                    && let Some(storage) = &self.storage
+                {
+                    storage.persist_resume(payload)?;
+                }
             }
         }
         if let Some(audio) = &mut self.audio {
@@ -1001,10 +1682,25 @@ impl Runtime {
         let show_title_image = !assets_stalled
             && matches!(self.flow.state(), FlowState::Title)
             && title_state_uses_image(self.flow.title().screen());
+        let show_title_objects = self
+            .title_screen_profile()
+            .is_some_and(|profile| profile.screen_type == RetailTitleScreenType::ImageAndObjects);
+        let title_overlay_alpha = matches!(self.flow.state(), FlowState::Title)
+            .then(|| {
+                retail_title_overlay_alpha(
+                    self.flow.title().phase(),
+                    self.flow.title().fade_counter(),
+                )
+            })
+            .unwrap_or_default();
         self.stage.render(VisualState {
             show_title_image,
-            show_retail_scene: !assets_stalled && !show_title_image,
+            // Type-three title screens composite animated GOOL objects over
+            // their MDAT image. Type-zero screens suppress even a scene still
+            // resident from the preceding state before the next 30 Hz step.
+            show_retail_scene: !assets_stalled && (!show_title_image || show_title_objects),
             show_loading_image: !assets_stalled && self.show_loading_image,
+            title_overlay_alpha,
         })?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
@@ -1012,6 +1708,7 @@ impl Runtime {
     }
 
     fn spawn_retail_objects(&mut self, dom: &Dom, log_scan: bool) -> Result<(), String> {
+        let title_mdat = self.live_title_mdat_eid();
         let attempts = {
             let spawn_scan = self.retail_zone_lifecycle.next_frame_spawn_scan();
             let neighbors = spawn_scan
@@ -1032,15 +1729,30 @@ impl Runtime {
                         })
                 })
                 .collect::<Result<Vec<_>, String>>()?;
-            let mut host = BrowserProgramHost::new(
-                &self.level_assets.nsd,
-                &self.level_assets.nsf,
-                &self.level_assets.nsf_bytes,
-                &mut self.retail_audio,
-            );
+            let mut host = if let Some(mdat) = title_mdat {
+                BrowserProgramHost::for_title_mdat(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                    mdat,
+                )
+            } else {
+                BrowserProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                )
+            };
             self.retail_objects
                 .spawn_current_zone_neighbors(&neighbors, &mut host)
         };
+        self.drain_retail_reclaim_diagnostics(dom);
         let attempt_count = attempts.len() as u64;
         let successful = attempts
             .iter()
@@ -1104,20 +1816,37 @@ impl Runtime {
                 unexpected.is_some(),
             );
         }
+        self.sync_completed_card_load(dom);
         Ok(())
     }
 
     fn tick_retail_runtime(&mut self, dom: &Dom) {
+        let title_mdat = self.live_title_mdat_eid();
         let result = {
-            let mut host = BrowserProgramHost::new(
-                &self.level_assets.nsd,
-                &self.level_assets.nsf,
-                &self.level_assets.nsf_bytes,
-                &mut self.retail_audio,
-            );
+            let mut host = if let Some(mdat) = title_mdat {
+                BrowserProgramHost::for_title_mdat(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                    mdat,
+                )
+            } else {
+                BrowserProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                )
+            };
             self.retail_objects
                 .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
         };
+        self.drain_retail_reclaim_diagnostics(dom);
         match result {
             Ok(frame) => {
                 let frame_executions = frame.executions.len();
@@ -1154,6 +1883,12 @@ impl Runtime {
                         frame_execution_errors != 0,
                     );
                 }
+                if let Err(error) = self.apply_retail_gool_level_effects(&frame.effects, dom) {
+                    let message = format!("retail save/restart effect failed: {error}");
+                    dom.log(&message, true);
+                    self.retail_runtime_error = Some(message);
+                    self.retail_tick_state = RetailTickState::Paused;
+                }
             }
             Err(error) => {
                 let message = format!("retail GOOL frame failed: {error:?}");
@@ -1161,6 +1896,387 @@ impl Runtime {
                 self.retail_runtime_error = Some(message);
             }
         }
+        self.sync_completed_card_load(dom);
+        if self.retail_runtime_error.is_none()
+            && let Err(error) = self.sync_retail_globals_to_flow(dom)
+        {
+            dom.log(&error, true);
+            self.retail_runtime_error = Some(error);
+            self.retail_tick_state = RetailTickState::Paused;
+        }
+    }
+
+    fn sync_completed_card_load(&mut self, dom: &Dom) {
+        let Some(save) = self.retail_objects.take_card_load() else {
+            return;
+        };
+        apply_save(&mut self.flow, save);
+        self.retail_audio
+            .set_sfx_volume(self.flow.options.sfx_volume);
+        if let Some(audio) = &mut self.audio {
+            audio.set_output_options(output_options(self.flow.options));
+        }
+        dom.log(
+            "Restored retail progression and audio options from the selected virtual-card slot.",
+            false,
+        );
+    }
+
+    fn sync_retail_globals_to_flow(&mut self, dom: &Dom) -> Result<(), String> {
+        let read = |index| {
+            self.retail_objects
+                .global_word(index)
+                .map_err(|error| format!("retail global {index} is unavailable: {error:?}"))
+        };
+        let level_count = read(LEVEL_COUNT_GLOBAL)?;
+        let levels_unlocked = read(LEVELS_UNLOCKED_GLOBAL)?;
+        let current_map_level = read(CURRENT_MAP_LEVEL_GLOBAL)?;
+        let gem_count = read(GEM_COUNT_GLOBAL)?;
+        let key_count = read(KEY_COUNT_GLOBAL)?;
+        let item_pool_1 = read(ITEM_POOL_1_GLOBAL)?;
+        let item_pool_2 = read(ITEM_POOL_2_GLOBAL)?;
+        let life_count = read(LIFE_COUNT_GLOBAL)? as i32;
+        let health = read(HEALTH_GLOBAL)? as i32;
+        let fruit_count = read(FRUIT_COUNT_GLOBAL)? as i32;
+        let box_count = read(BOX_COUNT_GLOBAL)? as i32;
+        let checkpoint_id = read(CHECKPOINT_ID_GLOBAL)? as i32;
+        let options = GameOptions {
+            mono: read(MONO_GLOBAL)? != 0,
+            sfx_volume: read(SFX_VOLUME_GLOBAL)?.min(u32::from(u8::MAX)) as u8,
+            music_volume: read(MUSIC_VOLUME_GLOBAL)?.min(u32::from(u8::MAX)) as u8,
+        };
+
+        self.flow.progress.level_count = level_count;
+        self.flow.progress.levels_unlocked = levels_unlocked;
+        self.flow.progress.current_map_level = current_map_level;
+        self.flow.progress.gem_count = gem_count.min(u32::from(u8::MAX)) as u8;
+        self.flow.progress.key_count = key_count;
+        self.flow.progress.item_pool_1 = item_pool_1;
+        self.flow.progress.item_pool_2 = item_pool_2;
+        self.flow.player.lives = life_count >> 8;
+        self.flow.player.health = (health >> 8).clamp(0, i32::from(u8::MAX)) as u8;
+        self.flow.player.fruit = (fruit_count >> 8).clamp(0, i32::from(u16::MAX)) as u16;
+        self.flow.player.boxes = (box_count >> 8).clamp(0, i32::from(u16::MAX)) as u16;
+        self.flow.player.checkpoint = (checkpoint_id != -1)
+            .then(|| (checkpoint_id >> 8).clamp(0, i32::from(u16::MAX)) as u16);
+
+        if self.flow.options != options {
+            self.flow.options = options;
+            self.retail_audio.set_sfx_volume(options.sfx_volume);
+            if let Some(audio) = &mut self.audio {
+                audio.set_output_options(output_options(options));
+            }
+            dom.log("Applied authored retail audio options.", false);
+        }
+        if let Some(mut context) = self.retail_objects.level_state_context().cloned() {
+            context.box_count = box_count;
+            context.checkpoint_id = checkpoint_id;
+            self.retail_objects.set_level_state_context(context);
+        }
+        Ok(())
+    }
+
+    fn drain_retail_reclaim_diagnostics(&mut self, dom: &Dom) {
+        for cleanup in self.retail_objects.take_cleanup_actions() {
+            let RuntimeCleanupAction::FreeObjectAudio(object) = cleanup;
+            self.retail_audio.free_owner(object.vm());
+        }
+        let faults = self.retail_objects.take_reclaim_event_faults();
+        if !faults.is_empty() {
+            let message = format!(
+                "Native object-pool reclaim ignored {} faulted TERM handler(s); first object: {:?}.",
+                faults.len(),
+                faults[0].object,
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
+    }
+
+    fn process_retail_level_transition(&mut self, dom: &Dom) -> Result<bool, JsValue> {
+        if self.next_lid == -1 && self.level_assets.level != FormatLevelId::TITLE {
+            let game_state = self
+                .retail_objects
+                .global_word(crust_sim::gool::GAME_STATE_GLOBAL)
+                .map_err(|error| {
+                    JsValue::from_str(&format!(
+                        "could not read retail transition game state: {error:?}"
+                    ))
+                })?;
+            if matches!(game_state, 0x200 | 0x300 | 0x400) {
+                self.next_lid = i32::try_from(FormatLevelId::TITLE.get())
+                    .expect("retail title level fits signed 32-bit");
+            }
+        }
+        if self.next_lid == -1 {
+            return Ok(false);
+        }
+
+        let requested_lid = std::mem::replace(&mut self.next_lid, -1);
+        let title_mdat = self.live_title_mdat_eid();
+        let report = {
+            let mut host = if let Some(mdat) = title_mdat {
+                BrowserProgramHost::for_title_mdat(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                    mdat,
+                )
+            } else {
+                BrowserProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                )
+            };
+            self.retail_objects
+                .finish_level_transition(&mut host, requested_lid)
+        }
+        .map_err(|error| JsValue::from_str(&format!("retail LEVEL_END phase failed: {error:?}")))?;
+        self.drain_retail_reclaim_diagnostics(dom);
+
+        let residual_effects = report
+            .effects
+            .iter()
+            .filter(|effect| !matches!(effect, VmEffect::Transition(_) | VmEffect::LoadState(_)))
+            .cloned()
+            .collect::<Vec<_>>();
+        self.apply_retail_gool_level_effects(&residual_effects, dom)
+            .map_err(|error| JsValue::from_str(&error))?;
+        if !report.event_failures.is_empty() {
+            let message = format!(
+                "Retail LEVEL_END reached {} checked handler failure(s); first object: {:?}.",
+                report.event_failures.len(),
+                report.event_failures[0].object,
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
+
+        let target = report.resolved.level;
+        let raw = u8::try_from(target.get()).map_err(|_| {
+            JsValue::from_str(&format!("retail transition target {target} is too large"))
+        })?;
+        let flow_target = LevelId::new(raw).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "retail transition target {target} is not playable"
+            ))
+        })?;
+        if !flow_target.is_playable() {
+            return Err(JsValue::from_str(&format!(
+                "retail transition target {target} is the non-playable Cave archive"
+            )));
+        }
+        self.pending_mount = Some(RetailPairMount {
+            target,
+            carry: report.carry,
+            bonus_return: report.resolved.bonus_return,
+            core_transition: true,
+        });
+        dom.log(
+            &format!(
+                "Retail LEVEL_END resolved {requested_lid} to {target} (bonus return: {}).",
+                report.resolved.bonus_return,
+            ),
+            !report.event_failures.is_empty(),
+        );
+        Ok(true)
+    }
+
+    fn apply_retail_gool_level_effects(
+        &mut self,
+        effects: &[VmEffect],
+        dom: &Dom,
+    ) -> Result<(), String> {
+        for effect in effects {
+            match *effect {
+                VmEffect::MidiTogglePlayback { object, value } => {
+                    if let Some(audio) = &mut self.audio {
+                        let change = audio.toggle_retail_music(value);
+                        if change != RetailMusicChange::Unchanged {
+                            dom.log(
+                                &format!(
+                                    "Retail GOOL object {object:?} toggled MIDI playback with {value:#x} ({change:?})."
+                                ),
+                                false,
+                            );
+                        }
+                    }
+                }
+                VmEffect::ResetMasterFadeStep { object } => {
+                    self.retail_master_fade.reset_step();
+                    dom.log(
+                        &format!(
+                            "Retail GOOL object {object:?} started the native master-volume fade."
+                        ),
+                        false,
+                    );
+                }
+                VmEffect::LoadState(_) => {
+                    self.apply_retail_hard_restart(dom)?;
+                    // The restart invalidates ordinary object identities and
+                    // native execution resumes from the restored band. No
+                    // later effect from the pre-restart frame may target it.
+                    break;
+                }
+                VmEffect::Transition(level) => {
+                    self.next_lid = level;
+                }
+                _ => {
+                    // The runtime applies SaveState misc 12/0 inside the
+                    // interpreter host, before the following GOOL
+                    // instruction. Re-saving here would incorrectly capture
+                    // end-of-frame state. Other effects have their own typed
+                    // host/lifecycle owners.
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_retail_hard_restart(&mut self, dom: &Dom) -> Result<(), String> {
+        let snapshot = self
+            .retail_objects
+            .saved_level_state()
+            .cloned()
+            .ok_or_else(|| "GOOL misc 12/1 has no saved level state".to_owned())?;
+        if snapshot.level != self.level_assets.level {
+            let outcome = {
+                let mut host = BrowserProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                );
+                self.retail_objects.restart_saved_level(&mut host)
+            }
+            .map_err(|error| format!("different-level restart failed: {error:?}"))?;
+            let RetailRestartOutcome::DifferentLevel { .. } = outcome else {
+                return Err("different-level restart unexpectedly stayed in this stream".to_owned());
+            };
+            self.next_lid = -2;
+            return Ok(());
+        }
+        let restored_music =
+            self.prepare_retail_music(&self.level_assets, snapshot.location.path.zone, false)?;
+        let activation_marker = self.level_assets.level != FormatLevelId::TITLE;
+        let plan = self
+            .retail_zone_lifecycle
+            .plan_hard_restart(snapshot.location.path.zone, activation_marker)
+            .map_err(|error| format!("could not plan hard restart: {error}"))?;
+        let mut pager_preview = self.retail_zone_pager.clone();
+        for action in plan.actions().iter().copied() {
+            apply_retail_zone_paging_action(&mut pager_preview, action)?;
+        }
+        let mut lifecycle_preview = self.retail_zone_lifecycle.clone();
+        lifecycle_preview
+            .commit_hard_restart(&plan)
+            .map_err(|error| format!("could not preflight hard restart lifecycle: {error}"))?;
+        let expected_level_update_flags = u8::from(
+            !self
+                .retail_objects
+                .level_state_context()
+                .ok_or_else(|| "hard restart has no level-state context".to_owned())?
+                .first_spawn,
+        );
+        let mut camera_preview = self.retail_camera;
+        let camera_step = camera_preview
+            .level_update(
+                &self.retail_zone_graph,
+                snapshot.location.path,
+                snapshot.location.progress.raw(),
+                expected_level_update_flags,
+            )
+            .map_err(|error| format!("could not preflight restored camera location: {error}"))?;
+        debug_assert_eq!(camera_step.after, snapshot.location);
+        let restored_path = self
+            .retail_zone_graph
+            .path(snapshot.location.path)
+            .ok_or_else(|| "restored camera path disappeared after validation".to_owned())?;
+        let restored_point_count = NonZeroU16::new(
+            u16::try_from(restored_path.points.len())
+                .map_err(|_| "restored camera path has too many points".to_owned())?,
+        )
+        .ok_or_else(|| "restored camera path is empty".to_owned())?;
+
+        let outcome = {
+            let mut host = BrowserProgramHost::new(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                &mut self.retail_audio,
+                &mut self.card,
+                &mut self.storage,
+            );
+            self.retail_objects.restart_saved_level(&mut host)
+        }
+        .map_err(|error| format!("object hard restart failed: {error:?}"))?;
+
+        let report = match outcome {
+            RetailRestartOutcome::Restarted(report) => report,
+            RetailRestartOutcome::DifferentLevel { .. } => {
+                self.next_lid = -2;
+                return Ok(());
+            }
+        };
+
+        for (_, zone_report) in &report.zone_reports {
+            for cleanup in &zone_report.cleanup_actions {
+                let RuntimeCleanupAction::FreeObjectAudio(object) = *cleanup;
+                self.retail_audio.free_owner(object.vm());
+            }
+        }
+        let termination_failures = report
+            .zone_reports
+            .iter()
+            .map(|(_, report)| report.event_failures.len())
+            .sum::<usize>();
+        let respawn_failures = report.respawn_event_failures.len();
+        if report.level_update_flags != expected_level_update_flags {
+            return Err(format!(
+                "hard restart LevelUpdate flags changed after preflight: expected {expected_level_update_flags}, got {}",
+                report.level_update_flags
+            ));
+        }
+        self.retail_zone_pager = pager_preview;
+        self.retail_zone_lifecycle = lifecycle_preview;
+        self.retail_camera = camera_preview;
+        self.refresh_retail_level_state_context(report.snapshot.location)?;
+        self.retail_frame = RetailFrameState::ready(
+            restored_point_count,
+            report.snapshot.location.progress.raw(),
+        );
+        self.retail_tick_state = RetailTickState::NeedsSpawn;
+        self.apply_prepared_retail_music(
+            restored_music,
+            false,
+            report.snapshot.location.path.zone,
+            dom,
+        )?;
+        dom.log(
+            &format!(
+                "Hard restart restored {}:{} progress {:#x}; {} objects terminated, {respawn_failures} RESPAWN and {termination_failures} TERM handler failures.",
+                report.snapshot.location.path.zone,
+                report.snapshot.location.path.index,
+                report.snapshot.location.progress.raw(),
+                report
+                    .zone_reports
+                    .iter()
+                    .map(|(_, report)| report.terminated.len())
+                    .sum::<usize>(),
+            ),
+            respawn_failures != 0 || termination_failures != 0,
+        );
+        self.sync_completed_card_load(dom);
+        Ok(())
     }
 
     fn update_retail_scene(
@@ -1171,27 +2287,37 @@ impl Runtime {
         dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
-        let objects = match self.retail_objects.render_objects() {
-            Ok(objects) => objects,
-            Err(error) => {
-                let warning = format!(
-                    "retail render-object snapshot was rejected; presenting world only: {error:?}"
-                );
-                if self.retail_runtime_warning.as_deref() != Some(&warning) {
-                    dom.log(&warning, true);
-                    self.retail_runtime_warning = Some(warning);
+        let render_title_objects = !self
+            .title_screen_profile()
+            .is_some_and(|profile| profile.screen_type == RetailTitleScreenType::ImageOnly);
+        let objects = if render_title_objects {
+            match self.retail_objects.render_objects() {
+                Ok(objects) => objects,
+                Err(error) => {
+                    let warning = format!(
+                        "retail render-object snapshot was rejected; presenting world only: {error:?}"
+                    );
+                    if self.retail_runtime_warning.as_deref() != Some(&warning) {
+                        dom.log(&warning, true);
+                        self.retail_runtime_warning = Some(warning);
+                    }
+                    Vec::new()
                 }
-                Vec::new()
             }
+        } else {
+            Vec::new()
         };
         let main_object = self
             .retail_objects
             .arena()
             .main_object()
             .and_then(|arena| self.retail_objects.object_for_arena(arena));
+        let field_of_view = self
+            .effective_retail_field_of_view()
+            .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
-            .build_at_progress_with_objects_and_display_mask(
+            .build_at_progress_with_objects_display_mask_and_fov(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -1204,6 +2330,7 @@ impl Runtime {
                 &objects,
                 main_object,
                 display_mask,
+                field_of_view,
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
@@ -1220,7 +2347,8 @@ impl Runtime {
         dom: &Dom,
     ) -> Result<RetailCameraStep, String> {
         let location = self.retail_camera.location();
-        let display_mask = self.retail_objects.current_display_mask();
+        let display_mask = self.effective_retail_display_mask();
+        let title_profile = self.title_screen_profile();
         let mode = self
             .retail_zone_graph
             .path(location.path)
@@ -1231,7 +2359,18 @@ impl Runtime {
                 )
             })?
             .camera_mode;
-        let step = if self.retail_objects.arena().main_object().is_none()
+        let step = if let Some(profile) = title_profile {
+            if profile.updates_camera() && display_mask & RETAIL_CAMERA_UPDATE != 0 {
+                self.retail_camera.update(
+                    &self.retail_zone_graph,
+                    RetailCameraInput {
+                        tapped: u32::from(snapshot.tapped),
+                    },
+                )
+            } else {
+                Ok(self.retail_camera.stationary_step())
+            }
+        } else if self.retail_objects.arena().main_object().is_none()
             || display_mask & (0x2 | 0x1_0000) != 0x2
         {
             // Bit two suppresses ordinary CamUpdate. Spin-death bit 0x10000
@@ -1262,12 +2401,7 @@ impl Runtime {
             .retail_camera
             .pose(&self.retail_zone_graph)
             .map_err(|error| error.to_string())?;
-        let field_of_view = self
-            .level_assets
-            .nsd
-            .ldat()
-            .ok_or_else(|| "playable level has no LDAT camera projection".to_owned())?
-            .field_of_view;
+        let field_of_view = self.effective_retail_field_of_view()?;
         let screen_projection = retail_screen_projection(field_of_view).ok_or_else(|| {
             format!("retail field of view {field_of_view} has no projection constant")
         })?;
@@ -1298,24 +2432,80 @@ impl Runtime {
                     if before.path.zone != after.path.zone {
                         self.apply_retail_zone_transition(after.path.zone, flags, dom)?;
                     }
+                    self.refresh_retail_level_state_context(after)?;
                 }
                 RetailCameraEffect::SaveStateHandshake { location } => {
                     self.retail_metrics.camera_save_handshakes =
                         self.retail_metrics.camera_save_handshakes.saturating_add(1);
-                    if self.retail_metrics.camera_save_handshakes == 1 {
-                        dom.log(
-                            &format!(
-                                "Retail camera requested an in-level save-state handshake at {}:{} progress {:#x}; snapshot persistence remains a typed host boundary.",
-                                location.path.zone,
-                                location.path.index,
-                                location.progress.raw(),
-                            ),
-                            true,
-                        );
+                    self.refresh_retail_level_state_context(location)?;
+                    let main = self
+                        .retail_objects
+                        .arena()
+                        .main_object()
+                        .and_then(|arena| self.retail_objects.object_for_arena(arena))
+                        .ok_or_else(|| {
+                            "camera save-state handshake has no live main object".to_owned()
+                        })?;
+                    match self
+                        .retail_objects
+                        .save_level_state(main, true)
+                        .map_err(|error| format!("camera save-state capture failed: {error:?}"))?
+                    {
+                        RetailSaveStateOutcome::Saved(_) => {
+                            if self.retail_metrics.camera_save_handshakes == 1 {
+                                dom.log(
+                                    &format!(
+                                        "Persisted the retail in-level snapshot at {}:{} progress {:#x}.",
+                                        location.path.zone,
+                                        location.path.index,
+                                        location.progress.raw(),
+                                    ),
+                                    false,
+                                );
+                            }
+                        }
+                        RetailSaveStateOutcome::RestrictedByZone => {}
                     }
                 }
             }
         }
+        Ok(())
+    }
+
+    fn refresh_retail_level_state_context(
+        &mut self,
+        location: RetailCameraLocation,
+    ) -> Result<(), String> {
+        let existing = self.retail_objects.level_state_context().cloned();
+        let context = build_retail_level_state_context(
+            &self.retail_zone_graph,
+            location,
+            &self.retail_zone_lifecycle,
+            existing
+                .as_ref()
+                .map_or(i32::from(self.flow.player.boxes) << 8, |state| {
+                    state.box_count
+                }),
+            existing.as_ref().map_or_else(
+                || {
+                    self.flow
+                        .player
+                        .checkpoint
+                        .map_or(-1, |id| i32::from(id) << 8)
+                },
+                |state| state.checkpoint_id,
+            ),
+            existing.as_ref().map_or(
+                [
+                    self.flow.player.translation.x,
+                    self.flow.player.translation.y,
+                    self.flow.player.translation.z,
+                ],
+                |state| state.checkpoint_translation,
+            ),
+            existing.as_ref().is_some_and(|state| state.first_spawn),
+        )?;
+        self.retail_objects.set_level_state_context(context);
         Ok(())
     }
 
@@ -1335,6 +2525,7 @@ impl Runtime {
         if plan.is_noop() {
             return Ok(());
         }
+        let prepared_music = self.prepare_retail_music(&self.level_assets, next_zone, false)?;
 
         // Validate every fallible page/entry operation before the first TERM
         // event can irreversibly mutate the live object forest.
@@ -1360,6 +2551,8 @@ impl Runtime {
                             &self.level_assets.nsf,
                             &self.level_assets.nsf_bytes,
                             &mut self.retail_audio,
+                            &mut self.card,
+                            &mut self.storage,
                         );
                         self.retail_objects.terminate_zone_objects(
                             zone,
@@ -1394,6 +2587,7 @@ impl Runtime {
         // lifecycle behind.
         self.retail_zone_pager = pager_preview;
         self.retail_zone_lifecycle = lifecycle_preview;
+        self.apply_prepared_retail_music(prepared_music, false, next_zone, dom)?;
 
         self.retail_metrics.zone_transitions =
             self.retail_metrics.zone_transitions.saturating_add(1);
@@ -1419,6 +2613,7 @@ impl Runtime {
                 event_failures.len()
             ));
         }
+        self.sync_completed_card_load(dom);
         Ok(())
     }
 
@@ -1492,6 +2687,7 @@ impl Runtime {
         if self.last_title_state == Some(state) {
             return Ok(());
         }
+        self.apply_retail_title_level_update(screen, dom)?;
         self.last_title_state = Some(state);
         if !title_state_uses_image(screen) {
             return Ok(());
@@ -1511,6 +2707,246 @@ impl Runtime {
             ),
             false,
         );
+        Ok(())
+    }
+
+    fn apply_protected_title_reset(&mut self, dom: &Dom) -> Result<(), JsValue> {
+        let current = self.save_data();
+        if let Some(payload) = self.resume.before_title_reset(current)
+            && let Some(storage) = &self.storage
+            && let Err(error) = storage.persist_resume(payload)
+        {
+            // The native browser hook still restores the protected in-memory
+            // payload when its eager persistence write fails.
+            dom.log(
+                &format!(
+                    "Could not flush browser resume before the title reset: {}",
+                    js_message(&error)
+                ),
+                true,
+            );
+        }
+        self.retail_objects.reset_level_globals().map_err(|error| {
+            JsValue::from_str(&format!("retail main-menu global reset failed: {error:?}"))
+        })?;
+        let protected = self.resume.after_title_reset().ok_or_else(|| {
+            JsValue::from_str("retail main-menu reset lost its protected resume payload")
+        })?;
+        self.retail_objects
+            .restore_resume_after_title_reset(protected)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "retail main-menu resume restoration failed: {error:?}"
+                ))
+            })?;
+        apply_save(&mut self.flow, protected);
+        self.retail_audio
+            .set_sfx_volume(self.flow.options.sfx_volume);
+        if let Some(audio) = &mut self.audio {
+            audio.set_output_options(output_options(self.flow.options));
+        }
+        dom.log(
+            "Applied the native main-menu reset with browser-resume protection.",
+            false,
+        );
+        Ok(())
+    }
+
+    fn apply_retail_title_level_update(
+        &mut self,
+        screen: TitleScreen,
+        dom: &Dom,
+    ) -> Result<(), JsValue> {
+        let profile = retail_title_screen_profile(screen, self.flow.progress.current_map_level);
+        self.retail_objects
+            .set_global_word(NEXT_DISPLAY_GLOBAL, profile.display_mask())
+            .map_err(|error| {
+                JsValue::from_str(&format!("could not publish title display mask: {error:?}"))
+            })?;
+        let zone_name = profile.zone_name;
+        let zone = Eid::from_name(zone_name).map_err(|error| {
+            JsValue::from_str(&format!("retail title zone {zone_name}: {error}"))
+        })?;
+        let path = RetailPathId { zone, index: 0 };
+        if self.retail_zone_graph.path(path).is_none() {
+            return Err(JsValue::from_str(&format!(
+                "retail title state {} references absent path {zone}:0",
+                screen as u8
+            )));
+        }
+        let previous_title_mdat = self
+            .last_title_state
+            .filter(|state| title_state_number_uses_image(*state))
+            .and_then(|state| title_mdat_eid(state).ok());
+
+        // TitleLoadScreen kills every old title/MDAT object before its
+        // explicit flag-two LevelUpdate, without zone immunity gates.
+        let report = {
+            let mut host = if let Some(mdat) = previous_title_mdat {
+                BrowserProgramHost::for_title_mdat(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                    mdat,
+                )
+            } else {
+                BrowserProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                    &mut self.retail_audio,
+                    &mut self.card,
+                    &mut self.storage,
+                )
+            };
+            self.retail_objects.terminate_all_objects(&mut host)
+        }
+        .map_err(|error| {
+            JsValue::from_str(&format!("retail title object teardown failed: {error:?}"))
+        })?;
+        for cleanup in &report.cleanup_actions {
+            let RuntimeCleanupAction::FreeObjectAudio(object) = *cleanup;
+            self.retail_audio.free_owner(object.vm());
+        }
+        if screen == TitleScreen::MainMenu {
+            self.apply_protected_title_reset(dom)?;
+        }
+        let step = self
+            .retail_camera
+            .level_update(&self.retail_zone_graph, path, 0, 2)
+            .map_err(|error| {
+                JsValue::from_str(&format!("retail title LevelUpdate failed: {error}"))
+            })?;
+        self.apply_retail_camera_effects(&step, dom)
+            .map_err(|error| JsValue::from_str(&error))?;
+        if profile.uses_image() {
+            self.spawn_retail_title_mdat(screen as u8, dom)?;
+        }
+        self.retail_tick_state = RetailTickState::NeedsSpawn;
+        dom.log(
+            &format!(
+                "Title state {} applied a type-{:?} flag-two LevelUpdate to {zone}:0 after terminating {} objects.",
+                screen as u8,
+                profile.screen_type,
+                report.terminated.len(),
+            ),
+            !report.event_failures.is_empty(),
+        );
+        self.sync_completed_card_load(dom);
+        Ok(())
+    }
+
+    fn spawn_retail_title_mdat(&mut self, state: u8, dom: &Dom) -> Result<(), JsValue> {
+        let mdat = load_title_mdat(
+            &self.level_assets.nsd,
+            &self.level_assets.nsf,
+            &self.level_assets.nsf_bytes,
+            state,
+        )
+        .map_err(|error| JsValue::from_str(&format!("retail title MDAT state {state}: {error}")))?;
+        let total_entities = mdat.entities.len();
+        let eligible_entities = mdat
+            .entities
+            .into_iter()
+            .filter(|entity| {
+                title_mdat_entity_is_unlocked(entity, self.flow.progress.levels_unlocked)
+            })
+            .collect::<Vec<_>>();
+        // Native GoolObjectSpawn reads the entity from the type-17 MDAT, then
+        // rewrites `zone` to `cur_zone` before assigning obj_zone and reading
+        // the ZDAT colors. The live level-state context is also the zone used
+        // by misc 12/7, so sharing it keeps title objects in that TERM domain.
+        let current_zone = self
+            .retail_objects
+            .level_state_context()
+            .map(|context| context.location.path.zone)
+            .ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "retail title MDAT state {state} has no current zone context"
+                ))
+            })?;
+        let binding = retail_title_mdat_binding(mdat.eid, current_zone);
+        let attempts = {
+            let neighbors = [NeighborZone {
+                eid: binding.object_zone,
+                display_flags: RETAIL_ZONE_OBJECTS_ACTIVE,
+                entities: eligible_entities.as_slice(),
+            }];
+            let mut host = BrowserProgramHost::for_title_mdat(
+                &self.level_assets.nsd,
+                &self.level_assets.nsf,
+                &self.level_assets.nsf_bytes,
+                &mut self.retail_audio,
+                &mut self.card,
+                &mut self.storage,
+                binding.source,
+            );
+            self.retail_objects
+                .spawn_current_zone_neighbors(&neighbors, &mut host)
+        };
+        self.drain_retail_reclaim_diagnostics(dom);
+
+        let attempt_count = attempts.len() as u64;
+        let successful = attempts
+            .iter()
+            .filter(|attempt| attempt.result.is_ok())
+            .count() as u64;
+        let already_active = attempts
+            .iter()
+            .filter(|attempt| {
+                matches!(
+                    &attempt.result,
+                    Err(RuntimeError::Spawn(
+                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
+                    ))
+                )
+            })
+            .count() as u64;
+        let failed = attempt_count
+            .saturating_sub(successful)
+            .saturating_sub(already_active);
+        self.retail_metrics.spawn_attempts = self
+            .retail_metrics
+            .spawn_attempts
+            .saturating_add(attempt_count);
+        self.retail_metrics.successful_spawns = self
+            .retail_metrics
+            .successful_spawns
+            .saturating_add(successful);
+        self.retail_metrics.already_active_spawn_skips = self
+            .retail_metrics
+            .already_active_spawn_skips
+            .saturating_add(already_active);
+        self.retail_metrics.failed_spawns =
+            self.retail_metrics.failed_spawns.saturating_add(failed);
+        let unexpected = attempts.iter().find_map(|attempt| {
+            attempt.result.as_ref().err().filter(|error| {
+                !matches!(
+                    error,
+                    RuntimeError::Spawn(
+                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
+                    )
+                )
+            })
+        });
+        if let Some(error) = unexpected {
+            let message = format!(
+                "Title MDAT state {state} reached {failed} unexpected spawn failure(s); first error: {error:?}"
+            );
+            dom.log(&message, true);
+            self.retail_runtime_warning = Some(message);
+        }
+        dom.log(
+            &format!(
+                "Title MDAT state {state} filtered {total_entities} descriptors to {} unlocked entries and immediately bound {successful}/{attempt_count} group-3 objects to current zone {current_zone} ({already_active} already active).",
+                eligible_entities.len(),
+            ),
+            unexpected.is_some(),
+        );
+        self.sync_completed_card_load(dom);
         Ok(())
     }
 
@@ -1618,6 +3054,9 @@ impl Runtime {
                     self.flow
                         .command(FlowCommand::Menu(MenuChoice::Back))
                         .map_err(flow_error)?;
+                } else if !self.retail_objects.arena().is_empty() {
+                    // The mounted title GOOL consumes this same pad edge and
+                    // owns misc-15 load/result sequencing.
                 } else if let Ok(CardOutcome::Loaded(save)) =
                     self.card
                         .control(CardOperation::LoadSelected, self.menu_index, None)
@@ -1698,22 +3137,36 @@ impl Runtime {
             if let Some(level) = asset_level {
                 self.queue_asset_level(level);
             }
-            if matches!(event, FlowEvent::Completed(_)) {
+            if matches!(event, FlowEvent::Completed(_)) && self.retail_objects.arena().is_empty() {
                 let operation = if self.card.current_slot().is_some() {
                     CardOperation::SaveCurrent
                 } else {
                     CardOperation::SaveSelected
                 };
-                self.card
-                    .control(operation, 0, Some(self.save_data()))
-                    .map_err(|error| {
-                        JsValue::from_str(&format!(
-                            "could not update the virtual-card completion slot: {error:?}"
-                        ))
-                    })?;
-                if let Some(storage) = &mut self.storage {
-                    storage.persist_card(&self.card)?;
+                let current = self.save_data();
+                let before = self.card.clone();
+                let mut candidate = before.clone();
+                candidate.set_storage_available(self.storage.is_some());
+                if let Err(error) = candidate.control(operation, 0, Some(current)) {
+                    self.card = candidate;
+                    return Err(JsValue::from_str(&format!(
+                        "could not update the virtual-card completion slot: {error:?}"
+                    )));
                 }
+                let persisted = self
+                    .storage
+                    .as_mut()
+                    .is_some_and(|storage| storage.persist_card(&candidate).is_ok());
+                if !persisted {
+                    let mut failed = before;
+                    failed.set_storage_available(false);
+                    let _ = failed.control(operation, 0, Some(current));
+                    self.card = failed;
+                    return Err(JsValue::from_str(
+                        "could not persist the virtual-card completion slot",
+                    ));
+                }
+                self.card = candidate;
             }
         }
         Ok(())
@@ -1765,6 +3218,15 @@ impl Runtime {
                 "Reading local NSD/NSF pair",
                 "No game data is uploaded",
             );
+            dom.set_menu(&[])?;
+            return Ok(());
+        }
+
+        // Once the authored GOOL scene is presenting, keep the diagnostic DOM
+        // chrome off the 4:3 output. The state and warning indicators remain in
+        // the monitor panel outside the game canvas.
+        if self.authored_scene_runtime_active() {
+            dom.set_overlay(false, "", "", "");
             dom.set_menu(&[])?;
             return Ok(());
         }
@@ -1927,9 +3389,72 @@ impl Runtime {
         self.pending_buttons |= PAD_START;
     }
 
+    fn prepare_retail_music(
+        &self,
+        pair: &ValidatedPair,
+        zone: Eid,
+        force_owner_change: bool,
+    ) -> Result<PreparedRetailMusic, String> {
+        let Some(audio) = &self.audio else {
+            return Ok(PreparedRetailMusic::Unchanged);
+        };
+        let midi = zone_retail_music_eid(pair, zone)?;
+        if !force_owner_change && audio.requested_retail_music_eid() == midi {
+            return Ok(PreparedRetailMusic::Unchanged);
+        }
+        midi.map_or(Ok(PreparedRetailMusic::Silence), |eid| {
+            decode_retail_music(pair, eid)
+                .map(|music| PreparedRetailMusic::Music(eid, Box::new(music)))
+        })
+    }
+
+    fn apply_prepared_retail_music(
+        &mut self,
+        music: PreparedRetailMusic,
+        immediate: bool,
+        zone: Eid,
+        dom: &Dom,
+    ) -> Result<(), String> {
+        let Some(audio) = &mut self.audio else {
+            return Ok(());
+        };
+        let (eid, change) = match music {
+            PreparedRetailMusic::Unchanged => return Ok(()),
+            PreparedRetailMusic::Silence if immediate => (None, audio.clear_retail_music()),
+            PreparedRetailMusic::Silence => (
+                None,
+                audio
+                    .request_retail_music(None)
+                    .map_err(|error| error.to_string())?,
+            ),
+            PreparedRetailMusic::Music(eid, music) if immediate => (
+                Some(eid),
+                audio
+                    .start_retail_music(eid, *music)
+                    .map_err(|error| error.to_string())?,
+            ),
+            PreparedRetailMusic::Music(eid, music) => (
+                Some(eid),
+                audio
+                    .request_retail_music(Some((eid, *music)))
+                    .map_err(|error| error.to_string())?,
+            ),
+        };
+        if change != RetailMusicChange::Unchanged {
+            dom.log(
+                &format!(
+                    "Retail music for zone {zone} requested {} ({change:?}).",
+                    eid.map_or_else(|| "silence".to_owned(), |eid| eid.to_string()),
+                ),
+                false,
+            );
+        }
+        Ok(())
+    }
+
     fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
-        if let Some(audio) = &self.audio {
+        if let Some(audio) = &mut self.audio {
             audio.set_muted(muted);
         }
     }
@@ -1941,6 +3466,12 @@ impl Runtime {
     }
 
     fn save_data(&self) -> SaveData {
+        self.retail_objects
+            .card_save_data()
+            .unwrap_or_else(|_| self.flow_save_data())
+    }
+
+    fn flow_save_data(&self) -> SaveData {
         SaveData {
             level_count: self.flow.progress.level_count,
             initial_lives: u32::try_from(self.flow.player.lives.max(0)).unwrap_or_default() << 8,
@@ -2770,6 +4301,18 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
             &JsValue::from_str("mono"),
             &JsValue::from_bool(output.mono()),
         )?;
+        Reflect::set(
+            debug,
+            &JsValue::from_str("retailMusicState"),
+            &JsValue::from_str(&format!("{:?}", audio.retail_music_state())),
+        )?;
+        Reflect::set(
+            debug,
+            &JsValue::from_str("retailMusicEid"),
+            &audio
+                .requested_retail_music_eid()
+                .map_or(JsValue::NULL, |eid| JsValue::from_f64(f64::from(eid.raw()))),
+        )?;
     }
     Ok(())
 }
@@ -2787,7 +4330,13 @@ fn current_level(flow: &GameFlow) -> LevelId {
 const fn is_retail_runtime_state(state: &FlowState) -> bool {
     matches!(
         state,
-        FlowState::Gameplay(_) | FlowState::Bonus(_) | FlowState::Boss(_) | FlowState::Ending
+        FlowState::Title
+            | FlowState::Gameplay(_)
+            | FlowState::Bonus(_)
+            | FlowState::Boss(_)
+            | FlowState::LevelComplete { .. }
+            | FlowState::Intro
+            | FlowState::Ending
     )
 }
 
@@ -2799,13 +4348,7 @@ fn level_name(level: LevelId) -> &'static str {
 }
 
 const fn title_state_uses_image(screen: TitleScreen) -> bool {
-    matches!(
-        screen,
-        TitleScreen::MainMenu
-            | TitleScreen::PublisherSecond
-            | TitleScreen::NaughtyDog
-            | TitleScreen::PublisherFirst
-    )
+    retail_title_screen_profile(screen, 0).uses_image()
 }
 
 fn apply_save(flow: &mut GameFlow, save: SaveData) {
@@ -2845,6 +4388,7 @@ fn retail_entity_count(zones: &BTreeMap<Eid, OwnedRetailZone>) -> usize {
 fn parse_retail_zone_catalog(
     pair: &ValidatedPair,
     graph: &RetailZoneGraph,
+    initial_zone: Eid,
 ) -> Result<(BTreeMap<Eid, OwnedRetailZone>, ZoneLifecycle), JsValue> {
     let mut zones = BTreeMap::new();
     let mut lifecycle_zones = Vec::with_capacity(graph.zone_count());
@@ -2897,9 +4441,38 @@ fn parse_retail_zone_catalog(
     let mut lifecycle = ZoneLifecycle::new(lifecycle_zones)
         .map_err(|error| JsValue::from_str(&format!("retail zone lifecycle: {error}")))?;
     lifecycle
-        .transition_with_marker(graph.spawn_path().zone, pair.level != FormatLevelId::TITLE)
+        .transition_with_marker(initial_zone, pair.level != FormatLevelId::TITLE)
         .map_err(|error| JsValue::from_str(&format!("initial retail zone activation: {error}")))?;
     Ok((zones, lifecycle))
+}
+
+fn build_retail_level_state_context(
+    graph: &RetailZoneGraph,
+    location: RetailCameraLocation,
+    lifecycle: &ZoneLifecycle,
+    box_count: i32,
+    checkpoint_id: i32,
+    checkpoint_translation: [i32; 3],
+    first_spawn: bool,
+) -> Result<RetailLevelStateContext, String> {
+    let graphics_flags = graph
+        .zone(location.path.zone)
+        .ok_or_else(|| {
+            format!(
+                "retail save-state location references absent zone {}",
+                location.path.zone
+            )
+        })?
+        .graphics_flags;
+    Ok(RetailLevelStateContext {
+        location,
+        graphics_flags,
+        box_count,
+        checkpoint_id,
+        checkpoint_translation,
+        first_spawn,
+        active_neighbor_zones: lifecycle.active_neighbor_zones(),
+    })
 }
 
 fn build_retail_zone_pager(
@@ -2936,6 +4509,24 @@ fn build_retail_zone_pager(
             }
         }
     }
+    // NSD load-list EIDs can name either an entry-bearing page member or a
+    // complete type-one TPAG page. Bind the latter through its typed page
+    // target so native `NSOpen` semantics do not invent an EntryHandle.
+    for pte in &pair.nsd.page_table {
+        let page_index = pte.page_index();
+        if matches!(
+            pair.nsf.pages.get(page_index.get() as usize),
+            Some(NsfPage::Texture(_))
+        ) {
+            pager.bind_page_eid(pte.eid, page_index).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not bind texture-page EID {} on page {}: {error:?}",
+                    pte.eid,
+                    page_index.get()
+                ))
+            })?;
+        }
+    }
 
     let current_zone = lifecycle
         .current_zone()
@@ -2945,14 +4536,9 @@ fn build_retail_zone_pager(
         .ok_or_else(|| JsValue::from_str("retail lifecycle current zone is absent"))?
         .load_list();
     for eid in load_list.entries() {
-        let entry = pager.resolve_eid(*eid).map_err(|error| {
+        pager.open_eid(*eid).map_err(|error| {
             JsValue::from_str(&format!(
-                "initial retail load entry {eid} does not resolve: {error:?}"
-            ))
-        })?;
-        pager.open_entry(entry).map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not open initial retail load entry {eid}: {error:?}"
+                "could not open initial retail load EID {eid}: {error:?}"
             ))
         })?;
     }
@@ -2972,28 +4558,18 @@ fn apply_retail_zone_paging_action(
     action: ZoneTransitionAction,
 ) -> Result<(), String> {
     match action {
-        ZoneTransitionAction::CloseEntry(eid) => {
-            let entry = pager.resolve_eid(eid).map_err(|error| {
-                format!("retail transition close entry {eid} does not resolve: {error:?}")
-            })?;
-            pager.close_entry(entry).map_err(|error| {
-                format!("could not close retail transition entry {eid}: {error:?}")
-            })
-        }
+        ZoneTransitionAction::CloseEntry(eid) => pager
+            .close_eid(eid)
+            .map_err(|error| format!("could not close retail transition EID {eid}: {error:?}")),
         ZoneTransitionAction::ClosePage(page) => pager.close_page(page).map_err(|error| {
             format!(
                 "could not close retail transition page {}: {error:?}",
                 page.get()
             )
         }),
-        ZoneTransitionAction::OpenEntry(eid) => {
-            let entry = pager.resolve_eid(eid).map_err(|error| {
-                format!("retail transition open entry {eid} does not resolve: {error:?}")
-            })?;
-            pager
-                .open_entry(entry)
-                .map_err(|error| format!("could not open retail transition entry {eid}: {error:?}"))
-        }
+        ZoneTransitionAction::OpenEntry(eid) => pager
+            .open_eid(eid)
+            .map_err(|error| format!("could not open retail transition EID {eid}: {error:?}")),
         ZoneTransitionAction::OpenPage(page) => pager.open_page(page).map_err(|error| {
             format!(
                 "could not open retail transition page {}: {error:?}",
@@ -3029,6 +4605,43 @@ fn parse_zone_entry<'a>(
     let header = ZoneHeader::parse(header_bytes)
         .map_err(|error| JsValue::from_str(&format!("{context} {eid} header: {error}")))?;
     Ok((entry, header))
+}
+
+fn zone_retail_music_eid(pair: &ValidatedPair, zone: Eid) -> Result<Option<Eid>, String> {
+    let (_, header) =
+        parse_zone_entry(pair, zone, "retail zone music").map_err(|error| js_message(&error))?;
+    Ok((header.graphics.midi != Eid::NONE).then_some(header.graphics.midi))
+}
+
+fn decode_retail_music(pair: &ValidatedPair, midi: Eid) -> Result<RetailMusic, String> {
+    let entry = pair.nsf.resolve_entry(&pair.nsd, midi).map_err(|error| {
+        format!(
+            "retail MIDI {midi} in level {} does not resolve: {error}",
+            pair.level
+        )
+    })?;
+    let asset = parse_retail_midi(entry, &pair.nsf_bytes)
+        .map_err(|error| format!("retail MIDI {midi}: {error}"))?;
+    let mut fragments = Vec::new();
+    for instrument in asset
+        .header
+        .instruments
+        .into_iter()
+        .filter(|eid| *eid != Eid::NONE)
+    {
+        let entry = pair
+            .nsf
+            .resolve_entry(&pair.nsd, instrument)
+            .map_err(|error| {
+                format!("retail MIDI {midi} instrument {instrument} does not resolve: {error}")
+            })?;
+        fragments.push(
+            parse_instrument_entry(entry, &pair.nsf_bytes)
+                .map_err(|error| format!("retail MIDI {midi} instrument {instrument}: {error}"))?,
+        );
+    }
+    RetailMusic::decode(&asset, &fragments)
+        .map_err(|error| format!("retail MIDI {midi} decode failed: {error}"))
 }
 
 fn decode_pair_loading_image(pair: &ValidatedPair) -> Result<Option<DecodedTexture>, JsValue> {
@@ -3137,15 +4750,6 @@ fn pair_entry_count(pair: &ValidatedPair) -> usize {
             crust_formats::stream::NsfPage::Entries(page) => page.entries.len(),
         })
         .sum()
-}
-
-fn hash_pair(pair: &ValidatedPair) -> u32 {
-    pair.nsd_bytes
-        .iter()
-        .chain(pair.nsf_bytes.iter().step_by(4096))
-        .fold(0x811c_9dc5_u32 ^ pair.level.get(), |hash, byte| {
-            (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
-        })
 }
 
 fn format_bytes(bytes: u64) -> String {

@@ -1,5 +1,84 @@
 //! Retail option gains and final music/SFX bus mixing.
 
+/// Full-scale value of the retail signed 32-bit master-volume accumulator.
+pub const RETAIL_MASTER_VOLUME_MAX: i32 = 0x3fff;
+
+/// Fade-out delta installed by retail's `MidiResetFadeStep` helper.
+pub const RETAIL_MASTER_FADE_OUT_STEP: i32 = -682;
+
+/// Browser-independent state for retail's whole-output master fade.
+///
+/// This is distinct from the MIDI cross-fade: the resulting gain applies to
+/// both music and SFX. The signed values and update order mirror the original
+/// 30 Hz audio update. In particular, requesting a fade only reinstalls the
+/// step; it never restores the current volume.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailMasterFade {
+    volume: i32,
+    step: i32,
+}
+
+impl Default for RetailMasterFade {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RetailMasterFade {
+    /// Creates the full-volume, inactive retail master fade state.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            volume: RETAIL_MASTER_VOLUME_MAX,
+            step: 0,
+        }
+    }
+
+    /// Reinstalls the retail fade-out step without changing current volume.
+    pub const fn reset_step(&mut self) {
+        self.step = RETAIL_MASTER_FADE_OUT_STEP;
+    }
+
+    /// Advances the master fade once at the cooperative 30 Hz update rate.
+    pub fn tick_30_hz(&mut self) {
+        if self.step == 0 {
+            return;
+        }
+
+        if self.step < 0 && self.volume < self.step.wrapping_abs() {
+            self.volume = 0;
+            self.step = 0;
+        }
+        if self.step > 0 && RETAIL_MASTER_VOLUME_MAX.wrapping_sub(self.volume) < self.step {
+            self.volume = RETAIL_MASTER_VOLUME_MAX;
+            self.step = 0;
+        }
+        self.volume = self.volume.wrapping_add(self.step);
+    }
+
+    /// Current signed retail master-volume accumulator.
+    #[must_use]
+    pub const fn volume(self) -> i32 {
+        self.volume
+    }
+
+    /// Current signed per-tick delta; zero means the fade is inactive.
+    #[must_use]
+    pub const fn step(self) -> i32 {
+        self.step
+    }
+
+    /// Current whole-output gain normalized to `0.0..=1.0`.
+    #[must_use]
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the private invariant restricts both values to exactly representable 14-bit integers"
+    )]
+    pub fn normalized_gain(self) -> f32 {
+        self.volume as f32 / RETAIL_MASTER_VOLUME_MAX as f32
+    }
+}
+
 /// Largest volume value stored by the retail options and save payload.
 pub const RETAIL_VOLUME_MAX: u8 = u8::MAX;
 
@@ -134,6 +213,11 @@ fn clipped_sample(sample: f64) -> f32 {
 mod tests {
     use super::*;
 
+    const COMPLETE_FADE_SEQUENCE: [i32; 25] = [
+        15_701, 15_019, 14_337, 13_655, 12_973, 12_291, 11_609, 10_927, 10_245, 9_563, 8_881,
+        8_199, 7_517, 6_835, 6_153, 5_471, 4_789, 4_107, 3_425, 2_743, 2_061, 1_379, 697, 15, 0,
+    ];
+
     fn assert_frame_close(actual: [f32; 2], expected: [f32; 2]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
             assert!(
@@ -141,6 +225,99 @@ mod tests {
                 "expected {expected}, got {actual}"
             );
         }
+    }
+
+    #[test]
+    fn master_fade_matches_every_retail_update_through_zero() {
+        let mut fade = RetailMasterFade::new();
+        assert_eq!(fade.volume(), RETAIL_MASTER_VOLUME_MAX);
+        assert_eq!(fade.step(), 0);
+        assert_eq!(fade.normalized_gain(), 1.0);
+
+        fade.reset_step();
+        assert_eq!(fade.step(), RETAIL_MASTER_FADE_OUT_STEP);
+        for expected in COMPLETE_FADE_SEQUENCE {
+            fade.tick_30_hz();
+            assert_eq!(fade.volume(), expected);
+            assert_eq!(
+                fade.step(),
+                if expected == 0 {
+                    0
+                } else {
+                    RETAIL_MASTER_FADE_OUT_STEP
+                }
+            );
+            assert!(fade.normalized_gain().is_finite());
+            assert!((0.0..=1.0).contains(&fade.normalized_gain()));
+        }
+
+        assert_eq!(fade.normalized_gain(), 0.0);
+        fade.tick_30_hz();
+        assert_eq!(fade.volume(), 0);
+        assert_eq!(fade.step(), 0);
+    }
+
+    #[test]
+    fn resetting_step_never_restores_or_double_advances_volume() {
+        let mut fade = RetailMasterFade::new();
+        fade.reset_step();
+        for expected in COMPLETE_FADE_SEQUENCE.into_iter().take(7) {
+            fade.tick_30_hz();
+            assert_eq!(fade.volume(), expected);
+        }
+
+        let partial_volume = fade.volume();
+        let partial_gain = fade.normalized_gain();
+        fade.reset_step();
+        fade.reset_step();
+        assert_eq!(fade.volume(), partial_volume);
+        assert_eq!(fade.normalized_gain(), partial_gain);
+        assert_eq!(fade.step(), RETAIL_MASTER_FADE_OUT_STEP);
+
+        fade.tick_30_hz();
+        assert_eq!(
+            fade.volume(),
+            partial_volume.wrapping_add(RETAIL_MASTER_FADE_OUT_STEP)
+        );
+    }
+
+    #[test]
+    fn retriggering_at_silence_clamps_without_signed_underflow() {
+        let mut fade = RetailMasterFade::new();
+        fade.reset_step();
+        for _ in COMPLETE_FADE_SEQUENCE {
+            fade.tick_30_hz();
+        }
+        assert_eq!(fade.volume(), 0);
+
+        fade.reset_step();
+        assert_eq!(fade.volume(), 0);
+        assert_eq!(fade.step(), RETAIL_MASTER_FADE_OUT_STEP);
+        fade.tick_30_hz();
+        assert_eq!(fade.volume(), 0);
+        assert_eq!(fade.step(), 0);
+        assert_eq!(fade.normalized_gain(), 0.0);
+    }
+
+    #[test]
+    fn retail_boundary_comparisons_preserve_the_original_strictness() {
+        let mut exact_step = RetailMasterFade {
+            volume: RETAIL_MASTER_FADE_OUT_STEP.wrapping_abs(),
+            step: RETAIL_MASTER_FADE_OUT_STEP,
+        };
+        exact_step.tick_30_hz();
+        assert_eq!(exact_step.volume(), 0);
+        assert_eq!(exact_step.step(), RETAIL_MASTER_FADE_OUT_STEP);
+        exact_step.tick_30_hz();
+        assert_eq!(exact_step.step(), 0);
+
+        let mut below_step = RetailMasterFade {
+            volume: RETAIL_MASTER_FADE_OUT_STEP.wrapping_abs() - 1,
+            step: RETAIL_MASTER_FADE_OUT_STEP,
+        };
+        below_step.tick_30_hz();
+        assert_eq!(below_step.volume(), 0);
+        assert_eq!(below_step.step(), 0);
     }
 
     #[test]

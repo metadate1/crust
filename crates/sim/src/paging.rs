@@ -77,6 +77,7 @@ pub enum PagingError {
     ReferenceUnderflow(PageIndex),
     InvalidTextureSlot(usize),
     UnknownEid(Eid),
+    DuplicateEid(Eid),
 }
 
 /// Bounds-checked page registry replacing NS pointer relocation.
@@ -85,6 +86,7 @@ pub struct Pager {
     pages: BTreeMap<PageIndex, PageRecord>,
     entries: BTreeMap<EntryHandle, u32>,
     eids: BTreeMap<Eid, EntryHandle>,
+    page_eids: BTreeMap<Eid, PageIndex>,
     active: LoadList,
     texture_slots: [Option<PageIndex>; TEXTURE_SLOT_COUNT],
     texture_generations: [u32; TEXTURE_SLOT_COUNT],
@@ -131,7 +133,27 @@ impl Pager {
         if !self.entries.contains_key(&entry) {
             return Err(PagingError::UnknownEntry(entry));
         }
+        if self.eids.contains_key(&eid) || self.page_eids.contains_key(&eid) {
+            return Err(PagingError::DuplicateEid(eid));
+        }
         self.eids.insert(eid, entry);
+        Ok(())
+    }
+
+    /// Binds a named NSD record whose target is a type-one texture page.
+    ///
+    /// Retail zone load lists store both ordinary entry EIDs and TPAG-page
+    /// EIDs in the same serialized array. Keeping the page target typed avoids
+    /// fabricating an [`EntryHandle`] for a texture page that has no entry
+    /// offset table.
+    pub fn bind_page_eid(&mut self, eid: Eid, page: PageIndex) -> Result<(), PagingError> {
+        if !self.pages.contains_key(&page) {
+            return Err(PagingError::UnknownPage(page));
+        }
+        if self.eids.contains_key(&eid) || self.page_eids.contains_key(&eid) {
+            return Err(PagingError::DuplicateEid(eid));
+        }
+        self.page_eids.insert(eid, page);
         Ok(())
     }
 
@@ -140,6 +162,33 @@ impl Pager {
             .get(&eid)
             .copied()
             .ok_or(PagingError::UnknownEid(eid))
+    }
+
+    /// Opens either an ordinary entry or a named texture page through the
+    /// same EID namespace used by native `NSOpen`.
+    pub fn open_eid(&mut self, eid: Eid) -> Result<(), PagingError> {
+        if let Some(entry) = self.eids.get(&eid).copied() {
+            return self.open_entry(entry);
+        }
+        let page = self
+            .page_eids
+            .get(&eid)
+            .copied()
+            .ok_or(PagingError::UnknownEid(eid))?;
+        self.open_page(page)
+    }
+
+    /// Closes a previously opened entry or named texture page EID.
+    pub fn close_eid(&mut self, eid: Eid) -> Result<(), PagingError> {
+        if let Some(entry) = self.eids.get(&eid).copied() {
+            return self.close_entry(entry);
+        }
+        let page = self
+            .page_eids
+            .get(&eid)
+            .copied()
+            .ok_or(PagingError::UnknownEid(eid))?;
+        self.close_page(page)
     }
 
     #[must_use]
@@ -410,5 +459,26 @@ mod tests {
         pager.register_page(PageIndex::new(0), [handle]).unwrap();
         pager.bind_eid(eid, handle).unwrap();
         assert_eq!(pager.resolve_eid(eid), Ok(handle));
+    }
+
+    #[test]
+    fn texture_page_eids_share_the_native_open_close_namespace() {
+        let mut pager = Pager::new();
+        let page = PageIndex::new(7);
+        let eid = Eid::from_name("WillT").unwrap();
+        pager.register_page(page, []).unwrap();
+        pager.bind_page_eid(eid, page).unwrap();
+
+        pager.open_eid(eid).unwrap();
+        assert_eq!(pager.page(page).unwrap().references, 1);
+        assert_eq!(pager.page(page).unwrap().state, PageState::Translated);
+        assert_eq!(pager.resolve_eid(eid), Err(PagingError::UnknownEid(eid)));
+
+        pager.close_eid(eid).unwrap();
+        assert_eq!(pager.page(page).unwrap().references, 0);
+        assert_eq!(
+            pager.bind_page_eid(eid, page),
+            Err(PagingError::DuplicateEid(eid))
+        );
     }
 }

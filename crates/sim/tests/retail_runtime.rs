@@ -1,10 +1,12 @@
 use crust_formats::binary::{Eid, EntryRef};
 use crust_formats::stream::{GOOL_PC_NONE, ZoneEntity, ZoneEntityPathPoint, structs::GoolState};
 use crust_sim::gool::{
-    HaltReason, Instruction, ObjectHandle as VmObjectHandle, RetailPadSnapshot, RetailTransform,
-    VmError, VmObject, VmStateProgram, process_register,
+    CollisionObjectReference, HaltReason, Instruction, ObjectHandle as VmObjectHandle,
+    RetailPadSnapshot, RetailTransform, VmError, VmObject, VmStateProgram, process_register,
 };
-use crust_sim::object_arena::{NeighborZone, ObjectOrigin, TreeParent};
+use crust_sim::object_arena::{
+    NeighborZone, OBJECT_ARENA_CAPACITY, OBJECT_POOL_CAPACITY, ObjectOrigin, TreeParent,
+};
 use crust_sim::retail_runtime::{
     ProgramBinding, ProgramHost, ProgramOrigin, RetailRuntime, RetailZoneEnvironment, RuntimeError,
     StateProgramBinding,
@@ -105,6 +107,9 @@ impl ProgramHost for RecordingHost {
         let code = match binding.executable {
             // Push 0x1234, synchronously spawn executable five, then return.
             1 => vec![Instruction::encode(0x00, REG0, REG1), 0x8a10_5001, RETURN],
+            // The reclaiming spawn has the same nonfatal null result when no
+            // expendable object exists in a full pool.
+            12 => vec![Instruction::encode(0x00, REG0, REG1), 0x9110_5001, RETURN],
             // Read the creator/parent's register zero, proving the typed link.
             5 => vec![Instruction::encode(0x11, PARENT_REG0, REG0), RETURN],
             // Yield a retail state change for host-backed state rebinding.
@@ -116,9 +121,12 @@ impl ProgramHost for RecordingHost {
             _ => vec![RETURN],
         };
         let mut object = VmObject::new(binding.object.vm(), code).map_err(|_| "VM object")?;
-        if binding.executable == 1 {
+        if matches!(binding.executable, 1 | 12) {
             object.set_register(0, 0x1200).map_err(|_| "register")?;
             object.set_register(1, 0x34).map_err(|_| "register")?;
+            object
+                .set_register(process_register::MISC_VALUE, 0xdead_beef)
+                .map_err(|_| "misc child")?;
         }
         if binding.executable == 6 {
             object
@@ -324,6 +332,15 @@ fn current_zone_entities_and_hosted_children_share_one_runtime_frame() {
     assert_eq!(report.frame.frame_index, 0);
     assert_eq!(report.frame.spawned_children.len(), 1);
     assert_eq!(report.frame.effects.len(), 1);
+    assert_eq!(
+        runtime
+            .machine()
+            .object(parent.vm())
+            .unwrap()
+            .register(process_register::MISC_VALUE),
+        Ok(CollisionObjectReference::new(child.vm()).to_word()),
+        "a successful native spawn leaves misc_child pointing at the child"
+    );
 
     assert_eq!(
         runtime.arena().get(child.arena()).unwrap().parent(),
@@ -383,6 +400,69 @@ fn current_zone_entities_and_hosted_children_share_one_runtime_frame() {
         Ok(u32::MAX - 1)
     );
     assert_eq!(child_vm.register(process_register::NODE), Ok(0xffff));
+}
+
+#[test]
+fn full_native_pool_returns_null_spawns_without_faulting_the_parents() {
+    for parent_executable in [1, 12] {
+        let mut entities = Vec::with_capacity(OBJECT_ARENA_CAPACITY);
+        entities.push(entity(200, 3, 0, 0));
+        for offset in 0..OBJECT_POOL_CAPACITY {
+            let executable = if offset + 1 == OBJECT_POOL_CAPACITY {
+                parent_executable
+            } else {
+                2
+            };
+            entities.push(entity(
+                10 + u16::try_from(offset).unwrap(),
+                3,
+                executable,
+                0,
+            ));
+        }
+        let neighbors = [NeighborZone {
+            eid: ZONE_A,
+            display_flags: 2,
+            entities: &entities,
+        }];
+        let mut host = RecordingHost::default();
+        let mut runtime = RetailRuntime::new(0);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        assert_eq!(attempts.len(), OBJECT_ARENA_CAPACITY);
+        assert!(attempts.iter().all(|attempt| attempt.result.is_ok()));
+        let parent = *attempts
+            .last()
+            .unwrap()
+            .result
+            .as_ref()
+            .expect("the last pool object is the spawning parent");
+        assert_eq!(runtime.arena().len(), OBJECT_ARENA_CAPACITY);
+        assert_eq!(runtime.arena().remaining_pool_capacity(), 0);
+
+        let frame = runtime.run_frame(&mut host, 3).unwrap();
+        let parent_execution = frame
+            .executions
+            .iter()
+            .find(|execution| execution.object == parent)
+            .unwrap();
+
+        assert_eq!(
+            parent_execution.result.as_ref().unwrap().reason,
+            HaltReason::Halted
+        );
+        assert!(!runtime.is_object_faulted(parent));
+        assert!(frame.spawned_children.is_empty());
+        assert_eq!(runtime.arena().len(), OBJECT_ARENA_CAPACITY);
+        assert_eq!(
+            runtime
+                .machine()
+                .object(parent.vm())
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0),
+            "pool exhaustion is native's null misc_child result"
+        );
+    }
 }
 
 #[test]

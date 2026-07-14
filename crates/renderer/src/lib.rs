@@ -10,6 +10,9 @@ pub mod command;
 pub mod object;
 pub mod projection;
 pub mod retail_texture;
+mod rotation;
+pub mod sprite;
+pub mod text;
 pub mod texture;
 pub mod timing;
 pub mod title;
@@ -17,8 +20,9 @@ pub mod title;
 pub use cache::{CachedTexture, TextureCache, TextureHandle, TextureRequest};
 pub use command::{GeneratedFrame, OrderingTable, PrimitiveCommand};
 pub use object::{
-    GoolObjectLighting, ObjectProjectionError, ObjectProjectionParameters,
-    ObjectProjectionTransform, ProjectedObjectModel, ProjectedObjectPolygon, ProjectedObjectVertex,
-    object_model_matrix, project_object_model,
+    GoolObjectLighting, ObjectDarkShaderInput, ObjectProjectionError, ObjectProjectionParameters,
+    ObjectProjectionTransform, ObjectZoneShaderError, ObjectZoneShading, ProjectedObjectModel,
+    ProjectedObjectPolygon, ProjectedObjectVertex, apply_object_zone_shader, object_model_matrix,
+    project_object_model,
 };
 pub use projection::{Matrix3, Viewport};

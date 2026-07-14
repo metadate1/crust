@@ -25,27 +25,65 @@ gameplay path.
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
   prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing.
 - Displayed current-zone neighbors are decoded into owned ZDAT entity descriptors when a pair is
-  mounted. In gameplay, bonus, boss and ending flow states, the browser spawns their group-three
-  entities into the checked retail arena and executes that arena at the cooperative 30 Hz boundary.
+  mounted. In title, gameplay, bonus, boss, level-complete, intro and ending flow states, the
+  browser spawns their group-three entities into the checked retail arena and executes that arena
+  at the cooperative 30 Hz boundary.
 - The NSF program host binds initial and requested GOOL states, synchronously applies characterized
   child-spawn effects, maintains typed arena/VM links, and advances the implemented state-change
   and animation-select/wait path using frame/draw counters. Initial and global-call frames share the
   bounded process/register array at the parsed `init_sp`, and state links consult the validated
   target descriptor flags. Rebind runs captured once and target transition blocks synchronously,
   including nested calls/returns and hosted spawns. Checked aligned code/storage/entry references,
-  paging cases one through six, path orientation and the characterized entity-color/solid query
-  slices are active. Normal, once, transition, event-service and interrupt code all complete typed
-  audio calls synchronously before the following instruction. Execution, checked-error and
-  quarantined-object counts are exposed through the engineering log/debug surface.
+  paging cases one through six, every `0x85` transform-vector selector and every `0x8e` solid/color
+  selector are active, including their source-defined no-op cases. `SZON` performs the exact reverse
+  current-header neighbor scan with inclusive wrapped Q24.8 rectangles and updates the linked
+  object's zone only on a match. Normal, once, transition, event-service and interrupt code all
+  complete typed audio calls synchronously before the following instruction. Execution,
+  checked-error and quarantined-object counts are exposed through the engineering log/debug
+  surface.
+- Static solid queries are refreshed from the current camera/native `cur_zone` neighborhood before
+  object execution rather than remaining attached to each object's spawn zone. The per-object zone
+  identity remains separately typed for object colors and zone migration. When that object zone is
+  detached, its rectangle, graphics and water plane supply the source ceiling/zone fallback without
+  adding its octree to current-neighbor geometry candidates. This separation carries the
+  characterized N. Sanity route across `e0_9Z`, `a0_9Z` and `a1_9Z` without a stale-zone fall; the
+  strict Hog Wild window crosses ten camera zones through `0n_hZ` while preserving Crash's detached
+  object-zone identity as `0c_hZ`.
+- Authored title MDAT entities bind to the same arena/VM host as level objects. Their retail
+  `title_state` word drives publisher, menu, options, password/load, map and game-over changes
+  through the native fade boundary. The final WebGL pass uses the source's 16-level nonlinear
+  black-overlay alpha table and exact pre-quantization counter step; blank and state-swap phases
+  stay opaque without affecting gameplay rendering. Type-zero loads preserve the source's `0x3ff0`
+  object-category tail (`0x22_3ff0`) and the following start/blank tick enables only the display and
+  animate bits (`0x22_3ffc`). Each screen swap tears down old objects and performs the source
+  flag-two `LevelUpdate` before spawning the next image-backed MDAT entities. The MDAT EID remains
+  descriptor provenance, while each spawned object's zone, origin and colors come from the current
+  ZDAT exactly like the source's type-17 rewrite, keeping it in current-neighbor TERM scope. Once an
+  authored arena is presenting without a runtime error, diagnostic DOM overlays and fallback menus
+  are hidden from the 4:3 canvas while status remains in the external monitor panel.
 - Camera `LevelUpdate` effects drive a source-ordered zone lifecycle. Departed active zones receive
   TERM in postorder, migrated objects survive, released subtrees clear typed VM/link/audio state,
   old load lists close before new lists open, newly adjacent zones activate, and their objects scan
   on the following cooperative frame. Display and animation masks latch with retail's one-frame
   timing.
+- Misc 12/7 synchronously visits the current header's forward neighbor list without filtering or
+  deduplication. Each neighbor uses the live eight-root postorder TERM traversal, including immunity,
+  migration, non-title Crash survival and persistent typed `ObjectZoneContext` target/sentinel
+  semantics. Object audio and typed tree/link ownership are cleaned synchronously; arena spawn
+  flags remain authoritative until their VM mirror is refreshed at the next frame boundary. A null
+  current zone is a no-op; duplicate EIDs are retained and later entries rescan the mutated live
+  tree.
 - Pair-scoped GOOL item-five descriptors and TGEO/SVTX/CVTX frames feed the live renderer. Current
   3D vertex objects use retail fixed-point transforms, lighting, culling and ordering and share one
   resident load-list-filtered TPAG cache/manifest with the world. Eligible collidable animations
   also register exact-preorder transformed bounds in the 96-entry frame arena before execution.
+  Type-two sprites, type-five fragments and status-B 2D CVTX use the source ZXY sprite transform.
+  Type-four text uses bounded `sp[-2]` argument aliases, the default or dynamic fixed-63 type-three
+  font, retail formatting/control commands, per-corner color modulation and ordered glyph/backdrop
+  quads. Standalone type-three font descriptors remain resource-only, as in the source. ZDAT object
+  shader modes two and three are connected with their separate SVTX/CVTX ramps and far-object
+  cutoffs. Graphics flag `0x1000` replaces only the GOOL-object camera with the source Q24.8 fixed
+  position, triangular Y bob and fixed pitch; the world keeps the authored path camera.
 - The WebGL stage has a validated transactional scene-update path with shared immutable
   decoded-texture identity reuse, atomic replacement/removal and a command-only fast path. Distinct
   allocations are conservatively uploaded without cloning or scanning their pixel vectors. Pair
@@ -58,9 +96,30 @@ gameplay path.
 - Cooperative 30 Hz loop, keyboard, standard-gamepad polling, complete touch pad, pause, mute,
   fullscreen, responsive presentation, WebGL2 output, and WebAudio scheduling. Each simulation
   tick installs the complete retail `tapped`/`held` history consumed by GOOL opcode `0x1a`.
+- Mounted type-19 PBAK entries are parsed with exact 304- and 511-spawn-word layouts and adapted to
+  the live browser runtime. Attract playback restores the recorded camera/player transform, scale,
+  bounds, spawn words, RNG, draw/tick timing and full 32-bit pad word; physical input interrupts it,
+  and the final recorded pad frame remains observable before returning to title. All nine legal
+  recordings, totaling 10,966 frames, pass the opt-in local corpus test.
 - Live SFX/music volume and mono options applied independently. Mounted type-12 ADIO item-zero
   samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
-  WebAudio; music remains the generated software sequence.
+  WebAudio. ZDAT MIDI references resolve mounted type-13 MIDI and type-14 INST entries; decoded VAB
+  programs and SEP tracks use the software synth, thirty-tick zone fades and GOOL's secondary-track
+  toggle without retaining proprietary bytes.
+- Retail `next_lid` writes are consumed at the following 30 Hz boundary before spawn/camera/GOOL.
+  The runtime broadcasts `LEVEL_END` to all eight roots in child-before-parent order, retains the
+  requested destination unless a final `-2` selects the saved level, carries process-lifetime
+  scalar state across a fresh pair-owned runtime and clears every pointer global. Bonus returns
+  mount the validated saved zone/path/progress, protect the pre-restart Crash spawn, then restore
+  saved spawn words, camera and object state before the normal scan.
+- The native 3,592-halfword encountered-object registry is modeled independently from the active
+  304-word spawn table. Misc-ten selectors four/five maintain its zero terminator and reusable
+  holes; each stream mount clears the active table and reapplies bit eight for matching retained
+  tags. Exact synchronous `LevelResetGlobals(1)` resets the documented scalar words and encounter
+  registry without clearing savestate, live objects or the active table. Retail card restore writes
+  initial lives, runs that reset, then restores the 128-byte payload fields and derived map/unlock
+  words; the main-menu resume handshake uses the same protected ordering. Misc 12/11 performs its
+  reset before the next GOOL instruction, including a same-handler `SaveState`.
 - Versioned automatic resume storage and a 15-slot virtual-card model using the checksummed
   128-byte payload.
 
@@ -71,8 +130,9 @@ gameplay path.
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode
   flags, player/object colors and the characterized scalar process defaults; runtime children
   inherit the parent transform and receive zone colors. Entity-pointer words deliberately remain
-  outside raw registers, and MDAT positioning, box stacking/stall adjustment, save-state spawn
-  hooks, remaining process globals and several host effects remain absent or partial. Camera zone
+  outside raw registers, while box stacking/stall adjustment, remaining process globals and several
+  host effects remain absent or partial. Initial Crash saves, checkpoint
+  captures, in-stream restarts and cross-pair session carry are connected. Camera zone
   crossings now execute the ordered lifecycle, dynamic pager references, TERM/migration teardown
   and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch is synchronous;
   checked paging metadata is synchronous and does not claim retail asynchronous I/O timing.
@@ -80,12 +140,20 @@ gameplay path.
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
   The legally local 300-frame N. Sanity trace now crosses the former ShadC executable 29/state one
   animation-bound boundary using validated frame bounds instead of the source branch's
-  uninitialized C locals. Solid suboperations one and three implement their characterized helper
-  paths; the late post-physics animation-stamp refresh, solid suboperations zero/two/four/five,
-  transform-vector suboperation six and some lighting selectors remain typed gaps.
-- Cross-level transitions remain high-level Rust state transitions. The host keeps all selected
-  file handles, validates and swaps every requested destination pair, and updates the active scene;
-  it does not yet reproduce the complete retail page residency/transition handshake.
+  uninitialized C locals. All `0x85` and `0x8e` selectors now have checked source-defined behavior;
+  this does not imply that the late post-physics animation-stamp refresh, broader object behavior,
+  dynamic lighting or full level progression is complete.
+- Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
+  monotonic object incarnation. If a TERM handler kills the active requester and synchronously
+  reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or
+  unwind the replacement object's stack.
+- Cross-level transitions are initiated by authored GOOL and use the native `LEVEL_END` and
+  session-carry/remount order. The host keeps all selected file handles, validates and atomically
+  swaps every requested pair, and rebuilds pair-scoped camera, lifecycle, pager, renderer and audio
+  owners. A same-level `LoadState` issued from inside a `LEVEL_END` handler still stops at a checked
+  boundary because continuing that exact handler requires a resumable nested browser restart
+  transaction. A legally local scan of all 44 retail pairs found zero authored occurrences of that
+  nested case. Complete asynchronous page residency timing also remains a gap.
 - `crust-renderer` implements texture decode, cache keys, projection, ordering and blend-command
   rules. Its WebGL2 command backend is connected to the live stage and presents decoded loading
   images, four image-backed retail title states and camera-selected worlds. Title, Hog Wild
@@ -94,12 +162,16 @@ gameplay path.
   observed first presented path point, draw count and 679-polygon visibility list. Automatic and
   hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
   SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
-  manifest. Sprite, font, text, fragment and 2D CVTX commands and mid-frame paging-driven texture
-  changes are not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown
-  and the current display mask.
+  manifest. Type-two sprites, type-five fragments, type-four text/font glyphs and status-B 2D CVTX
+  are coupled to the same ordered command/texture path. Mid-frame paging-driven texture changes are
+  not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown and the
+  current display mask.
   Twenty-two starts use fog/ripple/lightning/dark variants whose dynamic vertex/color effects
-  remain incomplete. Object shader modes two through four, their far-object rejection and the
-  zone-graphics `0x1000` fixed-pitch camera substitution are also incomplete. Rendering snapshots
+  remain incomplete. Object shader modes two and three and their source far-object rejection are
+  live, as is the object-only `0x1000` fixed-camera substitution. Mode four has a checked pure
+  renderer implementation and focused tests, but is deliberately unwired because immutable render
+  snapshots do not yet carry the runtime's live pause-object/player selection and `dark_dist`.
+  Rendering snapshots
   the complete arena after GOOL, while the source interleaves each object's simulation and drawing
   during preorder traversal. The current builder avoids reparsing an unchanged active graph,
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
@@ -108,19 +180,31 @@ gameplay path.
 - `crust-audio` implements SPU ADPCM, loop semantics, caching, the retail 24-voice allocation and
   control state machine, sequence events and a software synth. GOOL SFX now resolve type-12 ADIO
   entries from the mounted local NSF and reach WebAudio with owner cleanup. Retail INST/VAB/SEP/MIDI
-  program/envelope music, spatial panning and reverb DSP remain absent; generated music is still
-  used. The newest SFX path was compile- and model-tested but not manually auditioned in-browser.
+  music is connected, including volume, pan, expression, sustain, pitch bend, program selection,
+  zone fades and dual-track toggles. Exact SPU ADSR timing, vibrato, portamento, pressure/generic
+  controllers, spatial reverb and hardware-identical voice priority remain gaps. The newest music
+  path was compile-, model- and legally-local-disc tested but not yet manually auditioned.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses
   validated ZDAT octrees/colors plus ordered animation-derived frame bounds for the characterized
   legal branches. The former diagnostic movement and fixed-distance completion path is no longer
-  used. Late bound refresh, remaining collision branches and progression remain incomplete; Crash,
-  bosses, boxes, checkpoints, enemies, bonus entrances and ending conditions therefore do not yet
-  form a playable progression path.
-- The password UI applies a local deterministic progression rule, not the retail password codec.
-  Browser card/resume storage is wired and restoration was exercised, but a full retail save/load
-  handshake across all transitions has not been playthrough-certified. There is no connected
-  retail save selection/completion handshake, and damaged-card handling remains exercised at the
-  Rust model/storage boundary.
+  used. A strict legally-local 18,000-frame forward-input trace moves the camera and Crash through
+  the opening three N. Sanity zones and reaches the valid `a1_9Z` path-zero solid wall with no VM
+  errors, faults or terminal fall. That is a real playable progression path, not a certified level
+  completion: late bound refresh, broader collision and later Crash, boss, box, checkpoint, enemy,
+  bonus and ending behavior remain open. Hog Wild's checked 360-frame trace also has no VM fault or
+  execution error, but its frame-179 terminal fall remains a gameplay outcome and is not presented
+  as level progression parity.
+- PBAK playback returns to the main-menu title state after the final frame, but the source also
+  spawns a caption object of subtype two and sends it event `0xE00` when `island_cam_rot_x` is
+  nonzero. That caption/end handshake is not yet connected.
+- With a complete retail title stream, password input and validation belong to the mounted
+  `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. The
+  data-independent fallback UI still uses a local deterministic progression rule when that authored
+  graph cannot be spawned, and is not presented as retail password parity. Browser card/resume
+  storage and signed misc-15 operations are wired to the exact 15-slot,
+  128-byte virtual-card model, including rescan/format/save/load handshakes and synchronous GOOL
+  result globals. These paths and damaged-card behavior are heavily model-tested, but a complete
+  authored save/load playthrough across every title and level transition is not yet certified.
 - One historical diagnostic level and its completion/title-map transition were completed in an
   earlier browser build before the placeholder geometry and movement path were removed. No
   retail-authored level, boss, bonus route, ending, death/checkpoint sequence, long soak, mobile
@@ -131,7 +215,9 @@ gameplay path.
 The workspace includes native tests for malformed readers, ISO fields and extents, stream names and
 catalogs, NSD/NSF/page/entry bounds, tagged references, MDAT title composition, GOOL program/state
 graphs, state rebinding, all five animation descriptor families, TGEO/SVTX/CVTX frame parsing,
-animation references/waits and hosted entity/child execution, ZDAT entities, SLST
+animation references/waits, PBAK layout/playback and hosted entity/child execution, complete
+`0x85`/`0x8e` selector families, `SZON` neighbor resolution, misc 12/7 neighbor teardown,
+level-global/card-restore ordering, encountered-object registry behavior, ZDAT entities, SLST
 endpoint/cursor/rollback behavior, WGEO scene graphs, all SLST delta/swap forms, the fixed object
 arena/spawn tree and frame bounds, signed packed vertices, retail TPAG/CLUT/UV references, world and
 object fixed-point projection/lighting/culling, presentation order, scheduling, paging, GOOL execution,

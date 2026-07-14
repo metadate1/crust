@@ -5,14 +5,15 @@ use std::{collections::BTreeMap, path::PathBuf};
 use crust_formats::binary::{Eid, PageIndex};
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
-    LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, parse_nsd, parse_nsf,
+    LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
+    parse_nsf,
 };
 use crust_sim::Angle12;
 use crust_sim::gool::{RetailPadSnapshot, VmEffect};
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
-use crust_sim::retail_runtime::{NsfProgramHost, RetailRuntime};
+use crust_sim::retail_runtime::{NsfProgramHost, ProgramHost, RetailRuntime};
 use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, SpawnScanZone, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
 };
@@ -229,6 +230,187 @@ fn n_sanity_zone_lifecycle_matches_local_retail_band_and_transition_goldens() {
     assert_eq!(lifecycle.zone(a0).unwrap().display_flags(), 3);
     assert_eq!(lifecycle.zone(a1).unwrap().display_flags(), 3);
     assert_eq!(lifecycle.zone(a2).unwrap().display_flags(), 3);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_hard_restart_reloads_the_complete_initial_band() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::N_SANITY_BEACH;
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let mut lifecycle_zones = Vec::with_capacity(graph.zone_count());
+    for node in graph.zones() {
+        let entry = nsf.resolve_entry(&nsd, node.eid).unwrap();
+        let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+        lifecycle_zones.push(ZoneLifecycleZone::new(
+            node.eid,
+            header.display_flags,
+            header.neighbors,
+            OrderedZoneLoadList::from(&header.load_list),
+        ));
+    }
+
+    let e0 = retail_eid("e0_9Z");
+    let a0 = retail_eid("a0_9Z");
+    let mut lifecycle = ZoneLifecycle::new(lifecycle_zones).unwrap();
+    lifecycle.transition_with_marker(e0, true).unwrap();
+    let plan = lifecycle.plan_hard_restart(e0, true).unwrap();
+
+    let mut expected = vec![
+        ZoneTransitionAction::TerminateZoneObjects(e0),
+        ZoneTransitionAction::SetDisplayFlags {
+            zone: e0,
+            before: 7,
+            after: 4,
+        },
+        ZoneTransitionAction::TerminateZoneObjects(a0),
+        ZoneTransitionAction::SetDisplayFlags {
+            zone: a0,
+            before: 7,
+            after: 4,
+        },
+    ];
+    expected.extend(close_load_actions(N_SANITY_E0_ENTRIES, N_SANITY_E0_PAGES));
+    expected.extend(open_load_actions(N_SANITY_E0_ENTRIES, N_SANITY_E0_PAGES));
+    expected.extend([
+        ZoneTransitionAction::SetDisplayFlags {
+            zone: e0,
+            before: 4,
+            after: 7,
+        },
+        ZoneTransitionAction::SetDisplayFlags {
+            zone: a0,
+            before: 4,
+            after: 7,
+        },
+    ]);
+    assert_eq!(plan.actions(), expected);
+    assert_eq!(
+        scan_signature(plan.next_frame_spawn_scan()),
+        [(0, e0, 7), (1, a0, 7)]
+    );
+    lifecycle.commit_hard_restart(&plan).unwrap();
+    assert_eq!(lifecycle.active_neighbor_zones(), [e0, a0]);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn title_flag_two_level_updates_reach_every_authored_screen_zone() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::TITLE;
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair_with_roots(
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        [
+            "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ",
+            "3a_pZ",
+        ]
+        .map(retail_eid),
+    )
+    .unwrap();
+    let mut lifecycle_zones = Vec::with_capacity(graph.zone_count());
+    for node in graph.zones() {
+        let entry = nsf.resolve_entry(&nsd, node.eid).unwrap();
+        let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+        lifecycle_zones.push(ZoneLifecycleZone::new(
+            node.eid,
+            header.display_flags,
+            header.neighbors,
+            OrderedZoneLoadList::from(&header.load_list),
+        ));
+    }
+    let mut lifecycle = ZoneLifecycle::new(lifecycle_zones).unwrap();
+    lifecycle
+        .transition_with_marker(graph.spawn_path().zone, false)
+        .unwrap();
+
+    for name in [
+        "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ", "0a_pZ",
+    ] {
+        let zone = retail_eid(name);
+        assert!(
+            graph
+                .path(crust_formats::stream::RetailPathId { zone, index: 0 })
+                .is_some(),
+            "title screen zone {name} must expose its first camera path"
+        );
+        let plan = lifecycle.plan_transition_with_marker(zone, true).unwrap();
+        assert!(
+            plan.activation_marker(),
+            "{name} must retain flag-two marker"
+        );
+        lifecycle.commit_transition(&plan).unwrap();
+        assert!(
+            lifecycle
+                .next_frame_spawn_scan()
+                .iter()
+                .all(|candidate| candidate.display_flags & 4 != 0),
+            "{name} neighbors must receive the title activation marker"
+        );
+    }
+}
+
+#[test]
+#[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
+fn n_sanity_szon_resolves_last_serialized_neighbor_at_inclusive_origin() {
+    let disc_path = PathBuf::from(
+        std::env::var_os("C1_DISC_IMAGE")
+            .expect("C1_DISC_IMAGE must name a legally local NTSC-U raw BIN"),
+    );
+    let disc_bytes = std::fs::read(&disc_path)
+        .unwrap_or_else(|error| panic!("could not read {}: {error}", disc_path.display()));
+    let image = DiscImage::open(&disc_bytes).unwrap();
+    let streams = image.discover_streams().unwrap();
+    let level = LevelId::N_SANITY_BEACH;
+    let nsd_bytes = image
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsd))
+                .unwrap(),
+        )
+        .unwrap();
+    let nsf_bytes = image
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsf))
+                .unwrap(),
+        )
+        .unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let current_zone = nsd.ldat().unwrap().spawn_zone;
+    let current_entry = nsf.resolve_entry(&nsd, current_zone).unwrap();
+    let current_header =
+        ZoneHeader::parse(current_entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let last_neighbor = *current_header.neighbors.last().unwrap();
+    let neighbor_entry = nsf.resolve_entry(&nsd, last_neighbor).unwrap();
+    let rect = ZoneRect::parse(neighbor_entry.item(1).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let inclusive_origin = rect.origin.map(|coordinate| coordinate.wrapping_shl(8));
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+
+    assert_eq!(
+        host.find_neighbor_zone(current_zone, inclusive_origin),
+        Ok(Some(last_neighbor))
+    );
 }
 
 #[test]

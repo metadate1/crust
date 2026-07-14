@@ -13,13 +13,11 @@ use crust_formats::stream::{ObjectMaterial, ObjectModelFrame, ObjectVertex, Obje
 
 use crate::command::ScreenPoint;
 use crate::projection::{Matrix3, Vec3i, object_rotation_matrix, project};
+use crate::rotation::{angle12, yxy_rotation_matrix};
 use crate::texture::Rgba8;
 
 const MAX_COLORED_SHIFT: u8 = 8;
 const ORDERING_DEPTH_MAX: i64 = 0x7ff;
-const TRIG_Q: u32 = 48;
-const TRIG_HALF: i128 = 1_i128 << (TRIG_Q - 1);
-const HALF_PI_Q48: i128 = 442_139_859_501_778;
 
 /// Final fixed-point transform applied to every local model vertex.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +106,236 @@ pub struct GoolObjectLighting {
     pub words: [u16; 24],
     pub rotation_yxz: [i32; 3],
     pub scale_x: i32,
+}
+
+/// Dynamic inputs consumed only by ZDAT object-shader mode four.
+///
+/// Translations retain GOOL's native Q24.8 representation. `reference_translation`
+/// is the pause object when one exists and the player object otherwise. The
+/// scalar is the live `dark_dist` value advanced by the level shader runtime.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectDarkShaderInput {
+    pub reference_translation: [i32; 3],
+    pub object_translation: [i32; 3],
+    pub dark_distance: i32,
+}
+
+/// Source-compatible result of applying one ZDAT object shader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObjectZoneShading {
+    /// Effective GOOL colors used by SVTX lighting.
+    pub colors: [u16; 24],
+    /// CVTX color right shift. Modes other than mode-three CVTX leave it zero.
+    pub colored_shift: u8,
+}
+
+/// Checked failure while evaluating a zone object shader.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObjectZoneShaderError {
+    /// Mode four cannot be evaluated without the live pause/player and
+    /// `dark_dist` inputs owned by the level shader runtime.
+    MissingDarkInput,
+    /// Authored coordinates exceeded an intermediate for which the original
+    /// executable relied on signed 32-bit arithmetic.
+    DarkArithmeticOutOfRange(&'static str),
+}
+
+impl fmt::Display for ObjectZoneShaderError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingDarkInput => {
+                formatter.write_str("object shader mode four has no live dark-shader input")
+            }
+            Self::DarkArithmeticOutOfRange(context) => {
+                write!(formatter, "object shader mode-four {context} exceeds i32")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ObjectZoneShaderError {}
+
+/// Applies the source renderer's ZDAT object-shader branch.
+///
+/// `camera_depth` is the already transformed object origin and `depth_anchor`
+/// is `dword_800618B8`, established by the active world's fog setup. A `None`
+/// result is the branch's deliberate far-object rejection. Modes outside
+/// `2..=4` preserve the object's current colors unchanged.
+///
+/// Mode two applies to both model kinds. Mode three fades all SVTX lighting
+/// words, but CVTX receives only a color shift. Mode four requires explicit
+/// dynamic inputs rather than guessing the source's live global state.
+///
+/// # Errors
+///
+/// Returns an error when mode four lacks its dynamic input or when malformed
+/// coordinates would exceed a signed intermediate that is bounded for retail
+/// game data.
+pub fn apply_object_zone_shader(
+    mode: u32,
+    vertex_kind: ObjectVertexKind,
+    object_colors: [u16; 24],
+    zone_colors: [u16; 24],
+    camera_depth: i32,
+    depth_anchor: i32,
+    dark: Option<ObjectDarkShaderInput>,
+) -> Result<Option<ObjectZoneShading>, ObjectZoneShaderError> {
+    let mut shading = ObjectZoneShading {
+        colors: object_colors,
+        colored_shift: 0,
+    };
+    let depth_delta = i64::from(camera_depth) - i64::from(depth_anchor);
+    match mode {
+        2 => {
+            let ramp = depth_delta.saturating_mul(8).max(0);
+            if ramp > 0x7fff {
+                return Ok(None);
+            }
+            for (index, output) in shading.colors[..12].iter_mut().enumerate() {
+                *output = u16::try_from((i64::from(zone_colors[index]) + ramp).min(0x7fff))
+                    .unwrap_or(0x7fff);
+            }
+            for (relative, output) in shading.colors[12..].iter_mut().enumerate() {
+                *output = u16::try_from((i64::from(zone_colors[12 + relative]) + ramp).min(0x1000))
+                    .unwrap_or(0x1000);
+            }
+        }
+        3 if vertex_kind == ObjectVertexKind::Lit => {
+            let ramp = (depth_delta / 4).max(0);
+            if ramp > 28_000 {
+                return Ok(None);
+            }
+            for (source, output) in zone_colors.into_iter().zip(&mut shading.colors) {
+                *output = u16::try_from((i64::from(source) - ramp).max(0)).unwrap_or_default();
+            }
+        }
+        3 => {
+            shading.colored_shift = u8::try_from((depth_delta / 200).clamp(0, 8)).unwrap_or(8);
+        }
+        4 => {
+            shading.colors = mode_four_colors(
+                shading.colors,
+                dark.ok_or(ObjectZoneShaderError::MissingDarkInput)?,
+            )?;
+        }
+        _ => {}
+    }
+    Ok(Some(shading))
+}
+
+fn mode_four_colors(
+    mut colors: [u16; 24],
+    input: ObjectDarkShaderInput,
+) -> Result<[u16; 24], ObjectZoneShaderError> {
+    let initial_x = checked_difference(
+        input.object_translation[0],
+        input.reference_translation[0],
+        "initial x difference",
+    )? >> 8;
+    let initial_y = (checked_difference(
+        input.object_translation[1],
+        input.reference_translation[1],
+        "initial y difference",
+    )? >> 8)
+        .checked_sub(800)
+        .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(
+            "initial y offset",
+        ))?;
+    let initial_z = checked_difference(
+        input.object_translation[2],
+        input.reference_translation[2],
+        "initial z difference",
+    )? >> 8;
+    let distance_squared = checked_square_sum(
+        [initial_x, initial_y, initial_z],
+        "initial distance squared",
+    )?;
+    let distance = retail_sqrt(distance_squared).max(1);
+
+    let mut direction = [0_i32; 3];
+    for (axis, output) in direction.iter_mut().enumerate() {
+        let difference = checked_difference(
+            input.reference_translation[axis],
+            input.object_translation[axis],
+            "normalized direction difference",
+        )?;
+        let numerator = difference.checked_mul(0x100).ok_or(
+            ObjectZoneShaderError::DarkArithmeticOutOfRange("normalized direction numerator"),
+        )?;
+        *output = numerator / distance;
+    }
+
+    let complementary_distance = 6_000 - distance;
+    if complementary_distance < 0 {
+        direction[0] = 0;
+        direction[2] = 0;
+    }
+    let dark_distance = input.dark_distance.max(1);
+    let mut light_direction = [0_i32; 3];
+    for (source, output) in direction.into_iter().zip(&mut light_direction) {
+        let product = source.checked_mul(complementary_distance).ok_or(
+            ObjectZoneShaderError::DarkArithmeticOutOfRange("light direction product"),
+        )?;
+        *output = ((product >> 8) / dark_distance).clamp(-6_000, 6_000);
+    }
+
+    for row in 0..3 {
+        for (column, component) in light_direction.into_iter().enumerate() {
+            colors[row * 3 + column] = wrapping_u16(component);
+        }
+    }
+    let light_magnitude = retail_sqrt(checked_square_sum(
+        light_direction,
+        "light direction magnitude",
+    )?);
+    let ambient = u16::try_from(light_magnitude / 32).unwrap_or(u16::MAX);
+    colors[9..12].fill(ambient);
+    Ok(colors)
+}
+
+fn checked_difference(
+    left: i32,
+    right: i32,
+    context: &'static str,
+) -> Result<i32, ObjectZoneShaderError> {
+    left.checked_sub(right)
+        .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(context))
+}
+
+fn checked_square_sum(
+    values: [i32; 3],
+    context: &'static str,
+) -> Result<i32, ObjectZoneShaderError> {
+    values.into_iter().try_fold(0_i32, |sum, value| {
+        value
+            .checked_mul(value)
+            .and_then(|square| sum.checked_add(square))
+            .ok_or(ObjectZoneShaderError::DarkArithmeticOutOfRange(context))
+    })
+}
+
+fn retail_sqrt(value: i32) -> i32 {
+    if value == 0 {
+        return 0;
+    }
+    debug_assert!(value > 0);
+    let leading_zeros = value.leading_zeros() & !1;
+    let table_index = if leading_zeros < 24 {
+        value >> (24 - leading_zeros)
+    } else {
+        value << (leading_zeros - 24)
+    };
+    debug_assert!((64..=255).contains(&table_index));
+    // The source's 192-entry table is exactly floor(sqrt(index / 64) *
+    // 4096). Derive it without retaining a copied lookup table.
+    let table_value = (u64::try_from(table_index).unwrap_or_default() << 18).isqrt();
+    let table_value = i32::try_from(table_value).unwrap_or(i32::MAX);
+    (table_value << ((31 - leading_zeros) / 2)) >> 12
+}
+
+fn wrapping_u16(value: i32) -> u16 {
+    let bytes = value.to_le_bytes();
+    u16::from_le_bytes([bytes[0], bytes[1]])
 }
 
 /// One projected vertex with its final source-compatible RGBA color.
@@ -492,87 +720,6 @@ fn transpose(matrix: Matrix3) -> Matrix3 {
     }
 }
 
-fn yxy_rotation_matrix(rotation_xyz: [u16; 3]) -> Matrix3 {
-    let sx = sine_q12(rotation_xyz[0]);
-    let sy = sine_q12(rotation_xyz[1]);
-    let sz = sine_q12(rotation_xyz[2]);
-    let cx = cosine_q12(rotation_xyz[0]);
-    let cy = cosine_q12(rotation_xyz[1]);
-    let cz = cosine_q12(rotation_xyz[2]);
-    let sxsy = multiply_q12(sx, sy);
-    let sxsz = multiply_q12(sx, sz);
-    let sysz = multiply_q12(sy, sz);
-    let cxsy = multiply_q12(cx, sy);
-    let cxsz = multiply_q12(cx, sz);
-    let sxcy = multiply_q12(sx, cy);
-    let sxcz = multiply_q12(sx, cz);
-    let sycz = multiply_q12(sy, cz);
-    let cxcz = multiply_q12(cx, cz);
-    let sxcysz = multiply_q12(sxcy, sz);
-    let sxcycz = multiply_q12(sxcy, cz);
-    let cxcysz = multiply_q12(cxsz, cy);
-    let cxcycz = multiply_q12(cxcz, cy);
-    Matrix3 {
-        values: [
-            [cxcz.wrapping_sub(sxcysz), sysz, sxcz.wrapping_add(cxcysz)],
-            [sxsy, cy, cxsy.wrapping_neg()],
-            [
-                cxsz.wrapping_neg().wrapping_sub(sxcycz),
-                sycz,
-                sxsz.wrapping_neg().wrapping_add(cxcycz),
-            ],
-        ],
-    }
-}
-
-fn multiply_q12(left: i16, right: i16) -> i16 {
-    i16::try_from((i32::from(left) * i32::from(right)) >> 12)
-        .expect("a product of two Q12 i16 coefficients still fits i16")
-}
-
-fn angle12(value: i32) -> u16 {
-    u16::try_from(value.rem_euclid(0x1000)).expect("a reduced angle is in 0..4096")
-}
-
-fn sine_q12(angle: u16) -> i16 {
-    let angle = angle & 0x0fff;
-    let (quarter_index, sign) = match angle {
-        0x000..=0x3ff => (angle, 1_i32),
-        0x400..=0x7ff => (0x800 - angle, 1),
-        0x800..=0xbff => (angle - 0x800, -1),
-        _ => (0x1000 - angle, -1),
-    };
-    i16::try_from(i32::from(quarter_sine_q12(quarter_index)) * sign)
-        .expect("signed Q12 sine fits i16")
-}
-
-fn cosine_q12(angle: u16) -> i16 {
-    sine_q12(angle.wrapping_add(0x400) & 0x0fff)
-}
-
-fn quarter_sine_q12(index: u16) -> i16 {
-    let x = (HALF_PI_Q48 * i128::from(index) + 512) / 1024;
-    let x_squared = q48_multiply(x, x);
-    let mut term = x;
-    let mut sum = x;
-    let mut subtract = true;
-    for term_index in 1_i128..=8 {
-        let divisor = (term_index * 2) * (term_index * 2 + 1);
-        term = q48_multiply(term, x_squared) / divisor;
-        if subtract {
-            sum -= term;
-        } else {
-            sum += term;
-        }
-        subtract = !subtract;
-    }
-    i16::try_from((sum * 4096 + TRIG_HALF) >> TRIG_Q).expect("quarter-wave Q12 sine fits i16")
-}
-
-fn q48_multiply(left: i128, right: i128) -> i128 {
-    (left * right + TRIG_HALF) >> TRIG_Q
-}
-
 fn rgba(r: u8, g: u8, b: u8) -> Rgba8 {
     Rgba8 {
         r,
@@ -595,6 +742,7 @@ fn clamp_i64_to_i32(value: i64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sprite::{RetailSpriteTransform, RetailSpriteVectors};
     use crust_formats::binary::Eid;
     use crust_formats::stream::{
         ObjectGeometryHeader, ObjectVertexKind, parse_object_frame, parse_object_geometry,
@@ -694,6 +842,53 @@ mod tests {
     }
 
     #[test]
+    fn screen_2d_cvtx_projects_through_the_shared_sprite_matrix() {
+        let model = model(ObjectVertexKind::Colored, 0x1060_4020, false, true);
+        let sprite = RetailSpriteTransform::screen_2d(
+            RetailSpriteVectors {
+                translation: [0, 0, 0],
+                rotation_yxz: [0, 0, 0],
+                scale: [0x1000; 3],
+            },
+            0,
+            500,
+        )
+        .unwrap();
+        let result = project_object_model(
+            &model,
+            ObjectProjectionTransform {
+                matrix: sprite.matrix,
+                translation: sprite.translation,
+            },
+            parameters(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(result.skipped_saturated, 0);
+        assert_eq!(result.polygons.len(), 1);
+        assert_eq!(
+            result.polygons[0].vertices.map(|vertex| vertex.position),
+            [
+                ScreenPoint {
+                    x: -112,
+                    y: 70,
+                    z: 500,
+                },
+                ScreenPoint {
+                    x: 112,
+                    y: 70,
+                    z: 500,
+                },
+                ScreenPoint {
+                    x: 0,
+                    y: -70,
+                    z: 500,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn flat_svtx_projection_matches_fixed_golden() {
         let model = model(ObjectVertexKind::Lit, 0x0060_4020, false, true);
         let result = project_object_model(&model, transform(1000), parameters(), None).unwrap();
@@ -784,6 +979,170 @@ mod tests {
         assert_eq!(
             polygon.vertices.map(|vertex| vertex.color),
             [rgba(100, 176, 49), rgba(90, 186, 69), rgba(95, 181, 59)]
+        );
+    }
+
+    #[test]
+    fn mode_two_brightens_both_halves_and_rejects_at_exact_far_boundary() {
+        let mut zone = [0_u16; 24];
+        zone[0] = 100;
+        zone[11] = 0x7ff0;
+        zone[12] = 4_000;
+        zone[23] = 0x1000;
+        let visible =
+            apply_object_zone_shader(2, ObjectVertexKind::Lit, [9; 24], zone, 1_010, 1_000, None)
+                .unwrap()
+                .unwrap();
+        assert_eq!(visible.colors[0], 180);
+        assert_eq!(visible.colors[11], 0x7fff);
+        assert_eq!(visible.colors[12], 4_080);
+        assert_eq!(visible.colors[23], 0x1000);
+        assert_eq!(visible.colored_shift, 0);
+
+        assert!(
+            apply_object_zone_shader(
+                2,
+                ObjectVertexKind::Colored,
+                [0; 24],
+                zone,
+                5_095,
+                1_000,
+                None,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            apply_object_zone_shader(
+                2,
+                ObjectVertexKind::Colored,
+                [0; 24],
+                zone,
+                5_096,
+                1_000,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn mode_three_splits_svtx_fade_from_cvtx_shift_and_far_rejection() {
+        let zone = [30_000_u16; 24];
+        let lit = apply_object_zone_shader(
+            3,
+            ObjectVertexKind::Lit,
+            [7; 24],
+            zone,
+            113_000,
+            1_000,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(lit.colors, [2_000; 24]);
+        assert_eq!(lit.colored_shift, 0);
+        assert!(
+            apply_object_zone_shader(
+                3,
+                ObjectVertexKind::Lit,
+                [0; 24],
+                zone,
+                113_000,
+                1_000,
+                None,
+            )
+            .unwrap()
+            .is_some()
+        );
+        assert_eq!(
+            apply_object_zone_shader(
+                3,
+                ObjectVertexKind::Lit,
+                [0; 24],
+                zone,
+                113_004,
+                1_000,
+                None,
+            )
+            .unwrap(),
+            None
+        );
+
+        for (depth, expected) in [(1_199, 0), (1_200, 1), (2_600, 8), (i32::MAX, 8)] {
+            let colored = apply_object_zone_shader(
+                3,
+                ObjectVertexKind::Colored,
+                [7; 24],
+                zone,
+                depth,
+                1_000,
+                None,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(colored.colors, [7; 24]);
+            assert_eq!(colored.colored_shift, expected);
+        }
+    }
+
+    #[test]
+    fn mode_four_requires_live_input_and_matches_fixed_dark_light_golden() {
+        assert_eq!(
+            apply_object_zone_shader(4, ObjectVertexKind::Lit, [0; 24], [0; 24], 0, 0, None,),
+            Err(ObjectZoneShaderError::MissingDarkInput)
+        );
+
+        let mut original = [0_u16; 24];
+        for (index, word) in original[12..].iter_mut().enumerate() {
+            *word = u16::try_from(index + 1).unwrap();
+        }
+        let shaded = apply_object_zone_shader(
+            4,
+            ObjectVertexKind::Lit,
+            original,
+            [0; 24],
+            0,
+            0,
+            Some(ObjectDarkShaderInput {
+                reference_translation: [0, 0, 0],
+                object_translation: [0, 0, 600 << 8],
+                dark_distance: 2_000,
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        // Retail's normalized table sqrt returns 999 for 1_000_000, making
+        // this component -384 rather than an ideal-float -383.
+        let negative_384 = wrapping_u16(-384);
+        assert_eq!(
+            &shaded.colors[..9],
+            &[0, 0, negative_384, 0, 0, negative_384, 0, 0, negative_384]
+        );
+        assert_eq!(&shaded.colors[9..12], &[12; 3]);
+        assert_eq!(&shaded.colors[12..], &original[12..]);
+    }
+
+    #[test]
+    fn mode_four_rejects_malformed_overflow_instead_of_reproducing_c_ub() {
+        let error = apply_object_zone_shader(
+            4,
+            ObjectVertexKind::Lit,
+            [0; 24],
+            [0; 24],
+            0,
+            0,
+            Some(ObjectDarkShaderInput {
+                reference_translation: [i32::MIN, 0, 0],
+                object_translation: [i32::MAX, 0, 0],
+                dark_distance: 1,
+            }),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            ObjectZoneShaderError::DarkArithmeticOutOfRange("initial x difference")
         );
     }
 

@@ -3,9 +3,12 @@
 mod catalog;
 mod gool;
 mod gool_animation;
+mod mdat;
+mod music;
 mod nsd;
 mod nsf;
 mod object;
+mod pbak;
 mod slst;
 pub mod structs;
 mod wgeo;
@@ -22,6 +25,12 @@ pub use gool_animation::{
     GoolTextureInfo, GoolVertexAnimation, parse_gool_animation_descriptor,
     parse_gool_animation_header,
 };
+pub use mdat::{MDAT_ENTRY_TYPE, TitleMdat, load_title_mdat, title_mdat_eid};
+pub use music::{
+    EID_NONE_RAW, INST_ENTRY_TYPE, InstrumentFragment, MIDI_ENTRY_TYPE, RetailMidiAsset, Sep,
+    SepEvent, SepEventKind, SepSequence, VabBank, VabProgram, VabTone, parse_instrument_entry,
+    parse_retail_midi,
+};
 pub use nsd::{LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, Nsd, NsdHeader, NsdKind, NsdPte, parse_nsd};
 pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,
@@ -32,6 +41,12 @@ pub use object::{
     ObjectGeometry, ObjectGeometryHeader, ObjectMaterial, ObjectModelFrame, ObjectPolygon,
     ObjectVertex, ObjectVertexKind, SVTX_ENTRY_TYPE, TGEO_ENTRY_TYPE, load_object_model_frame,
     parse_object_frame, parse_object_geometry,
+};
+pub use pbak::{
+    PBAK_ENTRY_TYPE, PBAK_EXTENDED_FRAMES_OFFSET, PBAK_EXTENDED_LEVEL_STATE_LEN,
+    PBAK_EXTENDED_SPAWN_WORD_COUNT, PBAK_FRAME_LEN, PBAK_FRAMES_OFFSET, PBAK_LEVEL_STATE_LEN,
+    PBAK_SPAWN_WORD_COUNT, PbakBound, PbakFrame, PbakHeader, PbakLayout, PbakLevelState,
+    load_pbak_entry, parse_pbak_header,
 };
 pub use slst::{PolygonId, SlstCursor, SlstDelta, SlstDirection, SlstItem};
 pub use wgeo::{WorldGeometry, WorldPolygon, WorldTexture, WorldVertex, parse_world_geometry};

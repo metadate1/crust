@@ -2056,8 +2056,8 @@ mod tests {
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
     use crust_sim::retail_runtime::{
-        NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
-        ZoneTerminationMode,
+        NsfProgramHost, RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome,
+        RetailRuntime, ZoneTerminationMode,
     };
     use crust_sim::zone_lifecycle::{
         OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
@@ -3794,5 +3794,267 @@ mod tests {
         assert!(emitted_mode_four_primitives > 0);
         // Fragment/2D-CVTX descriptors are corpus-covered by renderer tests;
         // an idle direct boot is not guaranteed to enter those object states.
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn n_sanity_authored_pause_panel_blinks_five_willt_fragment_quads() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+        const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let level = LevelId::N_SANITY_BEACH;
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let ldat = nsd.ldat().unwrap();
+        let current_entry =
+            typed_entry(&nsf, &nsd, ldat.spawn_zone, ZDAT_ENTRY_TYPE, "spawn ZDAT").unwrap();
+        let current_header = ZoneHeader::parse(
+            entry_item(current_entry, &nsf_bytes, 0, "spawn ZDAT header").unwrap(),
+        )
+        .unwrap();
+        let mut owned_neighbors = Vec::new();
+        for eid in current_header.neighbors {
+            let entry = typed_entry(&nsf, &nsd, eid, ZDAT_ENTRY_TYPE, "neighbor ZDAT").unwrap();
+            let header = ZoneHeader::parse(
+                entry_item(entry, &nsf_bytes, 0, "neighbor ZDAT header").unwrap(),
+            )
+            .unwrap();
+            let entities = (0..header.entity_count)
+                .map(|entity_index| {
+                    let item_index =
+                        usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+                    ZoneEntity::parse(
+                        entry_item(entry, &nsf_bytes, item_index, "neighbor ZDAT entity").unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            owned_neighbors.push((eid, header.display_flags | 3, entities));
+        }
+        let neighbors = owned_neighbors
+            .iter()
+            .map(|(eid, display_flags, entities)| NeighborZone {
+                eid: *eid,
+                display_flags: *display_flags,
+                entities,
+            })
+            .collect::<Vec<_>>();
+        let active_neighbor_zones = neighbors
+            .iter()
+            .filter(|neighbor| neighbor.display_flags & 2 != 0)
+            .map(|neighbor| neighbor.eid)
+            .collect::<Vec<_>>();
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, level);
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: camera.location(),
+            graphics_flags: graph
+                .zone(camera.location().path.zone)
+                .unwrap()
+                .graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones,
+        });
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        runtime
+            .create_retail_core_objects(camera.location().path.zone, &mut host)
+            .unwrap();
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        assert!(attempts.iter().any(|attempt| attempt.result.is_ok()));
+
+        for _ in 0..12 {
+            let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+            runtime.set_level_state_context(RetailLevelStateContext {
+                location: step.after,
+                graphics_flags: graph.zone(step.after.path.zone).unwrap().graphics_flags,
+                box_count: 0,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+                first_spawn: false,
+                active_neighbor_zones: neighbors
+                    .iter()
+                    .filter(|neighbor| neighbor.display_flags & 2 != 0)
+                    .map(|neighbor| neighbor.eid)
+                    .collect(),
+            });
+            runtime
+                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                .unwrap();
+        }
+        let pause = runtime
+            .update_retail_pause(true, camera.location().path.zone, &mut host)
+            .unwrap();
+        let RetailPauseUpdate::Paused { controller } = pause else {
+            panic!("START did not create the authored pause controller: {pause:?}");
+        };
+        let controller_vm = runtime.machine().object(controller.vm()).unwrap();
+        assert_eq!(controller_vm.state(), 6);
+        assert_eq!(
+            controller_vm
+                .program_identity()
+                .unwrap()
+                .global_eid()
+                .name()
+                .as_deref(),
+            Some("DispC")
+        );
+
+        let mut builder = RetailSceneBuilder::new();
+        let frozen_draw_count = runtime.draw_count();
+        for paused_frame in 0..=30_u32 {
+            let frame = runtime
+                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                .unwrap();
+            assert!(
+                frame
+                    .executions
+                    .iter()
+                    .all(|execution| execution.result.is_ok())
+            );
+            assert_eq!(runtime.draw_count(), frozen_draw_count);
+            let objects = runtime.render_objects().unwrap();
+            let object = objects
+                .iter()
+                .find(|object| object.object == controller)
+                .expect("pause controller remains live throughout the blink cycle");
+            let expected_visible = paused_frame < 15 || paused_frame == 30;
+            assert_eq!(object.display_eligible, expected_visible);
+            assert_eq!(
+                object.status_b,
+                if expected_visible { 0x40200 } else { 0x40300 }
+            );
+            let reference = object
+                .animation_reference
+                .expect("pause controller selected its authored fragment animation");
+            assert_eq!(reference.offset(), 136);
+
+            if paused_frame == 0 {
+                let program = object.program.unwrap();
+                let global =
+                    typed_entry(&nsf, &nsd, program.global_eid(), 11, "pause GOOL program")
+                        .unwrap();
+                let animations =
+                    entry_item(global, &nsf_bytes, 5, "pause GOOL animations").unwrap();
+                let descriptor = parse_gool_animation_descriptor(
+                    animations,
+                    usize::try_from(reference.offset()).unwrap(),
+                )
+                .unwrap();
+                let GoolAnimationDescriptor::Fragment(fragment) = descriptor else {
+                    panic!("pause panel must be a type-five fragment animation");
+                };
+                assert_eq!(fragment.texture_page.name().as_deref(), Some("WillT"));
+                assert_eq!(fragment.header.length, 3);
+                assert_eq!(fragment.fragments_per_frame, 5);
+                assert_eq!(fragment.fragments.len(), 15);
+            }
+
+            if !matches!(paused_frame, 0 | 14 | 15 | 29 | 30) {
+                continue;
+            }
+            let main_object = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena));
+            let scene = builder
+                .build_at_progress_with_objects(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    RetailSceneProgressLocation {
+                        zone: camera.location().path.zone,
+                        path_index: camera.location().path.index,
+                        path_progress: camera.location().progress.raw(),
+                        draw_count: runtime.draw_count(),
+                    },
+                    &objects,
+                    main_object,
+                )
+                .unwrap_or_else(|error| panic!("pause frame {paused_frame}: {error}"));
+            assert_eq!(scene.stats.skipped_object_animations, 0);
+            assert_eq!(scene.stats.skipped_object_textured_polygons, 0);
+            let commands = scene
+                .commands
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command.source,
+                        CommandSource::Object { handle, .. }
+                            if handle == u32::from(controller.vm().get())
+                    ) && matches!(command.primitive, PrimitiveCommand::TexturedQuad(_))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(commands.len(), usize::from(expected_visible) * 5);
+            if !expected_visible {
+                continue;
+            }
+
+            assert!(commands.iter().all(|command| command.depth == 0x07ff));
+            let parts = commands
+                .iter()
+                .map(|command| match command.source {
+                    CommandSource::Object { part, .. } => part,
+                    _ => unreachable!(),
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(parts, BTreeSet::from([0, 1, 2, 3, 4]));
+            if paused_frame == 0 {
+                let mut xs = Vec::with_capacity(20);
+                let mut ys = Vec::with_capacity(20);
+                for command in &commands {
+                    let PrimitiveCommand::TexturedQuad(quad) = &command.primitive else {
+                        unreachable!();
+                    };
+                    for vertex in &quad.vertices {
+                        xs.push(vertex.position.x);
+                        ys.push(vertex.position.y);
+                    }
+                }
+                assert_eq!(xs.iter().copied().min(), Some(-75));
+                assert_eq!(xs.iter().copied().max(), Some(84));
+                assert_eq!(ys.iter().copied().min(), Some(43));
+                assert_eq!(ys.iter().copied().max(), Some(93));
+
+                let mut texture_handles = Vec::with_capacity(5);
+                for command in &commands {
+                    let PrimitiveCommand::TexturedQuad(quad) = &command.primitive else {
+                        unreachable!();
+                    };
+                    if !texture_handles.contains(&quad.texture) {
+                        texture_handles.push(quad.texture);
+                    }
+                }
+                assert_eq!(texture_handles.len(), 5);
+                for handle in texture_handles {
+                    let texture = scene
+                        .textures
+                        .iter()
+                        .find(|texture| texture.handle == handle)
+                        .expect("each pause quad has a decoded scene texture");
+                    assert!(
+                        texture
+                            .pixels
+                            .rgba()
+                            .chunks_exact(4)
+                            .any(|pixel| pixel[3] != 0),
+                        "each decoded pause fragment contains visible pixels"
+                    );
+                }
+            }
+        }
     }
 }

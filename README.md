@@ -109,8 +109,10 @@ prior Crash pad snapshot, creates executable-four/subtype-four beneath root seve
 tagged pause reference, and resumes through event `0xC00` with the saved GOOL clock restored.
 Paused frames continue spawn, object traversal, display latching, scene presentation and audio;
 ordinary GOOL, camera/shader motion and draw-count advancement remain frozen while the exact
-subtype-four/seven menu override executes. The captured browser pause panel still lacks readable
-authored `WillT` glyphs, so pause-menu text presentation remains incomplete.
+subtype-four/seven menu override executes. The authored pause panel is a type-five `WillT`
+fragment animation, not font text: its five pieces render as `PAUSED / PUSH SELECT FOR MAP` and
+follow the retail 15-frame visible/15-frame hidden blink cycle. A legally local renderer regression
+and an on-cycle WebGL browser capture cover that path.
 Bounds-checked type-19 PBAK parsing and browser playback restore the recorded camera/player
 snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
 (10,966 Crash pad boundaries) pass complete live runtime/render traces, including same-level death

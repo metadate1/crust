@@ -102,8 +102,10 @@ CVTX shifts into that projection and can reject objects at their authored depth 
 is also live: renderer-BSS darkness state survives stream remounts, the player (or a checked live
 pause object) is sampled at each object's post-update/pre-child display boundary, and the builder
 passes that translation plus the pre-camera `dark_dist` value to the fixed-point evaluator. The
-browser pause path does not yet materialize the native root-seven subtype-four controller, and the
-derived light matrix/color remain render-owned rather than being written back to VM object colors.
+browser pause path materializes the native root-seven subtype-four controller, preserves its
+paused-only update override and blink timing, and submits its five authored `WillT` fragment
+quads. The derived light matrix/color remain render-owned rather than being written back to VM
+object colors.
 For zones with graphics flag `0x1000`, a fixed Q24.8 camera with the 128-frame triangular Y bob and
 fixed pitch is substituted only for object projection; the ordinary world camera is unchanged.
 

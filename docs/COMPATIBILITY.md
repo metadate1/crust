@@ -221,10 +221,12 @@ gameplay path.
   now creates the native executable-four/subtype-four root-seven controller, publishes the tagged
   pause reference, freezes ordinary GOOL/camera/shader/draw-count work, and resumes through the
   source `0xC00` clock-rewind/cleanup handshake while spawn, scene presentation, display latching
-  and audio continue. The captured N. Sanity pause panel did not show readable authored `WillT`
-  glyphs, so pause-menu text remains a presentation gap. Mode four's derived light matrix and
-  ambient color are not yet written back into mutable GOOL object colors, so subsequent GOOL color
-  reads can differ.
+  and audio continue. The N. Sanity pause panel is the authored type-five `WillT` fragment
+  animation rather than type-four font text. Its five pieces render as
+  `PAUSED / PUSH SELECT FOR MAP`, at the retail far ordering depth, with the authored 15-frame
+  visible/15-frame hidden blink. This is covered by a legally local scene regression and an
+  on-cycle WebGL browser capture. Mode four's derived light matrix and ambient color are not yet
+  written back into mutable GOOL object colors, so subsequent GOOL color reads can differ.
   Rendering snapshots
   the complete arena after GOOL, while the source interleaves each object's simulation and drawing
   during preorder traversal. The current builder avoids reparsing an unchanged active graph,

@@ -353,7 +353,10 @@ The final checks below were run against this change set on 2026-07-14:
   draw count, `0xC00` resume clock rewind and synthetic controller/audio cleanup, checked-fault
   diagnostics, nonfatal controller-create failure, and screen-load reset ordering. The end-to-end
   START pause/resume path and visible authored controller panel were exercised in the browser below;
-  exact prior-pad latency and per-object paused execution are not claimed by that UI check.
+  exact prior-pad latency and per-object paused execution are not claimed by that UI check. A
+  legally local scene regression additionally proves that `DispC` state six selects the type-five
+  `WillT` descriptor at byte offset 136, emits five far-depth fragment quads with no skips for the
+  first 15 paused frames, hides them for the next 15, and repeats.
 - locked optimized native and `wasm32-unknown-unknown` workspace builds passed, as did the generated
   web release. The Wasm payload is 1,226,585 bytes with SHA-256
   `4bff814ee6569be65824ccf0ff875cac6bc264d22ca62c1d226c36d985549a75`.
@@ -368,13 +371,15 @@ The final checks below were run against this change set on 2026-07-14:
   Direct N. Sanity boot rendered live world/object geometry at 30 Hz with synthesized audio active.
   Touch START and keyboard Enter both opened and resumed the native pause controller, with telemetry
   changing `RUNNING → PAUSED → RUNNING`; paused scene presentation continued and resume restored the
-  world frame. The captured pause panel did not show readable `WillT` menu glyphs, which remains a
-  measured presentation gap. No new console warning/error appeared after the successful same-origin
-  mount and gameplay checks; the tab retained one earlier failed cross-origin bridge probe in its
-  historical log, before the successful route was used. The clean final artifact was then rebuilt
-  after the temporary route and follow-up pause field/error corrections; its served hash matches the
-  hash above, the removed route returns HTTP 404, and the already-loaded gameplay tab was deliberately
-  not reloaded so its in-memory local BIN selection remained visible.
+  world frame. A follow-up on-cycle capture showed the decoded `WillT` fragment panel clearly as
+  `PAUSED / PUSH SELECT FOR MAP`; the earlier unreadable capture had landed in its authored
+  15-frame hidden half-cycle. The visible-phase check reported no browser warnings or errors. No new
+  console warning/error appeared after the successful same-origin mount and gameplay checks; the tab
+  retained one earlier failed cross-origin bridge probe in its historical log, before the successful
+  route was used. The clean final artifact was then rebuilt after the temporary route and follow-up
+  pause field/error corrections; its served hash matches the hash above, the removed route returns
+  HTTP 404, and the already-loaded gameplay tab was deliberately not reloaded so its in-memory local
+  BIN selection remained visible.
 
 ## Reproducible commands
 
@@ -415,6 +420,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   n_sanity_gool_objects_project_through_the_pair_scoped_scene -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  n_sanity_authored_pause_panel_blinks_five_willt_fragment_quads -- --ignored --nocapture
 C1_DISC_IMAGE=/path/to/disc.bin \
   cargo test -p crust-web --lib --locked \
   builds_every_fractional_spawn_snapshot_directly_from_raw_disc -- --ignored --nocapture

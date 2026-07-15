@@ -137,6 +137,13 @@ whole first completion loop. N. Sanity emits `Transition(0x2d)` at frame 1,906, 
 host-owned MDAT boundary intact. Both outgoing `LEVEL_END` broadcasts complete without a checked
 handler failure. This is a deterministic simulation integration test, not a claim that a complete
 browser playthrough or later retail progression is certified.
+The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
+CrabC defeat, four ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
+checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
+restart. The checkpoint snapshot contains `0x400` before the handler's later live increment to
+`0x500`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,156; the next trace
+sample observes zero at frame 1,157, and the respawned checkpoint recounts to `0x100` at frame
+1,158. This is a focused deterministic route, not broad checkpoint/death certification.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
@@ -238,7 +245,8 @@ execution slice supplies the live follow camera and camera-selected WebGL scene 
 through the engineering log/debug counters. Its 3D vertex-object slice is now rendered with the
 camera-selected world; Crash accepts retail pad input and has a clean characterized route from
 `e0_9Z` through `a0_9Z`–`b7_9Z` to the authored Level Complete transition. Save/checkpoint behavior
-is not yet broadly playthrough-certified, and a
+now includes the focused N. Sanity enemy/crate/checkpoint/death/restart regression described above,
+but is not yet broadly playthrough-certified, and a
 same-level load nested inside `LEVEL_END` remains a checked resumable-host boundary. A legally
 local scan of all 44 retail pairs found zero authored occurrences of that nested case.
 

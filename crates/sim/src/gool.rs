@@ -84,6 +84,7 @@ pub const TICKS_CURRENT_FRAME_GLOBAL: usize = 43;
 pub const LEVEL_COUNT_GLOBAL: usize = 46;
 pub const LEVELS_UNLOCKED_GLOBAL: usize = 47;
 pub const DRAW_COUNT_GLOBAL: usize = 79;
+const CHECKPOINT_ID_GLOBAL: usize = 69;
 pub const CARD_FLAGS_GLOBAL: usize = 59;
 pub const CARD_PART_COUNT_GLOBAL: usize = 61;
 pub const CARD_PARTINFOS_GLOBAL: usize = 82;
@@ -4516,6 +4517,7 @@ impl Machine {
             (MUSIC_VOLUME_GLOBAL, 255),
             (LEVEL_COUNT_GLOBAL, 1),
             (LEVELS_UNLOCKED_GLOBAL, 1),
+            (CHECKPOINT_ID_GLOBAL, u32::MAX),
         ] {
             if let Some(global) = self.globals.get_mut(index) {
                 *global = value;
@@ -11473,6 +11475,7 @@ mod tests {
         assert_eq!(machine.global_word(TICKS_CURRENT_FRAME_GLOBAL), Ok(33));
         assert_eq!(machine.global_word(DRAW_COUNT_GLOBAL), Ok(19));
         assert_eq!(machine.global_word(GAME_STATE_GLOBAL), Ok(0x500));
+        assert_eq!(machine.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
         assert_eq!(machine.global_word(CAMERA_ROTATION_GLOBAL), Ok(0x234));
         assert_eq!(
             [0_usize, 1, 2].map(|axis| machine

@@ -374,8 +374,16 @@ gameplay path.
   boot death/restart deterministic. Normal parent-to-bonus session mounts retain the parent
   snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
   host return destination, so this is not evidence of a complete bonus round trip.
-  Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
-  open. A legally local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
+  The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
+  is defeated, BoxsC entity 12 and the next three counted boxes break, checkpoint entity 19 saves
+  the source-ordered pre-increment count `0x400` before the live count reaches `0x500`, and TurtC
+  entity 39 drives the authored death camera and same-level checkpoint restart. Fresh runtime
+  initialization also publishes native checkpoint sentinel `-1` directly to VM global 69.
+  A paired trace still observes CrabC's authored `0x300` contact event earlier in Rust than in the
+  instrumented C run. The opcode, gate, and pre-interpreter collision order match source; aligning
+  the first animation-frame AABB/trajectory difference remains open. Broader collision and later
+  Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain open. A legally
+  local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
   credits children, reaches at least 64 authored credits-child spawns, reuses arena generations,
   peaks at 82 live objects, and reports no VM fault; this replaces the broken 97-slot saturation at
   frame 1,437 but does not complete or certify the ending. Hog Wild's previously

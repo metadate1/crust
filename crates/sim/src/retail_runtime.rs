@@ -1357,15 +1357,18 @@ pub enum RetailTraversalBoundary {
     },
 }
 
-/// External level words sampled at the same point as native `LevelSaveState`.
+/// Pointer-free host mirrors used around native level save and restart calls.
 ///
 /// Pointer-bearing C globals are replaced by a validated camera location and
 /// an ordered list of active neighbor EIDs. The browser refreshes this value
-/// after every `LevelUpdate`, before GOOL can execute misc 12/0 or 12/1.
+/// after every `LevelUpdate`; synchronous scalar GOOL globals remain
+/// authoritative when a save or restart happens before that refresh.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RetailLevelStateContext {
     pub location: RetailCameraLocation,
     pub graphics_flags: u32,
+    /// Host-side mirror used by restart bookkeeping. `LevelSaveState` samples
+    /// the live VM global instead because GOOL can change it synchronously.
     pub box_count: i32,
     /// Native `checkpoint_id`, including its eight fractional/tag bits. `-1`
     /// means no checkpoint; zero deliberately remains distinct.
@@ -3915,7 +3918,15 @@ impl RetailRuntime {
             level,
             death_resets_counter,
             spawn_words: arena.spawn_table().snapshot(),
-            box_count: context.box_count,
+            // Native LevelSaveState samples the process-global word at this
+            // exact synchronous boundary. The calling GOOL handler can mutate
+            // that word on either side of the call, while the host's
+            // pointer-free camera/lifecycle mirror is refreshed only between
+            // cooperative frames.
+            box_count: machine
+                .global_word(BOX_COUNT_GLOBAL)
+                .map_err(RetailLevelStateError::Vm)?
+                .cast_signed(),
         };
         Ok(RetailSaveStateOutcome::Saved(Box::new(snapshot)))
     }
@@ -17300,7 +17311,7 @@ mod tests {
     #[test]
     fn level_save_captures_native_fields_and_translation_overrides() {
         let level = LevelId::new(0x03).unwrap();
-        let mut runtime = RetailRuntime::new_for_level(CURRENT_DISPLAY_GLOBAL + 1, level);
+        let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, level);
         let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
         let caller = spawn_test_object(&mut runtime, ZONE, 6, 2, 0);
         for (register, value) in [
@@ -17339,6 +17350,7 @@ mod tests {
         }
         runtime.arena.spawn_table_mut().set_flags(42, 0xa5).unwrap();
         runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime.set_global_word(BOX_COUNT_GLOBAL, 0x900).unwrap();
 
         let RetailSaveStateOutcome::Saved(caller_save) =
             runtime.save_level_state(caller, false).unwrap()
@@ -17374,9 +17386,34 @@ mod tests {
     }
 
     #[test]
+    fn level_save_reads_live_box_count_instead_of_stale_host_context() {
+        let level = LevelId::new(0x09).unwrap();
+        let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, level);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let caller = spawn_test_object(&mut runtime, ZONE, 6, 22, 0);
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.box_count = 0x400;
+        runtime.set_level_state_context(context);
+
+        // LevelSaveState reads the process global directly. A host mirror may
+        // legitimately still contain the previous cooperative-frame value at
+        // this synchronous boundary.
+        runtime.set_global_word(BOX_COUNT_GLOBAL, 0x500).unwrap();
+        let RetailSaveStateOutcome::Saved(snapshot) =
+            runtime.save_level_state(caller, true).unwrap()
+        else {
+            panic!("unrestricted checkpoint zone must save");
+        };
+
+        assert_eq!(snapshot.box_count, 0x500);
+        assert_eq!(runtime.level_state_context().unwrap().box_count, 0x400);
+        assert_eq!(runtime.arena().main_object(), Some(main.arena));
+    }
+
+    #[test]
     fn misc_save_and_load_are_synchronous_and_abort_the_remainder_of_the_frame() {
         let level = LevelId::new(0x03).unwrap();
-        let mut runtime = RetailRuntime::new_for_level(CURRENT_DISPLAY_GLOBAL + 1, level);
+        let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, level);
         let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
         let child = attach_test_child(&mut runtime, main, ZONE, 2);
 

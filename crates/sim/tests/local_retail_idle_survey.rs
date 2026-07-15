@@ -53,6 +53,9 @@ use crust_sim::{
 
 const GLOBAL_WORDS: usize = 256;
 const DOCTOR_OBJECT_GLOBAL: usize = 16;
+const LIFE_COUNT_GLOBAL: usize = 24;
+const HEALTH_GLOBAL: usize = 25;
+const FRUIT_COUNT_GLOBAL: usize = 26;
 const BOX_COUNT_GLOBAL: usize = 62;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
@@ -87,6 +90,7 @@ enum SurveyInputProfile {
     DirectionAndButtonSweep,
     DirectionAndButtonSweepToTransition,
     ForwardWithActions,
+    ForwardThroughCheckpointThenA8Hit,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,6 +106,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweep => "direction-and-button-sweep",
             Self::DirectionAndButtonSweepToTransition => "direction-and-button-sweep-to-transition",
             Self::ForwardWithActions => "forward-with-actions",
+            Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
         }
     }
 
@@ -725,12 +730,21 @@ impl SurveyInputController {
         frame: u32,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
+        checkpoint_id: i32,
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
             SurveyInputProfile::DirectionAndButtonSweep
             | SurveyInputProfile::DirectionAndButtonSweepToTransition => active_survey_held(frame),
             SurveyInputProfile::ForwardWithActions => self.n_sanity.held(camera, player),
+            SurveyInputProfile::ForwardThroughCheckpointThenA8Hit => {
+                let a8 = Eid::from_name("a8_9Z").expect("fixed N. Sanity route EID is valid");
+                if checkpoint_id > 0 && camera.path.zone == a8 {
+                    PAD_UP
+                } else {
+                    self.n_sanity.held(camera, player)
+                }
+            }
         }
     }
 }
@@ -789,6 +803,7 @@ struct LevelSurvey {
     terminal: Option<String>,
     zone_transitions: u64,
     restarts: u64,
+    restart_frames: Vec<u32>,
     save_handshakes: u64,
     spawn_attempts: u64,
     successful_spawns: u64,
@@ -824,6 +839,10 @@ struct LevelSurvey {
     first_below_zero: Option<(u32, PlayerTrace)>,
     first_terminal_fall: Option<(u32, PlayerTrace)>,
     progression_samples: Vec<String>,
+    box_count_samples: Vec<(u32, i32)>,
+    checkpoint_samples: Vec<(u32, i32, [i32; 3])>,
+    saved_box_count_samples: Vec<(u32, i32)>,
+    spawn_flag_samples: Vec<(u32, u16, u32)>,
     next_lid: Option<(u32, i32)>,
 }
 
@@ -837,6 +856,7 @@ impl LevelSurvey {
             terminal: None,
             zone_transitions: 0,
             restarts: 0,
+            restart_frames: Vec::new(),
             save_handshakes: 0,
             spawn_attempts: 0,
             successful_spawns: 0,
@@ -872,6 +892,10 @@ impl LevelSurvey {
             first_below_zero: None,
             first_terminal_fall: None,
             progression_samples: Vec::new(),
+            box_count_samples: Vec::new(),
+            checkpoint_samples: Vec::new(),
+            saved_box_count_samples: Vec::new(),
+            spawn_flag_samples: Vec::new(),
             next_lid: None,
         }
     }
@@ -989,7 +1013,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -1005,7 +1029,7 @@ impl LevelSurvey {
             self.executions,
             self.execution_errors,
             self.zone_transitions,
-            self.restarts,
+            self.restart_frames,
             self.save_handshakes,
             self.next_lid,
             self.initial_camera,
@@ -1027,6 +1051,10 @@ impl LevelSurvey {
             self.first_below_zero,
             self.first_terminal_fall,
             self.progression_samples,
+            self.box_count_samples,
+            self.checkpoint_samples,
+            self.saved_box_count_samples,
+            self.spawn_flag_samples,
             self.effect_counts,
             self.first_effect_samples,
             self.issue_counts,
@@ -1560,6 +1588,7 @@ fn apply_restart(
     *camera = camera_preview;
     refresh_level_context(runtime, graph, lifecycle, report.snapshot.location)?;
     survey.restarts += 1;
+    survey.restart_frames.push(frame);
     Ok(None)
 }
 
@@ -1687,10 +1716,22 @@ fn survey_pair_with_runtime(
     let mut held_previous = 0_u32;
     let mut held_previous_2 = 0_u32;
     let mut tapped_previous = 0_u32;
+    let mut last_interaction_globals = None;
+    let mut previous_box_count = None;
+    let mut previous_checkpoint = None;
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);
-        let held = input_controller.held(frame, camera.location(), player_trace(&runtime)?);
+        let checkpoint_id_before_frame = runtime
+            .global_word(CHECKPOINT_ID_GLOBAL)
+            .map(u32::cast_signed)
+            .map_err(|error| format!("checkpoint input global: {error:?}"))?;
+        let held = input_controller.held(
+            frame,
+            camera.location(),
+            player_trace(&runtime)?,
+            checkpoint_id_before_frame,
+        );
         let tapped = held & !held_previous;
         runtime
             .set_pad_snapshot(
@@ -1792,6 +1833,75 @@ fn survey_pair_with_runtime(
             survey.record_effect(frame, effect);
             if let VmEffect::Transition(next_lid) = effect {
                 survey.next_lid.get_or_insert((frame, *next_lid));
+            }
+            if let VmEffect::SaveState(_) = effect
+                && let Some(snapshot) = runtime.saved_level_state()
+            {
+                survey
+                    .saved_box_count_samples
+                    .push((frame, snapshot.box_count));
+            }
+            if let VmEffect::SpawnFlagsChanged { id, flags, .. } = effect {
+                survey.spawn_flag_samples.push((frame, *id, *flags));
+            }
+        }
+        let box_count = runtime
+            .global_word(BOX_COUNT_GLOBAL)
+            .map(u32::cast_signed)
+            .map_err(|error| format!("box-count trace global: {error:?}"))?;
+        if previous_box_count != Some(box_count) {
+            survey.box_count_samples.push((frame, box_count));
+            previous_box_count = Some(box_count);
+        }
+        let checkpoint_id = runtime
+            .global_word(CHECKPOINT_ID_GLOBAL)
+            .map(u32::cast_signed)
+            .map_err(|error| format!("checkpoint trace global: {error:?}"))?;
+        let checkpoint_translation = [
+            runtime
+                .global_word(CHECKPOINT_TRANSLATION_GLOBALS[0])
+                .map(u32::cast_signed)
+                .map_err(|error| format!("checkpoint-X trace global: {error:?}"))?,
+            runtime
+                .global_word(CHECKPOINT_TRANSLATION_GLOBALS[1])
+                .map(u32::cast_signed)
+                .map_err(|error| format!("checkpoint-Y trace global: {error:?}"))?,
+            runtime
+                .global_word(CHECKPOINT_TRANSLATION_GLOBALS[2])
+                .map(u32::cast_signed)
+                .map_err(|error| format!("checkpoint-Z trace global: {error:?}"))?,
+        ];
+        let checkpoint = (checkpoint_id, checkpoint_translation);
+        if previous_checkpoint != Some(checkpoint) {
+            survey
+                .checkpoint_samples
+                .push((frame, checkpoint_id, checkpoint_translation));
+            previous_checkpoint = Some(checkpoint);
+        }
+        if std::env::var_os("C1_INTERACTION_TRACE").is_some()
+            && matches!(input_profile, SurveyInputProfile::ForwardWithActions)
+        {
+            let read_global = |index| {
+                runtime
+                    .global_word(index)
+                    .map(u32::cast_signed)
+                    .map_err(|error| format!("interaction global {index}: {error:?}"))
+            };
+            let interaction_globals = [
+                read_global(LIFE_COUNT_GLOBAL)?,
+                read_global(HEALTH_GLOBAL)?,
+                read_global(FRUIT_COUNT_GLOBAL)?,
+                read_global(BOX_COUNT_GLOBAL)?,
+                read_global(CHECKPOINT_ID_GLOBAL)?,
+            ];
+            if last_interaction_globals != Some(interaction_globals) {
+                eprintln!(
+                    "interaction f{frame} held={held:#06x} lives/health/fruit/boxes/checkpoint={interaction_globals:?} camera={:?} player={:?} effects={:?}",
+                    camera.location(),
+                    player_trace(&runtime)?,
+                    report.effects,
+                );
+                last_interaction_globals = Some(interaction_globals);
             }
         }
         drain_reclaim_diagnostics(&mut runtime, &mut survey, frame);
@@ -2323,6 +2433,43 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         survey.summary()
     );
     if frames >= 900 {
+        assert!(
+            survey.box_count_samples.starts_with(&[
+                (1, 0),
+                (337, 0x100),
+                (527, 0x200),
+                (768, 0x300),
+                (793, 0x400),
+                (867, 0x500),
+            ]),
+            "the authored route must break the first five counted boxes at their native frame boundaries: {}",
+            survey.summary()
+        );
+        assert_eq!(
+            survey.checkpoint_samples,
+            [
+                (1, -1, [0, 0, 0]),
+                (867, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+            ],
+            "entity 19 must capture the first retail checkpoint: {}",
+            survey.summary()
+        );
+        assert!(
+            survey.spawn_flag_samples.contains(&(315, 14, 3)),
+            "the first CrabC defeat must publish entity 14's native spawn flags: {}",
+            survey.summary()
+        );
+        assert!(
+            survey.spawn_flag_samples.contains(&(337, 12, 3)),
+            "the first BoxsC break must publish entity 12's native spawn flags: {}",
+            survey.summary()
+        );
+        assert_eq!(
+            survey.saved_box_count_samples,
+            [(867, 0x400)],
+            "the checkpoint must save the live pre-increment box count at its synchronous source boundary: {}",
+            survey.summary()
+        );
         for zone_name in [
             "a1_9Z", "a2_9Z", "a3_9Z", "a4_9Z", "a5_9Z", "a6_9Z", "a7_9Z",
         ] {
@@ -2389,6 +2536,73 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
     assert!(
         survey.is_clean(),
         "goal-directed progression reached a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_checkpoint_survives_an_authored_death_restart() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == LevelId::N_SANITY_BEACH)
+        .expect("the retail level catalog contains N. Sanity Beach");
+    let (nsd_bytes, nsf_bytes) = read_pair(&root, known.id).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let survey = survey_pair(
+        known.name,
+        known.id,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::ForwardThroughCheckpointThenA8Hit,
+        1_400,
+    )
+    .unwrap();
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (337, 0x100),
+            (527, 0x200),
+            (768, 0x300),
+            (793, 0x400),
+            (867, 0x500),
+            (1_157, 0),
+            (1_158, 0x100),
+        ],
+        "same-level restart must reproduce native LevelInitMisc box reset and checkpoint respawn accounting"
+    );
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (867, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+        ],
+        "the checkpoint identity and spawn translation must survive the death restart"
+    );
+    assert_eq!(survey.saved_box_count_samples, [(867, 0x400)]);
+    assert!(survey.spawn_flag_samples.contains(&(315, 14, 3)));
+    assert!(survey.spawn_flag_samples.contains(&(337, 12, 3)));
+    assert_eq!(survey.restart_frames, [1_156]);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("load-state"), Some(&1));
+    assert_eq!(survey.death_camera_frames, 117);
+    assert_eq!(survey.death_camera_pose_changes, 116);
+    assert_eq!(survey.death_camera_max_count, 9);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert!(
+        survey.is_clean(),
+        "checkpoint/death route reached a checked runtime boundary: {}",
         survey.summary()
     );
 }

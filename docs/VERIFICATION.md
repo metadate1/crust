@@ -676,12 +676,43 @@ served repository contains no helper route or game byte. A live mid-frame evicti
 keyboard, physical gamepad, touch, fullscreen, or persistence reload was not exercised in this
 pass. No game data entered Git, browser persistence, or the repository tree.
 
-For this change set, 832 locked default tests and the complete 70-test legally local opt-in sweep
+The legally local N. Sanity interaction regression additionally follows the retail-authored first
+CrabC and BoxsC contacts, then records box-count transitions at frames 337, 527, 768, 793, and 867.
+Its fresh VM checkpoint global begins at native `LevelResetGlobals(1)` sentinel `-1`, rather than
+relying on a host-side context to mask a zero-initialized process word.
+Checkpoint entity 19 saves `0x400` synchronously before its handler's later live increment to
+`0x500`, with checkpoint ID `0x1300` and translation
+`[1_945_600, 4_135_168, 24_165_632]`. Suppressing the route controller's jump in `a8_9Z` permits
+the authored TurtC collision: the death camera begins at frame 1,041, changes pose on 116 of its 117
+frames with native maximum count nine, and restart completes at frame 1,156. The frame-1,157 trace
+sample observes `LevelInitMisc(0)`'s reset to zero; checkpoint respawn recounts to `0x100` at frame
+1,158. The run emits one save and one load handshake, retains the checkpoint identity, and reports
+no VM error, fault,
+terminal fall, or level transition.
+
+The same comparison identified one deliberately unresolved boundary: Rust installs the first
+Crash/Crab collider early enough for CrabC's authored direct opcode `0x87` to send event `0x300`
+before the instrumented C run does. Its PC `0x3b` ground-contact gate, PC `0x3c` event instruction,
+argument `0x6400`, and C/Rust pre-interpreter collision ordering agree. No event suppression or
+entity special case was added; the next comparison must align animation-frame bounds and player
+trajectory by native `frames_elapsed` before changing collision logic.
+
+The rebuilt browser artifact was then mounted from the user's exact 632,083,536-byte raw BIN through
+a localhost-only one-shot response. The browser recognized 88 streams and all 44 pairs, displayed
+the retail Naughty Dog title composition, and separately direct-booted N. Sanity Beach. The retained
+tab reported `RUNNING`, 30.00 Hz, `SYNTH ACTIVE`, level `0x09`, 88 files, 44/44 pairs, and no captured
+console error while rendering the retail world, Crash, and crates. Both one-shot responses closed
+after their single read; a final distribution rebuild removed the temporary bootstrap/CSP changes,
+and no helper listener or proprietary byte remained in the repository or served artifact. Keyboard,
+physical gamepad, touch, fullscreen, persistence reload, and the newly characterized checkpoint
+death route were not repeated manually in this browser pass.
+
+For this change set, 833 locked default tests and the complete 71-test legally local opt-in sweep
 passed with zero failures. The separate clean-policy active-input survey covered all 43 selectable
 pairs for 360 frames. Formatting, warnings-denied native and Wasm Clippy, the optimized native
 workspace build, optimized Wasm build, and web distribution build also passed. The generated Wasm
-is 1,322,664 bytes with SHA-256
-`235f8a9bad1b16275c26aa0be315b4b43af12696cb32ddc820b943f44434c24c`; the generated loader is
+is 1,322,709 bytes with SHA-256
+`967937a4836da5fe5e1b7d43dfe4a860bcf2a43d74d53a6bbcc08a99dbbce37b`; the generated loader is
 46,236 bytes with SHA-256
 `a26ab5a1a47530af0d7ca7326da07e3dcdfb30c8dcd9dafd56523d93813f5abe`.
 
@@ -706,6 +737,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  n_sanity_checkpoint_survives_an_authored_death_restart -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture

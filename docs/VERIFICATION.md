@@ -907,6 +907,36 @@ is 1,322,866 bytes with SHA-256
   BIN because the browser automation surface cannot populate the native file picker; the earlier
   foreground Chrome raw-BIN/direct-gameplay pass remains the current browser import evidence.
 
+## 2026-07-15 retail browser and stale-build verification
+
+- A legally local NTSC-U raw BIN was supplied to a fresh Wasm page through an ephemeral
+  same-origin test helper outside the repository. The helper constructed the same browser `File`
+  and dispatched the same production file-input event as the native picker; it differed only by
+  reading the whole local BIN into browser memory first. From `import_files` onward the ordinary
+  Blob/disc discovery, pair validation, runtime, renderer, audio and input path ran unchanged.
+- The page recognized 88 S0–S3 streams and all 44 pairs, selected and rendered the image-backed
+  retail title/menu, then directly mounted N. Sanity Beach (`0x09`). The visible gameplay frame
+  contained Crash, the authored beach/world geometry and crates. Runtime telemetry remained at
+  30.00 Hz with synthesized audio active.
+- The N. Sanity engineering log reported 22 reachable zones, 77 retail entity descriptors,
+  679/679 first-presented polygons, 49 decoded textures, 80 pages, 231 entries, seven successful
+  initial entity bindings with zero unexpected failures, and frame-zero execution of 23 objects
+  with zero GOOL errors. Recent browser diagnostics were empty after the final reload.
+- The browser exposed the same content-derived build ID in the DOM and build manifest. Generated
+  JavaScript and Wasm were requested with that ID. Eight dependency-free Node tests covered valid
+  manifests, changed source, tampered generated JavaScript, content-stable fingerprints, a missing
+  manifest, generated-JavaScript identity changes, forged identities and Git-state drift. The
+  server also served the verified manifest and Wasm with `no-store` and the correct Wasm MIME type.
+  A live source-drift probe changed `web/bootstrap.js`, received the intended `503` instead of the
+  stale artifact, restored the byte-identical source and immediately received `200`; the temporary
+  probe was not retained. A held build lock also rejected a concurrent publisher before it touched
+  the valid distribution. Two consecutive successful `npm run build` invocations then published
+  and verified the same content-derived identity without leaving the lock behind.
+- Formatting, Clippy with warnings denied, the complete non-ignored workspace test suite, native
+  release, the locked release Wasm build and `npm run build` passed. This pass verifies a genuine
+  retail title/direct-level browser boot and eliminates stale diagnostic bundles; it is not a new
+  claim of a complete browser playthrough or full retail parity.
+
 ## Reproducible commands
 
 ```bash

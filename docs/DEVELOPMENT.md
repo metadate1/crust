@@ -26,6 +26,19 @@ the console/network panel, and exercise both raw-disc and extracted-stream impor
 is origin-specific; `localhost` and `127.0.0.1`, different ports, and different protocols do not
 share card records.
 
+`npm run dev` rebuilds the release Wasm distribution before it opens the server. Use
+`npm run serve` only when deliberately reusing `dist/`: the server verifies the recorded source
+fingerprint and every served bootstrap/JavaScript/Wasm artifact before listening. The browser
+publishes that manifest as `window.__crustBuild` and requests generated JavaScript and Wasm with
+its build ID. A source change, tampered artifact, or missing manifest therefore fails closed
+instead of serving an old diagnostic runtime. The build is assembled in ignored `target/` storage
+and published only after the source fingerprint is rechecked, preserving the last valid `dist/`
+when compilation or binding generation fails.
+`npm run verify:dist` performs the same verification without opening a listening socket.
+The development server repeats verification for every request and returns `503` after source,
+artifact or Git drift. Builds use a repository-local lock so concurrent publishers cannot nest or
+discard staged distributions.
+
 ## Local-data verification
 
 Legally owned data may be placed under ignored `local-data/` or selected from anywhere on disk.

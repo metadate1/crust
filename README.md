@@ -282,13 +282,18 @@ Requirements are Node.js 20+, Rust 1.97.0 through `rustup`, and the matching `wa
 rustup toolchain install 1.97.0 --profile minimal --component clippy,rustfmt \
   --target wasm32-unknown-unknown
 cargo install wasm-bindgen-cli --version 0.2.126 --locked
-npm run build
 npm run dev
 ```
 
 Open <http://127.0.0.1:4174>. Choose either the raw `.bin`/`.iso`, or the `.NSD` and `.NSF`
 files from the disc's S0–S3 directories. The browser reads Blob ranges locally. The content
 security policy blocks cross-origin connections, and no runtime API uploads asset bytes.
+`npm run dev` performs a release Wasm rebuild before serving. `npm run serve` serves an existing
+`dist/` only after its source and artifact fingerprints pass; it refuses stale or modified output.
+The exact identity is available as `window.__crustBuild` and is used to version both generated
+JavaScript and Wasm requests, so an already-cached prototype bundle cannot silently reappear. Web
+builds are staged under ignored `target/` storage and replace `dist/` only after compilation,
+binding generation, and source-stability checks succeed.
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one

@@ -1,8 +1,11 @@
 import { createReadStream, existsSync, statSync } from "node:fs";
 import { createServer } from "node:http";
 import { extname, join, normalize, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { verifyBuildInfo } from "./build-info.mjs";
 
-const root = resolve(new URL("../dist", import.meta.url).pathname);
+const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const root = join(repositoryRoot, "dist");
 const port = Number(process.env.PORT || 4174);
 const types = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -12,7 +15,16 @@ const types = new Map([
   [".wasm", "application/wasm"],
 ]);
 
-createServer((request, response) => {
+const build = await verifyBuildInfo(repositoryRoot);
+
+createServer(async (request, response) => {
+  try {
+    await verifyBuildInfo(repositoryRoot);
+  } catch (error) {
+    response.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
+    response.end(`Web distribution changed after server start: ${error.message}\n`);
+    return;
+  }
   const pathname = decodeURIComponent(new URL(request.url || "/", "http://local").pathname);
   const requested = pathname === "/" ? "/index.html" : pathname;
   const file = normalize(join(root, requested));
@@ -29,6 +41,7 @@ createServer((request, response) => {
   });
   createReadStream(file).pipe(response);
 }).listen(port, "127.0.0.1", () => {
-  process.stdout.write(`crust dev server: http://127.0.0.1:${port}\n`);
+  process.stdout.write(
+    `crust dev server: http://127.0.0.1:${port} (${build.build_id})\n`,
+  );
 });
-

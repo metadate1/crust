@@ -7,9 +7,25 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 
 async function start() {
+  window.__crustBootstrap = "loading-build";
+  const response = await fetch("./build-info.json", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`Could not load build identity (${response.status})`);
+  }
+  const build = await response.json();
+  if (build?.schema !== 1 || typeof build.build_id !== "string") {
+    throw new Error("Build identity is missing or incompatible");
+  }
+  window.__crustBuild = Object.freeze(build);
+  document.documentElement.dataset.crustBuild = build.build_id;
+  const log = document.querySelector("#runtimeLog");
+  if (log) log.textContent += `\n> web build ${build.build_id}`;
+
   window.__crustBootstrap = "loading-wasm";
-  const { default: init, boot } = await import("./pkg/crust_web.js");
-  await init();
+  const version = encodeURIComponent(build.build_id);
+  const { default: init, boot } = await import(`./pkg/crust_web.js?build=${version}`);
+  const wasm = new URL(`./pkg/crust_web_bg.wasm?build=${version}`, window.location.href);
+  await init({ module_or_path: wasm });
   window.__crustBootstrap = "starting-rust";
   boot();
   window.__crustBootstrap = "running";

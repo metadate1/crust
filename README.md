@@ -178,9 +178,9 @@ frame 513, and Title imports the second carry into its parsed graph, ZDAT entiti
 map camera schedule. The post-completion Map unlocks level two; after the authored Up/Cross route
 it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. The
 same uninterrupted test imports that carry into Jungle Rollers, flings both early PlanC hazards,
-breaks four counted boxes, and
-reaches checkpoint entity 46 at frame 1,117 with the exact saved checkpoint translation/count. It
-then continues through the remaining main-path route and enters the end `WarpC`. The warp emits
+breaks four counted boxes, and reaches checkpoint entity 46 at frame 1,117 with the exact saved
+checkpoint translation/count. It then continues through the remaining main-path route and enters
+the end `WarpC`. The warp emits
 `Transition(0x2d)` at frame 2,546 with a live counted box total of `0x1000` and no restart, death
 camera, below-zero or terminal fall, VM error, faulted object, or checked issue. Jungle's checked
 `LEVEL_END` raises the unlocked count to three; its Level Complete screen emits Title on frame 306,

@@ -7,8 +7,8 @@
 //! camera/player-state route using only retail directional, jump, and spin pad
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
 //! A separate vertical-flow test retains the authored session carry across
-//! N. Sanity Beach, Level Complete, Title/Map, and Jungle Rollers through its
-//! end warp without writing any game data.
+//! N. Sanity Beach, Jungle Rollers, both Level Complete screens, the Title map,
+//! and the first mounted Great Gate frame without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only

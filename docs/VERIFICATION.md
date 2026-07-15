@@ -791,6 +791,49 @@ is 1,322,866 bytes with SHA-256
   evidence for import, title presentation, direct gameplay, keyboard input,
   audio state, pause, and fullscreen—not a full-playthrough or retail-parity claim.
 
+### Event-argv, effect-transaction, and bonus-context checkpoint (2026-07-15)
+
+- Physical retail-pool provenance now accompanies event argv through direct and broadcast sends,
+  EARG scopes, mapped-state changes, and child-spawn creation. Validation is transactional: invalid
+  sidecars, unknown objects, state mismatches, and conflicting paging metadata leave the complete
+  machine unchanged. Focused tests also cover reused physical storage being seeded before child
+  argv is applied and public-event inference from a live pool-backed pointer.
+- A retail frame drains ordered VM effects after each visited object, and every synchronous event
+  recipient starts a fresh bounded effect transaction. Deep 96-object preorder and 95-recipient
+  broadcast tests retain exact effect chronology beyond the standalone 256-effect transaction
+  bound. This removes the false whole-frame `EffectQueueFull` reached by the authored Dr. N. Brio
+  input survey without weakening the local transaction limit.
+- Level state publication now writes the current zone graphics flags to GOOL global 30 before the
+  next spawn/update pass. All five legally local bonus spawn zones publish `0x2002`, and the exact
+  Tawna-bonus WillC WARP program tests bit `0x2000` before its LoadState branch. The test establishes
+  the legal corpus and authored branch layout; it does not claim a complete third-token, portal,
+  `-2`, and protected parent-remount playthrough.
+- All 545 simulation-library tests passed. The locked workspace gate passed 869 default tests with
+  zero failures, and the complete legally local opt-in suite passed all 73 tests against the user's
+  raw NTSC-U BIN and extracted streams. The final strict active-input survey ran all 43 bootable
+  pairs for 5,400 frames each—232,200 pair-frames—with `faulted=0`, `errors=0`, and no checked
+  runtime issue. This remains bounded direction-and-button direct-boot evidence, not route
+  completion evidence.
+- Rustfmt, warnings-denied native workspace Clippy, warnings-denied Wasm Clippy, the optimized
+  native workspace build, and the optimized `wasm32-unknown-unknown` build all passed. The rebuilt
+  distribution contains a 1,343,521-byte Wasm module with SHA-256
+  `335875ede6f7651ca59b48ced29899a56d93c75ed65da5eef0658dbaa6f47563`; its 46,236-byte generated
+  loader has SHA-256 `0bd8e59cb89ffe118cff88dc13889ebdae612941808c693a782a6475983770cc`.
+  The no-store server returned byte-identical hashes for both files.
+- The exact rebuilt distribution was exercised in foreground Google Chrome with the user's raw BIN
+  selected through the native macOS picker. It recognized 88 streams, all 44 pairs, 43 playable
+  targets, and 219 MiB retained only in the tab; publisher presentation and the N. Sanity Beach
+  island node rendered from the title target. A fresh direct `0x09` mount visibly rendered Crash,
+  crates, and the level scene at 30.00 Hz with `SYNTH ACTIVE`. Six Up taps followed by Z captured
+  Crash airborne. Application pause/resume and mute/unmute were repeated successfully, and the
+  runtime engineering log showed the local mount, image decode, scene, camera, paging, and GOOL
+  initialization sequence without a reported runtime fault. The rebuilt in-app landing page also
+  reported no warning or error console entries.
+- No proprietary byte was copied into the repository or generated distribution. This pass did not
+  manually repeat physical gamepad, touch/mobile, fullscreen, virtual-card persistence reload,
+  later transitions, bosses, a complete bonus return, or ending flows, and it is not a full retail
+  parity claim.
+
 ## Reproducible commands
 
 ```bash

@@ -528,6 +528,7 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
                 count: 1,
                 allow_reclaim: false,
                 arguments: vec![0],
+                argument_pool_slots: vec![None],
             },
             VmEffect::SpawnChildren {
                 parent: boot_handle,
@@ -536,6 +537,7 @@ fn n_sanity_crash_uses_absolute_shared_code_addressing() {
                 count: 1,
                 allow_reclaim: false,
                 arguments: vec![0, 4096, 0],
+                argument_pool_slots: vec![None, None, None],
             },
         ]
     );

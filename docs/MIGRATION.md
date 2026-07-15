@@ -31,6 +31,8 @@ An external `git archive` copy produced these results:
 - Every bonus spawn zone is save-restricted. A normal bonus entry carries its parent snapshot;
   only a fresh direct boot seeds a one-shot same-level death/restart snapshot. Direct-boot bonus
   completion still needs an explicit host destination and is not treated as a certified round trip.
+  Each LevelUpdate publishes the destination zone graphics flags to GOOL global 30 before spawning;
+  legal bonus zones use `0x2002`, which selects the authored WARP LoadState branch.
 - Audio is 44.1 kHz, 24 logical voices, with music on voice zero.
 - The virtual card has 15 slots and an exact 128-byte little-endian payload. Its checksum starts at
   `0x12345678`, adds each byte with the checksum field zero, then rotates left three bits. Rescan

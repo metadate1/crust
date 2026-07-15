@@ -722,7 +722,23 @@ impl EventArgumentsReference {
 struct EventArgumentsScope {
     reference: EventArgumentsReference,
     arguments: [u32; MAX_EVENT_ARGUMENTS],
+    pool_slots: [Option<u8>; MAX_EVENT_ARGUMENTS],
     len: u8,
+}
+
+#[derive(Clone, Copy)]
+struct EventArgumentSlices<'a> {
+    arguments: Option<&'a [u32]>,
+    pool_slots: Option<&'a [Option<u8>]>,
+}
+
+impl<'a> EventArgumentSlices<'a> {
+    const fn new(arguments: Option<&'a [u32]>, pool_slots: Option<&'a [Option<u8>]>) -> Self {
+        Self {
+            arguments,
+            pool_slots,
+        }
+    }
 }
 
 /// Pointer-free view of the three retail transform vectors.
@@ -2091,6 +2107,7 @@ pub struct SendEventRequest {
     pub target: SendEventTarget,
     pub event: u32,
     arguments: [u32; MAX_EVENT_ARGUMENTS],
+    argument_pool_slots: [Option<u8>; MAX_EVENT_ARGUMENTS],
     argument_count: u8,
 }
 
@@ -2103,6 +2120,16 @@ impl SendEventRequest {
     #[must_use]
     pub const fn argument_count(&self) -> u8 {
         self.argument_count
+    }
+
+    /// Native physical-pool provenance captured beside each argument word.
+    ///
+    /// The slice has exactly the same length and ordering as
+    /// [`Self::arguments`]. A `None` entry is an ordinary scalar or a pointer
+    /// whose pool identity was not captured.
+    #[must_use]
+    pub fn argument_pool_slots(&self) -> &[Option<u8>] {
+        &self.argument_pool_slots[..usize::from(self.argument_count)]
     }
 }
 
@@ -2205,6 +2232,7 @@ pub enum VmEffect {
         count: u32,
         allow_reclaim: bool,
         arguments: Vec<u32>,
+        argument_pool_slots: Vec<Option<u8>>,
     },
     /// Misc 7 asks the runtime's exact handle-three/handle-four preorder for
     /// an active entity whose `pid_flags` word matches this value.
@@ -2306,6 +2334,7 @@ pub struct EventStateChange {
     pub state: u16,
     pub event: u32,
     pub arguments: Vec<u32>,
+    pub argument_pool_slots: Vec<Option<u8>>,
 }
 
 /// Complete synchronous result of one checked event delivery.
@@ -2617,6 +2646,10 @@ pub enum VmError {
     InvalidObjectReference(u32),
     InvalidEventArgumentsReference(u32),
     EventArgumentsTooLong(usize),
+    EventArgumentPoolSlotsLengthMismatch {
+        arguments: usize,
+        pool_slots: usize,
+    },
     EventArgumentReferenceCapacityExceeded,
     EventArgumentOutOfBounds {
         reference: u32,
@@ -2732,6 +2765,30 @@ pub enum VmError {
     UnknownControl(u8),
     EffectQueueFull,
     MissingHostEffect,
+}
+
+fn validate_argument_pool_slots(
+    argument_count: usize,
+    pool_slots: Option<&[Option<u8>]>,
+) -> Result<(), VmError> {
+    let Some(pool_slots) = pool_slots else {
+        return Ok(());
+    };
+    if pool_slots.len() != argument_count {
+        return Err(VmError::EventArgumentPoolSlotsLengthMismatch {
+            arguments: argument_count,
+            pool_slots: pool_slots.len(),
+        });
+    }
+    if let Some(pool_slot) = pool_slots
+        .iter()
+        .flatten()
+        .copied()
+        .find(|pool_slot| usize::from(*pool_slot) >= MAX_OBJECTS)
+    {
+        return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+    }
+    Ok(())
 }
 
 /// Why an interpreter invocation stopped.
@@ -3168,7 +3225,7 @@ impl VmObject {
         Ok(())
     }
 
-    fn register_pool_slot(&self, index: usize) -> Result<Option<u8>, VmError> {
+    pub(crate) fn register_pool_slot(&self, index: usize) -> Result<Option<u8>, VmError> {
         self.register_pool_slots
             .get(index)
             .copied()
@@ -3242,9 +3299,23 @@ impl VmObject {
         subtype: u8,
         frame_stamp: u32,
     ) -> Result<(), VmError> {
+        let stack_origin = usize::try_from(self.initial_stack_pointer)
+            .map_err(|_| VmError::InvalidInitialStackPointer(self.initial_stack_pointer))?;
         let arguments = self
             .stack
             .get(..self.state_argument_count)
+            .ok_or(VmError::InvalidInitialStackPointer(
+                self.initial_stack_pointer,
+            ))?
+            .to_vec();
+        let argument_pool_slots = self
+            .register_pool_slots
+            .get(
+                stack_origin
+                    ..stack_origin.checked_add(self.state_argument_count).ok_or(
+                        VmError::InvalidInitialStackPointer(self.initial_stack_pointer),
+                    )?,
+            )
             .ok_or(VmError::InvalidInitialStackPointer(
                 self.initial_stack_pointer,
             ))?
@@ -3297,7 +3368,7 @@ impl VmObject {
         self.set_register(process_register::STATE_FLAGS, self.state_flags)?;
         self.set_register(process_register::VOICE_ID, INITIAL_VOICE_ID as u32)?;
         self.set_register(process_register::NODE, INITIAL_NODE)?;
-        self.initialize_arguments(&arguments)?;
+        self.initialize_arguments_with_pool_slots(&arguments, &argument_pool_slots)?;
         self.set_register(process_register::STATE_STAMP, frame_stamp)
     }
 
@@ -3698,14 +3769,26 @@ impl VmObject {
     /// this once after binding a newly spawned object and before interpreting
     /// its state code.
     pub fn initialize_arguments(&mut self, arguments: &[u32]) -> Result<(), VmError> {
-        self.initialize_state_frame(arguments, true)
+        self.initialize_state_frame(arguments, None, true)
+    }
+
+    /// Installs creation/state arguments together with the native static-pool
+    /// identity captured for pointer-shaped words.
+    pub(crate) fn initialize_arguments_with_pool_slots(
+        &mut self,
+        arguments: &[u32],
+        pool_slots: &[Option<u8>],
+    ) -> Result<(), VmError> {
+        self.initialize_state_frame(arguments, Some(pool_slots), true)
     }
 
     fn initialize_state_frame(
         &mut self,
         arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
         push_initial_wait: bool,
     ) -> Result<(), VmError> {
+        validate_argument_pool_slots(arguments.len(), argument_pool_slots)?;
         let stack_origin = usize::try_from(self.initial_stack_pointer)
             .map_err(|_| VmError::InvalidInitialStackPointer(self.initial_stack_pointer))?;
         let required = arguments
@@ -3723,8 +3806,12 @@ impl VmObject {
         self.state_argument_count = arguments.len();
         self.call_stack.clear();
         self.pending_once = None;
-        for argument in arguments {
-            self.push_stack_word(*argument)?;
+        for (index, argument) in arguments.iter().copied().enumerate() {
+            let pool_slot = argument_pool_slots
+                .and_then(|pool_slots| pool_slots.get(index))
+                .copied()
+                .flatten();
+            self.push_stack_word_with_pool_slot(argument, pool_slot)?;
         }
         self.frame_base = stack_origin + arguments.len();
 
@@ -3918,36 +4005,32 @@ impl VmObject {
         arguments: &[u32],
         frame_stamp: u32,
     ) -> Result<(), VmError> {
-        if self.state != program.state_index {
-            return Err(VmError::StateProgramMismatch {
-                requested: self.state,
-                provided: program.state_index,
-            });
-        }
-        let once_word = self.register(process_register::ONCE_POINTER)?;
-        let once = if once_word == 0 {
-            None
-        } else {
-            let address = self.checked_code_address(once_word)?;
-            if address.segment != CodeSegment::Global {
-                return Err(VmError::InvalidOnceCodeSegment(address.segment));
-            }
-            Some(PendingOnce {
-                address,
-                state_stamp: frame_stamp,
-            })
-        };
-        let required = arguments
-            .len()
-            .checked_add(if once.is_some() {
-                STATE_FRAME_WORDS + ONCE_FRAME_WORDS
-            } else {
-                INITIAL_FRAME_WORDS
-            })
-            .ok_or(VmError::StackOverflow(self.handle))?;
-        if required > MAX_STACK_WORDS {
-            return Err(VmError::StackOverflow(self.handle));
-        }
+        self.rebind_state_program_inner(program, arguments, None, frame_stamp)
+    }
+
+    pub(crate) fn rebind_state_program_with_pool_slots(
+        &mut self,
+        program: &VmStateProgram,
+        arguments: &[u32],
+        argument_pool_slots: &[Option<u8>],
+        frame_stamp: u32,
+    ) -> Result<(), VmError> {
+        self.rebind_state_program_inner(program, arguments, Some(argument_pool_slots), frame_stamp)
+    }
+
+    fn rebind_state_program_inner(
+        &mut self,
+        program: &VmStateProgram,
+        arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
+        frame_stamp: u32,
+    ) -> Result<(), VmError> {
+        let once = self.preflight_state_program_rebind(
+            program,
+            arguments,
+            argument_pool_slots,
+            frame_stamp,
+        )?;
 
         self.code.clone_from(&program.code);
         self.external.fill(0);
@@ -3984,7 +4067,7 @@ impl VmObject {
         // Retail clears `once_p` only after the target external program and
         // state PCs have been rebound, but before replacing fp/sp.
         self.set_register(process_register::ONCE_POINTER, 0)?;
-        self.initialize_state_frame(arguments, once.is_none())?;
+        self.initialize_state_frame(arguments, argument_pool_slots, once.is_none())?;
         self.mark_retail_state_change()?;
         if let Some(once) = once {
             self.pending_once = Some(once);
@@ -3992,6 +4075,53 @@ impl VmObject {
             self.set_register(process_register::STATE_STAMP, frame_stamp)?;
         }
         Ok(())
+    }
+
+    fn preflight_state_program_rebind(
+        &self,
+        program: &VmStateProgram,
+        arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
+        frame_stamp: u32,
+    ) -> Result<Option<PendingOnce>, VmError> {
+        validate_argument_pool_slots(arguments.len(), argument_pool_slots)?;
+        if self.state != program.state_index {
+            return Err(VmError::StateProgramMismatch {
+                requested: self.state,
+                provided: program.state_index,
+            });
+        }
+        let once_word = self.register(process_register::ONCE_POINTER)?;
+        let once = if once_word == 0 {
+            None
+        } else {
+            let address = self.checked_code_address(once_word)?;
+            if address.segment != CodeSegment::Global {
+                return Err(VmError::InvalidOnceCodeSegment(address.segment));
+            }
+            Some(PendingOnce {
+                address,
+                state_stamp: frame_stamp,
+            })
+        };
+        let required = arguments
+            .len()
+            .checked_add(if once.is_some() {
+                STATE_FRAME_WORDS + ONCE_FRAME_WORDS
+            } else {
+                INITIAL_FRAME_WORDS
+            })
+            .ok_or(VmError::StackOverflow(self.handle))?;
+        let stack_origin = usize::try_from(self.initial_stack_pointer)
+            .map_err(|_| VmError::InvalidInitialStackPointer(self.initial_stack_pointer))?;
+        if required > MAX_STACK_WORDS
+            || stack_origin
+                .checked_add(required)
+                .is_none_or(|end| end > REGISTER_COUNT)
+        {
+            return Err(VmError::StackOverflow(self.handle));
+        }
+        Ok(once)
     }
 
     pub fn set_internal(&mut self, index: usize, value: u32) -> Result<(), VmError> {
@@ -4241,6 +4371,10 @@ pub struct Machine {
     /// assignment that happens to encode the same compact tagged reference.
     global_write_epochs: Vec<u64>,
     effects: Vec<VmEffect>,
+    /// Start of the current uninterrupted effect-producing transaction.
+    /// Retail hosts checkpoint between synchronous broadcast recipients while
+    /// retaining every observation in `effects` until its caller drains it.
+    effect_checkpoint: usize,
     pending_send_events: Vec<PendingSendEvent>,
     next_send_event_id: u64,
     pending_audio_host_request: Option<AudioHostRequest>,
@@ -4310,6 +4444,7 @@ impl Machine {
             retail_pool_slots_by_global: vec![None; global_words],
             global_write_epochs: vec![0; global_words],
             effects: Vec::new(),
+            effect_checkpoint: 0,
             pending_send_events: Vec::with_capacity(MAX_CALL_DEPTH),
             next_send_event_id: 1,
             pending_audio_host_request: None,
@@ -6389,6 +6524,24 @@ impl Machine {
         &mut self,
         arguments: Option<&[u32]>,
     ) -> Result<Option<EventArgumentsReference>, VmError> {
+        self.enter_event_arguments_scope_inner(arguments, None)
+    }
+
+    fn enter_event_arguments_scope_with_pool_slots(
+        &mut self,
+        arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
+    ) -> Result<Option<EventArgumentsReference>, VmError> {
+        self.enter_event_arguments_scope_inner(arguments, argument_pool_slots)
+    }
+
+    fn enter_event_arguments_scope_inner(
+        &mut self,
+        arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
+    ) -> Result<Option<EventArgumentsReference>, VmError> {
+        let argument_count = arguments.map_or(0, <[u32]>::len);
+        validate_argument_pool_slots(argument_count, argument_pool_slots)?;
         let Some(arguments) = arguments else {
             return Ok(None);
         };
@@ -6405,9 +6558,14 @@ impl Machine {
             .ok_or(VmError::EventArgumentReferenceCapacityExceeded)?;
         let mut owned = [0; MAX_EVENT_ARGUMENTS];
         owned[..arguments.len()].copy_from_slice(arguments);
+        let mut pool_slots = [None; MAX_EVENT_ARGUMENTS];
+        if let Some(argument_pool_slots) = argument_pool_slots {
+            pool_slots[..arguments.len()].copy_from_slice(argument_pool_slots);
+        }
         self.event_argument_scopes.push(EventArgumentsScope {
             reference,
             arguments: owned,
+            pool_slots,
             len: arguments.len() as u8,
         });
         Ok(Some(reference))
@@ -6434,11 +6592,21 @@ impl Machine {
         Ok(())
     }
 
+    #[cfg(test)]
     fn event_argument(
         &self,
         reference: EventArgumentsReference,
         index: i8,
     ) -> Result<u32, VmError> {
+        self.event_argument_with_pool_slot(reference, index)
+            .map(|(value, _)| value)
+    }
+
+    fn event_argument_with_pool_slot(
+        &self,
+        reference: EventArgumentsReference,
+        index: i8,
+    ) -> Result<(u32, Option<u8>), VmError> {
         let scope = self
             .event_argument_scopes
             .iter()
@@ -6449,7 +6617,7 @@ impl Machine {
             index,
             len: scope.len,
         })?;
-        scope
+        let value = scope
             .arguments
             .get(index)
             .copied()
@@ -6458,7 +6626,14 @@ impl Machine {
                 reference: reference.to_word(),
                 index: index as i8,
                 len: scope.len,
-            })
+            })?;
+        let pool_slot = scope
+            .pool_slots
+            .get(index)
+            .copied()
+            .flatten()
+            .filter(|_| CollisionObjectReference::from_word(value).is_some());
+        Ok((value, pool_slot))
     }
 
     fn begin_synchronous_event_frame(
@@ -6466,8 +6641,10 @@ impl Machine {
         handle: ObjectHandle,
         target: CodeAddress,
         arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
         behavior: ReturnBehavior,
     ) -> Result<usize, VmError> {
+        validate_argument_pool_slots(arguments.len(), argument_pool_slots)?;
         let object = self.object(handle)?;
         let code_len = match target.segment {
             CodeSegment::External => object.code.len(),
@@ -6513,8 +6690,12 @@ impl Machine {
             .ok_or(VmError::StackOverflow(handle))?;
         let frame_depth = object.call_stack.len();
 
-        for argument in arguments {
-            self.push(handle, *argument)?;
+        for (index, argument) in arguments.iter().copied().enumerate() {
+            let pool_slot = argument_pool_slots
+                .and_then(|pool_slots| pool_slots.get(index))
+                .copied()
+                .flatten();
+            self.push_with_pool_slot(handle, argument, pool_slot)?;
         }
         {
             let object = self.object_mut(handle)?;
@@ -6791,7 +6972,7 @@ impl Machine {
         &mut self,
         recipient: ObjectHandle,
         event: u32,
-        arguments: Option<&[u32]>,
+        arguments: EventArgumentSlices<'_>,
         event_pc: usize,
         host: &mut F,
         service_audio: bool,
@@ -6799,7 +6980,10 @@ impl Machine {
     where
         F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
     {
-        let reference = self.enter_event_arguments_scope(arguments)?;
+        let reference = self.enter_event_arguments_scope_with_pool_slots(
+            arguments.arguments,
+            arguments.pool_slots,
+        )?;
         let argv_word = reference.map_or(0, EventArgumentsReference::to_word);
         let previous_animation_wait = self.object(recipient)?.animation_wait;
         let behavior = ReturnBehavior::EventService {
@@ -6815,6 +6999,7 @@ impl Machine {
                 pc: event_pc,
             },
             &[event, argv_word],
+            None,
             behavior,
         ) {
             Ok(depth) => depth,
@@ -6868,6 +7053,7 @@ impl Machine {
         recipient: ObjectHandle,
         offset: usize,
         arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
         host: &mut F,
         service_audio: bool,
     ) -> Result<Execution, VmError>
@@ -6882,6 +7068,7 @@ impl Machine {
                 pc: offset,
             },
             arguments,
+            argument_pool_slots,
             ReturnBehavior::Interrupt {
                 previous_animation_wait,
             },
@@ -6931,9 +7118,11 @@ impl Machine {
         recipient: ObjectHandle,
         event: u32,
         state: u16,
-        arguments: &[u32],
+        arguments: (&[u32], &[Option<u8>]),
         acknowledged: bool,
     ) -> Result<EventDispatchOutcome, VmError> {
+        let (arguments, argument_pool_slots) = arguments;
+        validate_argument_pool_slots(arguments.len(), Some(argument_pool_slots))?;
         if self.object(recipient)?.event_state_blocked(state, event)? {
             self.set_event_acknowledgement(sender, false)?;
             return Ok(EventDispatchOutcome {
@@ -6958,6 +7147,7 @@ impl Machine {
                 state,
                 event,
                 arguments: arguments.to_vec(),
+                argument_pool_slots: argument_pool_slots.to_vec(),
             }),
         })
     }
@@ -7069,7 +7259,7 @@ impl Machine {
         self.object(candidate)?;
         self.object_mut(candidate)?.set_link(7, Some(origin))?;
         let execution =
-            self.invoke_event_interrupt(candidate, offset, &[0x100], &mut host, true)?;
+            self.invoke_event_interrupt(candidate, offset, &[0x100], None, &mut host, true)?;
         match execution.reason {
             HaltReason::InterruptCompleted | HaltReason::ObjectTerminated => Ok(None),
             HaltReason::StateChanged(state) => Ok(Some(EventStateChange {
@@ -7077,6 +7267,7 @@ impl Machine {
                 state,
                 event: STATUS_EVENT,
                 arguments: Vec::new(),
+                argument_pool_slots: Vec::new(),
             })),
             HaltReason::HostEffect if self.level_restart_requested => Ok(None),
             _ => unreachable!("invoke_event_interrupt validates its halt reason"),
@@ -7100,7 +7291,14 @@ impl Machine {
         let mut host = |_machine: &mut Self, _request: VmHostRequest| -> Result<(), VmError> {
             unreachable!("legacy event delivery suspends before typed audio")
         };
-        self.send_event_mode(sender, recipient, event, arguments, &mut host, false)
+        self.send_event_mode(
+            sender,
+            recipient,
+            event,
+            EventArgumentSlices::new(arguments, None),
+            &mut host,
+            false,
+        )
     }
 
     /// Audio-aware event delivery used by the stream-owning runtime.
@@ -7120,7 +7318,36 @@ impl Machine {
     where
         F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
     {
-        self.send_event_mode(sender, recipient, event, arguments, &mut host, true)
+        self.send_event_mode(
+            sender,
+            recipient,
+            event,
+            EventArgumentSlices::new(arguments, None),
+            &mut host,
+            true,
+        )
+    }
+
+    pub(crate) fn send_event_with_host_requests_and_pool_slots<F>(
+        &mut self,
+        sender: Option<ObjectHandle>,
+        recipient: Option<ObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
+        mut host: F,
+    ) -> Result<EventDispatchOutcome, VmError>
+    where
+        F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
+    {
+        self.send_event_mode(
+            sender,
+            recipient,
+            event,
+            EventArgumentSlices::new(arguments, argument_pool_slots),
+            &mut host,
+            true,
+        )
     }
 
     fn send_event_mode<F>(
@@ -7128,17 +7355,18 @@ impl Machine {
         sender: Option<ObjectHandle>,
         recipient: Option<ObjectHandle>,
         event: u32,
-        arguments: Option<&[u32]>,
+        arguments: EventArgumentSlices<'_>,
         host: &mut F,
         service_audio: bool,
     ) -> Result<EventDispatchOutcome, VmError>
     where
         F: FnMut(&mut Self, VmHostRequest) -> Result<(), VmError>,
     {
-        let argument_count = arguments.map_or(0, <[u32]>::len);
+        let argument_count = arguments.arguments.map_or(0, <[u32]>::len);
         if argument_count > MAX_EVENT_ARGUMENTS {
             return Err(VmError::EventArgumentsTooLong(argument_count));
         }
+        validate_argument_pool_slots(argument_count, arguments.pool_slots)?;
         if let Some(sender) = sender {
             self.object(sender)?;
         }
@@ -7152,13 +7380,29 @@ impl Machine {
         self.object(recipient)?;
         self.set_event_acknowledgement(sender, true)?;
         self.object_mut(recipient)?.set_link(7, sender)?;
-        let argument_words = arguments.unwrap_or(&[]);
+        let argument_words = arguments.arguments.unwrap_or(&[]);
+        // Public/runtime callers supply raw native-shaped words rather than a
+        // pre-captured sidecar. Snapshot every currently live pool pointer at
+        // this ownership boundary; an explicit sidecar instead represents
+        // exact earlier provenance and must never be re-derived after ABA.
+        let mut inferred_pool_slots = [None; MAX_EVENT_ARGUMENTS];
+        let argument_pool_slots = if let Some(pool_slots) = arguments.pool_slots {
+            pool_slots
+        } else {
+            for (pool_slot, argument) in inferred_pool_slots[..argument_count]
+                .iter_mut()
+                .zip(argument_words)
+            {
+                *pool_slot = self.live_pool_slot_for_word(*argument, None);
+            }
+            &inferred_pool_slots[..argument_count]
+        };
 
         if let Some(event_pc) = self.object(recipient)?.event_pc {
             let execution = self.invoke_event_service(
                 recipient,
                 event,
-                arguments,
+                EventArgumentSlices::new(arguments.arguments, Some(argument_pool_slots)),
                 event_pc,
                 host,
                 service_audio,
@@ -7177,7 +7421,7 @@ impl Machine {
                         recipient,
                         event,
                         state,
-                        argument_words,
+                        (argument_words, argument_pool_slots),
                         guard,
                     );
                 }
@@ -7189,6 +7433,7 @@ impl Machine {
                             state,
                             event,
                             arguments: Vec::new(),
+                            argument_pool_slots: Vec::new(),
                         }),
                     });
                 }
@@ -7232,6 +7477,7 @@ impl Machine {
                 recipient,
                 usize::from(state & 0x7fff),
                 argument_words,
+                Some(argument_pool_slots),
                 host,
                 service_audio,
             )?;
@@ -7249,6 +7495,7 @@ impl Machine {
                         state,
                         event,
                         arguments: Vec::new(),
+                        argument_pool_slots: Vec::new(),
                     }),
                 }),
                 HaltReason::HostEffect if self.level_restart_requested => {
@@ -7266,7 +7513,7 @@ impl Machine {
             recipient,
             event,
             state,
-            argument_words,
+            (argument_words, argument_pool_slots),
             acknowledged,
         )
     }
@@ -7278,14 +7525,49 @@ impl Machine {
         program: &VmStateProgram,
         arguments: &[u32],
     ) -> Result<(), VmError> {
+        self.rebind_state_program_inner(handle, program, arguments, None)
+    }
+
+    pub(crate) fn rebind_state_program_with_pool_slots(
+        &mut self,
+        handle: ObjectHandle,
+        program: &VmStateProgram,
+        arguments: &[u32],
+        argument_pool_slots: &[Option<u8>],
+    ) -> Result<(), VmError> {
+        self.rebind_state_program_inner(handle, program, arguments, Some(argument_pool_slots))
+    }
+
+    fn rebind_state_program_inner(
+        &mut self,
+        handle: ObjectHandle,
+        program: &VmStateProgram,
+        arguments: &[u32],
+        argument_pool_slots: Option<&[Option<u8>]>,
+    ) -> Result<(), VmError> {
+        validate_argument_pool_slots(arguments.len(), argument_pool_slots)?;
         let frame_stamp = self.frames_elapsed;
+        self.object(handle)?.preflight_state_program_rebind(
+            program,
+            arguments,
+            argument_pool_slots,
+            frame_stamp,
+        )?;
         self.register_paging_metadata(
             program.page_count,
             &program.resident_pages,
             &program.entry_pages,
         )?;
         let object = self.object_mut(handle)?;
-        object.rebind_state_program(program, arguments, frame_stamp)
+        match argument_pool_slots {
+            Some(pool_slots) => object.rebind_state_program_with_pool_slots(
+                program,
+                arguments,
+                pool_slots,
+                frame_stamp,
+            ),
+            None => object.rebind_state_program(program, arguments, frame_stamp),
+        }
     }
 
     /// Starts the `once_p` block captured by the most recent state rebind.
@@ -7934,7 +8216,26 @@ impl Machine {
 
     #[must_use]
     pub fn take_effects(&mut self) -> Vec<VmEffect> {
+        self.effect_checkpoint = 0;
         core::mem::take(&mut self.effects)
+    }
+
+    pub(crate) fn drain_effects_into(&mut self, destination: &mut Vec<VmEffect>) {
+        destination.append(&mut self.effects);
+        self.effect_checkpoint = 0;
+    }
+
+    pub(crate) fn clear_effects(&mut self) {
+        self.effects.clear();
+        self.effect_checkpoint = 0;
+    }
+
+    /// Starts a new bounded synchronous effect segment without discarding the
+    /// ordered observations accumulated for the current caller. Native
+    /// broadcasts apply each recipient before visiting the next one, so one
+    /// recipient—not the full 96-object traversal—is the uninterrupted unit.
+    pub(crate) fn checkpoint_effects(&mut self) {
+        self.effect_checkpoint = self.effects.len();
     }
 
     pub fn run(&mut self, handle: ObjectHandle, budget: usize) -> Result<Execution, VmError> {
@@ -8332,13 +8633,28 @@ impl Machine {
         }
 
         let mut arguments = [0; MAX_EVENT_ARGUMENTS];
+        let mut argument_pool_slots = [None; MAX_EVENT_ARGUMENTS];
         {
-            let stack = &self.object(handle)?.stack;
-            let first = stack
+            let object = self.object(handle)?;
+            let first = object
+                .stack
                 .len()
                 .checked_sub(argument_count)
                 .ok_or(VmError::StackUnderflow(handle))?;
-            arguments[..argument_count].copy_from_slice(&stack[first..]);
+            arguments[..argument_count].copy_from_slice(&object.stack[first..]);
+            let stack_origin = usize::try_from(object.initial_stack_pointer)
+                .map_err(|_| VmError::InvalidInitialStackPointer(object.initial_stack_pointer))?;
+            for (offset, pool_slot) in argument_pool_slots[..argument_count].iter_mut().enumerate()
+            {
+                let register = stack_origin
+                    .checked_add(first)
+                    .and_then(|index| index.checked_add(offset))
+                    .ok_or(VmError::StackOverflow(handle))?;
+                *pool_slot = self.live_pool_slot_for_word(
+                    arguments[offset],
+                    object.register_pool_slot(register)?,
+                );
+            }
         }
         let event =
             self.read_storage_reference(event_source.expect("eligible source is present"))?;
@@ -8358,6 +8674,7 @@ impl Machine {
             target,
             event,
             arguments,
+            argument_pool_slots,
             argument_count: argument_count as u8,
         };
         self.enqueue_send_event(request, return_link_halt)?;
@@ -10111,8 +10428,9 @@ impl Machine {
                 }
                 let reference = EventArgumentsReference::from_word(argv_word)
                     .ok_or(VmError::InvalidEventArgumentsReference(argv_word))?;
-                let argument = self.event_argument(reference, secondary)?;
-                self.push(handle, argument)?;
+                let (argument, pool_slot) =
+                    self.event_argument_with_pool_slot(reference, secondary)?;
+                self.push_with_pool_slot(handle, argument, pool_slot)?;
                 Ok(false)
             }
             1 | 6 => {
@@ -11283,7 +11601,23 @@ impl Machine {
 
         let argument_start = stack_len - encoded_argument_count;
         let argument_end = argument_start + argument_count;
-        let arguments = self.object(handle)?.stack[argument_start..argument_end].to_vec();
+        let (arguments, argument_pool_slots) = {
+            let object = self.object(handle)?;
+            let stack_origin = usize::try_from(object.initial_stack_pointer)
+                .map_err(|_| VmError::InvalidInitialStackPointer(object.initial_stack_pointer))?;
+            let arguments = object.stack[argument_start..argument_end].to_vec();
+            let mut pool_slots = Vec::with_capacity(argument_count);
+            for stack_index in argument_start..argument_end {
+                let register = stack_origin
+                    .checked_add(stack_index)
+                    .ok_or(VmError::StackOverflow(handle))?;
+                let argument = object.stack[stack_index];
+                pool_slots.push(
+                    self.live_pool_slot_for_word(argument, object.register_pool_slot(register)?),
+                );
+            }
+            (arguments, pool_slots)
+        };
         self.object_mut(handle)?.stack.truncate(argument_start);
         if signed_count > 0 {
             self.emit(VmEffect::SpawnChildren {
@@ -11293,6 +11627,7 @@ impl Machine {
                 count,
                 allow_reclaim,
                 arguments,
+                argument_pool_slots,
             })?;
             return Ok(true);
         }
@@ -11300,7 +11635,7 @@ impl Machine {
     }
 
     fn emit(&mut self, effect: VmEffect) -> Result<(), VmError> {
-        if self.effects.len() == MAX_EFFECTS {
+        if self.effects.len().saturating_sub(self.effect_checkpoint) >= MAX_EFFECTS {
             return Err(VmError::EffectQueueFull);
         }
         self.effects.push(effect);
@@ -11666,6 +12001,65 @@ mod tests {
                 index: -1,
                 len: 2,
             })
+        );
+    }
+
+    #[test]
+    fn copied_event_argument_keeps_physical_pool_identity_across_compact_aba() {
+        let original = handle(0);
+        let actor = handle(1);
+        let replacement = handle(2);
+        let pointer = CollisionObjectReference::new(original).to_word();
+        let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        original_object.set_register(8, 0x1111_1100).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(original_object).unwrap();
+        machine.bind_retail_pool_slot(original, 5).unwrap();
+        let reference = machine
+            .enter_event_arguments_scope_with_pool_slots(Some(&[pointer]), Some(&[Some(5)]))
+            .unwrap()
+            .unwrap();
+        let mut actor_object = VmObject::new(
+            actor,
+            vec![
+                misc(0, 0, REG1),
+                Instruction::encode(0x11, STACK, 0x0e04),
+                Instruction::encode(0x11, 0x0d08, 0x0e17),
+            ],
+        )
+        .unwrap();
+        actor_object.set_register(1, reference.to_word()).unwrap();
+        machine.insert_object(actor_object).unwrap();
+
+        machine.run(actor, 1).unwrap();
+        assert_eq!(
+            machine
+                .object(actor)
+                .unwrap()
+                .register_pool_slot(SYNTHETIC_STACK_POINTER),
+            Ok(Some(5))
+        );
+        machine
+            .leave_event_arguments_scope(Some(reference))
+            .unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, 5)
+            .unwrap();
+
+        let mut compact_reuse = VmObject::new(original, vec![0]).unwrap();
+        compact_reuse.set_register(8, 0x2222_2200).unwrap();
+        machine.insert_object(compact_reuse).unwrap();
+        machine.bind_retail_pool_slot(original, 6).unwrap();
+        let mut same_slot_replacement = VmObject::new(replacement, vec![0]).unwrap();
+        same_slot_replacement.set_register(8, 0x3333_3300).unwrap();
+        machine.insert_object(same_slot_replacement).unwrap();
+        machine.bind_retail_pool_slot(replacement, 5).unwrap();
+
+        machine.run(actor, 2).unwrap();
+        assert_eq!(
+            machine.object(actor).unwrap().register(23),
+            Ok(0x3333_3300),
+            "the copied native argv pointer follows its physical slot, not a reused compact handle"
         );
     }
 
@@ -15218,6 +15612,7 @@ mod tests {
                 count: 1,
                 allow_reclaim: false,
                 arguments: vec![0],
+                argument_pool_slots: vec![None],
             }]
         );
 
@@ -15654,6 +16049,70 @@ mod tests {
         assert_eq!(deliveries, REPETITIONS);
         assert!(machine.object(sender).unwrap().stack().is_empty());
         assert!(machine.pending_send_events.is_empty());
+    }
+
+    #[test]
+    fn send_and_spawn_owned_arguments_capture_live_physical_pool_slots() {
+        let target = handle(0);
+        let sender = handle(1);
+        let recipient = handle(2);
+        let pointer = CollisionObjectReference::new(target).to_word();
+
+        let mut sender_object = VmObject::new(
+            sender,
+            vec![send_event_instruction(0x87, 0x1f, 1, 1, 0x080f)],
+        )
+        .unwrap();
+        sender_object.set_link(1, Some(recipient)).unwrap();
+        let mut send_machine = Machine::new(0);
+        send_machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        send_machine.bind_retail_pool_slot(target, 5).unwrap();
+        send_machine.insert_object(sender_object).unwrap();
+        send_machine
+            .insert_object(VmObject::new(recipient, vec![0]).unwrap())
+            .unwrap();
+        // Deliberately push without an attached sidecar. The owned host
+        // request must enrich the live compact token at the capture boundary.
+        send_machine.push(sender, pointer).unwrap();
+        send_machine.push(sender, 1).unwrap();
+        let mut captured_send = false;
+        send_machine
+            .run_with_host_requests(sender, 1, |_machine, request| {
+                let VmHostRequest::SendEvent(request) = request else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                assert_eq!(request.arguments(), &[pointer]);
+                assert_eq!(request.argument_pool_slots(), &[Some(5)]);
+                captured_send = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(captured_send);
+
+        let spawner = handle(1);
+        let mut spawn_machine = Machine::new(0);
+        spawn_machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        spawn_machine.bind_retail_pool_slot(target, 5).unwrap();
+        spawn_machine
+            .insert_object(VmObject::new(spawner, vec![0x8a10_5001]).unwrap())
+            .unwrap();
+        spawn_machine.push(spawner, pointer).unwrap();
+        assert_eq!(
+            spawn_machine.run(spawner, 1).unwrap().reason,
+            HaltReason::HostEffect
+        );
+        assert!(matches!(
+            spawn_machine.effects().last(),
+            Some(VmEffect::SpawnChildren {
+                arguments,
+                argument_pool_slots,
+                ..
+            }) if arguments == &[pointer] && argument_pool_slots == &[Some(5)]
+        ));
     }
 
     #[test]
@@ -16836,6 +17295,7 @@ mod tests {
                     state: 5,
                     event: 0x1500,
                     arguments: vec![11, 22],
+                    argument_pool_slots: vec![None, None],
                 }),
             })
         );
@@ -16901,6 +17361,202 @@ mod tests {
                 .register(process_register::MISC_VALUE),
             Ok(0)
         );
+    }
+
+    #[test]
+    fn event_state_change_rebind_preserves_argument_pool_identity() {
+        let target = handle(0);
+        let recipient = handle(1);
+        let pointer = CollisionObjectReference::new(target).to_word();
+        let mut recipient_object = VmObject::new(recipient, vec![0]).unwrap();
+        recipient_object.event_map = vec![1];
+        recipient_object.state_flags_by_index = vec![0; 2];
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(target, 5).unwrap();
+        machine.insert_object(recipient_object).unwrap();
+
+        let outcome = machine
+            .send_event(None, Some(recipient), 0, Some(&[pointer]))
+            .unwrap();
+        let change = outcome.state_change.unwrap();
+        assert_eq!(change.arguments, [pointer]);
+        assert_eq!(change.argument_pool_slots, [Some(5)]);
+        let state = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: GOOL_PC_NONE,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap();
+        machine
+            .rebind_state_program_with_pool_slots(
+                recipient,
+                &state,
+                &change.arguments,
+                &change.argument_pool_slots,
+            )
+            .unwrap();
+        let object = machine.object(recipient).unwrap();
+        assert_eq!(
+            object.register_pool_slot(object.initial_stack_pointer() as usize),
+            Ok(Some(5))
+        );
+    }
+
+    #[test]
+    fn malformed_argument_pool_sidecars_are_rejected_transactionally() {
+        let h = handle(0);
+        let pointer = CollisionObjectReference::new(h).to_word();
+        let invalid_slot = MAX_OBJECTS as u8;
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+        let object_snapshot = object.clone();
+        assert_eq!(
+            object.initialize_arguments_with_pool_slots(&[pointer], &[]),
+            Err(VmError::EventArgumentPoolSlotsLengthMismatch {
+                arguments: 1,
+                pool_slots: 0,
+            })
+        );
+        assert_eq!(object, object_snapshot);
+        assert_eq!(
+            object.initialize_arguments_with_pool_slots(&[pointer], &[Some(invalid_slot)]),
+            Err(VmError::InvalidRetailPoolSlot(invalid_slot))
+        );
+        assert_eq!(object, object_snapshot);
+
+        let recipient = handle(1);
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        machine
+            .insert_object(VmObject::new(recipient, vec![0]).unwrap())
+            .unwrap();
+        let machine_snapshot = machine.clone();
+        assert_eq!(
+            machine.send_event_with_host_requests_and_pool_slots(
+                Some(h),
+                Some(recipient),
+                0,
+                Some(&[pointer]),
+                Some(&[]),
+                |_machine, _request| Ok(()),
+            ),
+            Err(VmError::EventArgumentPoolSlotsLengthMismatch {
+                arguments: 1,
+                pool_slots: 0,
+            })
+        );
+        assert_eq!(machine, machine_snapshot);
+
+        let eid = Eid::from_raw(0x7500_2055);
+        let state = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: GOOL_PC_NONE,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_paging_metadata(5, [PageIndex::new(0)], [(eid, PageIndex::new(4))]);
+        assert_eq!(
+            machine.rebind_state_program_with_pool_slots(h, &state, &[pointer], &[]),
+            Err(VmError::EventArgumentPoolSlotsLengthMismatch {
+                arguments: 1,
+                pool_slots: 0,
+            })
+        );
+        assert_eq!(machine, machine_snapshot);
+        assert_eq!(
+            machine.rebind_state_program_with_pool_slots(
+                h,
+                &state,
+                &[pointer],
+                &[Some(invalid_slot)],
+            ),
+            Err(VmError::InvalidRetailPoolSlot(invalid_slot))
+        );
+        assert_eq!(machine, machine_snapshot);
+
+        let unknown = handle(2);
+        assert_eq!(
+            machine.rebind_state_program(unknown, &state, &[]),
+            Err(VmError::UnknownObject(unknown))
+        );
+        assert_eq!(machine, machine_snapshot);
+
+        let mismatch_eid = Eid::from_raw(0x7500_2455);
+        let mismatch = VmStateProgram::new(
+            1,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: GOOL_PC_NONE,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_paging_metadata(9, [PageIndex::new(1)], [(mismatch_eid, PageIndex::new(8))]);
+        assert_eq!(
+            machine.rebind_state_program(h, &mismatch, &[]),
+            Err(VmError::StateProgramMismatch {
+                requested: 0,
+                provided: 1,
+            })
+        );
+        assert_eq!(machine, machine_snapshot);
+
+        let conflict_eid = Eid::from_raw(0x7500_2855);
+        machine
+            .register_paging_metadata(
+                3,
+                &[PageIndex::new(1)],
+                &[(conflict_eid, PageIndex::new(2))],
+            )
+            .unwrap();
+        let conflict_snapshot = machine.clone();
+        let conflicting = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: GOOL_PC_NONE,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .unwrap()
+        .with_paging_metadata(4, [PageIndex::new(1)], [(conflict_eid, PageIndex::new(3))]);
+        assert_eq!(
+            machine.rebind_state_program(h, &conflicting, &[]),
+            Err(VmError::ConflictingEntryPage {
+                eid: conflict_eid,
+                first: PageIndex::new(2),
+                second: PageIndex::new(3),
+            })
+        );
+        assert_eq!(machine, conflict_snapshot);
     }
 
     #[test]
@@ -17013,6 +17669,7 @@ mod tests {
                     state: 2,
                     event: 0x0300,
                     arguments: Vec::new(),
+                    argument_pool_slots: Vec::new(),
                 }),
             })
         );
@@ -18872,6 +19529,7 @@ mod tests {
                     pc: 0,
                 },
                 &[],
+                None,
                 ReturnBehavior::Interrupt {
                     previous_animation_wait: None,
                 },

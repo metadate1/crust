@@ -258,9 +258,10 @@ gameplay path.
 ## Exact remaining parity gaps
 
 - Pool-backed register access is broader than pointer/address emulation. LEA-style address-taking
-  through a link whose slot is free is not represented. Event and child-spawn argument vectors do
-  not yet carry pool-provenance sidecars, and retired slots retain process registers and translation
-  rather than the complete non-process color, collision-bound, or animation state. The 96-slot
+  through a link whose slot is free is not represented. Event and child-spawn argument vectors now
+  retain validated pool-provenance sidecars through EARG, mapped state rebind, synchronous send, and
+  reused-slot child initialization. Retired slots retain process registers and translation rather
+  than the complete non-process color, collision-bound, or animation state. The 96-slot
   ordinary free list is modeled, while the dedicated main slot is only kept outside that list and
   detached on release; its byte-exact separate allocation, release, and reinitialization nuances
   remain incomplete. Synthetic non-retail VM teardown deliberately retains its older checked
@@ -407,7 +408,12 @@ gameplay path.
   spawn zone, making direct-
   boot death/restart deterministic. Normal parent-to-bonus session mounts retain the parent
   snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
-  host return destination, so this is not evidence of a complete bonus round trip.
+  host return destination, so this is not evidence of a complete bonus round trip. LevelUpdate now
+  publishes the current zone graphics flags into GOOL global 30 before the next object pass. All
+  five legal bonus spawn zones produce `0x2002`, and the exact Tawna-bonus WillC WARP program tests
+  bit `0x2000` before its LoadState branch. This fixes a concrete bonus-routing blocker, but the
+  complete third-token, portal, `-2`, and protected parent-remount route is not yet an observed
+  end-to-end playthrough.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

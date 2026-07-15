@@ -132,9 +132,11 @@ Reallocation seeds the replacement from the slot's retained process words, then 
 selective in-place initialization. Raw `sp`, `pc`, `fp`, `tp`, and `ep` words are reset along with
 the other source-initialized fields; untouched process words keep their previous values. This
 covers Jaws of Darkness's reclaimed `fruit_hud` copy/read and the legal Dr. N. Brio boundary where
-eight live `BoxsC` children retain creator link four after `BriOC` is reclaimed. Address-taking
-through a free-slot link, event/spawn argument provenance sidecars, retained non-process
-colors/bounds/animation, and byte-exact dedicated-main allocation/reinitialization remain open.
+eight live `BoxsC` children retain creator link four after `BriOC` is reclaimed. Event argv,
+mapped-state rebinds, and child-spawn creation arguments carry the same physical-slot provenance;
+copying a pointer through EARG or an owned host request therefore cannot retarget it through compact
+handle reuse. Address-taking through a free-slot link, retained non-process colors/bounds/animation,
+and byte-exact dedicated-main allocation/reinitialization remain open.
 Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
 deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
 The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and
@@ -189,7 +191,9 @@ fresh destination runtime, and restore bonus returns from the saved zone/path/pr
 Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
 same-level restart snapshot because all five bonus spawn zones are save-restricted; directly booted
 bonus completion still lacks a distinct host return destination and is not claimed as a complete
-round trip. WebAudio
+round trip. Every LevelUpdate also republishes the destination zone's graphics flags in GOOL global
+30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch instead of
+falling through to the ordinary Title transition. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
 fallback has been removed. The native 3,592-halfword encountered-object registry is retained
 separately from each mount's fresh 304-word

@@ -228,9 +228,12 @@ fields reset; process words not written by initialization remain intact. The Dar
 of Darkness `fruit_hud`/creator chain, and Dr. N. Brio `BoxsC` creator links all use this same model.
 No stale Rust reference is kept or dereferenced. Writes that would mutate an ordinary free slot's
 three allocator-owned link words are rejected transactionally instead of reproducing native
-malformed-list behavior. Still outside this slice are address-taking through a free-slot link,
-provenance sidecars for event/spawn arguments, retained non-process colors/bounds/animation, and
-byte-exact dedicated-main allocation and reinitialization behavior.
+malformed-list behavior. Event-service argv scopes, mapped-state changes, direct/broadcast send
+requests, and child-spawn argument vectors copy a parallel physical-slot sidecar. Sidecars are
+validated before mutation, survive EARG/stack copies, and are applied to a child only after its
+reused slot storage is seeded. Still outside this slice are address-taking through a free-slot
+link, retained non-process colors/bounds/animation, and byte-exact dedicated-main allocation and
+reinitialization behavior.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
@@ -272,6 +275,13 @@ storage reference, an external-state-table alias, and the VM's rotating constant
 because their backing identity/lifetimes cannot yet be represented without retargeting the native
 pointer. Opcode `0x81` follows the native switch's missing-case behavior as an intentional one-cycle
 no-op.
+
+The standalone VM retains a bounded effect buffer for checked host handshakes. A retail frame drains
+that buffer after each visited object's update and display boundary, before descending to children,
+into the frame-owned ordered observation list. Every synchronous event recipient also starts a new
+bounded effect transaction, including nested broadcast recipients, while the frame observation list
+retains the exact traversal order. This preserves native preorder chronology and prevents either a
+deep 96-object subtree or a wide broadcast from falsely exhausting a whole-frame VM queue.
 
 A `RETURN` with no call frame remains a normal halt for synthetic `VmObject::new` fixtures. A
 program parsed from retail GOOL instead reports `InvalidInitialReturn`, matching the zero saved
@@ -410,7 +420,10 @@ the parent-level snapshot for authored `-2` return. A fresh direct boot has no n
 snapshot, so only that advertised host entry path arms a one-shot same-level restart snapshot for
 death recovery; session-carried bonus entry never enables the fallback. Completing a directly
 booted bonus with that synthetic snapshot still needs an explicit host return policy and is not
-claimed as a complete bonus round trip.
+claimed as a complete bonus round trip. `set_level_state_context` publishes the current zone's
+graphics flags to GOOL global 30 at initial mount, zone changes, remounts, and hard restarts before
+the next spawn/update pass. Legal bonus zones publish `0x2002`; WillC's WARP state tests bit
+`0x2000` before selecting its LoadState return path.
 
 ## Audio
 

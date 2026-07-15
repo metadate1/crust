@@ -73,6 +73,8 @@ const BOX_OBJECT_TYPE: u32 = 0x22;
 const BOX_STACK_SPACING: i32 = 0x19000;
 const BOX_NEAR_TOLERANCE: u32 = 10;
 const BOX_NO_STAGGER_GRAPHICS_FLAG: u32 = 4;
+/// Native `cur_zone_flags_ro`, sampled by GOOL during level/bonus routing.
+pub const CURRENT_ZONE_FLAGS_GLOBAL: usize = 30;
 const PREVIOUS_BOX_GLOBAL: usize = 116;
 const BOXES_Y_GLOBAL: usize = 117;
 const PREVIOUS_BOX_ENTITY_GLOBAL: usize = 118;
@@ -1769,6 +1771,7 @@ struct FrameWork<E> {
     executions: Vec<RuntimeExecution<E>>,
     spawned_children: Vec<RuntimeObjectHandle>,
     display_records: Vec<RetailDisplayRecord>,
+    effects: Vec<VmEffect>,
 }
 
 struct FrameTraversalHook<'hook, F> {
@@ -1806,6 +1809,7 @@ struct SendEventTraversal<'a, H: ProgramHost> {
     sender: RuntimeObjectHandle,
     event: u32,
     arguments: &'a [u32],
+    argument_pool_slots: &'a [Option<u8>],
     mode: u8,
     count: u32,
 }
@@ -1895,6 +1899,7 @@ impl<H: ProgramHost> SendEventTraversal<'_, H> {
             Some(recipient),
             self.event,
             Some(self.arguments),
+            Some(self.argument_pool_slots),
             self.spawned_children,
         );
         Ok(())
@@ -2760,10 +2765,16 @@ impl RetailRuntime {
             self.set_mount_global(index, 0);
         }
         for index in [
-            30, // cur_zone_flags_ro; republished by the destination LevelUpdate
-            37, 38, 39, // camera translation
-            40, 41, 42, // camera rotation
-            43, 44, 45,  // frame ticks and screen words
+            CURRENT_ZONE_FLAGS_GLOBAL, // republished by the destination LevelUpdate
+            37,
+            38,
+            39, // camera translation
+            40,
+            41,
+            42, // camera rotation
+            43,
+            44,
+            45,  // frame ticks and screen words
             62,  // box_count
             65,  // gem_stamp
             66,  // island_cam_state
@@ -3397,6 +3408,10 @@ impl RetailRuntime {
             context.first_spawn = true;
             self.pending_first_spawn = false;
         }
+        // Native LevelUpdate publishes this scalar before the following GOOL
+        // spawn/update pass. Bonus WARP state 32 reads bit 0x2000 to select
+        // LoadState instead of the ordinary Title transition.
+        self.set_mount_global(CURRENT_ZONE_FLAGS_GLOBAL, context.graphics_flags);
         self.level_state_context = Some(context);
         self.machine.acknowledge_level_state_context();
     }
@@ -4642,6 +4657,7 @@ impl RetailRuntime {
             recipient,
             event,
             arguments,
+            None,
             &mut spawned_children,
             load_state_mode,
             None,
@@ -5166,7 +5182,7 @@ impl RetailRuntime {
                 .map_err(RuntimeError::Vm)?;
         }
         self.machine.clear_frame_bounds();
-        let _discarded_effects = self.machine.take_effects();
+        self.machine.clear_effects();
         let frame_stamp = wrapping_frame_stamp(self.frame_index);
         self.machine.set_frames_elapsed(frame_stamp);
         self.machine.set_draw_count(self.draw_count);
@@ -5177,6 +5193,7 @@ impl RetailRuntime {
             executions: Vec::with_capacity(self.handles.vm_by_arena.len()),
             spawned_children: Vec::new(),
             display_records: Vec::with_capacity(self.handles.vm_by_arena.len()),
+            effects: Vec::with_capacity(self.handles.vm_by_arena.len()),
         };
         let paused = self.pause.paused;
         let mut traversal_hook = FrameTraversalHook {
@@ -5229,7 +5246,8 @@ impl RetailRuntime {
         // latch, when requested) succeeds. A failed later object must not
         // expose a partially reconstructed frame to the renderer.
         self.rendered_frame_objects = Some(std::mem::take(&mut work.display_records));
-        let effects = self.machine.take_effects();
+        self.machine.drain_effects_into(&mut work.effects);
+        let effects = std::mem::take(&mut work.effects);
         if effects
             .iter()
             .any(|effect| matches!(effect, VmEffect::ResetLevelGlobals { .. }))
@@ -5270,6 +5288,7 @@ impl RetailRuntime {
                 RetailTraversalBoundary::BeforeMainObjectUpdate { root, object },
             )?;
             if self.machine.level_restart_requested() {
+                self.machine.drain_effects_into(&mut work.effects);
                 return Ok(());
             }
         }
@@ -5332,6 +5351,7 @@ impl RetailRuntime {
                 // child traversal, without dispatching TERM.
                 self.kill_invalid_initial_return(object, host, &mut work.spawned_children)?;
                 work.executions.push(RuntimeExecution { object, result });
+                self.machine.drain_effects_into(&mut work.effects);
                 return Ok(());
             }
             if let Ok(vm_object) = self.machine.object(object.vm)
@@ -5358,6 +5378,7 @@ impl RetailRuntime {
             }
         }
         if self.machine.level_restart_requested() {
+            self.machine.drain_effects_into(&mut work.effects);
             return Ok(());
         }
         if let Some(object) = self.handles.for_arena(arena_handle)
@@ -5413,6 +5434,12 @@ impl RetailRuntime {
                 snapshot: display_snapshot,
             });
         }
+
+        // `Machine` keeps a small bounded effect queue for standalone
+        // interpreter callers. A retail frame can legitimately visit 97
+        // animation/audio-producing objects, including one deep subtree, so
+        // publish this object's ordered observations before descending.
+        self.machine.drain_effects_into(&mut work.effects);
 
         let mut child = self
             .arena
@@ -5816,6 +5843,7 @@ impl RetailRuntime {
                             Some(recipient),
                             event,
                             Some(&[0]),
+                            None,
                             spawned_children,
                         );
                         if dispatch.is_err() {
@@ -5915,6 +5943,7 @@ impl RetailRuntime {
                             Some(recipient),
                             event,
                             Some(&[argument]),
+                            None,
                             spawned_children,
                         );
                         // Native solid callers discard `GoolSendEvent`'s
@@ -7108,6 +7137,7 @@ impl RetailRuntime {
             recipient,
             event,
             arguments,
+            None,
             spawned_children,
             EventLoadStateMode::RequestRestart,
             None,
@@ -7132,6 +7162,7 @@ impl RetailRuntime {
         recipient: Option<RuntimeObjectHandle>,
         event: u32,
         arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
     ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
         Self::dispatch_event_parts_mode(
@@ -7150,6 +7181,7 @@ impl RetailRuntime {
             recipient,
             event,
             arguments,
+            argument_pool_slots,
             spawned_children,
             EventLoadStateMode::RequestRestart,
             current_object,
@@ -7173,6 +7205,59 @@ impl RetailRuntime {
         recipient: Option<RuntimeObjectHandle>,
         event: u32,
         arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
+        spawned_children: &mut Vec<RuntimeObjectHandle>,
+        load_state_mode: EventLoadStateMode,
+        current_object: Option<VmObjectHandle>,
+    ) -> Result<EventDispatchOutcome, RuntimeError<H::Error>> {
+        // Native GoolSendEvent is one immediate recipient transaction. Keep
+        // every effect in caller-visible order, but reset the bounded burst
+        // counter at both sides so a 96-object TERM or broadcast traversal is
+        // not mistaken for one uninterrupted interpreter transaction.
+        machine.checkpoint_effects();
+        let result = Self::dispatch_event_parts_mode_inner(
+            arena,
+            handles,
+            machine,
+            pending_states,
+            pending_cleanup_actions,
+            reclaim_event_faults,
+            level,
+            level_state_context,
+            saved_level_state,
+            transition_zone_context,
+            host,
+            sender,
+            recipient,
+            event,
+            arguments,
+            argument_pool_slots,
+            spawned_children,
+            load_state_mode,
+            current_object,
+        );
+        machine.checkpoint_effects();
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_event_parts_mode_inner<H: ProgramHost>(
+        arena: &mut ObjectArena,
+        handles: &mut HandleMap,
+        machine: &mut Machine,
+        pending_states: &mut BTreeMap<VmObjectHandle, u16>,
+        pending_cleanup_actions: &mut Vec<RuntimeCleanupAction>,
+        reclaim_event_faults: &mut Vec<RuntimeReclaimEventFault>,
+        level: Option<LevelId>,
+        level_state_context: Option<&RetailLevelStateContext>,
+        saved_level_state: &mut Option<RetailLevelSnapshot>,
+        transition_zone_context: ObjectZoneContext,
+        host: &mut H,
+        sender: Option<RuntimeObjectHandle>,
+        recipient: Option<RuntimeObjectHandle>,
+        event: u32,
+        arguments: Option<&[u32]>,
+        argument_pool_slots: Option<&[Option<u8>]>,
         spawned_children: &mut Vec<RuntimeObjectHandle>,
         load_state_mode: EventLoadStateMode,
         current_object: Option<VmObjectHandle>,
@@ -7185,11 +7270,12 @@ impl RetailRuntime {
         }
 
         let mut callback_error = None;
-        let outcome = machine.send_event_with_host_requests(
+        let outcome = machine.send_event_with_host_requests_and_pool_slots(
             sender.map(RuntimeObjectHandle::vm),
             recipient.map(RuntimeObjectHandle::vm),
             event,
             arguments,
+            argument_pool_slots,
             |machine, request| {
                 let result = match request {
                     VmHostRequest::Effect(VmEffect::LoadState(vm))
@@ -7297,8 +7383,18 @@ impl RetailRuntime {
             } else {
                 &[]
             };
+            let argument_pool_slots = if use_event_arguments {
+                change.argument_pool_slots.as_slice()
+            } else {
+                &[]
+            };
             machine
-                .rebind_state_program(object.vm, &program, arguments)
+                .rebind_state_program_with_pool_slots(
+                    object.vm,
+                    &program,
+                    arguments,
+                    argument_pool_slots,
+                )
                 .map_err(RuntimeError::Vm)?;
             pending_states.remove(&object.vm);
             arena
@@ -8033,6 +8129,7 @@ impl RetailRuntime {
                     Some(recipient),
                     request.event,
                     Some(request.arguments()),
+                    Some(request.argument_pool_slots()),
                     spawned_children,
                 );
             }
@@ -8054,6 +8151,7 @@ impl RetailRuntime {
                     sender,
                     event: request.event,
                     arguments: request.arguments(),
+                    argument_pool_slots: request.argument_pool_slots(),
                     mode,
                     count: 0,
                 };
@@ -8084,6 +8182,7 @@ impl RetailRuntime {
                     sender,
                     event: request.event,
                     arguments: request.arguments(),
+                    argument_pool_slots: request.argument_pool_slots(),
                     mode,
                     count: 0,
                 };
@@ -8771,6 +8870,7 @@ impl RetailRuntime {
             count,
             allow_reclaim,
             arguments,
+            argument_pool_slots,
         } = effect
         else {
             return Err(RuntimeError::Vm(VmError::MissingHostEffect));
@@ -8894,6 +8994,9 @@ impl RetailRuntime {
             let install_result = (|| {
                 machine
                     .seed_retail_pool_slot_storage(object.arena.slot(), &mut vm_object)
+                    .map_err(RuntimeError::Vm)?;
+                vm_object
+                    .initialize_arguments_with_pool_slots(arguments, argument_pool_slots)
                     .map_err(RuntimeError::Vm)?;
                 let environment = host
                     .zone_environment(binding_zone)
@@ -9199,6 +9302,7 @@ mod tests {
 
     use super::*;
     use crate::gool::Instruction;
+    use crate::object_arena::OBJECT_POOL_CAPACITY;
     use crate::object_bounds::MAX_FRAME_BOUNDS;
 
     const ZONE: Eid = Eid::from_raw(0x1234_5679);
@@ -9338,6 +9442,22 @@ mod tests {
 
         assert_eq!(runtime.global_word(FADE_COUNTER_GLOBAL), Ok(288));
         assert_eq!(runtime.global_word(FADE_STEP_GLOBAL), Ok(32));
+    }
+
+    #[test]
+    fn level_update_context_publishes_zone_flags_before_the_next_gool_pass() {
+        let mut runtime =
+            RetailRuntime::new_for_level(CURRENT_ZONE_FLAGS_GLOBAL + 1, LevelId::new_const(0x25));
+        assert_eq!(runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL), Ok(0));
+        let mut context = level_context(ZONE, false, vec![ZONE]);
+        context.graphics_flags = 0x2002;
+
+        runtime.set_level_state_context(context.clone());
+
+        assert_eq!(runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL), Ok(0x2002));
+        context.graphics_flags = 0x0404;
+        runtime.set_level_state_context(context);
+        assert_eq!(runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL), Ok(0x0404));
     }
 
     #[test]
@@ -10631,6 +10751,113 @@ mod tests {
             _binding: StateProgramBinding,
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
+        }
+    }
+
+    struct ArgumentProvenanceHost {
+        argument_target: VmObjectHandle,
+    }
+
+    impl ProgramHost for ArgumentProvenanceHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let code = match binding.executable {
+                // Push the live target token without an explicit sidecar,
+                // then create one executable-five child with argc one.
+                42 => vec![
+                    Instruction::encode(0x00, TEST_SCALAR_OPERAND_A, TEST_SCALAR_OPERAND_B),
+                    0x8a10_5001,
+                    RETURN,
+                ],
+                // Stay live for the bounded frame after the runtime installs
+                // the creation argument in reused native process storage.
+                5 => vec![
+                    Instruction::encode(0x00, TEST_SCALAR_OPERAND_B, TEST_SCALAR_OPERAND_C,);
+                    4
+                ],
+                _ => vec![RETURN],
+            };
+            let mut object = VmObject::new(binding.object.vm(), code).map_err(|_| ())?;
+            if binding.executable == 42 {
+                object
+                    .set_register(
+                        TEST_SCALAR_REGISTER_A,
+                        CollisionObjectReference::new(self.argument_target).to_word(),
+                    )
+                    .map_err(|_| ())?;
+                object
+                    .set_register(TEST_SCALAR_REGISTER_B, 0)
+                    .map_err(|_| ())?;
+            }
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    struct EffectBurstHost;
+
+    impl ProgramHost for EffectBurstHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let mut object = VmObject::new(
+                binding.object.vm(),
+                vec![misc(12, 9, TEST_SCALAR_OPERAND_A); 3],
+            )
+            .map_err(|_| ())?;
+            object
+                .set_register(
+                    TEST_SCALAR_REGISTER_A,
+                    (u32::from(binding.object.vm().get()) + 1) << 8,
+                )
+                .map_err(|_| ())?;
+            Ok(object)
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    #[test]
+    fn full_retail_frame_drains_bounded_vm_effects_in_object_order() {
+        let entities = [entity(0, 2, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &entities,
+        }];
+        let mut runtime = RetailRuntime::new(0);
+        let mut host = EffectBurstHost;
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        let mut parent = *attempts[0].result.as_ref().unwrap();
+        for _ in 1..OBJECT_POOL_CAPACITY {
+            let child = attach_test_child(&mut runtime, parent, ZONE, 2);
+            let mut object =
+                VmObject::new(child.vm, vec![misc(12, 9, TEST_SCALAR_OPERAND_A); 3]).unwrap();
+            object
+                .set_register(TEST_SCALAR_REGISTER_A, (u32::from(child.vm.get()) + 1) << 8)
+                .unwrap();
+            *runtime.machine.object_mut(child.vm).unwrap() = object;
+            parent = child;
+        }
+
+        let frame = runtime.run_frame(&mut host, 3).unwrap();
+
+        assert_eq!(frame.effects.len(), OBJECT_POOL_CAPACITY * 3);
+        for (index, triplet) in frame.effects.chunks_exact(3).enumerate() {
+            let expected = VmEffect::Transition(i32::try_from(index + 1).unwrap());
+            assert!(triplet.iter().all(|effect| effect == &expected));
         }
     }
 
@@ -12078,6 +12305,68 @@ mod tests {
         assert_eq!(object.register(process_register::STATUS_B), Ok(0));
     }
 
+    #[test]
+    fn spawned_child_arguments_replace_reused_slot_pointer_provenance() {
+        let mut runtime = RetailRuntime::new(0);
+        let stale_target = spawn_test_object(&mut runtime, ZONE, 282, 2, 0);
+        let argument_target = spawn_test_object(&mut runtime, ZONE, 283, 2, 0);
+        let sacrificial = spawn_test_object(&mut runtime, ZONE, 284, 2, 0);
+        let mut host = ArgumentProvenanceHost {
+            argument_target: argument_target.vm,
+        };
+        let parent_entity = [entity(285, 42, 0)];
+        let neighbors = [NeighborZone {
+            eid: ZONE,
+            display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+            entities: &parent_entity,
+        }];
+        let parent = *runtime.spawn_current_zone_neighbors(&neighbors, &mut host)[0]
+            .result
+            .as_ref()
+            .unwrap();
+
+        // Retire the slot the child will reuse with a different pointer in
+        // its argument-register position. Seeding after argument injection
+        // would resurrect this stale sidecar.
+        let argument_register = runtime
+            .machine
+            .object(sacrificial.vm)
+            .unwrap()
+            .initial_stack_pointer() as usize;
+        runtime
+            .machine
+            .object_mut(sacrificial.vm)
+            .unwrap()
+            .set_register(
+                argument_register,
+                CollisionObjectReference::new(stale_target.vm).to_word(),
+            )
+            .unwrap();
+        let mut removal = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(sacrificial.arena, &mut removal)
+            .unwrap();
+
+        let frame = runtime.run_frame(&mut host, 2).unwrap();
+        let child = *frame
+            .spawned_children
+            .iter()
+            .find(|child| {
+                runtime
+                    .arena
+                    .get(child.arena)
+                    .is_some_and(|object| object.parent() == TreeParent::Object(parent.arena))
+            })
+            .expect("the parent must synchronously materialize its child");
+        assert_eq!(child.arena.slot(), sacrificial.arena.slot());
+        let child_object = runtime.machine.object(child.vm).unwrap();
+        assert_eq!(
+            child_object.register_pool_slot(child_object.initial_stack_pointer() as usize),
+            Ok(Some(argument_target.arena.slot())),
+            "creation argv must overwrite the reused slot's stale physical-pointer sidecar"
+        );
+    }
+
     fn install_szon_program(
         runtime: &mut RetailRuntime,
         requester: RuntimeObjectHandle,
@@ -13010,6 +13299,64 @@ mod tests {
                 Ok(EVENT)
             );
         }
+        assert!(!runtime.faulted_objects.contains(&sender));
+    }
+
+    #[test]
+    fn all_root_broadcast_checkpoints_each_recipient_effect_transaction() {
+        const EVENT: u32 = 0x1500;
+
+        let mut runtime = RetailRuntime::new(0);
+        let recipients = (0..OBJECT_POOL_CAPACITY - 1)
+            .map(|index| {
+                let recipient = spawn_test_object(&mut runtime, ZONE, (index + 100) as u16, 3, 0);
+                let transition_value = i32::from(recipient.vm.get()) + 1;
+                let vm = runtime.machine.object_mut(recipient.vm).unwrap();
+                vm.set_register(TEST_SCALAR_REGISTER_A, (transition_value as u32) << 8)
+                    .unwrap();
+                vm.configure_test_event_interrupt(
+                    EVENT,
+                    vec![
+                        misc(12, 9, TEST_SCALAR_OPERAND_A),
+                        misc(12, 9, TEST_SCALAR_OPERAND_A),
+                        misc(12, 9, TEST_SCALAR_OPERAND_A),
+                        0x8280_0000,
+                    ],
+                )
+                .unwrap();
+                recipient
+            })
+            .collect::<Vec<_>>();
+        let sender = spawn_test_object(&mut runtime, ZONE, 300, 3, 0);
+        install_test_event_sender(&mut runtime, sender, None, 0x8f, EVENT);
+        let delivery_order = runtime
+            .arena
+            .postorder_snapshot()
+            .unwrap()
+            .into_iter()
+            .filter_map(|arena| runtime.handles.for_arena(arena))
+            .filter(|object| recipients.contains(object))
+            .collect::<Vec<_>>();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 4).unwrap();
+
+        assert_eq!(recipients.len(), OBJECT_POOL_CAPACITY - 1);
+        assert_eq!(delivery_order.len(), recipients.len());
+        let transitions = frame
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::Transition(value) => Some(*value),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            transitions,
+            delivery_order
+                .iter()
+                .flat_map(|recipient| [i32::from(recipient.vm.get()) + 1; 3])
+                .collect::<Vec<_>>()
+        );
         assert!(!runtime.faulted_objects.contains(&sender));
     }
 

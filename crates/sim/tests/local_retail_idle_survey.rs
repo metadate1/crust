@@ -45,9 +45,9 @@ use crust_sim::{
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
-        NsfProgramError, NsfProgramHost, ProgramHost, RetailLevelStateContext,
-        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RuntimeError, RuntimeObjectHandle,
-        ZoneTerminationMode,
+        CURRENT_ZONE_FLAGS_GLOBAL, NsfProgramError, NsfProgramHost, ProgramHost,
+        RetailLevelStateContext, RetailRestartOutcome, RetailRuntime, RetailSessionCarry,
+        RuntimeError, RuntimeObjectHandle, ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
@@ -2295,6 +2295,68 @@ fn every_direct_bonus_boot_has_a_restartable_local_snapshot() {
             survey.summary()
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn bonus_zone_flags_and_warp_program_layout_match_the_legal_corpus() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for level in [0x24, 0x25, 0x26, 0x33, 0x34].map(LevelId::new_const) {
+        let (nsd, nsf, nsf_bytes) =
+            parse_local_pair(&root, level).expect("the local bonus pair must parse");
+        let graph = graph_for_pair(level, &nsd, &nsf, &nsf_bytes)
+            .expect("the local bonus zone graph must parse");
+        let spawn = graph
+            .zone(graph.spawn_path().zone)
+            .expect("the bonus spawn zone must be in its graph");
+        assert_eq!(spawn.graphics_flags, 0x2002, "bonus LID {level}");
+
+        let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, level);
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: RetailCameraLocation {
+                path: graph.spawn_path(),
+                progress: crust_sim::retail_frame::PathProgress::ZERO,
+            },
+            graphics_flags: spawn.graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: vec![spawn.eid],
+        });
+        assert_eq!(
+            runtime.global_word(CURRENT_ZONE_FLAGS_GLOBAL),
+            Ok(0x2002),
+            "bonus LID {level} must publish cur_zone_flags_ro before GOOL"
+        );
+    }
+
+    let level = LevelId::new_const(0x24);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the local Tawna bonus pair must parse");
+    let will = Eid::from_name("WillC").expect("fixed retail player EID is valid");
+    let warp = Eid::from_name("WarpC").expect("fixed retail portal EID is valid");
+    let warp_state = load_gool_state_program(&nsd, &nsf, &nsf_bytes, warp, 0)
+        .expect("load the authored WarpC initial state");
+    let player_warp = load_gool_state_program(&nsd, &nsf, &nsf_bytes, will, 32)
+        .expect("load the authored WillC WARP state");
+    let player_death = load_gool_state_program(&nsd, &nsf, &nsf_bytes, will, 22)
+        .expect("load the authored WillC fall-kill state");
+
+    assert_eq!(warp_state.code().get(0x2e), Some(&0x87a4_0816));
+    assert_eq!(warp_state.code().get(0x42), Some(&0x87a4_0816));
+    assert_eq!(player_warp.event_map().get(22), Some(&32));
+    assert_eq!(player_warp.code_pc(), Some(0x9b6));
+    assert_eq!(player_warp.code().get(0xa2f), Some(&0x1fbe_081e));
+    assert_eq!(player_warp.code().get(0xa30), Some(&0x0782_0e1f));
+    assert_eq!(player_warp.code().get(0xa31), Some(&0x8227_c002));
+    assert_eq!(player_warp.code().get(0xa32), Some(&0x1cc0_dbe0));
+    assert_eq!(player_warp.code().get(0xa34), Some(&0x1cc4_d819));
+    assert_eq!(player_death.event_map().get(9), Some(&22));
+    assert_eq!(player_death.code().get(0x5fc), Some(&0x1cc0_dbe0));
 }
 
 #[test]

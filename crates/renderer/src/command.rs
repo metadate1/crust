@@ -323,7 +323,7 @@ impl PrimitiveCommand {
                 let [a, b, c, d] = quad.vertices;
                 vec![
                     colored_triangle([a, b, d], quad.blend, quad.style, source, depth, viewport),
-                    colored_triangle([c, d, a], quad.blend, quad.style, source, depth, viewport),
+                    colored_triangle([d, c, a], quad.blend, quad.style, source, depth, viewport),
                 ]
             }
             Self::TexturedQuad(quad) => {
@@ -339,7 +339,7 @@ impl PrimitiveCommand {
                         viewport,
                     ),
                     textured_triangle(
-                        [c, d, a],
+                        [d, c, a],
                         quad.texture,
                         quad.blend,
                         PrimitiveStyle::Fill,
@@ -793,15 +793,68 @@ mod tests {
         assert_eq!(
             positions[1],
             [
-                ScreenPoint { x: 0, y: 10, z: 10 },
                 ScreenPoint {
                     x: 10,
                     y: 10,
                     z: 10
                 },
+                ScreenPoint { x: 0, y: 10, z: 10 },
                 ScreenPoint { x: 0, y: 0, z: 10 },
             ]
         );
+    }
+
+    #[test]
+    fn textured_quad_split_matches_original_diagonal_and_order() {
+        let textured_vertex = |x, y, u| TexturedVertex {
+            position: ScreenPoint { x, y, z: 10 },
+            color: WHITE,
+            uv: Uv { u, v: 0.0 },
+        };
+        let quad = PrimitiveCommand::TexturedQuad(TexturedQuad {
+            vertices: [
+                textured_vertex(0, 0, 0.0),
+                textured_vertex(10, 0, 1.0),
+                textured_vertex(0, 10, 2.0),
+                textured_vertex(10, 10, 3.0),
+            ],
+            texture: TextureHandle::new(7),
+            blend: BlendMode::Opaque,
+        });
+        let triangles = quad.triangles(CommandSource::Overlay, 0, Viewport::PSX);
+        let positions = triangles
+            .iter()
+            .map(|triangle| triangle.vertices.map(|vertex| vertex.position))
+            .collect::<Vec<_>>();
+        let u_coordinates = triangles
+            .iter()
+            .map(|triangle| triangle.vertices.map(|vertex| vertex.uv.u))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            positions,
+            [
+                [
+                    ScreenPoint { x: 0, y: 0, z: 10 },
+                    ScreenPoint { x: 10, y: 0, z: 10 },
+                    ScreenPoint {
+                        x: 10,
+                        y: 10,
+                        z: 10
+                    },
+                ],
+                [
+                    ScreenPoint {
+                        x: 10,
+                        y: 10,
+                        z: 10
+                    },
+                    ScreenPoint { x: 0, y: 10, z: 10 },
+                    ScreenPoint { x: 0, y: 0, z: 10 },
+                ],
+            ]
+        );
+        assert_eq!(u_coordinates, [[0.0, 1.0, 3.0], [3.0, 2.0, 0.0]]);
     }
 
     #[test]

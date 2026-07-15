@@ -937,6 +937,52 @@ is 1,322,866 bytes with SHA-256
   retail title/direct-level browser boot and eliminates stale diagnostic bundles; it is not a new
   claim of a complete browser playthrough or full retail parity.
 
+### CoreObjects, island-route, audio-init, and quad-order checkpoint (2026-07-15)
+
+- Initial and destination mounts now execute the source `CoreObjectsCreate` pad-history boundary.
+  Three ordinary-input tests cover a new mount press, a button held across the mount, and the
+  browser's between-frame latch. A fourth covers `PbakChoose` state three: physical/pending input is
+  suppressed to zero while prior held/tapped history still shifts.
+- Title island camera modes seven/eight now receive live globals 66/64. Mode seven writes global 66
+  before `LevelUpdate`; mode eight writes it after the synchronous `LevelUpdate`/TERM boundary.
+  Three native tests exhaust every `u16` mode, signed state passthrough/non-island rejection, and
+  the state observed by a synchronous TERM callback. A legally local normal-route regression
+  observed mode-seven state `-1 → 1` before its frame-23 cross-zone update, reached Main Menu ready
+  at frame 10, loaded Map at frame 20, reached Map ready at frame 30, emitted authored N. Sanity
+  destination `0x09` on Cross at frame 31, completed `LEVEL_END` with no handler failure, and
+  imported the session carry at draw count 31.
+- `MidiInit` voice partitioning is table-tested for every one of the 44 known pairs, both volume
+  override branches, mute precedence, and the default branch. Browser initial boot uses
+  resume-restored options; destination mounts use carried GOOL globals. Each pair remount also
+  resets the all-bus master fade to `0x3fff`, step zero, and unity WebAudio gain.
+- Colored and textured quad conversion now matches the C backend's `[0,1,3]`, `[3,2,0]` order.
+  Legally local sprite/fragment, text/font, pause-panel, Great Hall dynamic-font and all-pair
+  non-vertex scene regressions passed. The N. Sanity authored Crash command fingerprint remained
+  `0xc19351b9ca5b0c36`.
+- Focused verification passed 69 web-library tests (53 active, 16 local-data ignored), all 71 audio
+  tests, all 87 renderer-library tests, warnings-denied Wasm Clippy, all 881 tests in the locked
+  non-ignored workspace gate, and all 77 legally local ignored tests against the user's BIN/stream
+  directory. The complete workspace inventory is 958 tests.
+
+### Final browser candidate (2026-07-15)
+
+- A fresh in-app-browser load mounted all 88 legally local S0–S3 files through the real file-input
+  change handler, recognized 44/44 pairs and retained 219 MiB only in the tab. Because the in-app
+  browser automation API cannot operate a native file chooser, this pass used a temporary
+  loopback-only test bridge outside the repository to populate that input; the bridge was bound to
+  `127.0.0.1`, copied no assets into `crust`, and is not part of the application or distribution.
+  Raw-BIN discovery/extraction was exercised separately by the complete legally local suite.
+- Boot target `0x19` rendered the authored main menu. Touch Cross entered the island map and showed
+  the N. Sanity Beach node; a second Cross mounted `0x09` and visibly rendered the authored opening
+  gameplay scene. Telemetry remained at 30.00 Hz with synthesized audio active. Pause/resume and
+  mute/unmute toggled to their expected states, keyboard direction events were dispatched, and the
+  browser diagnostic log remained empty.
+- This was a bounded route/control smoke test, not a full playthrough. Gamepad, fullscreen, virtual
+  card persistence, later-level transitions, bosses, bonuses, and ending progression were not
+  repeated manually in this pass. The final post-commit distribution is rebuilt with
+  `npm run build`, checked by the stale-bundle guard, and served from the ordinary repository
+  server; the delivery summary reports its exact clean build identity.
+
 ## Reproducible commands
 
 ```bash
@@ -955,6 +1001,10 @@ C1_DISC_IMAGE=/path/to/disc.bin \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   prepares_every_legally_local_recording_without_copying_game_data -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --test local_title_mdat_runtime --locked \
+  authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry \
+  -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture

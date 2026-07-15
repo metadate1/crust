@@ -9,7 +9,10 @@ use crust_formats::stream::{
     ZoneEntity, ZoneEntityPathPoint, ZoneHeader, load_title_mdat, parse_nsd, parse_nsf,
 };
 use crust_platform::input::PadState;
-use crust_sim::camera::RetailCameraLocation;
+use crust_sim::camera::{
+    RetailCameraEffect, RetailCameraInput, RetailCameraLocation, RetailCameraOutcome,
+    RetailCameraRuntime, RetailIslandCameraInput,
+};
 use crust_sim::card::{CardOperation, CardOutcome, SaveData, VirtualCard};
 use crust_sim::flow::{TitlePhase, TitleScreen};
 use crust_sim::gool::{
@@ -23,7 +26,8 @@ use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::player::{PAD_CROSS, PAD_DOWN, PAD_START};
 use crust_sim::retail_frame::PathProgress;
 use crust_sim::retail_runtime::{
-    AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
+    AnimationBoundBinding, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
+    ISLAND_CAMERA_STATE_GLOBAL, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, ProgramOrigin, RetailLevelStateContext, RetailRuntime,
     RetailTitleAction, RetailZoneEnvironment, RuntimeError, StateProgramBinding,
 };
@@ -329,7 +333,11 @@ fn title_zone_catalog(
     nsd: &Nsd,
     nsf: &Nsf,
     nsf_bytes: &[u8],
-) -> (BTreeMap<Eid, OwnedTitleZone>, ZoneLifecycle) {
+) -> (
+    RetailZoneGraph,
+    BTreeMap<Eid, OwnedTitleZone>,
+    ZoneLifecycle,
+) {
     let roots = TITLE_DIRECT_ZONES.map(|name| Eid::from_name(name).unwrap());
     let graph = RetailZoneGraph::from_pair_with_roots(nsd, nsf, nsf_bytes, roots)
         .expect("title zone graph must parse");
@@ -375,7 +383,7 @@ fn title_zone_catalog(
         );
     }
     let lifecycle = ZoneLifecycle::new(lifecycle_zones).expect("title lifecycle must parse");
-    (zones, lifecycle)
+    (graph, zones, lifecycle)
 }
 
 fn title_screen_fixture(screen: TitleScreen) -> (&'static str, u32, bool) {
@@ -387,6 +395,14 @@ fn title_screen_fixture(screen: TitleScreen) -> (&'static str, u32, bool) {
         ),
         TitleScreen::Options => (
             "0f_pZ",
+            DISPLAY_WORLD
+                | DISPLAY_OBJECTS_AND_ANIMATION
+                | DISPLAY_CAMERA_UPDATE
+                | DISPLAY_TITLE_LOADED,
+            false,
+        ),
+        TitleScreen::Map => (
+            "1a_pZ",
             DISPLAY_WORLD
                 | DISPLAY_OBJECTS_AND_ANIMATION
                 | DISPLAY_CAMERA_UPDATE
@@ -520,6 +536,91 @@ fn authored_main_menu_routes_and_password_card_handshake_are_characterized() {
     }
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+    let mut title = AuthoredTitleHarness::main_menu(&nsd, &nsf, &nsf_bytes);
+
+    title.wait_until_ready(32);
+    assert_eq!(title.frame, 10, "authored MainMenu ready-frame drift");
+    title.tap(PAD_CROSS);
+    assert_eq!(
+        title.runtime.global_word(TITLE_STATE_GLOBAL).unwrap(),
+        TitleScreen::Map.raw(),
+        "default MainMenu selection must request the world map"
+    );
+    let map_loaded_at = title
+        .wait_for_loaded(TitleScreen::Map, 32)
+        .expect("MainMenu Cross must reach the source TitleLoadState map boundary");
+    assert_eq!(map_loaded_at, 20, "authored Map load-frame drift");
+    title.wait_until_ready(32);
+    let map_ready_at = title.frame;
+    assert_eq!(map_ready_at, 30, "authored Map ready-frame drift");
+    assert!(
+        title.runtime.arena().main_object().is_some(),
+        "the authored map controller must own the live main-object slot"
+    );
+
+    // CoreFrame consumes the request before another title GOOL frame. Do not
+    // execute a synthetic release frame after the authored write.
+    title.step(u16::try_from(PAD_CROSS).unwrap());
+    assert_eq!(
+        title.transitions,
+        [(31, 0x09)],
+        "the first unlocked map node must request N. Sanity Beach on Cross"
+    );
+    assert_eq!(
+        title.island_level_updates.first(),
+        Some(&(23, 7, -1, 1, 1, true)),
+        "mode-seven state must be visible before its first cross-zone LevelUpdate"
+    );
+    assert!(
+        title
+            .island_level_updates
+            .iter()
+            .all(|&(_, mode, _, observed, state_after, _)| {
+                mode == 7 && observed == state_after
+            }),
+        "every exercised mode-seven LevelUpdate must observe the prior writeback: {:?}",
+        title.island_level_updates,
+    );
+
+    let report = {
+        let mut host = TitleFlowHost::new(&nsd, &nsf, &nsf_bytes, &mut title.card);
+        title
+            .runtime
+            .finish_level_transition(&mut host, 0x09)
+            .expect("the map LEVEL_END phase must export a checked session carry")
+    };
+    assert!(
+        report.event_failures.is_empty(),
+        "map LEVEL_END handlers must complete cleanly: {:?}",
+        report.event_failures
+    );
+    assert_eq!(report.requested_lid, 0x09);
+    assert_eq!(report.next_lid_after_event, 0x09);
+    assert_eq!(report.resolved.level, LevelId::N_SANITY_BEACH);
+    assert!(!report.resolved.bonus_return);
+
+    let title_draw_count = report.carry.draw_count;
+    assert_eq!(title_draw_count, 31, "title/map draw-count drift");
+    let mounted =
+        RetailRuntime::new_from_session(RETAIL_GLOBAL_WORDS, LevelId::N_SANITY_BEACH, report.carry)
+            .expect("N. Sanity must import the title/map session carry");
+    assert_eq!(mounted.level(), Some(LevelId::N_SANITY_BEACH));
+    assert_eq!(mounted.draw_count(), title_draw_count);
+    assert_eq!(
+        mounted.global_word(LEVELS_UNLOCKED_GLOBAL).unwrap(),
+        1,
+        "the first-map handoff must retain fresh-game progression"
+    );
+    eprintln!(
+        "authored title route: MainMenu ready=10, Map loaded={map_loaded_at}, Map ready={map_ready_at}, N. Sanity request={}, carry draw_count={title_draw_count}",
+        map_ready_at + 1,
+    );
+}
+
 fn default_title_save() -> SaveData {
     SaveData {
         level_count: 1,
@@ -534,29 +635,41 @@ struct AuthoredTitleHarness<'assets> {
     nsd: &'assets Nsd,
     nsf: &'assets Nsf,
     nsf_bytes: &'assets [u8],
+    graph: RetailZoneGraph,
     zones: BTreeMap<Eid, OwnedTitleZone>,
     lifecycle: ZoneLifecycle,
+    camera: RetailCameraRuntime,
     runtime: RetailRuntime,
     card: VirtualCard,
     pad: PadState,
     frame: u32,
     loaded: Vec<(u32, TitleScreen)>,
+    transitions: Vec<(u32, i32)>,
+    /// Frame, mode, state before, state at the `LevelUpdate` boundary, state
+    /// after, and whether the effect crosses a zone boundary. A production
+    /// cross-zone `LevelUpdate` exposes the boundary value to synchronous TERM.
+    island_level_updates: Vec<(u32, u16, i32, i32, i32, bool)>,
 }
 
 impl<'assets> AuthoredTitleHarness<'assets> {
     fn main_menu(nsd: &'assets Nsd, nsf: &'assets Nsf, nsf_bytes: &'assets [u8]) -> Self {
-        let (zones, lifecycle) = title_zone_catalog(nsd, nsf, nsf_bytes);
+        let (graph, zones, lifecycle) = title_zone_catalog(nsd, nsf, nsf_bytes);
+        let camera = RetailCameraRuntime::new(&graph).expect("title camera must initialize");
         let mut harness = Self {
             nsd,
             nsf,
             nsf_bytes,
+            graph,
             zones,
             lifecycle,
+            camera,
             runtime: RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, LevelId::TITLE),
             card: VirtualCard::new(),
             pad: PadState::default(),
             frame: 0,
             loaded: Vec::new(),
+            transitions: Vec::new(),
+            island_level_updates: Vec::new(),
         };
         harness
             .runtime
@@ -589,16 +702,19 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             .set_global_word(NEXT_DISPLAY_GLOBAL, display_mask)
             .unwrap();
         let zone = Eid::from_name(zone_name).unwrap();
+        let path = RetailPathId { zone, index: 0 };
         self.lifecycle
             .transition_with_marker(zone, true)
             .unwrap_or_else(|error| panic!("title {screen:?} LevelUpdate: {error}"));
+        let camera_step = self
+            .camera
+            .level_update(&self.graph, path, 0, 2)
+            .unwrap_or_else(|error| panic!("title {screen:?} camera LevelUpdate: {error}"));
+        assert_eq!(camera_step.after.path, path);
         let owned = self.zones.get(&zone).unwrap();
         self.runtime
             .set_level_state_context(RetailLevelStateContext {
-                location: RetailCameraLocation {
-                    path: RetailPathId { zone, index: 0 },
-                    progress: PathProgress::ZERO,
-                },
+                location: camera_step.after,
                 graphics_flags: owned.header.graphics.flags,
                 box_count: 0,
                 checkpoint_id: -1,
@@ -662,10 +778,11 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 }
             })
             .collect::<Vec<_>>();
-        let mut host = TitleFlowHost::new(self.nsd, self.nsf, self.nsf_bytes, &mut self.card);
-        let attempts = self
-            .runtime
-            .spawn_current_zone_neighbors(&neighbors, &mut host);
+        let attempts = {
+            let mut host = TitleFlowHost::new(self.nsd, self.nsf, self.nsf_bytes, &mut self.card);
+            self.runtime
+                .spawn_current_zone_neighbors(&neighbors, &mut host)
+        };
         assert!(
             attempts.iter().all(|attempt| {
                 attempt.result.is_ok()
@@ -679,6 +796,8 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             "title frame {} spawn mismatch: {attempts:?}",
             self.frame
         );
+        self.update_map_camera();
+        let mut host = TitleFlowHost::new(self.nsd, self.nsf, self.nsf_bytes, &mut self.card);
         let pad = &mut self.pad;
         let report = self
             .runtime
@@ -716,12 +835,119 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 .filter(|execution| execution.result.is_err())
                 .collect::<Vec<_>>()
         );
+        self.transitions
+            .extend(report.effects.iter().filter_map(|effect| match effect {
+                VmEffect::Transition(level) => Some((self.frame, *level)),
+                _ => None,
+            }));
         let action = self.runtime.begin_retail_title_update().unwrap();
         if let Some(RetailTitleAction::LoadScreen { screen, .. }) = action {
             self.mount(screen);
         }
         self.runtime.finish_retail_title_update().unwrap();
         self.runtime.finish_deferred_display_frame().unwrap();
+    }
+
+    fn update_map_camera(&mut self) {
+        let Some(presentation) = self.runtime.retail_title_presentation().unwrap() else {
+            return;
+        };
+        if presentation.screen != TitleScreen::Map || self.runtime.arena().main_object().is_none() {
+            return;
+        }
+        let snapshot = self.pad.snapshot();
+        let island_cam_state = self
+            .runtime
+            .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+            .unwrap()
+            .cast_signed();
+        let island_cam_rot_x = self
+            .runtime
+            .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+            .unwrap()
+            .cast_signed();
+        let step = self
+            .camera
+            .update_with_island(
+                &self.graph,
+                RetailCameraInput {
+                    tapped: snapshot.tapped,
+                },
+                Some(RetailIslandCameraInput {
+                    island_cam_state,
+                    island_cam_rot_x,
+                }),
+            )
+            .expect("authored world-map camera update must execute");
+        let island_writeback = match step.outcome {
+            RetailCameraOutcome::IslandAdvanced {
+                mode,
+                state_before,
+                state_after,
+                ..
+            } => Some((mode, state_before, state_after)),
+            _ => None,
+        };
+        if let Some((7, _, state_after)) = island_writeback {
+            // Native mode seven updates `island_cam_state` before its optional
+            // LevelUpdate, so departing TERM handlers observe the new value.
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .unwrap();
+        }
+        for effect in &step.effects {
+            let RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags,
+            } = *effect
+            else {
+                continue;
+            };
+            if let Some((mode, state_before, state_after)) = island_writeback {
+                let observed = self
+                    .runtime
+                    .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+                    .unwrap()
+                    .cast_signed();
+                self.island_level_updates.push((
+                    self.frame,
+                    mode,
+                    state_before,
+                    observed,
+                    state_after,
+                    before.path.zone != after.path.zone,
+                ));
+            }
+            if before.path.zone != after.path.zone {
+                self.lifecycle
+                    .transition_with_marker(after.path.zone, flags & 2 != 0)
+                    .expect("world-map zone transition must remain valid");
+            }
+            let existing = self.runtime.level_state_context().unwrap().clone();
+            let zone = self.zones.get(&after.path.zone).unwrap();
+            self.runtime
+                .set_level_state_context(RetailLevelStateContext {
+                    location: after,
+                    graphics_flags: zone.header.graphics.flags,
+                    box_count: existing.box_count,
+                    checkpoint_id: existing.checkpoint_id,
+                    checkpoint_translation: existing.checkpoint_translation,
+                    first_spawn: existing.first_spawn,
+                    active_neighbor_zones: self.lifecycle.active_neighbor_zones(),
+                });
+        }
+        if let Some((8, _, state_after)) = island_writeback {
+            // Native mode eight performs LevelUpdate first and only then
+            // resets `island_cam_state` when the destination leaves mode eight.
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .unwrap();
+        }
+        self.runtime.set_frame_context(
+            step.game_state,
+            self.camera.rotation_xz(&self.graph).unwrap(),
+        );
     }
 
     fn wait_until_ready(&mut self, limit: u32) {

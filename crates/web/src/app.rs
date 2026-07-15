@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 
 use crust_audio::output::{OutputOptions, RetailMasterFade};
-use crust_audio::retail::{RetailAudioEngine, RetailAudioError};
+use crust_audio::retail::{RetailAudioEngine, RetailAudioError, retail_max_midi_voices};
 use crust_audio::retail_music::RetailMusic;
 use crust_audio::retail_player::RetailMusicChange;
 use crust_formats::binary::{Eid, FormatError, PageIndex};
@@ -33,7 +33,7 @@ use crust_sim::Vec3;
 use crust_sim::camera::{
     RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
     RetailCameraPose, RetailCameraRuntime, RetailCameraStep, RetailDeathCameraInput,
-    RetailDeathCameraState,
+    RetailDeathCameraState, RetailIslandCameraInput,
 };
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
@@ -57,7 +57,8 @@ use crust_sim::paging::{
 };
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
-    AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
+    AnimationBoundBinding, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
+    ISLAND_CAMERA_STATE_GLOBAL, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
     RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
     RetailSaveStateOutcome, RetailSessionCarry, RetailThunderCue, RetailTitleAction,
@@ -100,7 +101,8 @@ use crate::title_runtime::{
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
 use crate::{
-    authoritative_save_or_last, initial_retail_level_state, require_render_object_snapshot,
+    RetailIslandWritebackPhase, authoritative_save_or_last, core_objects_pad_update,
+    initial_retail_level_state, require_render_object_snapshot, retail_island_state_writeback,
 };
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
@@ -327,8 +329,9 @@ impl App {
     }
 
     fn start_runtime(&mut self, pair: ValidatedPair) -> Result<(), JsValue> {
+        let physical_held = self.keyboard_bits | self.touch_bits() | poll_gamepad()?;
         let storage = self.storage.take().or_else(|| StorageState::open().ok());
-        let mut runtime = Runtime::new(pair, storage, &self.dom)?;
+        let mut runtime = Runtime::new(pair, storage, physical_held, &self.dom)?;
         runtime.set_muted(self.muted);
         self.runtime = Some(runtime);
         self.busy = false;
@@ -752,6 +755,9 @@ struct Runtime {
     previous_shader_wall_ticks: Option<u32>,
     retail_shader_ticks_elapsed: u32,
     pad: PlatformPadState,
+    /// Most recent physical browser sample, refreshed on every RAF even while
+    /// an asynchronous pair validation freezes cooperative simulation.
+    latest_physical_held: u16,
     stage: GlStage,
     retail_frame: RetailFrameState,
     retail_objects: RetailRuntime,
@@ -797,6 +803,7 @@ impl Runtime {
     fn new(
         pair: ValidatedPair,
         mut storage: Option<StorageState>,
+        physical_held: u16,
         dom: &Dom,
     ) -> Result<Self, JsValue> {
         let raw_level = u8::try_from(pair.level.get())
@@ -836,7 +843,20 @@ impl Runtime {
                 None
             }
         };
-        let mut retail_audio = RetailAudioEngine::default();
+        // MidiInit partitions the shared 24-voice table on every NSInit. The
+        // boundary depends on the mounted level and restored option volumes;
+        // defaulting to eight would let SFX steal retail music slots in most
+        // levels.
+        let mut retail_audio = RetailAudioEngine::new(retail_max_midi_voices(
+            pair.level,
+            flow.options.music_volume,
+            flow.options.sfx_volume,
+        ))
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not initialize the retail MIDI voice boundary: {error}"
+            ))
+        })?;
         retail_audio.set_sfx_volume(flow.options.sfx_volume);
         let mut stage = GlStage::new(&dom.canvas)?;
         let after_loading_image = if let Some(image) = decode_pair_loading_image(&pair)? {
@@ -944,6 +964,18 @@ impl Runtime {
             initial_level_state.checkpoint_translation,
             false,
         )?);
+        // Native CoreObjectsCreate begins with PadUpdate. Publish that shifted
+        // history before any HUD/root once handler can observe the destination
+        // pad, and retain the same snapshot for the first CoreFrame gate.
+        let mut pad = PlatformPadState::default();
+        let initial_pad = core_objects_pad_update(&mut pad, physical_held, 0, None);
+        retail_objects
+            .set_pad_snapshot(0, retail_pad_snapshot(initial_pad))
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not initialize the CoreObjectsCreate pad boundary: {error:?}"
+                ))
+            })?;
         let last_authoritative_save = retail_objects.card_save_data().map_err(|error| {
             JsValue::from_str(&format!(
                 "could not snapshot initial retail save globals: {error:?}"
@@ -979,7 +1011,8 @@ impl Runtime {
             previous_step_us: None,
             previous_shader_wall_ticks: None,
             retail_shader_ticks_elapsed: 0,
-            pad: PlatformPadState::default(),
+            pad,
+            latest_physical_held: physical_held,
             stage,
             retail_frame,
             retail_objects,
@@ -1205,6 +1238,33 @@ impl Runtime {
             read_mount_global(CHECKPOINT_TRANSLATION_GLOBALS[1])?,
             read_mount_global(CHECKPOINT_TRANSLATION_GLOBALS[2])?,
         ];
+        let mounted_music_volume = retail_objects
+            .global_word(MUSIC_VOLUME_GLOBAL)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not import destination music volume: {error:?}"
+                ))
+            })?
+            .min(u32::from(u8::MAX)) as u8;
+        let mounted_sfx_volume = retail_objects
+            .global_word(SFX_VOLUME_GLOBAL)
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not import destination SFX volume: {error:?}"
+                ))
+            })?
+            .min(u32::from(u8::MAX)) as u8;
+        let mut destination_retail_audio = RetailAudioEngine::new(retail_max_midi_voices(
+            level,
+            mounted_music_volume,
+            mounted_sfx_volume,
+        ))
+        .map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not initialize destination retail MIDI voice boundary: {error}"
+            ))
+        })?;
+        destination_retail_audio.set_sfx_volume(mounted_sfx_volume);
         retail_objects.set_level_state_context(build_retail_level_state_context(
             &retail_zone_graph,
             retail_camera.location(),
@@ -1214,6 +1274,24 @@ impl Runtime {
             mounted_checkpoint_translation,
             false,
         )?);
+        // Build the pad boundary transactionally alongside the candidate
+        // runtime. If validation fails, neither the live history nor the live
+        // object graph advances. On commit this is the PadUpdate at the start
+        // of native CoreObjectsCreate after NSInit.
+        let mut destination_pad = self.pad;
+        let destination_pad_snapshot = core_objects_pad_update(
+            &mut destination_pad,
+            self.latest_physical_held,
+            self.pending_buttons,
+            prepared_pbak.as_ref().map(|_| 0),
+        );
+        retail_objects
+            .set_pad_snapshot(0, retail_pad_snapshot(destination_pad_snapshot))
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not initialize destination CoreObjectsCreate pad boundary: {error:?}"
+                ))
+            })?;
         // Materialize the destination's process-lifetime roots against the
         // candidate runtime and candidate stream host. A malformed DispC or
         // ZDAT therefore fails before the active flow/runtime mount is
@@ -1304,6 +1382,7 @@ impl Runtime {
         self.retail_zone_graph = retail_zone_graph;
         self.retail_camera = retail_camera;
         self.retail_camera_pose_override = None;
+        self.pad = destination_pad;
         self.retail_objects = retail_objects;
         self.last_authoritative_save = destination_authoritative_save;
         self.retail_zones = retail_zones;
@@ -1322,11 +1401,14 @@ impl Runtime {
         self.retail_metrics = RetailRuntimeMetrics::default();
         self.retail_runtime_error = None;
         self.retail_runtime_warning = None;
-        self.retail_audio = RetailAudioEngine::default();
-        self.retail_audio
-            .set_random_seed(self.retail_objects.random_seed_b());
-        self.retail_audio
-            .set_sfx_volume(self.flow.options.sfx_volume);
+        destination_retail_audio.set_random_seed(self.retail_objects.random_seed_b());
+        self.retail_audio = destination_retail_audio;
+        // AudioInit/MidiInit restore the whole-output fade to full scale on
+        // every NSInit. Never carry a level-end fade into the destination.
+        self.retail_master_fade = RetailMasterFade::new();
+        if let Some(audio) = &mut self.audio {
+            audio.set_retail_master_gain(self.retail_master_fade.normalized_gain());
+        }
         self.last_title_state = None;
         log_retail_core_objects(dom, retail_core_objects);
         log_retail_level_misc_object(dom, retail_level_misc_object);
@@ -1661,6 +1743,10 @@ impl Runtime {
     }
 
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
+        // Pair validation is asynchronous, but browser input is not. Retain
+        // each RAF sample so the destination CoreObjectsCreate PadUpdate uses
+        // the current physical state instead of the source level's last tick.
+        self.latest_physical_held = held;
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
         let shader_wall_ticks = (timestamp_ms.max(0.0) / 0.963_765).trunc() as u32;
         let assets_stalled = self.assets_stalled();
@@ -3083,11 +3169,33 @@ impl Runtime {
             Ok(self.retail_camera.stationary_step())
         } else if let Some(profile) = self.title_screen_profile() {
             if profile.updates_camera() {
-                self.retail_camera.update(
+                // Modes seven/eight consume title-owned globals that ordinary
+                // CamUpdate deliberately cannot invent. Supplying them here
+                // is the authored island-map path from menu selection to the
+                // first gameplay `next_lid` request.
+                let island_cam_state = self
+                    .retail_objects
+                    .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+                    .map_err(|error| {
+                        format!("retail island-camera state is unavailable: {error:?}")
+                    })?
+                    .cast_signed();
+                let island_cam_rot_x = self
+                    .retail_objects
+                    .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+                    .map_err(|error| {
+                        format!("retail island-camera rotation is unavailable: {error:?}")
+                    })?
+                    .cast_signed();
+                self.retail_camera.update_with_island(
                     &self.retail_zone_graph,
                     RetailCameraInput {
                         tapped: snapshot.tapped,
                     },
+                    Some(RetailIslandCameraInput {
+                        island_cam_state,
+                        island_cam_rot_x,
+                    }),
                 )
             } else {
                 Ok(self.retail_camera.stationary_step())
@@ -3118,12 +3226,29 @@ impl Runtime {
             }
         }
         .map_err(|error| error.to_string())?;
+        let island_state_writeback = retail_island_state_writeback(step.outcome);
+        if let Some((RetailIslandWritebackPhase::BeforeLevelUpdate, state_after)) =
+            island_state_writeback
+        {
+            // Native mode seven publishes the orbit state before its optional
+            // LevelUpdate, so departing-zone TERM handlers observe the new
+            // value just as they do in CamUpdate.
+            self.write_retail_island_camera_state(state_after)?;
+        }
         if !spin_death && step.before != step.after {
             // Every modeled path movement corresponds to the native
             // LevelUpdate/CamFollow write that replaces a prior death pose.
             self.retail_camera_pose_override = None;
         }
         self.apply_retail_camera_effects(&step, dom)?;
+        if let Some((RetailIslandWritebackPhase::AfterLevelUpdate, state_after)) =
+            island_state_writeback
+        {
+            // Native mode eight performs LevelUpdate first. That call may run
+            // TERM handlers synchronously; only after it returns does CamUpdate
+            // publish state one when the destination leaves mode eight.
+            self.write_retail_island_camera_state(state_after)?;
+        }
         let rotation_xz = self
             .retail_camera
             .rotation_xz(&self.retail_zone_graph)
@@ -3149,6 +3274,12 @@ impl Runtime {
             ),
         );
         Ok(step)
+    }
+
+    fn write_retail_island_camera_state(&mut self, state: i32) -> Result<(), String> {
+        self.retail_objects
+            .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state.cast_unsigned())
+            .map_err(|error| format!("retail island-camera state writeback failed: {error:?}"))
     }
 
     fn apply_retail_camera_effects(

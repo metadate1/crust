@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crust_formats::binary::Eid;
+use crust_formats::stream::LevelId;
 use crust_sim::gool::{
     AudioControlArgument, AudioControlOperation, AudioControlRequest, AudioHostRequest,
     AudioHostResponse, AudioScalarArgument, AudioVoiceCreateRequest, ObjectHandle,
@@ -21,6 +22,34 @@ use crate::mixer::{AudioMetrics, Mixer, Sample, VOICE_COUNT};
 pub const DEFAULT_MAX_MIDI_VOICES: usize = 8;
 pub const RETAIL_MAX_VOLUME: u16 = 0x3fff;
 pub const RETAIL_BASE_PITCH: i16 = 0x1000;
+
+/// Returns the exact MIDI/SFX hardware-voice boundary selected by retail
+/// `MidiInit` for one stream mount.
+///
+/// Music owns slots below the returned index and gameplay SFX owns the
+/// remaining slots through slot 23. The two option-volume branches precede
+/// the level table in the original routine, including music mute taking
+/// precedence when both buses are muted.
+#[must_use]
+pub const fn retail_max_midi_voices(level: LevelId, music_volume: u8, sfx_volume: u8) -> usize {
+    if music_volume == 0 {
+        return 8;
+    }
+    if sfx_volume == 0 {
+        return 20;
+    }
+
+    match level.get() {
+        0x03 => 11,
+        0x05 | 0x0c | 0x15 => 13,
+        0x06 | 0x07 => 14,
+        0x1f | 0x22 | 0x2e => 15,
+        0x0e | 0x13 => 17,
+        0x08 | 0x11 | 0x14 | 0x16 | 0x1e | 0x24 | 0x28 | 0x2a | 0x33 => 18,
+        0x0a => 21,
+        _ => 16,
+    }
+}
 
 const FLAG_FORCE_OFF: u32 = 0x001;
 const FLAG_STOP_AFTER_RAMP: u32 = 0x002;
@@ -864,9 +893,92 @@ fn retail_random(maximum: u32, seed: &mut u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use crust_formats::stream::KNOWN_LEVELS;
     use crust_sim::gool::{AudioControlFlags, AudioVoiceSelector, StorageReference, StorageRegion};
 
     use super::*;
+
+    #[test]
+    fn midi_voice_boundary_matches_every_known_retail_level() {
+        const EXPECTED: [(u32, usize); 44] = [
+            (0x03, 11),
+            (0x04, 16),
+            (0x05, 13),
+            (0x06, 14),
+            (0x07, 14),
+            (0x08, 18),
+            (0x09, 16),
+            (0x0a, 21),
+            (0x0c, 13),
+            (0x0e, 17),
+            (0x0f, 16),
+            (0x11, 18),
+            (0x12, 16),
+            (0x13, 17),
+            (0x14, 18),
+            (0x15, 13),
+            (0x16, 18),
+            (0x17, 16),
+            (0x18, 16),
+            (0x19, 16),
+            (0x1a, 16),
+            (0x1b, 16),
+            (0x1c, 16),
+            (0x1d, 16),
+            (0x1e, 18),
+            (0x1f, 15),
+            (0x20, 16),
+            (0x21, 16),
+            (0x22, 15),
+            (0x23, 16),
+            (0x24, 18),
+            (0x25, 16),
+            (0x26, 16),
+            (0x28, 18),
+            (0x29, 16),
+            (0x2a, 18),
+            (0x2c, 16),
+            (0x2d, 16),
+            (0x2e, 15),
+            (0x33, 18),
+            (0x34, 16),
+            (0x37, 16),
+            (0x38, 16),
+            (0x39, 16),
+        ];
+
+        assert_eq!(KNOWN_LEVELS.len(), EXPECTED.len());
+        for (known, (raw_level, expected)) in KNOWN_LEVELS.into_iter().zip(EXPECTED) {
+            assert_eq!(known.id.get(), raw_level);
+            assert_eq!(
+                retail_max_midi_voices(known.id, u8::MAX, u8::MAX),
+                expected,
+                "{} ({:#04x})",
+                known.name,
+                known.id.get(),
+            );
+        }
+    }
+
+    #[test]
+    fn midi_voice_boundary_volume_overrides_precede_every_level_case() {
+        for known in KNOWN_LEVELS {
+            for music_volume in [0, u8::MAX] {
+                assert_eq!(
+                    retail_max_midi_voices(known.id, music_volume, 0),
+                    if music_volume == 0 { 8 } else { 20 },
+                    "{} with music volume {music_volume}",
+                    known.name,
+                );
+            }
+            assert_eq!(retail_max_midi_voices(known.id, 0, u8::MAX), 8);
+        }
+    }
+
+    #[test]
+    fn midi_voice_boundary_unknown_level_uses_the_retail_default() {
+        assert_eq!(retail_max_midi_voices(LevelId::new_const(0x02), 1, 1), 16);
+    }
 
     fn handle(index: u16) -> ObjectHandle {
         ObjectHandle::new(index).unwrap()

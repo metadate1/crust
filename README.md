@@ -39,7 +39,12 @@ On the island-map title state, WGEO item three is parsed with its unusual serial
 `len + type-as-record-zero` layout. The renderer carries the active path group across worlds and
 applies globals 73/75 as non-mutating per-frame animation-mask overrides, matching
 `GfxAnimMapPaths` without writing into user-supplied stream bytes. The last effective masks persist
-through the map's fade-out, matching the native resident-WGEO write lifetime.
+through the map's fade-out, matching the native resident-WGEO write lifetime. Camera modes
+seven/eight consume the authored island globals with their distinct source ordering: mode seven
+publishes its next state before `LevelUpdate`, while mode eight publishes after the synchronous
+`LevelUpdate`/TERM boundary. Both complete before the following GOOL traversal, so the normal Main
+Menu → Map → N. Sanity Cross route emits and mounts retail level `0x09` rather than stopping at a
+host boundary.
 
 The browser now owns a checked retail object runtime for title, gameplay, bonus, boss, level-
 complete, intro and ending states.
@@ -51,7 +56,10 @@ matrix and typed parent/player links; runtime children inherit their parent's tr
 Every gameplay, boss, bonus, and map mount also creates the native executable-four life, fruit,
 and pickup HUD roots before the first zone scan and publishes their checked tagged references to
 the exact GOOL globals used by pickups, saves, and bonus routing. Title, level-complete, intro, and
-ending mounts retain the source's no-HUD branch. The mount then runs the object-creating half of
+ending mounts retain the source's no-HUD branch. Before those roots run, initial and destination
+mounts perform the source `CoreObjectsCreate` pad-history shift; an armed attract recording forces
+the new held/tapped words to zero while retaining prior history. The mount then runs the
+object-creating half of
 `LevelInitMisc(1)`: its six applicable levels receive the native root-four controller, including
 Ripper Roo's executable-39/subtype-four controller and checked `ambiance_obj` global-eight link.
 State changes rebind at the synchronous host boundary: a captured once block runs before the state
@@ -185,7 +193,9 @@ Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
 fades, the native all-bus master fade and GOOL-controlled alternate tracks. Sampled VAB voices
 apply the two retail ADSR register words through an exact fixed-point 44.1 kHz attack, decay,
-sustain, and release generator before mixing. Authored `next_lid`
+sustain, and release generator before mixing. Every stream mount also applies retail's level- and
+volume-specific MIDI/SFX slot boundary and resets the all-bus fade to full scale. Authored
+`next_lid`
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
 fresh destination runtime, and restore bonus returns from the saved zone/path/progress.
 Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
@@ -260,7 +270,7 @@ does not certify the complete ending flow.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 546 passing tests; the locked default workspace gate has 870, plus 76
+The `crust-sim` library has 546 passing tests; the locked default workspace gate has 881, plus 77
 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.

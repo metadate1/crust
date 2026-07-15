@@ -105,7 +105,9 @@ exact Pager slot snapshot freezes frame-start world requests and the source load
 each object is projected, its recorded live `(EID, generation, page)` map is replayed into the same
 cache, preserving mid-frame paging changes without re-reading the final arena. Commands share one
 texture manifest, and reversed object insertion is placed ahead of the already compensated world
-stream to preserve the source's head-insert ordering-table behavior. On title level `0x19`, state 15 enables
+stream to preserve the source's head-insert ordering-table behavior. Colored and textured quads use
+the PC backend's exact conversion order `[0,1,3]` then `[3,2,0]`, retaining shared-edge winding,
+Gouraud and UV interpolation behavior. On title level `0x19`, state 15 enables
 a checked WGEO item-three path program. Its group cursor persists across ZDAT world order, globals
 73 and 75 select groups 0–31 and 32–63, and frame-local polygon copies receive the effective
 animation masks so mounted stream storage remains immutable. A graph-scoped sidecar retains the
@@ -187,13 +189,22 @@ synthetic title, menu or gameplay scene.
 
 ## Simulation and GOOL
 
-The hosted presentation path records the 30 Hz order `card/pad → pending level transition → spawn
-→ camera → frame-start texture snapshot → GOOL plus ordered display-record capture → combined
-world/object scene → presentation` plus draw-skip and draw-count
+Initial boot and every committed pair remount first perform the `CoreObjectsCreate` `PadUpdate`,
+including state-three PBAK suppression, so the next frame sees the source-shifted held/tapped
+history even across asynchronous validation. The hosted presentation path then records the 30 Hz
+order `card/pause → PBAK → pending level transition → spawn → shader → camera → frame-start texture
+snapshot → GOOL plus ordered display-record capture → combined world/object scene → presentation`
+plus draw-skip and draw-count
 timing. Title frames insert the authoritative `TitleUpdate → TitleLoadState → GLUpdate` boundary
 after GOOL; the high-level `GameFlow` value only mirrors the screen loaded there. `RetailCameraRuntime`
 owns the live path handle, signed-8.8 progress and persistent follow offsets/zoom/speed. Its follow
 input reads GOOL global 65 directly for the source `frames_elapsed - gem_stamp <= 15` neighbor gate.
+Island-map camera modes seven/eight receive title globals 66 (`island_cam_state`) and 64
+(`island_cam_rot_x`) through a typed host input. Mode seven publishes the returned state before its
+optional `LevelUpdate`; mode eight performs the synchronous `LevelUpdate` and departing-zone TERM
+handlers first, then publishes its returned state. Both boundaries finish before the following GOOL
+traversal. This is the normal authored Main Menu → Map → N. Sanity handoff, not a high-level route
+substitution.
 ZDAT entities decode into owned
 descriptors and signed path points. A fixed 96-slot object pool, dedicated main-object slot, eight
 logical roots, 304 active spawn words and generational handles reproduce the bounded spawn-tree
@@ -453,6 +464,10 @@ ramp/glide and owner-wide teardown. The browser program host lazily resolves loc
 zero, returns the exact synchronous voice result to GOOL, ticks voices at 30 Hz and merges their PCM
 into WebAudio. The output unlocks only after a user gesture; mute does not stop simulation, and
 SFX/music volume plus mono are independent. Zone MIDI EIDs resolve checked type-13/type-14 entries;
+each `NSInit` partitions the 24 hardware slots at the exact `MidiInit` boundary selected by restored
+music/SFX volumes and the mounted level (8, 11, 13, 14, 15, 16, 17, 18, 20, or 21). The same mount
+resets the all-bus master fade to `0x3fff` with zero step and immediately republishes unity WebAudio
+gain, so a level-end fade cannot silence the destination stream.
 VAB waves become owned PCM sample banks and SEP events drive two independent sequencers. A
 browser-independent owner applies source-timed thirty-tick zone fades, defers transitions while
 GOOL selects the second track, and drops both banks at a level boundary. The WebAudio master gain

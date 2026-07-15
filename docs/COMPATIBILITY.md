@@ -124,6 +124,12 @@ gameplay path.
   ZDAT exactly like the source's type-17 rewrite, keeping it in current-neighbor TERM scope. An
   authored arena owns the 4:3 canvas. Before it is available the browser presents only loading/error
   diagnostics and external status; it does not advance a synthetic title, menu or gameplay flow.
+- Island-map camera modes seven/eight consume GOOL globals 66/64 through a typed host boundary.
+  Mode seven publishes its returned state before `LevelUpdate`; mode eight publishes after the
+  synchronous `LevelUpdate`/TERM boundary. The legally local normal route reaches Main Menu ready
+  at frame 10, loads Map at frame 20, reaches Map ready at frame 30, emits authored
+  `next_lid = 0x09` on Cross at frame 31, completes clean `LEVEL_END`, and imports that session
+  carry into N. Sanity Beach at draw count 31.
 - Island-map state 15 consumes each WGEO item-three path list with the source's
   `len + type-as-record-zero` layout. The active group carries across worlds, globals 73/75 control
   the 64 group bits, and effective mask-seven/mask-zero writes are applied to frame-local polygon
@@ -307,10 +313,13 @@ gameplay path.
 - Cross-level transitions are initiated by authored GOOL and use the native `LEVEL_END` and
   session-carry/remount order. The host keeps all selected file handles, validates and atomically
   swaps every requested pair, and rebuilds pair-scoped camera, lifecycle, pager, renderer and audio
-  owners. A same-level `LoadState` issued from inside a `LEVEL_END` handler still stops at a checked
-  boundary because continuing that exact handler requires a resumable nested browser restart
-  transaction. A legally local scan of all 44 retail pairs found zero authored occurrences of that
-  nested case. Different-level loads capture their restart kind and clear bonus mode at the
+  owners. Initial boot and committed remounts perform the source `CoreObjectsCreate` pad-history
+  shift before root work; an armed state-three PBAK mount preserves prior history while suppressing
+  its new held/tapped words. A same-level `LoadState` issued from inside a `LEVEL_END` handler still
+  stops at a checked boundary because continuing that exact handler requires a resumable nested
+  browser restart transaction. A legally local scan of all 44 retail pairs found zero authored
+  occurrences of that nested case. Different-level loads capture their restart kind and clear bonus
+  mode at the
   synchronous instruction boundary; later GOOL and LEVEL_END recipients can continue without a
   later SaveState reclassifying the earlier request. Complete asynchronous page residency timing
   also remains a gap.
@@ -323,7 +332,8 @@ gameplay path.
   hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
   SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
   manifest. Type-two sprites, type-five fragments, type-four text/font glyphs and status-B 2D CVTX
-  are coupled to the same ordered command/texture path. The pager models the eight usable native
+  are coupled to the same ordered command/texture path. Colored and textured quads split in the PC
+  backend's exact `[0,1,3]`, `[3,2,0]` order. The pager models the eight usable native
   texture slots (physical slots 8–15), source-order free/stale/unprotected replacement,
   current-zone load-list protection and immutable generation snapshots; initial mount, restart and
   zone transition install destination protection before opening pages. GOOL paging effects execute
@@ -371,7 +381,9 @@ gameplay path.
   entries from the mounted local NSF and reach WebAudio with owner cleanup. Retail INST/VAB/SEP/MIDI
   music is connected, including volume, pan, expression, sustain, pitch bend, program selection,
   zone fades and dual-track toggles. Sampled voices now use exact fixed-point SPU ADSR timing for
-  attack, decay, sustain, release, key-off, and linear/exponential rate modes. Remaining gaps are
+  attack, decay, sustain, release, key-off, and linear/exponential rate modes. Each mount applies
+  the exact `MidiInit` level/volume partition between music and SFX slots and restores the native
+  full-scale inactive master fade before destination audio starts. Remaining gaps are
   Gaussian interpolation (the synth currently interpolates linearly), vibrato, portamento,
   pressure and unsupported generic controllers, spatial reverb/effects, SPU noise/FM, and
   hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music

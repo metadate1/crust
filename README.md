@@ -178,9 +178,12 @@ frame 513, and Title imports the second carry into its parsed graph, ZDAT entiti
 map camera schedule. The post-completion Map unlocks level two; after the authored Up/Cross route
 it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. All four
 outgoing `LEVEL_END` broadcasts complete without a checked handler failure, and the carried map,
-count, unlock, island-camera and draw state remain exact. This is a deterministic simulation
-integration test, not a claim that a complete browser playthrough or later retail progression is
-certified.
+count, unlock, island-camera, RNG and draw state remain exact. The same uninterrupted test imports
+that carry into Jungle Rollers, flings both early PlanC hazards, breaks four counted boxes, and
+reaches checkpoint entity 46 at frame 1,117. It completes 1,500 Jungle frames at `0u_cZ` path one
+with the exact saved checkpoint translation/count, no restart, death camera, below-zero or terminal
+fall, VM error, faulted object, or checked issue. This is a deterministic simulation integration
+test, not a claim that a complete browser playthrough or full Jungle route is certified.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

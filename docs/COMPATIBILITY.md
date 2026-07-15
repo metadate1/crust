@@ -448,13 +448,15 @@ gameplay path.
   the third-token save/fade/status/`0x24` transition, and WarpC's parsed proximity/status gate at
   its exact quantized boundaries. Together they cover the control path, but they are not one
   uninterrupted pad-driven or browser playthrough.
-  A bounded local replay imported the authentic first-completion carry into Jungle Rollers and
-  showed why the existing fresh-boot controller cannot simply be reused as a progression proof:
-  source-retained RNG-A and `draw_count` independently alter its hazard/animation phase. The
-  authentic phase enters Crash state 23 at frame 532 and restarts at frame 648 with no VM fault;
-  replacing either value with its fresh-boot value avoids that collision. The C source preserves
-  both values across `NSKill`/`NSInit`, so resetting them would be incompatible. A phase-robust
-  uninterrupted Jungle route after the authentic carry remains open.
+  The authentic first-completion carry into Jungle Rollers retains source RNG-A and `draw_count`,
+  which independently alter its hazard/animation phase; resetting either at mount would be source
+  incompatible. The former fresh-boot controller entered Crash state 23 at frame 532 and restarted
+  at frame 648. A phase-robust exact-carry regression now flings both early PlanC hazards and
+  reaches checkpoint entity 46 at frame 1,117 with its exact translation, a saved pre-increment box
+  count of `0x400`, and a live count of `0x500`. It completes 1,500 clean Jungle frames at `0u_cZ`
+  path one/progress 5,344 without a restart, death camera, below-zero or terminal fall, VM error,
+  faulted object, or checked issue. The uninterrupted route from that checkpoint to Jungle
+  completion remains open.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

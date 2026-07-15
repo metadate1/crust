@@ -2874,8 +2874,9 @@ mod tests {
     use crust_sim::object_arena::NeighborZone;
     use crust_sim::retail_lighting::{ObjectDarkShaderInput, apply_retail_object_zone_shader};
     use crust_sim::retail_runtime::{
-        NsfProgramHost, RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome,
-        RetailRuntime, ZoneTerminationMode,
+        ISLAND_CAMERA_ROTATION_GLOBAL, NsfProgramHost, RetailDemoFinishOutcome,
+        RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
+        ZoneTerminationMode,
     };
     use crust_sim::zone_lifecycle::{
         OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
@@ -5101,11 +5102,14 @@ mod tests {
             .unwrap()
             .expect("selected level has one PBAK recording");
         assert_eq!(prepared.snapshot.level, level);
-        let trace_frames = std::env::var("C1_PBAK_FRAMES").ok().map_or(232, |value| {
-            value
-                .parse::<usize>()
-                .unwrap_or_else(|error| panic!("C1_PBAK_FRAMES {value:?}: {error}"))
-        });
+        let trace_frames = std::env::var("C1_PBAK_FRAMES").ok().map_or_else(
+            || prepared.frame_count(),
+            |value| {
+                value
+                    .parse::<usize>()
+                    .unwrap_or_else(|error| panic!("C1_PBAK_FRAMES {value:?}: {error}"))
+            },
+        );
         assert!(
             trace_frames <= prepared.frame_count(),
             "the render trace cannot outlive the recording"
@@ -5154,6 +5158,7 @@ mod tests {
         let mut builder = RetailSceneBuilder::new();
         let mut observed_offender = None;
         let mut finish_outcome = None;
+        let mut finish_island_rotation = None;
         let mut pad_boundaries = 0_usize;
         let maximum_wall_frames = trace_frames.saturating_mul(8).max(trace_frames + 512);
         for pbak_frame in 0..maximum_wall_frames {
@@ -5204,6 +5209,11 @@ mod tests {
                         held_previous_2: previous.held_previous,
                     };
                     if end.is_some() {
+                        finish_island_rotation = Some(
+                            runtime
+                                .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+                                .map_err(crust_sim::retail_runtime::RuntimeError::Vm)?,
+                        );
                         runtime
                             .set_pad_snapshot(0, pbak_event_pad_snapshot(previous, pad))
                             .map_err(crust_sim::retail_runtime::RuntimeError::Vm)?;
@@ -5371,10 +5381,34 @@ mod tests {
                 playback.is_returning(),
                 "{pad_boundaries} Crash pad boundaries ran across {trace_frames} wall frames"
             );
-            assert!(
-                finish_outcome.is_some(),
-                "the final recorded pad boundary must complete the retail demo handshake"
-            );
+            let finish_outcome = finish_outcome
+                .as_ref()
+                .expect("the final recorded pad boundary must complete the retail demo handshake");
+            let finish_island_rotation = finish_island_rotation
+                .expect("the final recorded pad boundary must sample its island-camera target");
+            match (finish_island_rotation, finish_outcome) {
+                (0, RetailDemoFinishOutcome::Released) => {
+                    assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
+                }
+                (0, outcome) => {
+                    panic!("a zero island-camera target must release playback, got {outcome:?}")
+                }
+                (_, RetailDemoFinishOutcome::CaptionEvent { .. }) => {
+                    assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(3));
+                }
+                (_, RetailDemoFinishOutcome::CaptionEventFault { .. }) => {
+                    panic!("the legal recording reached a malformed caption-event handler")
+                }
+                (_, RetailDemoFinishOutcome::Released) => {
+                    panic!("a nonzero island-camera target must hand off to the caption object")
+                }
+            }
+            if level == LevelId::new_const(0x0c) {
+                assert_eq!(
+                    finish_island_rotation, 0,
+                    "the direct-mount pb0cB fixture must retain its zero island-camera target"
+                );
+            }
         }
     }
 

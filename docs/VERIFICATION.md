@@ -63,8 +63,8 @@ rather than an overflow error.
 
 ## Hosted retail-runtime slices
 
-The 2026-07-13 and 2026-07-14 opt-in tests used the same legally owned raw BIN in place and did not
-copy any disc or stream bytes into the repository:
+The 2026-07-13 through 2026-07-15 opt-in tests used the same legally owned raw BIN in place and did
+not copy any disc or stream bytes into the repository:
 
 - The fractional camera/scene test discovered the complete retail catalog and successfully built a
   signed-8.8 progress snapshot for all 43 bootable pairs directly from the raw image. The three
@@ -178,11 +178,15 @@ copy any disc or stream bytes into the repository:
   CVTX shift/cutoff, mode-four lighting and malformed-coordinate rejection. Web scene tests confirm
   all three modes are gated into live object rendering and that graphics flag `0x1000` substitutes
   the Q24.8 bobbing/fixed-pitch camera for objects only.
-- The exact Jungle Rollers `pb0cB` integration trace builds every scene through frame 231 and
-  checks every contained object execution. It covers `FruiC` raw sprite shifts 24, 26, 28, 31, 34,
-  246, 271 and 297 with their low-five-bit effective values, and verifies the caption's
-  executable-four/subtype-nine child keeps a null lifecycle zone while using the current ZDAT for
-  environment/colors.
+- The exact Jungle Rollers `pb0cB` integration trace runs all 1,348 recorded pad boundaries, builds
+  every non-restart scene, and checks every contained object execution. It covers `FruiC` raw
+  sprite shifts 24, 26, 28, 31, 34, 246, 271 and 297 with their low-five-bit effective values.
+  Separate runtime coverage verifies that the caption's executable-four/subtype-nine child keeps a
+  null lifecycle zone while using the current ZDAT for environment/colors. The direct-mount
+  fixture samples a zero island-camera target at the final boundary, returns `Released`, and leaves
+  PBAK state zero. Separate finish-contract coverage verifies that a nonzero carried target
+  completes the caption handoff and retains state three; the full local-scene trace rejects a
+  checked caption-handler fault whenever that branch is used.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.
@@ -376,14 +380,15 @@ The final checks below were run against this change set on 2026-07-14:
   source's flag-enabled `PlotObjWalls` collision calls accounts for the current timing and early
   interaction changes. This deterministic
   local test is not a browser playthrough or a claim of full retail parity.
-- `authored_n_sanity_completion_title_vertical_flow_preserves_session_carry` passes against the
-  legally local stream directory. It reaches N. Sanity's authored `Transition(0x2d)` at frame
-  1,900, finishes the outgoing `LEVEL_END`, imports the resulting `RetailSessionCarry` into Level
-  Complete, reaches that pair's authored `Transition(0x19)` at frame 513, finishes the second
-  `LEVEL_END`, and imports its carry into Title. The destination contexts are seeded from carried
-  globals 62, 69, and 102–104; both broadcasts report zero checked handler failures, and Title's
-  intentionally empty gameplay-core frame completes with no effect or fault. This proves the
-  simulation's first three-pair completion handoff, not an end-user browser playthrough.
+- `authored_n_sanity_completion_title_vertical_flow_preserves_session_carry` passed against the
+  legally local stream directory at this checkpoint. It reached N. Sanity's authored
+  `Transition(0x2d)` at frame 1,900, finished the outgoing `LEVEL_END`, imported the resulting
+  `RetailSessionCarry` into Level Complete, reached that pair's authored `Transition(0x19)` at
+  frame 513, finished the second `LEVEL_END`, and imported its carry into Title. The destination
+  contexts were seeded from carried globals 62, 69, and 102–104; both broadcasts reported zero
+  checked handler failures, and Title's intentionally empty gameplay-core frame completed with no
+  effect or fault. This proved the simulation's first three-pair completion handoff, not an
+  end-user browser playthrough.
 - the legal Jungle Rollers PBAK scene test passed after pinning the first source-correct `FruiC`
   incarnation: synchronous `0x83`/`0x84` local-bound refresh moves its first shrink-four frame to
   wall frame 190/pad boundary 191, followed by the exact raw/effective shift checkpoints through
@@ -1014,17 +1019,21 @@ is 1,322,866 bytes with SHA-256
   explicit regression assertions. The final camera is `1b_pZ` path zero at progress `0x0b00`; map
   level two, level count one, two unlocked levels, and island state one survive the session carries.
   Every checked execution and `LEVEL_END` handler succeeds, with zero faulted objects.
-- A temporary replay harness outside the repository imported that exact carry into Jungle Rollers
-  and classified the first fresh-controller divergence. With authentic RNG-A `0xc5f24260` and draw
-  count 2,677, Crash enters gameplay-death state 23 on frame 532 and restarts on frame 648 without a
-  checked VM fault. Replacing either RNG-A with its fresh `0x00003039` value or draw count with zero
-  independently avoids the death and matches the fresh route through 16 camera paths at frame 700.
-  Replacing globals (including checkpoint translation), spawn tags, saved level state, RNG-B,
-  respawn/death counters, or `first_spawn` does not. Source inspection confirms RNG-A and draw count
-  are intentionally process-lifetime across `NSKill`/`NSInit`; the former savestate is overwritten
-  by Jungle's first Crash spawn, and stale spawn translation is gated by checkpoint id `-1`.
-  Therefore no source-incompatible mount reset was added: the open gap is a phase-robust Jungle
-  controller/full route, not a session-carry defect.
+- The authentic Jungle carry initially exposed a stale fresh-controller assumption: holding its old
+  route entered gameplay-death state 23 at frame 532 and restarted at frame 648. Replacing either
+  RNG-A or draw count independently avoided that collision, while replacing globals, spawn tags,
+  saved state, RNG-B, respawn/death counters, or `first_spawn` did not. Both values are intentionally
+  process-lifetime in the source, so no incompatible mount reset was added. The committed
+  phase-robust route instead uses authored attacks at the live hazard phases and reaches checkpoint
+  entity 46 at frame 1,117. Its 1,500-frame exact-carry golden retains RNG-A/draw continuity, saves
+  the `0x400` pre-increment box count, advances the live count to `0x500`, and ends at `0u_cZ` path
+  one/progress 5,344 with no restart, below-zero or terminal fall, VM error, faulted object, or
+  checked issue. Full Jungle completion after that checkpoint remains open.
+- The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
+  `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
+  recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
+  handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
+  restart, built each non-restart scene, and retained the exact transient `FruiC` shift checks.
 - Rustfmt, native and Wasm Clippy with warnings denied, eight dependency-free Node tests, all 890
   non-ignored locked workspace tests, all 78 legally local ignored tests, the native workspace
   release, the `wasm32-unknown-unknown` web release, `npm run build`, and the distribution verifier
@@ -1074,8 +1083,8 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_n_sanity_completion_title_vertical_flow_preserves_session_carry \
-  -- --ignored --nocapture
+  authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_carry \
+  -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot \

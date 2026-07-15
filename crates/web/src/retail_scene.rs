@@ -31,8 +31,8 @@ use crust_renderer::text::{RetailTextProjection, project_retail_text};
 use crust_renderer::texture::{DecodedTexture, Rgba8};
 use crust_renderer::{
     GoolObjectLighting, ObjectDarkShaderInput, ObjectProjectionParameters,
-    ObjectProjectionTransform, ProjectedObjectPolygon, apply_object_zone_shader,
-    project_object_model,
+    ObjectProjectionTransform, ProjectedObjectPolygon, WorldShaderMode, apply_fog,
+    apply_object_zone_shader, fog_cutoff, project_object_model,
 };
 use crust_sim::Angle12;
 use crust_sim::camera::RetailCameraPose;
@@ -44,7 +44,8 @@ const SLST_ENTRY_TYPE: u32 = 4;
 const WGEO_ENTRY_TYPE: u32 = 3;
 const RETAIL_TEXTURE_PAGE_SLOTS: usize = 8;
 const RETAIL_OBJECT_MODEL_CACHE_FRAMES: usize = 256;
-const ZONE_FLAG_RIPPLE: u32 = 0x100;
+#[cfg(test)]
+const ZONE_FLAG_RIPPLE: u32 = crust_renderer::world::ZONE_FLAG_RIPPLE;
 // `LdatInit` initializes the global current/next GOOL display masks to
 // DISPLAY_WORLDS | DISPANIM_OBJECTS | CAM_UPDATE. The ZDAT field with the
 // same C-era name is a separate neighbor-zone lifecycle mask.
@@ -732,7 +733,8 @@ fn build_retail_scene_cached(
     let object_camera_matrix = adjusted_camera_matrix(raw_object_camera_matrix);
     let projection_distance =
         projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
-    let ripple_wave = if graph.zone_header.graphics.flags & ZONE_FLAG_RIPPLE != 0 {
+    let world_shader_mode = WorldShaderMode::from_flags(graph.zone_header.graphics.flags);
+    let ripple_wave = if world_shader_mode == WorldShaderMode::Ripple {
         if builder
             .ripple
             .as_ref()
@@ -839,6 +841,25 @@ fn build_retail_scene_cached(
             }
         })
         .collect::<Vec<_>>();
+    let world_fog_cutoffs = if world_shader_mode == WorldShaderMode::Fog {
+        graph
+            .worlds
+            .iter()
+            .map(|world| {
+                fog_cutoff(
+                    nsd.level().get(),
+                    graph.zone_header.graphics.visibility_depth,
+                    0,
+                    graph.zone_header.graphics.unknown_b_to_e[0],
+                    world.header.is_backdrop,
+                    true,
+                )
+                .map_err(|error| scene_error(format!("WGEO fog parameters: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    } else {
+        Vec::new()
+    };
 
     let mut textures = BTreeMap::new();
     let mut texture_handles = HashMap::new();
@@ -887,10 +908,22 @@ fn build_retail_scene_cached(
                 saturated_vertices = saturated_vertices.saturating_add(1);
             }
             screens[vertex_index] = projected.screen;
+            let color = if world_shader_mode == WorldShaderMode::Fog {
+                apply_fog(
+                    vertex.color,
+                    projected.screen.z,
+                    world_fog_cutoffs[world_index],
+                    graph.zone_header.graphics.unknown_b_to_e[0],
+                    graph.zone_header.graphics.far_color,
+                )
+                .map_err(|error| scene_error(format!("WGEO fog shader: {error}")))?
+            } else {
+                vertex.color
+            };
             colors[vertex_index] = Rgba8 {
-                r: vertex.color[0],
-                g: vertex.color[1],
-                b: vertex.color[2],
+                r: color[0],
+                g: color[1],
+                b: color[2],
                 a: u8::MAX,
             };
         }
@@ -3777,6 +3810,84 @@ mod tests {
         eprintln!("empty external-transition spawn snapshots: {empty:#?}");
         assert_eq!(built, 43);
         assert_eq!(empty, ["Hog Wild", "Title / Island Map", "Whole Hog"]);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn every_local_fog_start_shades_projected_world_colors() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        let mut fog_levels = 0_usize;
+        let mut shaded_vertices = 0_usize;
+
+        for known in KNOWN_LEVELS.iter().filter(|known| known.bootable) {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = std::fs::read(&nsd_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+            let nsf_bytes = std::fs::read(&nsf_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let ldat = nsd.ldat().expect("bootable retail level has LDAT");
+            let path_index = u32::try_from(ldat.spawn_path_index)
+                .expect("retail spawn path index is non-negative");
+            let graph = parse_scene_graph(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneCacheKey {
+                    zone: ldat.spawn_zone,
+                    path_index,
+                },
+                0,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{} spawn graph: {error}", known.name));
+            if WorldShaderMode::from_flags(graph.zone_header.graphics.flags) != WorldShaderMode::Fog
+            {
+                continue;
+            }
+
+            fog_levels = fog_levels.saturating_add(1);
+            let scene = build_retail_scene(&nsd, &nsf, &nsf_bytes)
+                .unwrap_or_else(|error| panic!("{} fog scene: {error}", known.name));
+            for command in &scene.commands {
+                let CommandSource::World { polygon, .. } = command.source else {
+                    continue;
+                };
+                let polygon = PolygonId::from_raw(
+                    u16::try_from(polygon).expect("world provenance polygon fits its wire word"),
+                );
+                let geometry = &graph.worlds[usize::from(polygon.world_index)];
+                let polygon = geometry.polygons[usize::from(polygon.polygon_index)];
+                let output = match &command.primitive {
+                    PrimitiveCommand::ColoredTriangle(triangle) => {
+                        triangle.vertices.map(|vertex| vertex.color)
+                    }
+                    PrimitiveCommand::TexturedTriangle(triangle) => {
+                        triangle.vertices.map(|vertex| vertex.color)
+                    }
+                    _ => panic!("world geometry must produce triangles"),
+                };
+                for (index, color) in output.into_iter().enumerate() {
+                    let source =
+                        geometry.vertices[usize::from(polygon.vertex_indices[index])].color;
+                    if [color.r, color.g, color.b] != source {
+                        shaded_vertices = shaded_vertices.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        assert!(fog_levels > 0, "the retail corpus must contain a fog start");
+        assert!(
+            shaded_vertices > 0,
+            "projected retail fog vertices must differ from raw WGEO colors"
+        );
+        eprintln!("fog starts={fog_levels}, shaded projected vertices={shaded_vertices}");
     }
 
     #[test]

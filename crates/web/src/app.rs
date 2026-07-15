@@ -95,7 +95,9 @@ use crate::title_runtime::{
 };
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
-use crate::{authoritative_save_or_last, initial_retail_level_state};
+use crate::{
+    authoritative_save_or_last, initial_retail_level_state, require_render_object_snapshot,
+};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
@@ -1765,7 +1767,6 @@ impl Runtime {
                         world_display_mask,
                         map_path_animation,
                         camera_pose_override,
-                        dom,
                     )
                 {
                     let message = format!("retail scene update failed: {}", js_message(&error));
@@ -2518,6 +2519,12 @@ impl Runtime {
             .plan_hard_restart(snapshot.location.path.zone, activation_marker)
             .map_err(|error| format!("could not plan hard restart: {error}"))?;
         let mut pager_preview = self.retail_zone_pager.clone();
+        let restored_load_list = self
+            .retail_zone_lifecycle
+            .zone(snapshot.location.path.zone)
+            .ok_or_else(|| "restored texture zone is absent from the lifecycle".to_owned())?
+            .load_list();
+        pager_preview.set_current_texture_load_eids(restored_load_list.entries().iter().copied());
         for action in plan.actions().iter().copied() {
             apply_retail_zone_paging_action(&mut pager_preview, action)?;
         }
@@ -2635,26 +2642,14 @@ impl Runtime {
         world_display_mask: u32,
         map_path_animation: Option<RetailMapPathAnimation>,
         camera_pose_override: Option<RetailCameraPose>,
-        dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
         let render_title_objects = !self
             .title_screen_profile()
             .is_some_and(|profile| profile.screen_type == RetailTitleScreenType::ImageOnly);
         let objects = if render_title_objects {
-            match self.retail_objects.render_objects() {
-                Ok(objects) => objects,
-                Err(error) => {
-                    let warning = format!(
-                        "retail render-object snapshot was rejected; presenting world only: {error:?}"
-                    );
-                    if self.retail_runtime_warning.as_deref() != Some(&warning) {
-                        dom.log(&warning, true);
-                        self.retail_runtime_warning = Some(warning);
-                    }
-                    Vec::new()
-                }
-            }
+            require_render_object_snapshot(self.retail_objects.render_objects())
+                .map_err(|error| JsValue::from_str(&error))?
         } else {
             Vec::new()
         };
@@ -2919,6 +2914,13 @@ impl Runtime {
         // Validate every fallible page/entry operation before the first TERM
         // event can irreversibly mutate the live object forest.
         let mut pager_preview = self.retail_zone_pager.clone();
+        let destination_load_list = self
+            .retail_zone_lifecycle
+            .zone(next_zone)
+            .ok_or_else(|| "destination texture zone is absent from the lifecycle".to_owned())?
+            .load_list();
+        pager_preview
+            .set_current_texture_load_eids(destination_load_list.entries().iter().copied());
         for action in plan.actions().iter().copied() {
             apply_retail_zone_paging_action(&mut pager_preview, action)?;
         }
@@ -4723,6 +4725,7 @@ fn build_retail_zone_pager(
         .zone(current_zone)
         .ok_or_else(|| JsValue::from_str("retail lifecycle current zone is absent"))?
         .load_list();
+    pager.set_current_texture_load_eids(load_list.entries().iter().copied());
     for eid in load_list.entries() {
         pager.open_eid(*eid).map_err(|error| {
             JsValue::from_str(&format!(

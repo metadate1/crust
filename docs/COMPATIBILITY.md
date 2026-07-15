@@ -264,12 +264,20 @@ gameplay path.
   hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
   SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
   manifest. Type-two sprites, type-five fragments, type-four text/font glyphs and status-B 2D CVTX
-  are coupled to the same ordered command/texture path. Mid-frame paging-driven texture changes are
-  not yet coupled to rendering. Post-update object snapshots do honor dynamic teardown and the
-  current display mask.
-  Twenty-two starts use fog/ripple/lightning/dark variants. The source ripple displacement is live
-  for graphics-flag `0x100` worlds, including its effect-vertex selection and submission-driven
-  wave state; fog, lightning, and remaining world-level dynamic color effects are incomplete. Object
+  are coupled to the same ordered command/texture path. The pager now models the eight usable
+  native texture slots (physical slots 8–15), source-order free/stale/unprotected replacement,
+  current-zone load-list protection and immutable generation snapshots; initial mount, restart and
+  zone transition install destination protection before opening pages. GOOL paging effects and
+  per-object generation snapshots are not yet synchronously replayed by the renderer, so
+  mid-frame paging-driven texture changes remain incomplete. Post-update object snapshots do honor
+  dynamic teardown and the current display mask.
+  Twenty-two starts use fog/ripple/lightning/dark variants. Source-order flag dispatch now selects
+  Dark2, combined fog/lightning, fog, ripple, lightning or plain transforms without allowing a
+  lower-priority ripple bit to displace a fog/dark world. The source ripple displacement is live
+  for selected ripple worlds, including its effect-vertex selection and submission-driven wave
+  state. Fog uses the projected-depth cutoff, backdrop exemption, ZDAT far color and clamped
+  fixed-point color interpolation. Lightning, combined dark and Dark2 dynamic color state remain
+  incomplete. Object
   shader modes two and three and their source far-object
   rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
   at the native display boundary with source-order player/pause selection and `dark_dist`; a legal

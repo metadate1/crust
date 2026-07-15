@@ -522,7 +522,7 @@ The focused checks below were also completed:
   flag `0x100`; with the camera held constant, one unpaused submission moved visible effect-marked
   WGEO geometry while ordinary visible geometry stayed fixed, repeated paused submissions stayed
   fixed, and a hidden-world gap consumed no wave advance. No fresh fog or lightning parity claim
-  follows from this check.
+  follows from this ripple check; the separate current fog evidence is recorded below.
 - The parsed-retail unit fixture executes raw RETURN word `0x82894000` through its initial frame and
   reports `InvalidInitialReturn`; the synthetic `VmObject::new` compatibility case still reports
   `Halted`. The legally local Ending regression then ran the browser-ordered spawn/camera/GOOL loop
@@ -586,6 +586,50 @@ Wasm was regenerated and is what the normal server serves. Because the local-onl
 deleted, the visible in-memory tab was not remounted after that narrow correction; its observed
 positive-speed N. Sanity route is unaffected by the signed edge case.
 
+Additional checks for the current world-rendering and paging change set were completed against
+legally local data:
+
+- A fresh goal-directed N. Sanity Beach run reached the authored `Transition(0x2d)` at frame 1,906.
+  It recorded 41 camera-path changes, 18 zone transitions, 65 successful spawns and 29,338 GOOL
+  executions with zero execution errors. The trace also crossed paging, solid-query, event,
+  child-spawn, state-change, SFX, audio-control and save-state effects. This is deterministic
+  simulation characterization, not a browser level-completion claim.
+- The opt-in fog-start sweep found two retail starts whose source-priority world shader mode is Fog
+  and counted 544 projected WGEO vertices whose output RGB differed from the authored source color.
+  Focused renderer tests separately cover flag priority, strict depth cutoff, backdrop exemption
+  and clamped fixed-point blending. Lightning, combined dark and Dark2 dynamic state remain
+  incomplete.
+- The texture-slot pager tests cover all eight usable slots (native physical slots 8–15),
+  source-order free/stale/unprotected replacement, null-zone fallback, current-zone EID
+  protection, resident idempotence, freed/stale generation renewal, immutable frame snapshots and
+  atomic exhaustion failure. Initial mount, hard restart and zone transition now publish the
+  destination load-list protection before opening its pages. GOOL paging effects and per-object
+  frame-snapshot replay are not yet synchronously coupled to the renderer.
+- A focused web regression injects `InvalidRootIndex(8)` into render-object snapshot creation and
+  verifies that the error is returned instead of being replaced with an empty object list. The
+  browser scene path propagates that failure into its existing runtime-error/pause handling, so a
+  rejected object snapshot cannot silently present a world-only frame. This fault was unit-tested;
+  it was not injected into a live browser session.
+
+The supplied 632,083,536-byte raw BIN was also mounted in the visible in-app browser through an
+ephemeral same-origin loopback helper that dispatched the ordinary local-file input event. The
+importer reported 88 streams, all 44 level pairs and 219 MiB of selected stream extents. A direct
+N. Sanity Beach boot ran at 30.00 Hz with synthesized audio and visibly rendered its retail world,
+Crash and crate geometry; held touch input changed the live pose and camera. Pause/resume and
+mute/unmute changed telemetry and returned to `RUNNING` and `SYNTH ACTIVE`. The expanded
+engineering log reported seven initial entity bindings, 23 first-frame object executions and zero
+GOOL errors; browser console and network traces were not independently captured in this pass. The
+helper and game bytes were not added to the repository. This pass confirms local import and live
+authored-scene presentation, not a completed browser level, transition sequence or full retail
+playthrough.
+
+For this change set, 803 locked default tests and the complete 64-test legally local opt-in sweep
+passed. Warnings-denied native Clippy, the optimized workspace build, warnings-denied Wasm Clippy
+and the optimized Wasm build also passed. The generated Wasm is 1,277,626 bytes with SHA-256
+`bfc01bbe44850c6ba85daa0ffc8fa81ce700abc1ed6a976359d0500b86d72a2c`; the generated loader is
+46,236 bytes with SHA-256
+`8ed2a96cf8c5cb549b33f6595ead2d350cf2d2e9e62680e660aa66a268cd9f01`.
+
 ## Reproducible commands
 
 ```bash
@@ -636,6 +680,11 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   upstream_ripple_moves_visible_effect_vertices_from_the_retail_wgeo -- --ignored --nocapture
+cargo test -p crust-web --lib --locked \
+  rejected_render_object_snapshot_is_not_replaced_by_an_empty_scene
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  every_local_fog_start_shades_projected_world_colors -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --test local_great_hall_dynamic_font --locked -- \
   --ignored --nocapture

@@ -16,6 +16,7 @@ pub mod text;
 pub mod texture;
 pub mod timing;
 pub mod title;
+pub mod world;
 
 pub use cache::{CachedTexture, TextureCache, TextureHandle, TextureRequest};
 pub use command::{GeneratedFrame, OrderingTable, PrimitiveCommand};
@@ -26,3 +27,7 @@ pub use object::{
     project_object_model,
 };
 pub use projection::{Matrix3, Viewport};
+pub use world::{
+    Dark2Parameters, LightningChannel, WorldShaderError, WorldShaderMode, apply_dark, apply_dark2,
+    apply_fog, apply_lightning, fixed_color_blend, fog_cutoff,
+};

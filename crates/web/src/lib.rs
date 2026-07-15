@@ -6,6 +6,8 @@ use wasm_bindgen::prelude::*;
 
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::card::SaveData;
+#[cfg(any(target_arch = "wasm32", test))]
+use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject};
 
 #[cfg(target_arch = "wasm32")]
 mod app;
@@ -73,6 +75,16 @@ pub(crate) fn authoritative_save_or_last<E>(
     last: SaveData,
 ) -> SaveData {
     current.unwrap_or(last)
+}
+
+/// Converts the checked object snapshot into the only scene input the browser
+/// may accept. A rejected snapshot must stop the runtime instead of silently
+/// degrading the frame to world-only rendering.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn require_render_object_snapshot(
+    snapshot: Result<Vec<RetailRenderObject>, RenderObjectsError>,
+) -> Result<Vec<RetailRenderObject>, String> {
+    snapshot.map_err(|error| format!("retail render-object snapshot failed: {error:?}"))
 }
 
 #[wasm_bindgen]
@@ -146,6 +158,17 @@ mod tests {
             authoritative_save_or_last::<()>(Err(()), last),
             last,
             "an unreadable VM must retain the last exact retail payload"
+        );
+    }
+
+    #[test]
+    fn rejected_render_object_snapshot_is_not_replaced_by_an_empty_scene() {
+        let error = require_render_object_snapshot(Err(RenderObjectsError::InvalidRootIndex(8)))
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            "retail render-object snapshot failed: InvalidRootIndex(8)"
         );
     }
 }

@@ -191,12 +191,18 @@ fresh destination runtime, and restore bonus returns from the saved zone/path/pr
 Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
 same-level restart snapshot because all five bonus spawn zones are save-restricted; directly booted
 bonus completion still lacks a distinct host return destination and is not claimed as a complete
-round trip. A legally local cross-stream characterization now carries Jungle Rollers (`0x0c`) into
-Tawna Bonus (`0x24`), runs WillC's exact WarpC/CardC confirmation path, observes `LoadState` on
-frame 301, resolves the `-2` return target, and reproduces the protected parent remount while
-checking Crash's transform, camera path/progress, box count, and all 304 spawn words. It does not
-substitute for driving the third-token pickup and physical portal collision as one uninterrupted
-playthrough. Every LevelUpdate also republishes the destination zone's graphics flags in GOOL
+round trip. A legally local controlled regression drives all three authentic Jungle Rollers Tawna
+crate descriptors from their authored player `HIT 0x0300` boundary through `BoxsC` → `FruiC` →
+`DispC`. Only token three performs `SaveState`, before its counter increment; the HUD then sends
+completion `0x2700`, resets the master fade, sends status `0x0f00 [0x500]`, emits destination
+`0x24`, and `finish_level_transition` carries the saved `0x0c` snapshot into Tawna Bonus. A
+separate parsed WarpC/WillC regression covers the transition's exact proximity/status gate and its
+direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream characterization runs the
+real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
+Rollers, and reproduces the protected parent remount while checking Crash's transform, camera
+path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
+substitute for one uninterrupted pad-driven route or browser full-playthrough. Every LevelUpdate
+also republishes the destination zone's graphics flags in GOOL
 global 30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch
 instead of falling through to the ordinary Title transition. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
@@ -254,7 +260,8 @@ does not certify the complete ending flow.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 546 passing tests; the locked default workspace gate has 870. Native
+The `crust-sim` library has 546 passing tests; the locked default workspace gate has 870, plus 76
+ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,

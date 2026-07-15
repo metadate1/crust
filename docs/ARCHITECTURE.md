@@ -431,6 +431,19 @@ level. A later SaveState may change the eventual `-2` destination, but cannot re
 the earlier request into a same-level structural restart. Same-level `LoadState` remains a checked
 stop because its deferred restart structurally replaces the active object forest.
 
+The Tawna entry and return tests preserve the native transaction boundaries rather than inventing
+a host shortcut. Three authentic Jungle Rollers token crates are started at their authored player
+`HIT` handler; `BoxsC` spawns subtype-13 `FruiC`, `FruiC` routes the token and entity ID to `DispC`,
+and the third token makes `DispC` save the parent `0x0c` state before Crash's counter increment.
+The HUD later sends completion event `0x2700`, resets the master fade, sends status
+`0x0f00 [0x500]`, and emits destination `0x24`; the different-level `LEVEL_END` carry retains that
+snapshot. In Tawna Bonus, the parsed WarpC transition accepts only when portal status bit `0x20` is
+clear, the signed quantized X/Z Euclidean distance is below `0x28000`, the Y delta is in
+`[-0x20800, 0)`, and Crash is grounded without the atop-object bit `0x200000`. Acceptance sends
+direct event `0x1600 [0]` to WillC state 32, after which the CardC/`LoadState` path performs the
+protected `-2` return. The regressions fix objects and positions at these exact program boundaries;
+they do not steer one uninterrupted browser route.
+
 ## Audio
 
 The audio library is deterministic signed stereo at 44.1 kHz. Sixteen-byte SPU ADPCM blocks decode

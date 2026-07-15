@@ -2435,6 +2435,39 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
 
     let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
         parse_local_pair(&root, bonus).expect("Tawna bonus pair must parse");
+    let bonus_graph = graph_for_pair(bonus, &bonus_nsd, &bonus_nsf, &bonus_nsf_bytes)
+        .expect("Tawna bonus zone graph must parse");
+    let (bonus_zones, _) = zone_catalog(
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        &bonus_graph,
+        bonus,
+    )
+    .expect("Tawna bonus zones must parse");
+    let portal_zone = Eid::from_name("1__AZ").expect("fixed Tawna portal zone EID is valid");
+    let portal_entity = bonus_zones[&portal_zone]
+        .entities
+        .iter()
+        .find(|entity| entity.id == 15)
+        .expect("Tawna's authored return portal must be present");
+    assert_eq!(
+        (
+            portal_entity.group,
+            portal_entity.executable,
+            portal_entity.subtype,
+            portal_entity.spawn_flags,
+            portal_entity.initializer,
+        ),
+        (3, 0x20, 1, 0x0008, [0; 3])
+    );
+    assert_eq!(
+        portal_entity
+            .path_points
+            .first()
+            .map(|point| (point.x, point.y, point.z)),
+        Some((1479, 310, 160))
+    );
     let bonus_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, parent_transition.carry)
             .expect("the bonus stream must import the parent session carry");
@@ -2483,6 +2516,10 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
     )
     .expect("the Tawna bonus spawn band must contain WarpC");
     let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    // The legal Machine regression exercises WarpC's parsed transition-level
+    // proximity/status polling gate and proves that this is the exact handoff
+    // it produces. Start here at that synchronous handoff so this separate
+    // cross-stream test isolates CardC, LoadState, LEVEL_END, and remounting.
     // WarpC's authored sequence is `PSHV stack, 0` followed by an EVNT with
     // argc one (`0x87a40816`), so WillC receives the literal zero argument.
     let dispatch = bonus_runtime
@@ -2721,6 +2758,488 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
             Ok(expected.cast_unsigned())
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jungle_rollers_three_tawna_crates_enter_the_authored_bonus() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x0c);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Jungle Rollers pair must parse");
+    let name = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .map(|known| known.name)
+        .expect("Jungle Rollers must be in the retail catalog");
+    let (_, mut runtime) = survey_pair_with_runtime(
+        name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Jungle Rollers must mount its authentic core objects");
+    let player = runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| runtime.object_for_arena(arena))
+        .expect("Jungle Rollers must spawn Crash");
+    assert_eq!(
+        runtime
+            .machine()
+            .object(player.vm())
+            .unwrap()
+            .register(0x48),
+        Ok(0),
+        "Tawna's process counter starts empty"
+    );
+
+    let graph = graph_for_pair(level, &nsd, &nsf, &nsf_bytes)
+        .expect("Jungle Rollers zone graph must parse");
+    let (zones, _) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, level).expect("zones must parse");
+    let boxs = Eid::from_name("BoxsC").expect("fixed retail crate EID is valid");
+    let fruic = Eid::from_name("FruiC").expect("fixed retail pickup EID is valid");
+    let token_break = load_gool_state_program(&nsd, &nsf, &nsf_bytes, boxs, 24)
+        .expect("BoxsC token-break state must load");
+    let token_pickup = load_gool_state_program(&nsd, &nsf, &nsf_bytes, fruic, 11)
+        .expect("FruiC token-pickup state must load");
+    assert_eq!(token_break.code_pc(), Some(0x437));
+    assert_eq!(token_break.code().get(0x466), Some(&0x9120_3341));
+    assert_eq!(token_pickup.code_pc(), Some(0x1f9));
+    assert_eq!(token_pickup.code().get(0x3c4), Some(&0x87a4_0e47));
+
+    let token_crates = [("0h_cZ", 22_u16), ("0w_cZ", 59), ("0G_cZ", 79)];
+    let expected_counter_frames = [6_u32, 7, 7];
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let pickup_hud = CollisionObjectReference::from_word(runtime.global_word(14).unwrap())
+        .and_then(|reference| runtime.object_for_vm(reference.object()))
+        .expect("global 14 must retain the live DispC pickup HUD");
+    assert_eq!(
+        runtime.machine().object(pickup_hud.vm()).unwrap().state(),
+        11,
+        "DispC subtype five starts in its authored pickup-HUD initialization state"
+    );
+    let mut pickup_hud_ready = None;
+    for frame in 1..=180_u32 {
+        runtime.set_frame_timing(34, 34);
+        let report = runtime
+            .run_frame(&mut host, INSTRUCTION_BUDGET)
+            .unwrap_or_else(|error| panic!("pickup HUD warm-up frame {frame}: {error:?}"));
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok())
+        );
+        if runtime.machine().object(pickup_hud.vm()).unwrap().state() == 12 {
+            pickup_hud_ready = Some(frame);
+            break;
+        }
+    }
+    assert_eq!(
+        pickup_hud_ready,
+        Some(5),
+        "the core pickup HUD must reach its accepting state before gameplay tokens arrive"
+    );
+    let initial_parent_snapshot = runtime
+        .saved_level_state()
+        .cloned()
+        .expect("fresh Jungle Rollers must retain its authentic initial snapshot");
+    let mut third_token_snapshot = None;
+
+    for (token_index, (zone_name, entity_id)) in token_crates.into_iter().enumerate() {
+        let zone_eid = Eid::from_name(zone_name).expect("fixed retail zone EID is valid");
+        let zone = zones.get(&zone_eid).expect("token zone must be parsed");
+        let entity = zone
+            .entities
+            .iter()
+            .find(|entity| entity.id == entity_id)
+            .unwrap_or_else(|| panic!("token entity {entity_id} must exist in {zone_name}"))
+            .clone();
+        assert_eq!(
+            (
+                entity.group,
+                entity.executable,
+                entity.subtype,
+                entity.initializer[0]
+            ),
+            (3, 0x22, 10, 0x69),
+            "the local descriptor must be an authored Tawna token crate"
+        );
+        let display_flags = graph
+            .zone(zone_eid)
+            .expect("token zone must exist in its graph")
+            .display_flags
+            | 2;
+        let token_entities = [entity];
+        let attempts = runtime.spawn_current_zone_neighbors(
+            &[NeighborZone {
+                eid: zone_eid,
+                display_flags,
+                entities: &token_entities,
+            }],
+            &mut host,
+        );
+        assert_eq!(attempts.len(), 1);
+        let token_box = *attempts[0]
+            .result
+            .as_ref()
+            .unwrap_or_else(|error| panic!("token crate {entity_id} must spawn: {error:?}"));
+
+        // Entity binding selects BoxsC state zero, but the native object gets
+        // one cooperative visit before an interaction can break it. Preserve
+        // that initialization visit so state 24 reads the initializer-derived
+        // token kind rather than an uninitialized process register.
+        runtime.set_frame_timing(34, 34);
+        let initialized = runtime
+            .run_frame(&mut host, INSTRUCTION_BUDGET)
+            .unwrap_or_else(|error| panic!("token crate {entity_id} init frame: {error:?}"));
+        assert!(
+            initialized
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "token crate {entity_id} initialization faulted: {:?}",
+            initialized.executions
+        );
+
+        let dispatch = runtime
+            .dispatch_event(&mut host, Some(player), Some(token_box), 0x0300, Some(&[0]))
+            .unwrap_or_else(|error| panic!("token crate {entity_id} break event: {error:?}"));
+        assert_eq!(
+            dispatch.state_change.as_ref().map(|change| change.state),
+            Some(24),
+            "the authored player-hit event enters BoxsC state 24"
+        );
+
+        let previous_counter = u32::try_from(token_index).unwrap() << 8;
+        let expected_counter = u32::try_from(token_index + 1).unwrap() << 8;
+        assert_eq!(
+            runtime
+                .machine()
+                .object(player.vm())
+                .unwrap()
+                .register(0x48),
+            Ok(previous_counter)
+        );
+        let mut reached_counter = None;
+        let mut token_spawns = Vec::new();
+        let mut token_pickup = None;
+        let mut hud_deliveries = Vec::new();
+        let mut combo_deliveries = Vec::new();
+        let mut compact_trace = Vec::new();
+        let mut save_state_frames = Vec::new();
+        for frame in 1..=64_u32 {
+            runtime.set_frame_timing(34, 34);
+            runtime
+                .set_pad_snapshot(0, RetailPadSnapshot::default())
+                .expect("idle pad snapshot must be valid");
+            let report = runtime
+                .run_frame(&mut host, INSTRUCTION_BUDGET)
+                .unwrap_or_else(|error| {
+                    panic!("token crate {entity_id} frame {frame} failed: {error:?}")
+                });
+            assert!(
+                report
+                    .executions
+                    .iter()
+                    .all(|execution| execution.result.is_ok()),
+                "token crate {entity_id} frame {frame} faulted: {:?}",
+                report.executions
+            );
+            for effect in &report.effects {
+                if matches!(effect, VmEffect::SaveState(object) if *object == pickup_hud.vm()) {
+                    save_state_frames.push(frame);
+                    let saved = runtime
+                        .saved_level_state()
+                        .cloned()
+                        .expect("DispC SaveState must install a complete parent snapshot");
+                    assert!(
+                        third_token_snapshot.replace(saved).is_none(),
+                        "the authentic route must install exactly one third-token snapshot"
+                    );
+                }
+                match effect {
+                    VmEffect::SpawnChildren {
+                        parent,
+                        executable: 3,
+                        subtype: 13,
+                        count: 1,
+                        arguments,
+                        ..
+                    } if *parent == token_box.vm() => {
+                        token_spawns.push((frame, arguments.clone()));
+                        let direct_children = report
+                            .spawned_children
+                            .iter()
+                            .copied()
+                            .filter(|child| {
+                                runtime
+                                    .machine()
+                                    .object(child.vm())
+                                    .ok()
+                                    .and_then(crust_sim::gool::VmObject::program_identity)
+                                    .is_some_and(|identity| identity.global_eid() == fruic)
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            direct_children.len(),
+                            1,
+                            "BoxsC's one-child effect must materialize one FruiC program"
+                        );
+                        assert!(
+                            token_pickup.replace(direct_children[0]).is_none(),
+                            "BoxsC must emit exactly one matching token-child effect"
+                        );
+                    }
+                    VmEffect::SendEvent(request)
+                        if request.target
+                            == SendEventTarget::Direct {
+                                recipient: player.vm(),
+                            }
+                            && request.event == 0x1000 =>
+                    {
+                        combo_deliveries.push((
+                            frame,
+                            request.sender,
+                            request.arguments().to_vec(),
+                        ));
+                    }
+                    VmEffect::SendEvent(request)
+                        if request.target
+                            == SendEventTarget::Direct {
+                                recipient: pickup_hud.vm(),
+                            }
+                            && request.event == 0x2000 =>
+                    {
+                        hud_deliveries.push((frame, request.sender, request.arguments().to_vec()));
+                    }
+                    _ => {}
+                }
+                if compact_trace.len() < 32
+                    && matches!(
+                        effect,
+                        VmEffect::SpawnChildren { .. } | VmEffect::SendEvent(_)
+                    )
+                {
+                    compact_trace.push(format!("frame {frame}: {effect:?}"));
+                }
+            }
+            let counter = runtime
+                .machine()
+                .object(player.vm())
+                .expect("Crash must remain live")
+                .register(0x48)
+                .expect("Tawna counter register must remain valid");
+            assert!(
+                counter == previous_counter || counter == expected_counter,
+                "token crate {entity_id} skipped a retail counter step: {counter:#x}"
+            );
+            if counter == expected_counter {
+                reached_counter = Some(frame);
+                break;
+            }
+        }
+        let counter_frame = reached_counter.unwrap_or_else(|| {
+            let counter = runtime
+                .machine()
+                .object(player.vm())
+                .and_then(|object| object.register(0x48))
+                .unwrap_or(u32::MAX);
+            panic!(
+                "token crate {entity_id} never advanced Tawna's counter to {expected_counter:#x}; final={counter:#x}; trace={compact_trace:#?}"
+            )
+        });
+        let token_pickup = token_pickup.expect("BoxsC must materialize its subtype-13 FruiC child");
+        assert_eq!(
+            token_spawns,
+            vec![(1, vec![0x6900, u32::from(entity_id) << 8])],
+            "BoxsC must spawn the authored subtype-13 token pickup"
+        );
+        assert_eq!(
+            hud_deliveries,
+            vec![(
+                3,
+                token_pickup.vm(),
+                vec![0x6900, u32::from(entity_id) << 8]
+            )],
+            "FruiC must deliver the token kind and crate PID to DispC"
+        );
+        assert_eq!(
+            combo_deliveries,
+            vec![(counter_frame, token_pickup.vm(), vec![0x6900])],
+            "FruiC must deliver Tawna's token kind through Crash's combo event"
+        );
+        assert_eq!(
+            counter_frame, expected_counter_frames[token_index],
+            "the cooperative token path must retain its deterministic timing"
+        );
+        assert_eq!(
+            save_state_frames,
+            if token_index == 2 { vec![4] } else { vec![] },
+            "only DispC's third-token handshake performs the parent-level save"
+        );
+        assert_eq!(
+            runtime.machine().object(pickup_hud.vm()).unwrap().state(),
+            13,
+            "DispC must wait in its counter-synchronization state"
+        );
+
+        let mut hud_settled_frame = None;
+        let mut completion_delivery = None;
+        let mut reset_master_fade_frame = None;
+        let mut completion_status_delivery = None;
+        let mut transition = None;
+        let mut post_counter_save = false;
+        let mut saw_hud_state_13 = runtime.machine().object(pickup_hud.vm()).unwrap().state() == 13;
+        for frame in 1..=180_u32 {
+            runtime.set_frame_timing(34, 34);
+            let report = runtime
+                .run_frame(&mut host, INSTRUCTION_BUDGET)
+                .unwrap_or_else(|error| panic!("Tawna HUD frame {frame}: {error:?}"));
+            assert!(
+                report
+                    .executions
+                    .iter()
+                    .all(|execution| execution.result.is_ok()),
+                "Tawna HUD frame {frame} faulted: {:?}",
+                report.executions
+            );
+            for effect in &report.effects {
+                match effect {
+                    VmEffect::SaveState(object) if *object == pickup_hud.vm() => {
+                        post_counter_save = true;
+                    }
+                    VmEffect::SendEvent(request)
+                        if request.sender == pickup_hud.vm()
+                            && request.target
+                                == SendEventTarget::Direct {
+                                    recipient: player.vm(),
+                                }
+                            && request.event == 0x2700 =>
+                    {
+                        completion_delivery = Some((frame, request.arguments().to_vec()));
+                    }
+                    VmEffect::ResetMasterFadeStep { object } if *object == pickup_hud.vm() => {
+                        reset_master_fade_frame = Some(frame);
+                    }
+                    VmEffect::SendEvent(request)
+                        if request.sender == pickup_hud.vm()
+                            && request.target
+                                == SendEventTarget::Direct {
+                                    recipient: player.vm(),
+                                }
+                            && request.event == 0x0f00
+                            && request.arguments() == [0x500] =>
+                    {
+                        completion_status_delivery = Some((frame, request.arguments().to_vec()));
+                    }
+                    VmEffect::Transition(destination) => {
+                        transition = Some((frame, *destination));
+                    }
+                    _ => {}
+                }
+            }
+            let hud_state = runtime.machine().object(pickup_hud.vm()).unwrap().state();
+            saw_hud_state_13 |= hud_state == 13;
+            if token_index < 2 && saw_hud_state_13 && hud_state == 12 {
+                hud_settled_frame = Some(frame);
+            }
+            if hud_settled_frame.is_some() || transition.is_some() {
+                break;
+            }
+        }
+
+        assert!(
+            !post_counter_save,
+            "the third-token save must precede its counter increment"
+        );
+        if token_index < 2 {
+            assert_eq!(
+                runtime.saved_level_state(),
+                Some(&initial_parent_snapshot),
+                "the first two tokens must not replace Jungle Rollers' saved state"
+            );
+            assert_eq!(hud_settled_frame, Some(60));
+            assert_eq!(completion_delivery, None);
+            assert_eq!(reset_master_fade_frame, None);
+            assert_eq!(completion_status_delivery, None);
+            assert_eq!(transition, None);
+            assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(u32::MAX));
+            assert_eq!(
+                runtime
+                    .machine()
+                    .object(player.vm())
+                    .unwrap()
+                    .register(0x48),
+                Ok(expected_counter)
+            );
+        } else {
+            assert_eq!(hud_settled_frame, None);
+            assert_eq!(completion_delivery, Some((1, vec![0])));
+            assert_eq!(reset_master_fade_frame, Some(38));
+            assert_eq!(completion_status_delivery, Some((53, vec![0x500])));
+            assert_eq!(transition, Some((53, 0x24)));
+            assert_eq!(
+                runtime.global_word(CHECKPOINT_ID_GLOBAL),
+                Ok(u32::from(entity_id) << 8)
+            );
+            assert_eq!(
+                runtime
+                    .machine()
+                    .object(player.vm())
+                    .unwrap()
+                    .register(0x48),
+                Ok(0),
+                "DispC clears Tawna's counter immediately before the bonus transition"
+            );
+            assert_eq!(
+                runtime.saved_level_state().map(|snapshot| snapshot.level),
+                Some(level)
+            );
+        }
+    }
+
+    let third_token_snapshot = third_token_snapshot
+        .expect("the third token must replace Jungle Rollers' initial saved state");
+    assert_ne!(
+        third_token_snapshot.spawn_words, initial_parent_snapshot.spawn_words,
+        "the third-token save must capture the route's changed persistent crate state"
+    );
+    assert_eq!(
+        runtime.saved_level_state(),
+        Some(&third_token_snapshot),
+        "the exact third-token snapshot must remain live until LEVEL_END"
+    );
+
+    let transition = runtime
+        .finish_level_transition(&mut host, 0x24)
+        .expect("the authentic third-token destination must complete LEVEL_END");
+    assert!(transition.event_failures.is_empty());
+    assert_eq!(transition.next_lid_after_event, 0x24);
+    assert_eq!(transition.resolved.level, LevelId::new_const(0x24));
+    assert!(!transition.resolved.bonus_return);
+    assert_eq!(
+        transition.carry.saved_level_state.as_ref(),
+        Some(&third_token_snapshot),
+        "the exact third-token SaveState must carry Jungle Rollers into Tawna Bonus"
+    );
+    let bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::new_const(0x24), transition.carry)
+            .expect("Tawna Bonus must import the exact third-token session carry");
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&third_token_snapshot),
+        "the fresh Tawna Bonus runtime must retain Jungle Rollers' third-token snapshot"
+    );
 }
 
 #[test]

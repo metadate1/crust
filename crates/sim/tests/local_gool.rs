@@ -11,9 +11,10 @@ use crust_formats::stream::{
     parse_gool_animation_descriptor, parse_nsd, parse_nsf, structs::GoolState,
 };
 use crust_sim::gool::{
-    AnimationReference, AnimationSource, CodeAddress, CodeSegment, Execution, HaltReason, Machine,
-    ObjectHandle, ProcessAnimationKind, REGISTER_COUNT, StorageReference, StorageRegion, VmEffect,
-    VmObject, VmStateProgram, process_register,
+    AnimationReference, AnimationSource, CURRENT_LEVEL_GLOBAL, CodeAddress, CodeSegment, Execution,
+    HaltReason, Machine, ObjectHandle, ProcessAnimationKind, REGISTER_COUNT, SendEventTarget,
+    StorageReference, StorageRegion, VmEffect, VmHostRequest, VmObject, VmStateProgram,
+    process_register,
 };
 
 fn words(bytes: &[u8]) -> Vec<u32> {
@@ -361,6 +362,288 @@ fn title_boxs_lea_resolves_its_internal_table_as_native_no_draw() {
     assert_eq!(process.storage().region(), StorageRegion::Internal);
     assert_eq!(process.storage().index(), 2);
     assert_eq!(*process.kind(), ProcessAnimationKind::NoDraw);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn tawna_bonus_warpc_uses_the_exact_authored_player_proximity_gate() {
+    #[derive(Clone, Copy)]
+    struct GateCase {
+        label: &'static str,
+        portal_status_a: u32,
+        player_status_a: u32,
+        player_dx: i32,
+        player_dz: i32,
+        player_dy: i32,
+        accepted: bool,
+    }
+
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x24);
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let metadata = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+    let warp_eid = Eid::from_name("WarpC").unwrap();
+    let player_eid = Eid::from_name("WillC").unwrap();
+    let warp_program = load_gool_program(&metadata, &nsf, &nsf_bytes, warp_eid, 1).unwrap();
+    let player_program = load_gool_program(&metadata, &nsf, &nsf_bytes, player_eid, 0).unwrap();
+
+    assert_eq!(warp_program.state().transition_pc, 0x21);
+    assert_eq!(warp_program.code()[0x2e], 0x87a4_0816);
+    assert_eq!(warp_program.code()[0x42], 0x87a4_0816);
+    assert_eq!(player_program.event_map()[0x16], 32);
+
+    let cases = [
+        GateCase {
+            label: "inside every boundary",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: true,
+        },
+        GateCase {
+            label: "portal first-frame bit",
+            portal_status_a: 0x20,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "positive horizontal quantization edge inside",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0x27f00,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: true,
+        },
+        GateCase {
+            label: "positive raw unit rounds to the exclusive boundary",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0x27f01,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "negative-side last raw unit remains inside",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: -0x27fff,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: true,
+        },
+        GateCase {
+            label: "horizontal boundary is exclusive",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0x28000,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "Z boundary is also exclusive",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0x28000,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "quantized diagonal remains just inside Euclidean radius",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0x1c400,
+            player_dz: 0x1c400,
+            player_dy: -1,
+            accepted: true,
+        },
+        GateCase {
+            label: "next quantized diagonal reaches the exclusive radius",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0x1c500,
+            player_dz: 0x1c500,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "lower vertical boundary is inclusive",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -0x20800,
+            accepted: true,
+        },
+        GateCase {
+            label: "below the vertical range",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -0x20801,
+            accepted: false,
+        },
+        GateCase {
+            label: "upper vertical boundary is exclusive",
+            portal_status_a: 0,
+            player_status_a: 1,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: 0,
+            accepted: false,
+        },
+        GateCase {
+            label: "player must be grounded",
+            portal_status_a: 0,
+            player_status_a: 0,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: false,
+        },
+        GateCase {
+            label: "player cannot stand atop another object",
+            portal_status_a: 0,
+            player_status_a: 1 | 0x20_0000,
+            player_dx: 0,
+            player_dz: 0,
+            player_dy: -1,
+            accepted: false,
+        },
+    ];
+
+    for case in cases {
+        let warp = ObjectHandle::new(0).unwrap();
+        let player = ObjectHandle::new(1).unwrap();
+        let portal_translation = [0x10_0000_i32, 0x40_000_i32, -0x20_0000_i32];
+
+        let mut warp_object = VmObject::from_gool_program(warp, &warp_program).unwrap();
+        warp_object.initialize_retail_process(1, 0).unwrap();
+        warp_object.set_link(5, Some(player)).unwrap();
+        warp_object
+            .set_register(process_register::STATUS_A, case.portal_status_a)
+            .unwrap();
+        for (register, value) in [
+            (process_register::TRANSLATION_X, portal_translation[0]),
+            (process_register::TRANSLATION_Y, portal_translation[1]),
+            (
+                process_register::TRANSLATION_Z,
+                portal_translation[2] + case.player_dz,
+            ),
+        ] {
+            warp_object
+                .set_register(register, value.cast_unsigned())
+                .unwrap();
+        }
+
+        let mut player_object = VmObject::from_gool_program(player, &player_program).unwrap();
+        player_object.initialize_retail_process(0, 0).unwrap();
+        player_object
+            .set_register(process_register::STATUS_A, case.player_status_a)
+            .unwrap();
+        for (register, value) in [
+            (
+                process_register::TRANSLATION_X,
+                portal_translation[0] + case.player_dx,
+            ),
+            (
+                process_register::TRANSLATION_Y,
+                portal_translation[1] + case.player_dy,
+            ),
+            (process_register::TRANSLATION_Z, portal_translation[2]),
+        ] {
+            player_object
+                .set_register(register, value.cast_unsigned())
+                .unwrap();
+        }
+
+        let mut machine = Machine::new(256);
+        machine.insert_object(warp_object).unwrap();
+        machine.insert_object(player_object).unwrap();
+        machine
+            .set_global_word(CURRENT_LEVEL_GLOBAL, level.get() << 8)
+            .unwrap();
+        let mut delivered_state = None;
+        let execution = machine
+            .run_transition_with_host_requests(warp, |machine, request| {
+                let VmHostRequest::SendEvent(request) = request else {
+                    return Err(crust_sim::gool::VmError::MissingHostEffect);
+                };
+                assert_eq!(request.sender, warp, "{}", case.label);
+                assert_eq!(
+                    request.target,
+                    SendEventTarget::Direct { recipient: player },
+                    "{}",
+                    case.label
+                );
+                assert_eq!(request.event, 0x1600, "{}", case.label);
+                assert_eq!(request.arguments(), &[0], "{}", case.label);
+                let outcome = machine.send_event(
+                    Some(warp),
+                    Some(player),
+                    request.event,
+                    Some(request.arguments()),
+                )?;
+                delivered_state = outcome.state_change.map(|change| change.state);
+                Ok(())
+            })
+            .unwrap()
+            .expect("WarpC state zero has an authored transition block");
+
+        if case.accepted {
+            assert_eq!(delivered_state, Some(32), "{}", case.label);
+            assert_eq!(
+                execution.reason,
+                HaltReason::StateChanged(1),
+                "{}",
+                case.label
+            );
+            assert!(
+                machine.effects().iter().any(|effect| matches!(
+                    effect,
+                    VmEffect::SendEvent(request)
+                        if request.sender == warp
+                            && request.target == SendEventTarget::Direct { recipient: player }
+                            && request.event == 0x1600
+                            && request.arguments() == [0]
+                )),
+                "{}",
+                case.label
+            );
+        } else {
+            assert_eq!(delivered_state, None, "{}", case.label);
+            assert_eq!(
+                execution.reason,
+                HaltReason::TransitionCompleted,
+                "{}",
+                case.label
+            );
+            assert!(
+                machine
+                    .effects()
+                    .iter()
+                    .all(|effect| !matches!(effect, VmEffect::SendEvent(_))),
+                "{}",
+                case.label
+            );
+        }
+    }
 }
 
 #[test]

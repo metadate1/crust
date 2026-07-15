@@ -871,6 +871,42 @@ is 1,322,866 bytes with SHA-256
   the three Tawna tokens or physically traversed the bonus portal. Those uninterrupted gameplay
   steps remain open.
 
+### Tawna token-entry and portal-gate checkpoint (2026-07-15)
+
+- The legal Jungle Rollers stream contains the three characterized Tawna token crates at
+  `0h_cZ:22`, `0w_cZ:59`, and `0G_cZ:79`. Each descriptor is group 3, executable `0x22`, subtype
+  10, with initializer `0x69`. Starting at the authored player `HIT 0x0300` boundary enters
+  `BoxsC` state 24, spawns subtype-13 `FruiC`, sends `[0x6900, pid]` to the live `DispC` pickup HUD,
+  and sends token kind `0x6900` to Crash. The observed counter sequence is
+  `0 → 0x100 → 0x200 → 0x300`.
+- Only the third token makes the HUD emit `SaveState`, on local frame 4 and before Crash increments
+  the counter. After that increment, `DispC` sends completion `0x2700 [0]` on frame 1, resets the
+  master-fade step on frame 38, sends status `0x0f00 [0x500]` and emits `Transition(0x24)` on frame
+  53, writes checkpoint `79 << 8`, and clears the token counter. Completing `LEVEL_END` resolves
+  Tawna Bonus `0x24` and carries the saved Jungle Rollers `0x0c` snapshot into its fresh runtime.
+- The legal Tawna Bonus portal descriptor is `1__AZ` entity 15, group 3, executable `0x20`, subtype
+  1, spawn flags `0x8`, zero initializer, at point `(1479, 310, 160)`. Its parsed WarpC transition
+  requires portal bit `0x20` clear, signed quantized X/Z Euclidean distance `< 0x28000`, Y delta in
+  `[-0x20800, 0)`, grounded Crash, and no atop-object bit `0x200000`. Boundary cases include the
+  positive signed-shift edge at `0x27f00`/`0x27f01` and the negative edge at `-0x27fff`. An accepted
+  gate sends direct event `0x1600 [0]` and selects WillC state 32; every rejected case completes
+  without sending an event.
+- The downstream legal cross-stream test now also asserts that exact portal entity before covering
+  CardC, frame-301 `LoadState`, protected `-2` return, and the complete parent remount. These tests
+  deliberately join at controlled program boundaries: they do not steer Crash to the crates or
+  portal through collision broadphase, and they are not one uninterrupted browser playthrough.
+- The stable checkpoint passed Rustfmt, 870 locked default tests with zero failures and 76 ignored,
+  all 76 legally local opt-in tests with zero failures, warnings-denied native and Wasm Clippy, and
+  optimized native and `wasm32-unknown-unknown` builds. `npm run build` regenerated the served
+  distribution. Its 1,345,221-byte Wasm module has SHA-256
+  `74d69d81473ab74a6e87956304124185cb0dcf047fe74b2990f6244942f2c3bd`; the 46,236-byte generated
+  loader has SHA-256 `5d16cd2e5b74c8178a95006de3063a3ea3ce0aa339d6697006afcf4c3ca87ffc`.
+- The no-store server returned HTTP 200 and byte-identical Wasm/loader hashes. A visible in-app
+  browser reload reached the local-media workspace with the picker, 30 Hz standby telemetry,
+  15-slot card status, touch controls, and no console entries. This smoke did not remount the raw
+  BIN because the browser automation surface cannot populate the native file picker; the earlier
+  foreground Chrome raw-BIN/direct-gameplay pass remains the current browser import evidence.
+
 ## Reproducible commands
 
 ```bash
@@ -905,6 +941,14 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  jungle_rollers_three_tawna_crates_enter_the_authored_bonus \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_gool --locked \
+  tawna_bonus_warpc_uses_the_exact_authored_player_proximity_gate \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \

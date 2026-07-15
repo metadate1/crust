@@ -418,8 +418,11 @@ gameplay path.
   Jungle Rollers (`0x0c`) snapshot into Tawna Bonus (`0x24`), delivers WarpC's exact `0x1600`/zero
   event, advances CardC's Cross prompt, observes `LoadState` at frame 301, and resolves sentinel
   `-2` back to `0x0c`. It then reproduces the protected destination spawn/restart and checks the
-  restored Crash transform, camera location, box count, and every saved spawn word. The third-token
-  pickup and physical portal collision are still not one observed end-to-end playthrough.
+  restored Crash transform, camera location, box count, and every saved spawn word. Separate
+  controlled regressions cover all three authentic `BoxsC` → `FruiC` → `DispC` Tawna-token routes,
+  the third-token save/fade/status/`0x24` transition, and WarpC's parsed proximity/status gate at
+  its exact quantized boundaries. Together they cover the control path, but they are not one
+  uninterrupted pad-driven or browser playthrough.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -462,7 +465,9 @@ gameplay path.
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
 - One deterministic retail-authored N. Sanity route now reaches its real end warp and requests
-  Level Complete. No boss, complete bonus round trip, complete ending, broad death/checkpoint
+  Level Complete. The Tawna bonus control path is covered at exact entry, portal, return, and
+  remount boundaries, but no uninterrupted pad-driven/browser bonus round trip has been completed.
+  No boss, complete ending, broad death/checkpoint
   sequence, long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
 
 ## Automated coverage
@@ -480,8 +485,10 @@ collision, camera, title transitions, bonus returns, demo frames, card operation
 storage envelopes, input, texture formats/cache/projection/blends, process-local animation payloads,
 world-ripple timing, complete world Lightning/Dark/Dark2 state and fixed-point evaluation,
 shared-RNG/PBAK timing, invalid-initial-return reclamation, ADPCM, fixed-point ADSR, sample mixing
-and software synthesis. Property tests exercise parser/state-machine invariants where arbitrary input
-is useful.
+and software synthesis. Legally local coverage additionally includes the authentic three-token
+crate/pickup/HUD route, its bonus `LEVEL_END` carry, WarpC's proximity and quantization boundaries,
+and the protected bonus `LoadState`/parent remount. Property tests exercise parser/state-machine
+invariants where arbitrary input is useful.
 
 Browser checks and the exact exercised flows are recorded in [VERIFICATION.md](VERIFICATION.md).
 A passing native suite is never described as browser or retail parity.

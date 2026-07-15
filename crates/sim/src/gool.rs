@@ -111,6 +111,10 @@ const STATUS_B_MAIN_COLOR_BY_ZONE: u32 = 0x0400_0000;
 /// Fourteen-bit retail code/PC address space.
 pub const MAX_CODE_WORDS: usize = 1 << 14;
 pub const NULL_INPUT_VALUE: u32 = 3;
+/// `OptionsC` state two reads interrupter register `0x40` through this exact
+/// word once before its controller's first all-root event supplies link seven.
+/// The NTSC-U PS1 low-memory read at that null-derived address observes zero.
+const OPTIONS_NULL_INTERRUPTER_LOAD: u32 = 0x1c30_7840;
 const ANIMATION_REFERENCE_TAG: u32 = 0xa700_0000;
 const ANIMATION_REFERENCE_MASK: u32 = 0x00ff_ffff;
 const CODE_REFERENCE_TAG: u32 = 0xa600_0000;
@@ -4401,6 +4405,14 @@ impl Machine {
         if let Some(global) = self.globals.get_mut(TICKS_CURRENT_FRAME_GLOBAL) {
             *global = ticks_current_frame as u32;
         }
+    }
+
+    /// Current rounded cooperative timing used by retail movement and
+    /// `GoolObjectRotate`. Negative host deltas are clamped at the same safe
+    /// boundary used by physics contexts.
+    #[must_use]
+    pub fn ticks_per_frame(&self) -> u32 {
+        u32::try_from(self.ticks_per_frame).unwrap_or(0)
     }
 
     /// Supplies the presentation counter consumed by opcode `0x1e`.
@@ -9211,13 +9223,21 @@ impl Machine {
                     operand: instruction as u16 & 0x0fff,
                 })?;
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let register = (self.read_storage_reference(input)? >> 8) as usize;
+                let Some(target) = self.object(handle)?.links[usize::from(link_index)] else {
+                    // Keep this compatibility read instruction-exact. Stores,
+                    // other registers, and every other absent process link
+                    // remain checked failures instead of inheriting C's null
+                    // pointer arithmetic.
+                    if primary == 3 && instruction == OPTIONS_NULL_INTERRUPTER_LOAD {
+                        self.push(handle, 0)?;
+                        return Ok(false);
+                    }
+                    return Err(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
-                let register = (self.read_storage_reference(input)? >> 8) as usize;
+                    });
+                };
                 if primary == 3 {
                     let value = self.object(target)?.register(register)?;
                     self.push(handle, value)?;
@@ -14875,6 +14895,33 @@ mod tests {
         );
         assert_eq!(machine.object(target).unwrap().register(5), Ok(0x1234_5678));
         assert_eq!(machine.object(source).unwrap().stack(), &[0x1234_5678]);
+    }
+
+    #[test]
+    fn options_null_interrupter_bootstrap_is_instruction_exact() {
+        let options = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(options, vec![OPTIONS_NULL_INTERRUPTER_LOAD]).unwrap())
+            .unwrap();
+
+        assert_eq!(machine.run(options, 1).unwrap().steps, 1);
+        assert_eq!(machine.object(options).unwrap().stack(), &[0]);
+
+        for (object, instruction) in [
+            (handle(1), misc(3, 0, 0x0841) | (7 << 12)),
+            (handle(2), misc(4, 0, 0x0840) | (7 << 12)),
+        ] {
+            let mut candidate = VmObject::new(object, vec![instruction]).unwrap();
+            candidate.set_register(0, 0x1234_5600).unwrap();
+            let mut checked = Machine::new(0);
+            checked.insert_object(candidate).unwrap();
+            checked.push(object, 0x1234_5678).unwrap();
+            assert_eq!(
+                checked.run(object, 1),
+                Err(VmError::MissingLink { object, link: 7 })
+            );
+        }
     }
 
     #[test]

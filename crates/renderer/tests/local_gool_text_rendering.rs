@@ -27,6 +27,8 @@ fn local_retail_text_terms_and_font_links_are_characterized() {
     let mut projected_terms = 0_usize;
     let mut projected_quads = 0_usize;
     let mut decoded_glyphs = 0_usize;
+    let mut controller_icon_terms = 0_usize;
+    let mut decoded_controller_icon_terms = 0_usize;
     let mut projection_errors = BTreeMap::<String, usize>::new();
     let transform = RetailSpriteTransform::screen_2d(
         RetailSpriteVectors {
@@ -78,8 +80,8 @@ fn local_retail_text_terms_and_font_links_are_characterized() {
                     parse_gool_animation_descriptor(animations, font_offset)
                 else {
                     // Byte-wise discovery intentionally encounters embedded
-                    // type tags. A complete fixed-63 font parse is the
-                    // ownership proof for a real type-four descriptor.
+                    // type tags. A complete header-length-bounded font parse
+                    // is the ownership proof for a real type-four descriptor.
                     continue;
                 };
                 text_descriptors += 1;
@@ -102,6 +104,21 @@ fn local_retail_text_terms_and_font_links_are_characterized() {
                     }
                 }
                 for term in text.terms {
+                    let controller_icon = matches!(term.as_slice(), b"c" | b"s" | b"t" | b"x");
+                    if controller_icon {
+                        controller_icon_terms += 1;
+                        let glyph = font.glyphs[usize::from(term[0] - 0x20)];
+                        RetailTextureReference::new(
+                            TpagReference::new(font.texture_page),
+                            TextureInfo2 {
+                                color: glyph.texture.color,
+                                region: glyph.texture.region,
+                            },
+                        )
+                        .decode(&nsf, &nsf_bytes)
+                        .expect("CardC controller icon texture must decode");
+                        decoded_controller_icon_terms += 1;
+                    }
                     if format_retail_text(&term, &arguments).is_ok() {
                         formatted_terms += 1;
                     }
@@ -139,14 +156,13 @@ fn local_retail_text_terms_and_font_links_are_characterized() {
     assert!(text_descriptors > 0);
     assert!(terms > 0);
     assert_eq!(formatted_terms, terms);
-    assert_eq!(
-        projected_terms + projection_errors.values().sum::<usize>(),
-        terms
-    );
-    // The fixed retail tables retain eight copies each of four lowercase
-    // sentinel terms (`c`, `s`, `t`, `x`) which native would index past its
-    // 0x20..=0x5e glyph array. Rust rejects those 32 unused terms explicitly.
-    assert_eq!(projection_errors.values().sum::<usize>(), 32);
+    assert_eq!(projected_terms, terms);
+    assert!(projection_errors.is_empty(), "{projection_errors:?}");
+    // CardC retains eight copies of each controller-button icon. They live in
+    // the variable tail of its 90-record font and are active title UI terms,
+    // not malformed lowercase text or non-drawable state sentinels.
+    assert_eq!(controller_icon_terms, 32);
+    assert_eq!(decoded_controller_icon_terms, controller_icon_terms);
     assert!(projected_quads > 0);
     assert_eq!(decoded_glyphs, DECODE_SAMPLE_LIMIT);
 }

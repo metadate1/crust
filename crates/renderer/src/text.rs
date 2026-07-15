@@ -835,6 +835,46 @@ mod tests {
     }
 
     #[test]
+    fn extended_controller_icon_glyphs_render_but_unserialized_slots_stay_invalid() {
+        let mut extended = font();
+        extended.header.length = 90;
+        extended.glyphs.resize(
+            90,
+            GoolGlyph {
+                texture: texture(0),
+                width: 0,
+                height: 0,
+            },
+        );
+        let triangle_index = usize::from(b't' - 0x20);
+        extended.glyphs[triangle_index] = GoolGlyph {
+            texture: texture(0x0030_2010),
+            width: 400,
+            height: 0,
+        };
+
+        let rendered = project_retail_text(projection(b"t", &extended)).unwrap();
+        assert_eq!(rendered.quads.len(), 1);
+        assert_eq!(
+            rendered.quads[0].kind,
+            RetailTextQuadKind::Glyph {
+                character: b't',
+                glyph_index: 84,
+            }
+        );
+
+        let base = font();
+        assert_eq!(
+            project_retail_text(projection(b"t", &base)),
+            Err(RetailTextError::InvalidGlyph {
+                offset: 0,
+                character: b't',
+                glyph_count: 63,
+            })
+        );
+    }
+
+    #[test]
     fn controls_scale_toggle_color_newline_and_pluralize_without_oob_reads() {
         let font = font();
         let mut singular = projection(b"~sx800~A~c0B~nA~p0Z", &font);

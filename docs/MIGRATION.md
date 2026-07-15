@@ -30,7 +30,9 @@ An external `git archive` copy produced these results:
 - A bonus return target uses the signed transition sentinel `-2`.
 - Audio is 44.1 kHz, 24 logical voices, with music on voice zero.
 - The virtual card has 15 slots and an exact 128-byte little-endian payload. Its checksum starts at
-  `0x12345678`, adds each byte with the checksum field zero, then rotates left three bits.
+  `0x12345678`, adds each byte with the checksum field zero, then rotates left three bits. Rescan
+  publication is an authored acknowledgement: `CHECKING` remains latched until CardC clears
+  `FLAG_6`, and the staged part table becomes visible on the following update.
 - Existing storage keys and schema versions remain unchanged.
 - Image-backed title states resolve `5MapP`, `7MapP`, `8MapP`, and `aMapP` MDAT graphs; each IMAG
   column contains 16×16 indexed tiles and selects a CLUT item through the MDAT IPAL table.
@@ -44,9 +46,10 @@ An external `git archive` copy produced these results:
   handle rather than a pointer; opcode `0x81` preserves the native switch's one-cycle no-op.
 - Retail GOOL animation item five is retained as owned bytes. All five descriptor families are
   bounds-checked at unaligned byte offsets, and vertex descriptors resolve TGEO plus exact
-  SVTX/CVTX frames through the mounted pair only. Type-three fonts always consume the source
-  `gool_font` layout of 63 glyphs plus one backdrop; their header length byte remains animation
-  metadata and is not reused as an array count. State-change yields resolve the requested state
+  SVTX/CVTX frames through the mounted pair only. Type-three fonts consume the exact glyph count
+  in their header length byte. The first 63 slots retain the conventional `0x20..=0x5e` table,
+  the backdrop texture aliases slot 63, and the longer tables safely expose authored controller
+  icons such as CardC's `c`, `s`, `t`, and `x`. State-change yields resolve the requested state
   through NSD/NSF metadata, bind a new checked state program, and resume with explicit wrapping
   frame/draw stamps; serialized state PCs and animation offsets never become native pointers.
   Toxic Waste's LEA-created `BaraC` type-zero descriptor is decoded from the live same-object
@@ -70,6 +73,10 @@ An external `git archive` copy produced these results:
   object solid response, every directional surface variant, entity-color scaling and its source
   no-op hole. GOP translation, stack consumption, aliases and wrapping fixed-point arithmetic stay
   explicit even in selectors whose native observable work is only operand translation.
+- The spinning-death camera no longer stops at a display-mask boundary. A checked resolver turns
+  the live tagged object, animation frame and vertex index into an owned world-space focus; a pure
+  fixed-point core retains the source death-camera words and count writeback. Browser rendering and
+  GOOL transform-vector projection consume the same explicit pose without retaining a C pointer.
 - Misc primary nine (`SZON`) never stores a relocated ZDAT pointer. The stream host resolves the
   current header, scans neighbor EIDs in reverse serialized order, parses rectangles lazily and
   applies the source's inclusive wrapping Q24.8 containment test. No match leaves the linked
@@ -100,7 +107,8 @@ An external `git archive` copy produced these results:
   discarded, while tick two presents gameplay with path progress `0x200` and draw count one.
 - A level request is latched during GOOL and consumed at the start of the next cooperative frame.
   The requested signed value is retained while `LEVEL_END` visits all eight roots in postorder;
-  only a final `-2` selects the saved level. Remount carry owns globals, RNG, savestate, counters and
+  only a final `-2` selects the saved level. Remount carry owns globals, RNG, savestate, the native
+  process-lifetime `draw_count`, other counters and
   the 3,592-halfword encountered-object registry, while every object identity, pointer global,
   pair-backed cache and active 304-word spawn table is rebuilt for the destination. Bonus return
   substitutes the saved zone/path/progress during destination initialization and protects the one

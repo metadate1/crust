@@ -8,6 +8,7 @@ use crust_formats::stream::{RetailPathId, RetailZoneGraph, ZonePath};
 
 use crate::math::{Angle12, Angles, Vec3, integer_sqrt, seek};
 use crate::retail_frame::{PATH_POINT_STEP, PathProgress};
+use crate::retail_physics::rotate_toward;
 
 /// Input is accepted by GOOL-controlled gameplay.
 pub const GAME_STATE_PLAYING: i32 = 0x100;
@@ -21,6 +22,9 @@ const ZONE_AUTO_CAM_Z_OFFSET: u32 = 0x80;
 const ZONE_SIDE_SCROLL: u32 = 0x4000;
 const ZONE_BACKWARD: u32 = 0x8000;
 const ZONE_DISCARD_BELOW_PATHS: u32 = 0x4_0000;
+
+/// Display-list flag that enables `CamDeath`'s accelerating orbit.
+pub const GOOL_FLAG_SPIN_ACCEL: u32 = 0x0004_0000;
 
 const PAD_UP: u32 = 0x1000;
 const PAD_RIGHT: u32 = 0x2000;
@@ -47,9 +51,6 @@ pub struct CameraState {
     pub mode: CameraMode,
     pub offset: Vec3,
     pub zoom: i32,
-    pub death_acceleration: i32,
-    pub death_orbit: i32,
-    pub death_flip_velocity: i32,
 }
 
 impl Default for CameraState {
@@ -64,9 +65,6 @@ impl Default for CameraState {
                 z: -0x12c00,
             },
             zoom: 0x6a400,
-            death_acceleration: 0,
-            death_orbit: 0,
-            death_flip_velocity: 0,
         }
     }
 }
@@ -79,27 +77,6 @@ impl CameraState {
         self.translation.x = seek(self.translation.x, desired.x, speed);
         self.translation.y = seek(self.translation.y, desired.y, speed);
         self.translation.z = seek(self.translation.z, desired.z, speed);
-    }
-
-    /// Advances the characterized orbit acceleration used by death cameras.
-    pub fn death_step(&mut self, focus: Vec3, flip_speed: i32, zoom_speed: i32, accelerate: bool) {
-        self.mode = CameraMode::Death;
-        self.death_acceleration = 22;
-        self.death_flip_velocity = flip_speed;
-        if accelerate {
-            self.death_orbit = self.death_orbit.wrapping_add(self.death_acceleration);
-            self.rotation.x = self.rotation.x.wrapping_add(self.death_acceleration);
-        }
-        self.translation.y = seek(self.translation.y, focus.y.saturating_add(120_000), 102_400);
-        self.zoom = seek(self.zoom, 175_000, zoom_speed);
-        let sin = i32::from(Angle12::new(self.death_orbit).sin_q12());
-        let cos = i32::from(Angle12::new(self.death_orbit).cos_q12());
-        self.translation.x = focus
-            .x
-            .wrapping_add(((i64::from(self.zoom) * i64::from(sin)) >> 12) as i32);
-        self.translation.z = focus
-            .z
-            .wrapping_add(((i64::from(self.zoom) * i64::from(cos)) >> 12) as i32);
     }
 }
 
@@ -177,6 +154,210 @@ pub struct RetailCameraLocation {
 pub struct RetailCameraPose {
     pub translation: [i32; 3],
     pub rotation_yxz: [i32; 3],
+}
+
+/// Per-frame values consumed by retail `CamDeath` after its object/animation
+/// vertex lookup and `GoolTransform` have already been validated and run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailDeathCameraInput {
+    /// World-space spin vertex (`r_vert` in the source), in engine fixed point.
+    pub transformed_focus: Vec3,
+    pub flip_speed: i32,
+    pub zoom_speed: i32,
+    pub spin_accel: bool,
+    /// Cooperative-frame period consumed by source `GoolObjectRotate`.
+    pub ticks_per_frame: u32,
+}
+
+/// Persistent globals owned by retail `CamDeath`.
+///
+/// Field names deliberately retain their source names so save-state/runtime
+/// integration cannot accidentally conflate the orbit angle, radius, and two
+/// independent angular velocities.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailDeathCameraState {
+    pub i_death_cam: i32,
+    pub dcam_angvel: i32,
+    pub dcam_trans_z: i32,
+    pub dcam_rot_y1: i32,
+    pub dcam_rot_y2: i32,
+    pub dcam_accel: i32,
+    pub dcam_angvel2: i32,
+}
+
+/// Checked failure outside the defined retail distance domain.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailDeathCameraError {
+    HorizontalDistanceOverflow { relative_x: i32, relative_z: i32 },
+}
+
+impl RetailDeathCameraState {
+    /// Runs one source-ordered `CamDeath` update.
+    ///
+    /// The caller supplies the already transformed spin vertex, keeping NSD
+    /// references and animation lifetimes outside this pure camera boundary.
+    /// An out-of-domain distance is rejected before either persistent state or
+    /// the camera pose changes; the original signed C multiply is only defined
+    /// while the sum of squares fits `i32`.
+    pub fn step(
+        &mut self,
+        camera: &mut RetailCameraPose,
+        input: RetailDeathCameraInput,
+    ) -> Result<(), RetailDeathCameraError> {
+        let relative_x = camera.translation[0].wrapping_sub(input.transformed_focus.x) >> 8;
+        let relative_y = camera.translation[1].wrapping_sub(input.transformed_focus.y) >> 8;
+        let relative_z = camera.translation[2].wrapping_sub(input.transformed_focus.z) >> 8;
+        let horizontal_squared = i64::from(relative_x) * i64::from(relative_x)
+            + i64::from(relative_z) * i64::from(relative_z);
+        let horizontal_squared = i32::try_from(horizontal_squared)
+            .map_err(|_| RetailDeathCameraError::HorizontalDistanceOverflow {
+                relative_x,
+                relative_z,
+            })?
+            .unsigned_abs();
+        let distance_xz = retail_death_sqrt(horizontal_squared) as i32;
+        let angle_xz = retail_death_atan2(relative_x.wrapping_neg(), relative_z.wrapping_neg())
+            .wrapping_add(0x800);
+
+        if self.i_death_cam < 9 {
+            if self.i_death_cam == 0 {
+                self.dcam_angvel = i32::from(
+                    Angle12::new(camera.rotation_yxz[1]).difference_to(Angle12::new(angle_xz)),
+                ) / 9;
+            }
+            self.dcam_trans_z = distance_xz.wrapping_shl(8);
+            self.dcam_rot_y1 = 0;
+            self.dcam_rot_y2 = angle_xz;
+            self.dcam_accel = 22;
+            camera.rotation_yxz[1] = camera.rotation_yxz[1].wrapping_add(self.dcam_angvel);
+            self.i_death_cam = self.i_death_cam.wrapping_add(1);
+        }
+
+        let angle_yz = retail_death_atan2(relative_y, distance_xz);
+        let target_y = angle_yz.wrapping_neg();
+        let pitch_difference =
+            i32::from(Angle12::new(camera.rotation_yxz[0]).difference_to(Angle12::new(target_y)));
+        self.dcam_angvel2 = if pitch_difference < 0x72 {
+            input.flip_speed / 2
+        } else {
+            input.flip_speed
+        };
+        camera.rotation_yxz[0] = rotate_toward(
+            camera.rotation_yxz[0],
+            target_y,
+            self.dcam_angvel2,
+            input.ticks_per_frame,
+            false,
+            None,
+        );
+
+        if input.spin_accel {
+            self.dcam_rot_y1 = self.dcam_rot_y1.wrapping_add(self.dcam_accel);
+            camera.rotation_yxz[1] = camera.rotation_yxz[1].wrapping_add(self.dcam_accel);
+        }
+
+        camera.translation[1] = seek(
+            camera.translation[1],
+            input.transformed_focus.y.wrapping_add(120_000),
+            102_400,
+        );
+        self.dcam_trans_z = retail_seek(distance_xz.wrapping_shl(8), 175_000, input.zoom_speed);
+
+        let orbit = Angle12::new(self.dcam_rot_y1.wrapping_add(self.dcam_rot_y2));
+        camera.translation[0] = input
+            .transformed_focus
+            .x
+            .wrapping_add(retail_death_orbit_axis(self.dcam_trans_z, orbit.sin_q12()));
+        camera.translation[2] = input
+            .transformed_focus
+            .z
+            .wrapping_add(retail_death_orbit_axis(self.dcam_trans_z, orbit.cos_q12()));
+        Ok(())
+    }
+}
+
+// Source PC `atan_table` delta bits. Each table step is zero or one, so a
+// prefix popcount reproduces its exact 1,024 entries without host floating
+// point. This is local to the typed camera slice until the shared GOOL helper
+// can be made crate-visible without widening its public API.
+const RETAIL_DEATH_ATAN_INCREMENTS: [u64; 16] = [
+    0x6d6d_6dad_b5b6_b6d6,
+    0xd6d6_dada_db5b_5b6b,
+    0x5ada_dad6_d6d6_d6d6,
+    0x5ad6_d6b5_ad6d_6b5b,
+    0x6b56_b5ab_5ad6_b56b,
+    0xd5aa_d5ab_56ad_5ab5,
+    0xd556_aad5_5aab_55aa,
+    0xaaaa_aaad_5555_aaaa,
+    0xaaaa_aa55_5555_55aa,
+    0xa555_2aaa_5555_4aaa,
+    0x4a95_2a95_4aa9_54aa,
+    0x4a54_a52a_54a5_4a95,
+    0xa525_294a_4a52_9529,
+    0x2524_a494_9494_94a4,
+    0x9249_24a4_924a_4929,
+    0x8924_9249_2492_4924,
+];
+
+fn retail_death_atan2(y: i32, x: i32) -> i32 {
+    let negative_y = y < 0;
+    let negative_x = x < 0;
+    let y = i64::from(y).unsigned_abs();
+    let x = i64::from(x).unsigned_abs();
+    if y | x == 0 {
+        return 0;
+    }
+    let mut angle = if y >= x {
+        0x400 - retail_death_atan_ratio(x, y)
+    } else {
+        retail_death_atan_ratio(y, x)
+    };
+    if negative_x {
+        angle = 0x800 - angle;
+    }
+    if negative_y { -angle } else { angle }
+}
+
+fn retail_death_atan_ratio(numerator: u64, denominator: u64) -> i32 {
+    let ratio = if numerator >> 21 != 0 {
+        numerator / (denominator >> 10).max(1)
+    } else {
+        (numerator << 10) / denominator
+    }
+    .min(0x3ff) as usize;
+    let block = ratio / 64;
+    let bit = ratio % 64;
+    let prior = RETAIL_DEATH_ATAN_INCREMENTS[..block]
+        .iter()
+        .map(|word| word.count_ones())
+        .sum::<u32>();
+    let mask = if bit == 63 {
+        u64::MAX
+    } else {
+        (1_u64 << (bit + 1)) - 1
+    };
+    (prior + (RETAIL_DEATH_ATAN_INCREMENTS[block] & mask).count_ones()) as i32
+}
+
+fn retail_death_sqrt(value: u32) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    let leading = value.leading_zeros() & !1;
+    let index = if leading < 24 {
+        value >> (24 - leading)
+    } else {
+        value << (leading - 24)
+    };
+    debug_assert!((64..=255).contains(&index));
+    let table_value = integer_sqrt(u64::from(index) << 18);
+    (table_value << ((31 - leading) / 2)) >> 12
+}
+
+fn retail_death_orbit_axis(radius: i32, trig: i16) -> i32 {
+    let input = radius >> 4;
+    let rotated = (i64::from(trig) * i64::from(input)) >> 12;
+    (rotated as i32).wrapping_shl(4)
 }
 
 /// Behavior selected by one source-compatible camera update.
@@ -2057,6 +2238,190 @@ mod tests {
 
     const TEST_ZONE: Eid = Eid::from_raw(1);
 
+    fn death_input(focus: Vec3) -> RetailDeathCameraInput {
+        RetailDeathCameraInput {
+            transformed_focus: focus,
+            flip_speed: 100,
+            zoom_speed: 1_000,
+            spin_accel: false,
+            ticks_per_frame: 34,
+        }
+    }
+
+    #[test]
+    fn retail_death_camera_first_frame_matches_cam_death_golden() {
+        // cam.c CamDeath: relative=(100, 0, 0), table dist=99, ang_xz=0x400.
+        // The first of nine alignment steps is therefore 0x400 / 9 = 113.
+        let mut state = RetailDeathCameraState::default();
+        let mut camera = RetailCameraPose {
+            translation: [25_600, 0, 0],
+            rotation_yxz: [0, 0, 0],
+        };
+
+        state.step(&mut camera, death_input(Vec3::ZERO)).unwrap();
+
+        assert_eq!(
+            state,
+            RetailDeathCameraState {
+                i_death_cam: 1,
+                dcam_angvel: 113,
+                dcam_trans_z: 26_344,
+                dcam_rot_y1: 0,
+                dcam_rot_y2: 0x400,
+                dcam_accel: 22,
+                dcam_angvel2: 50,
+            }
+        );
+        // GoolTransform first shifts the radius from Q16 to Q12, so the final
+        // quarter-turn offset is 26_336 rather than the unquantized 26_344.
+        assert_eq!(camera.translation, [26_336, 102_400, 0]);
+        assert_eq!(camera.rotation_yxz, [0, 113, 0]);
+    }
+
+    #[test]
+    fn retail_death_camera_preserves_source_nine_step_alignment_boundary() {
+        let mut state = RetailDeathCameraState {
+            i_death_cam: 8,
+            dcam_angvel: 113,
+            dcam_trans_z: 1,
+            dcam_rot_y1: 777,
+            dcam_rot_y2: 888,
+            dcam_accel: 999,
+            dcam_angvel2: 1,
+        };
+        let mut camera = RetailCameraPose {
+            translation: [25_600, 0, 0],
+            rotation_yxz: [0, 904, 0],
+        };
+        let input = death_input(Vec3::ZERO);
+
+        state.step(&mut camera, input).unwrap();
+        assert_eq!(state.i_death_cam, 9);
+        assert_eq!(state.dcam_rot_y1, 0);
+        assert_eq!(state.dcam_rot_y2, 0x400);
+        assert_eq!(state.dcam_accel, 22);
+        assert_eq!(camera.rotation_yxz[1], 1_017);
+
+        let retained_angle = state.dcam_rot_y2;
+        let retained_velocity = state.dcam_angvel;
+        state.step(&mut camera, input).unwrap();
+        assert_eq!(state.i_death_cam, 9);
+        assert_eq!(state.dcam_rot_y2, retained_angle);
+        assert_eq!(state.dcam_angvel, retained_velocity);
+        assert_eq!(camera.rotation_yxz[1], 1_017);
+    }
+
+    #[test]
+    fn retail_death_camera_keeps_signed_pitch_threshold_and_frame_scale() {
+        let mut negative_delta_state = RetailDeathCameraState::default();
+        let mut negative_delta_camera = RetailCameraPose {
+            translation: [25_600, 25_600, 0],
+            rotation_yxz: [0, 0, 0],
+        };
+        let mut positive_delta_state = RetailDeathCameraState::default();
+        let mut positive_delta_camera = RetailCameraPose {
+            translation: [25_600, -25_600, 0],
+            rotation_yxz: [0, 0, 0],
+        };
+        let mut input = death_input(Vec3::ZERO);
+        input.flip_speed = 1_024;
+        input.ticks_per_frame = 34;
+
+        negative_delta_state
+            .step(&mut negative_delta_camera, input)
+            .unwrap();
+        positive_delta_state
+            .step(&mut positive_delta_camera, input)
+            .unwrap();
+
+        // CamDeath compares GoolAngDiff directly (without abs): the negative
+        // -45-degree delta takes half speed, while +45 degrees takes full speed.
+        assert_eq!(negative_delta_state.dcam_angvel2, 512);
+        assert_eq!(positive_delta_state.dcam_angvel2, 1_024);
+        assert_eq!(negative_delta_camera.rotation_yxz[0], 0x1000 - 17);
+        assert_eq!(positive_delta_camera.rotation_yxz[0], 34);
+    }
+
+    #[test]
+    fn retail_death_camera_preserves_negative_authored_zoom_speed() {
+        let mut state = RetailDeathCameraState::default();
+        let mut camera = RetailCameraPose {
+            translation: [25_600, 0, 0],
+            rotation_yxz: [0, 0, 0],
+        };
+        let mut input = death_input(Vec3::ZERO);
+        input.zoom_speed = -1_000;
+
+        state.step(&mut camera, input).unwrap();
+
+        // The source GoolSeek keeps delta signed. With a target above the
+        // 25,344-unit radius, -1,000 therefore moves away to 24,344 instead
+        // of being normalized into a positive seek step.
+        assert_eq!(state.dcam_trans_z, 24_344);
+    }
+
+    #[test]
+    fn retail_death_camera_spin_acceleration_updates_both_source_words() {
+        let mut state = RetailDeathCameraState {
+            i_death_cam: 9,
+            dcam_angvel: 7,
+            dcam_trans_z: 0,
+            dcam_rot_y1: 40,
+            dcam_rot_y2: 0x400,
+            dcam_accel: 22,
+            dcam_angvel2: 0,
+        };
+        let mut camera = RetailCameraPose {
+            translation: [25_600, 0, 0],
+            rotation_yxz: [0, 0x1234, 0],
+        };
+        let mut input = death_input(Vec3::ZERO);
+        input.spin_accel = GOOL_FLAG_SPIN_ACCEL != 0;
+
+        state.step(&mut camera, input).unwrap();
+
+        assert_eq!(state.i_death_cam, 9);
+        assert_eq!(state.dcam_rot_y1, 62);
+        assert_eq!(camera.rotation_yxz[1], 0x124a);
+    }
+
+    #[test]
+    fn retail_death_camera_uses_source_sqrt_table_quantization() {
+        // Source msqrt returns 16 for 289 although mathematical floor-sqrt is
+        // 17; this guards against replacing its normalized lookup with f64 or
+        // the generic integer square root directly.
+        assert_eq!(retail_death_sqrt(289), 16);
+        assert_eq!(retail_death_sqrt(10_000), 99);
+        assert_eq!(retail_death_atan2(-100, 0), -0x400);
+        assert_eq!(retail_death_atan2(100, 100), 0x200);
+    }
+
+    #[test]
+    fn retail_death_camera_rejects_undefined_distance_transactionally() {
+        let mut state = RetailDeathCameraState {
+            i_death_cam: 4,
+            dcam_angvel: 5,
+            dcam_trans_z: 6,
+            dcam_rot_y1: 7,
+            dcam_rot_y2: 8,
+            dcam_accel: 9,
+            dcam_angvel2: 10,
+        };
+        let mut camera = RetailCameraPose {
+            translation: [i32::MAX, 12, i32::MAX],
+            rotation_yxz: [13, 14, 15],
+        };
+        let state_before = state;
+        let camera_before = camera;
+
+        assert!(matches!(
+            state.step(&mut camera, death_input(Vec3::ZERO)),
+            Err(RetailDeathCameraError::HorizontalDistanceOverflow { .. })
+        ));
+        assert_eq!(state, state_before);
+        assert_eq!(camera, camera_before);
+    }
+
     #[test]
     fn follow_distance_accepts_a_wrapped_unsigned_ps1_radicand() {
         let path = RetailPathId {
@@ -2426,34 +2791,6 @@ mod tests {
             }
         );
         assert_eq!(camera, before);
-    }
-
-    #[test]
-    fn death_camera_uses_characterized_acceleration() {
-        let mut camera = CameraState {
-            translation: Vec3 {
-                x: 4_000,
-                y: 5_000,
-                z: 6_000,
-            },
-            ..CameraState::default()
-        };
-        camera.death_step(
-            Vec3 {
-                x: 1_000,
-                y: 2_000,
-                z: 3_000,
-            },
-            100,
-            1_000,
-            true,
-        );
-        assert_eq!(camera.death_acceleration, 22);
-        assert_eq!(camera.death_orbit, 22);
-        assert_eq!(camera.death_flip_velocity, 100);
-        assert!(camera.translation.x.unsigned_abs() < 10_000_000);
-        assert!(camera.translation.y.unsigned_abs() < 10_000_000);
-        assert!(camera.translation.z.unsigned_abs() < 10_000_000);
     }
 
     #[test]

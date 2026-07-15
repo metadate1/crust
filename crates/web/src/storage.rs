@@ -10,6 +10,8 @@ use crust_sim::card::{
 use wasm_bindgen::JsValue;
 use web_sys::Storage;
 
+use crate::card_persistence::{CardPersistIntent, merge_card_record};
+
 #[derive(Debug)]
 pub struct StorageState {
     storage: Storage,
@@ -54,32 +56,13 @@ impl StorageState {
         card
     }
 
-    pub fn persist_card(&mut self, card: &VirtualCard) -> Result<(), JsValue> {
+    pub fn persist_card(
+        &mut self,
+        card: &VirtualCard,
+        intent: CardPersistIntent,
+    ) -> Result<(), JsValue> {
         let timestamp = now_timestamp();
-        let mut next_record = self.card_record.clone();
-        for (index, slot) in card.slots().iter().copied().enumerate() {
-            next_record.slots[index] = match slot {
-                Slot::Empty => CardSlot::Empty,
-                Slot::Valid(payload) => CardSlot::Valid {
-                    payload: Box::new(payload.into_bytes()),
-                    updated_at: timestamp,
-                },
-                Slot::Corrupt => match &self.card_record.slots[index] {
-                    CardSlot::Damaged {
-                        encoded_payload,
-                        updated_at,
-                    } => CardSlot::Damaged {
-                        encoded_payload: encoded_payload.clone(),
-                        updated_at: *updated_at,
-                    },
-                    _ => CardSlot::Damaged {
-                        encoded_payload: "damaged".to_owned(),
-                        updated_at: timestamp,
-                    },
-                },
-            };
-        }
-        next_record.updated_at = timestamp;
+        let next_record = merge_card_record(&self.card_record, card, timestamp, intent);
         let json = encode_virtual_card(&next_record)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.storage.set_item(CARD_STORAGE_KEY, &json)?;

@@ -33,7 +33,7 @@ use crust_formats::{
 use crust_sim::{
     camera::{
         RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
-        RetailCameraRuntime,
+        RetailCameraPose, RetailCameraRuntime, RetailDeathCameraInput, RetailDeathCameraState,
     },
     gool::{
         CodeAddress, CodeSegment, GoolProgramIdentity, RetailPadSnapshot,
@@ -798,6 +798,11 @@ struct LevelSurvey {
     camera_path_changes: u64,
     last_camera_path_change: u32,
     last_camera_progress_change: u32,
+    death_camera_frames: u64,
+    death_camera_pose_changes: u64,
+    death_camera_max_count: i32,
+    first_death_camera_pose: Option<(u32, RetailCameraPose)>,
+    last_death_camera_pose: Option<(u32, RetailCameraPose)>,
     initial_player_translation: Option<[i32; 3]>,
     final_player_translation: Option<[i32; 3]>,
     player_minimum: Option<[i32; 3]>,
@@ -840,6 +845,11 @@ impl LevelSurvey {
             camera_path_changes: 0,
             last_camera_path_change: 0,
             last_camera_progress_change: 0,
+            death_camera_frames: 0,
+            death_camera_pose_changes: 0,
+            death_camera_max_count: 0,
+            first_death_camera_pose: None,
+            last_death_camera_pose: None,
             initial_player_translation: None,
             final_player_translation: None,
             player_minimum: None,
@@ -926,6 +936,19 @@ impl LevelSurvey {
         }
     }
 
+    fn observe_death_camera(&mut self, frame: u32, pose: RetailCameraPose, count: i32) {
+        self.death_camera_frames += 1;
+        self.death_camera_max_count = self.death_camera_max_count.max(count);
+        self.first_death_camera_pose.get_or_insert((frame, pose));
+        if self
+            .last_death_camera_pose
+            .is_some_and(|(_, previous)| previous != pose)
+        {
+            self.death_camera_pose_changes += 1;
+        }
+        self.last_death_camera_pose = Some((frame, pose));
+    }
+
     fn record_effect(&mut self, effect: &VmEffect) {
         let kind = effect_kind(effect);
         *self.effect_counts.entry(kind).or_default() += 1;
@@ -936,7 +959,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -961,6 +984,11 @@ impl LevelSurvey {
             self.camera_path_changes,
             self.last_camera_path_change,
             self.last_camera_progress_change,
+            self.death_camera_frames,
+            self.death_camera_pose_changes,
+            self.death_camera_max_count,
+            self.first_death_camera_pose,
+            self.last_death_camera_pose,
             self.initial_player_translation,
             self.final_player_translation,
             self.player_minimum,
@@ -1256,6 +1284,8 @@ fn update_camera(
     nsd: &Nsd,
     graph: &RetailZoneGraph,
     camera: &mut RetailCameraRuntime,
+    death_camera: &mut RetailDeathCameraState,
+    death_camera_pose: &mut Option<RetailCameraPose>,
     lifecycle: &mut ZoneLifecycle,
     runtime: &mut RetailRuntime,
     host: &mut NsfProgramHost<'_>,
@@ -1274,8 +1304,37 @@ fn update_camera(
         .camera_mode;
     let display_mask = runtime.current_display_mask();
     let camera_before = *camera;
-    let step = if runtime.arena().main_object().is_none() || display_mask & (0x2 | 0x1_0000) != 0x2
-    {
+    let spin_death = display_mask & 0x1_0000 != 0;
+    let step = if runtime.arena().main_object().is_none() {
+        camera.stationary_step()
+    } else if spin_death {
+        let resolved = runtime
+            .resolve_spin_death_camera_inputs(host)
+            .map_err(|error| format!("spin-death camera input resolution: {error:?}"))?;
+        let pose = death_camera_pose.get_or_insert(
+            camera
+                .pose(graph)
+                .map_err(|error| format!("spin-death camera initial pose: {error}"))?,
+        );
+        death_camera.i_death_cam = resolved.count;
+        death_camera
+            .step(
+                pose,
+                RetailDeathCameraInput {
+                    transformed_focus: resolved.focus,
+                    flip_speed: resolved.flip_speed,
+                    zoom_speed: resolved.zoom_speed,
+                    spin_accel: resolved.spin_accel,
+                    ticks_per_frame: resolved.ticks_per_frame,
+                },
+            )
+            .map_err(|error| format!("spin-death camera step: {error:?}"))?;
+        runtime
+            .set_spin_death_camera_count(death_camera.i_death_cam)
+            .map_err(|error| format!("spin-death camera count writeback: {error:?}"))?;
+        survey.observe_death_camera(frame, *pose, death_camera.i_death_cam);
+        camera.stationary_step()
+    } else if display_mask & 0x2 != 0x2 {
         camera.stationary_step()
     } else if matches!(mode, 5 | 6) {
         let input = follow_input(runtime, level, held_buttons)?
@@ -1296,6 +1355,9 @@ fn update_camera(
                 )
             })?
     };
+    if !spin_death && step.before != step.after {
+        *death_camera_pose = None;
+    }
 
     for effect in &step.effects {
         match *effect {
@@ -1359,7 +1421,9 @@ fn update_camera(
     let rotation_xz = camera
         .rotation_xz(graph)
         .map_err(|error| error.to_string())?;
-    let pose = camera.pose(graph).map_err(|error| error.to_string())?;
+    let pose = (*death_camera_pose)
+        .map_or_else(|| camera.pose(graph), Ok)
+        .map_err(|error| error.to_string())?;
     let field_of_view = nsd
         .ldat()
         .ok_or_else(|| "bootable pair has no LDAT".to_owned())?
@@ -1561,6 +1625,8 @@ fn survey_pair_with_runtime(
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let mut camera = RetailCameraRuntime::new(&graph).map_err(|error| error.to_string())?;
+    let mut death_camera = RetailDeathCameraState::default();
+    let mut death_camera_pose = None;
     let spawn_points = graph
         .path(graph.spawn_path())
         .and_then(|path| u16::try_from(path.points.len()).ok())
@@ -1660,6 +1726,8 @@ fn survey_pair_with_runtime(
             nsd,
             &graph,
             &mut camera,
+            &mut death_camera,
+            &mut death_camera_pose,
             &mut lifecycle,
             &mut runtime,
             &mut host,
@@ -1745,7 +1813,10 @@ fn survey_pair_with_runtime(
                     survey.terminal = Some(terminal);
                     break;
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    death_camera = RetailDeathCameraState::default();
+                    death_camera_pose = None;
+                }
                 Err(error) => {
                     survey.record_issue("restart", frame, error.clone());
                     survey.terminal = Some(format!("restart boundary: {error}"));
@@ -1903,6 +1974,50 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
             hog_wild.first_terminal_fall.is_none(),
             "Hog Wild must restart before retaining a terminal fall: {}",
             hog_wild.summary()
+        );
+    }
+    if requested_level == Some(LevelId::new_const(0x03))
+        && survey_frame_count() >= 1_300
+        && surveys[0].input_profile == SurveyInputProfile::DirectionAndButtonSweep
+    {
+        let cortex_power = &surveys[0];
+        assert_eq!(cortex_power.death_camera_frames, 117);
+        assert_eq!(cortex_power.death_camera_pose_changes, 116);
+        assert_eq!(cortex_power.death_camera_max_count, 9);
+        assert_eq!(
+            cortex_power.first_death_camera_pose,
+            Some((
+                1_168,
+                RetailCameraPose {
+                    translation: [2_066_176, 1_645_056, 31_882_960],
+                    rotation_yxz: [3_441, 4, 0],
+                },
+            ))
+        );
+        assert_eq!(
+            cortex_power.last_death_camera_pose,
+            Some((
+                1_284,
+                RetailCameraPose {
+                    translation: [2_047_600, 1_406_464, 33_587_488],
+                    rotation_yxz: [3_763, 0, 0],
+                },
+            ))
+        );
+    }
+    if requested_level == Some(LevelId::new_const(0x0a))
+        && survey_frame_count() >= 1_800
+        && surveys[0].input_profile == SurveyInputProfile::DirectionAndButtonSweep
+    {
+        let papu_papu = &surveys[0];
+        assert!(
+            papu_papu.restarts >= 6,
+            "Papu Papu's source-valid sweep must exercise authored deaths: {}",
+            papu_papu.summary()
+        );
+        assert_eq!(
+            papu_papu.death_camera_frames, 0,
+            "Papu Papu's authored deaths use the ordinary fade/load-state path, not GOOL_FLAG_SPIN_DEATH"
         );
     }
     if std::env::var_os("C1_SURVEY_REQUIRE_CLEAN").is_some() {
@@ -2083,6 +2198,11 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         n_sanity_survey.summary()
     );
 
+    let n_sanity_draw_count = n_sanity_runtime.draw_count();
+    assert!(
+        n_sanity_draw_count > 0,
+        "the completed source level must have advanced the native draw counter"
+    );
     let completion_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&n_sanity_nsd, &n_sanity_nsf, &n_sanity_nsf_bytes);
         let report = n_sanity_runtime
@@ -2098,6 +2218,7 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         );
         assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
         assert!(!report.resolved.bonus_return);
+        assert_eq!(report.carry.draw_count, n_sanity_draw_count);
         report.carry
     };
 
@@ -2107,6 +2228,7 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
     let completion_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, completion, completion_carry)
             .expect("Level Complete must import N. Sanity's session carry");
+    assert_eq!(completion_runtime.draw_count(), n_sanity_draw_count);
     let (completion_survey, mut completion_runtime) = survey_pair_with_runtime(
         known_name(completion),
         completion,
@@ -2131,6 +2253,8 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         completion_survey.summary()
     );
 
+    let completion_draw_count = completion_runtime.draw_count();
+    assert!(completion_draw_count > n_sanity_draw_count);
     let title_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
         let report = completion_runtime
@@ -2143,6 +2267,7 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         );
         assert_eq!(report.resolved.level, LevelId::TITLE);
         assert!(!report.resolved.bonus_return);
+        assert_eq!(report.carry.draw_count, completion_draw_count);
         report.carry
     };
 
@@ -2151,6 +2276,7 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         parse_local_pair(&root, title).expect("Title pair must parse");
     let mut title_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, title, title_carry)
         .expect("Title must import Level Complete's session carry");
+    assert_eq!(title_runtime.draw_count(), completion_draw_count);
     let title_graph = graph_for_pair(title, &title_nsd, &title_nsf, &title_nsf_bytes)
         .expect("Title graph must parse");
     let (_, title_lifecycle) = zone_catalog(
@@ -2191,10 +2317,18 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
     assert!(title_frame.executions.is_empty());
     assert!(title_frame.effects.is_empty());
     assert_eq!(title_runtime.faulted_object_count(), 0);
+    assert_eq!(
+        title_runtime.draw_count(),
+        completion_draw_count.wrapping_add(1),
+        "Title's first display frame must continue the cross-stream phase"
+    );
     eprintln!(
-        "vertical-flow: N. Sanity -> Level Complete at frame {}; Level Complete -> Title at frame {}; Title core mounted cleanly",
+        "vertical-flow: N. Sanity -> Level Complete at frame {} with draw count {}; Level Complete -> Title at frame {} with draw count {}; Title first frame advanced to {}",
         n_sanity_survey.next_lid.unwrap().0,
+        n_sanity_draw_count,
         completion_survey.next_lid.unwrap().0,
+        completion_draw_count,
+        title_runtime.draw_count(),
     );
 }
 

@@ -30,7 +30,11 @@ gameplay path.
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
   prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing. The
   authored global-65 `gem_stamp` now drives the exact `frames_elapsed - gem_stamp <= 15` neighbor
-  gate instead of a browser constant.
+  gate instead of a browser constant. Authored `GOOL_FLAG_SPIN_DEATH` now runs the retail
+  vertex-follow `CamDeath`: its live object/animation/model vertex is generation- and bounds-checked,
+  its PC sqrt/atan tables, signed pitch threshold, nine-frame alignment, zoom/orbit seeks and
+  `ticks_per_frame` rotation are integer-exact, and its pose feeds both object projection and the
+  WebGL scene. `GOOL_FLAG_SPIN_ACCEL` uses the source `0x40000` bit.
 - Displayed current-zone neighbors are decoded into owned ZDAT entity descriptors when a pair is
   mounted. In title, gameplay, bonus, boss, level-complete, intro and ending flow states, the
   browser spawns their group-three entities into the checked retail arena and executes that arena
@@ -126,8 +130,9 @@ gameplay path.
   Jungle Rollers playback covers the `FruiC` raw-shift sequence 24, 26, 28, 31, 34 … 297 without a
   renderer halt; saturated results are culled at the same validity boundary rather than clamped by
   host shift rules.
-  Type-four text uses bounded `sp[-2]` argument aliases, the default or dynamic fixed-63 type-three
-  font, retail formatting/control commands, per-corner color modulation and ordered glyph/backdrop
+  Type-four text uses bounded `sp[-2]` argument aliases, the default or dynamic header-length-bounded
+  type-three font, retail formatting/control commands, the extended controller-icon records that
+  follow the C declaration's first 63 slots, per-corner color modulation and ordered glyph/backdrop
   quads. Standalone type-three font descriptors remain resource-only, as in the source. ZDAT object
   shader modes two and three are connected with their separate SVTX/CVTX ramps and far-object
   cutoffs. Mode four consumes a source-order player translation (or a checked live pause-object
@@ -316,7 +321,10 @@ gameplay path.
   deterministic route now feeds a separate legally local cross-pair test: N. Sanity's checked
   `LEVEL_END` exports a session carry, Level Complete imports it and reaches its authored
   `Transition(0x19)` at frame 513, and Title imports the second carry with a valid graph, zone
-  context, and intentionally empty gameplay-core frame. Both outgoing level-end broadcasts are
+  context, and intentionally empty gameplay-core frame. The process-lifetime `draw_count` now
+  remains phase-continuous through both `NSKill`/`NSInit` boundaries and advances again on Title's
+  first display frame; same-level and bonus-return `LevelRestart` still reset it exactly where the
+  source does. Both outgoing level-end broadcasts are
   clean. This deterministic first completion loop does not establish a browser playthrough or full
   retail parity.
   Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
@@ -327,7 +335,9 @@ gameplay path.
   recorded checked 360-frame idle trace delivered the authored fall-kill event to state 22,
   advanced `fade_counter` through the native `-2`/`-1` sentinels, emitted `LoadState`, and completed
   two same-level restarts with no VM error, faulted
-  object, checked issue or retained terminal fall. This characterizes the idle death/restart loop;
+  object, checked issue or retained terminal fall. A separate active Cortex Power regression covers
+  117 consecutive vertex-follow death-camera frames and the count-nine alignment boundary. These
+  characterize the observed death/restart paths;
   it does not establish steering, enemy, bonus or level-completion parity. Collision-generated
   ceiling, outside-zone, water and final-surface events now dispatch synchronously at their native
   `solid.c` call sites. Ordered status/link effects and the mover's current process fields are live
@@ -344,7 +354,10 @@ gameplay path.
   than applying a data-independent password rule. Browser card/resume
   storage and signed misc-15 operations are wired to the exact 15-slot,
   128-byte virtual-card model, including rescan/format/save/load handshakes and synchronous GOOL
-  result globals. These paths and damaged-card behavior are heavily model-tested, but a complete
+  result globals. The staged rescan keeps `CHECKING` visible until authored CardC acknowledges
+  `FLAG_6`, then publishes on the following update; the legally local empty-card Load screen now
+  completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
+  as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
 - One deterministic retail-authored N. Sanity route now reaches its real end warp and requests
   Level Complete. No boss, complete bonus round trip, complete ending, broad death/checkpoint

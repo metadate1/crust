@@ -21,11 +21,15 @@ pub const GOOL_TEXTURE_INFO_LEN: usize = 8;
 pub const GOOL_GLYPH_LEN: usize = 12;
 /// Exact serialized size of one textured fragment.
 pub const GOOL_FRAGMENT_LEN: usize = 16;
-/// Exact glyph count in retail's fixed `gool_font` printable-character table.
+/// Number of conventional printable slots before retail's backdrop alias.
+///
+/// Type-three descriptors serialize `header.length` glyphs. Retail's C view
+/// names only the first 63 (`0x20..=0x5e`) and pointer-indexes later records
+/// for controller icons such as `c`, `s`, `t`, and `x`. The fragment-shaped
+/// backdrop aliases the bytes beginning at glyph index 63.
 pub const GOOL_FONT_GLYPH_COUNT: usize = 63;
-/// Exact serialized size of a type-three font descriptor.
-pub const GOOL_MAX_FONT_ANIMATION_LEN: usize =
-    8 + GOOL_FONT_GLYPH_COUNT * GOOL_GLYPH_LEN + GOOL_FRAGMENT_LEN;
+/// Maximum serialized size of a type-three font descriptor.
+pub const GOOL_MAX_FONT_ANIMATION_LEN: usize = 8 + u8::MAX as usize * GOOL_GLYPH_LEN;
 
 /// Animation kinds named by the retail GOOL format.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -120,7 +124,7 @@ pub struct GoolFragment {
     pub bounds: [i16; 4],
 }
 
-/// Fully validated fixed-size type-three font descriptor.
+/// Fully validated variable-size type-three font descriptor.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GoolFontAnimation {
     pub header: GoolAnimationHeader,
@@ -190,7 +194,7 @@ impl GoolAnimationDescriptor {
         match self {
             Self::Vertex(_) => GOOL_VERTEX_ANIMATION_LEN,
             Self::Sprite(value) => 8 + value.frames.len() * GOOL_TEXTURE_INFO_LEN,
-            Self::Font(_) => GOOL_MAX_FONT_ANIMATION_LEN,
+            Self::Font(value) => 8 + value.glyphs.len() * GOOL_GLYPH_LEN,
             Self::Text(value) => value.serialized_len,
             Self::Fragment(value) => 12 + value.fragments.len() * GOOL_FRAGMENT_LEN,
         }
@@ -262,11 +266,13 @@ pub fn parse_gool_animation_descriptor(
         }
         GoolAnimationKind::Font => {
             let texture_page = read_named_eid(&mut reader, "GOOL font texture page")?;
-            // `gool_font` embeds exactly 63 glyph records followed by one
-            // backdrop fragment. Authentic headers carry animation metadata
-            // values such as 64, 90, and 95 here; that byte is not an array
-            // count for this fixed-layout descriptor.
-            let glyphs = (0..GOOL_FONT_GLYPH_COUNT)
+            // The source C declaration names 63 conventional printable slots,
+            // but retail serializes `length` records and deliberately indexes
+            // beyond that declaration for controller-icon glyphs. The
+            // fragment-shaped backdrop aliases glyph 63; only its texture
+            // words are consumed by GfxTransformFragment because text layout
+            // supplies the bounds separately.
+            let glyphs = (0..usize::from(header.length))
                 .map(|_| {
                     Ok(GoolGlyph {
                         texture: parse_texture_info(&mut reader)?,
@@ -275,12 +281,19 @@ pub fn parse_gool_animation_descriptor(
                     })
                 })
                 .collect::<Result<Vec<_>, FormatError>>()?;
-            let backdrop = parse_fragment(&mut reader)?;
+            let backdrop = glyphs
+                .get(GOOL_FONT_GLYPH_COUNT)
+                .copied()
+                .filter(|glyph| glyph.has_texture())
+                .map(|glyph| GoolFragment {
+                    texture: glyph.texture,
+                    bounds: [0; 4],
+                });
             Ok(GoolAnimationDescriptor::Font(GoolFontAnimation {
                 header,
                 texture_page,
                 glyphs,
-                backdrop: (backdrop.texture.color.raw() != 0).then_some(backdrop),
+                backdrop,
             }))
         }
         GoolAnimationKind::Text => {
@@ -444,8 +457,10 @@ mod tests {
             8 + GOOL_TEXTURE_INFO_LEN * 2
         );
 
-        let mut font_and_text = vec![0_u8; GOOL_MAX_FONT_ANIMATION_LEN];
-        font_and_text[0..4].copy_from_slice(&[3, 0, GOOL_FONT_GLYPH_COUNT as u8, 0]);
+        let glyph_count = GOOL_FONT_GLYPH_COUNT + 1;
+        let font_len = 8 + glyph_count * GOOL_GLYPH_LEN;
+        let mut font_and_text = vec![0_u8; font_len];
+        font_and_text[0..4].copy_from_slice(&[3, 0, glyph_count as u8, 0]);
         font_and_text[4..8].copy_from_slice(&page.raw().to_le_bytes());
         let text_offset = font_and_text.len();
         font_and_text.extend_from_slice(&[4, 0, 2, 0]);
@@ -456,8 +471,9 @@ mod tests {
         let GoolAnimationDescriptor::Font(font) = font else {
             panic!("expected font descriptor");
         };
-        assert_eq!(font.glyphs.len(), GOOL_FONT_GLYPH_COUNT);
+        assert_eq!(font.glyphs.len(), glyph_count);
         assert!(font.backdrop.is_none());
+        assert_eq!(GoolAnimationDescriptor::Font(font).byte_len(), font_len);
         let text = parse_gool_animation_descriptor(&font_and_text, text_offset).unwrap();
         let GoolAnimationDescriptor::Text(text) = text else {
             panic!("expected text descriptor");
@@ -481,22 +497,41 @@ mod tests {
     }
 
     #[test]
-    fn font_length_is_metadata_while_the_glyph_table_remains_fixed() {
+    fn font_length_bounds_the_variable_glyph_table_and_backdrop_alias() {
         let page = Eid::from_name("pageT").unwrap();
         for length in [64, 90, 95] {
-            let mut bytes = vec![0_u8; GOOL_MAX_FONT_ANIMATION_LEN];
+            let byte_len = 8 + usize::from(length) * GOOL_GLYPH_LEN;
+            let mut bytes = vec![0_u8; byte_len];
             bytes[0..4].copy_from_slice(&[3, 0, length, 0]);
             bytes[4..8].copy_from_slice(&page.raw().to_le_bytes());
+            let backdrop_offset = 8 + GOOL_FONT_GLYPH_COUNT * GOOL_GLYPH_LEN;
+            bytes[backdrop_offset..backdrop_offset + 4]
+                .copy_from_slice(&0x8123_4567_u32.to_le_bytes());
 
             let descriptor = parse_gool_animation_descriptor(&bytes, 0).unwrap();
-            assert_eq!(descriptor.byte_len(), GOOL_MAX_FONT_ANIMATION_LEN);
+            assert_eq!(descriptor.byte_len(), byte_len);
             let GoolAnimationDescriptor::Font(font) = descriptor else {
                 panic!("expected font descriptor");
             };
             assert_eq!(font.header.length, length);
-            assert_eq!(font.glyphs.len(), GOOL_FONT_GLYPH_COUNT);
-            assert!(font.backdrop.is_none());
+            assert_eq!(font.glyphs.len(), usize::from(length));
+            assert_eq!(
+                font.backdrop.map(|backdrop| backdrop.texture),
+                Some(font.glyphs[GOOL_FONT_GLYPH_COUNT].texture)
+            );
+            assert_eq!(font.backdrop.unwrap().bounds, [0; 4]);
         }
+    }
+
+    #[test]
+    fn variable_font_rejects_a_truncated_extended_glyph() {
+        let page = Eid::from_name("pageT").unwrap();
+        let mut bytes = vec![0_u8; 8 + 90 * GOOL_GLYPH_LEN - 1];
+        bytes[0..4].copy_from_slice(&[3, 0, 90, 0]);
+        bytes[4..8].copy_from_slice(&page.raw().to_le_bytes());
+
+        let error = parse_gool_animation_descriptor(&bytes, 0).unwrap_err();
+        assert!(error.message().contains("field is truncated"));
     }
 
     #[test]

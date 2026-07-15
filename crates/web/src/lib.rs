@@ -11,6 +11,8 @@ use crust_sim::card::SaveData;
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod assets;
+#[cfg(any(target_arch = "wasm32", test))]
+mod card_persistence;
 #[cfg(target_arch = "wasm32")]
 mod disc_import;
 #[cfg(target_arch = "wasm32")]

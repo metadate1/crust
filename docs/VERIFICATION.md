@@ -113,10 +113,11 @@ copy any disc or stream bytes into the repository:
   worlds, five visible 3D objects, 621 world polygons and 568 submitted object polygons, with 63
   shared decoded textures, zero undeclared or skipped object texture references, 84 saturated
   object polygons and 444 face-culled polygons.
-- The fixed-layout type-three font sweep found 19 validated text/font pairs containing 1,214 terms.
-  All terms passed bounded four-argument formatting; 1,182 projected safely into 4,265 glyph or
-  backdrop quads and 64 representative glyph textures decoded. The remaining 32 are unused
-  lowercase sentinel terms that Rust rejects instead of indexing beyond retail's 63-glyph table.
+- The variable-layout type-three font sweep found 62 validated text/font pairs containing 1,257
+  terms. All terms passed bounded four-argument formatting and projected safely into 4,372 glyph
+  or backdrop quads, while 64 representative glyph textures decoded. This includes all 32 CardC
+  controller-icon terms (`c`, `s`, `t`, and `x`) through their validated 90-record font rather than
+  an unchecked C array overrun.
   Across 42 non-title idle boots, 531 live type-four text frames emitted 3,894 textured quads; the
   same trace also exercised 50,714 sprite and 177 fragment frames. No dynamic-font override became
   live in that idle window. A separate legally local Great Hall ending-route golden now executes
@@ -157,8 +158,8 @@ copy any disc or stream bytes into the repository:
   colors and retained effective render colors, and native's null-object-zone fallback.
 - All nine PBAK recordings completed full live simulation/render traces across their 10,966 Crash
   pad boundaries. Papu Papu's recording exercised an authored same-level death/restart before
-  continuing to its final input handshake. These traces honor display-mask/spin-death camera
-  suppression, apply camera-emitted zone TERM/lifecycle transitions and save handshakes, refresh
+  continuing to its final input handshake. These traces honor display-mask camera selection,
+  apply camera-emitted zone TERM/lifecycle transitions and save handshakes, refresh
   live box/checkpoint globals, preserve the final recorded pad word, and return through the checked
   caption-controller path.
 - A separate strict 360-frame Hog Wild idle trace completed with 713 GOOL executions, zero
@@ -482,18 +483,18 @@ The final checks below were run against this change set on 2026-07-14:
   and running N. Sanity scene. Keyboard, physical gamepad, fullscreen, and touch presentation were
   not repeated in this pass; no game bytes entered Git, browser persistence, or the repository.
 
-## 2026-07-15 ADSR/ripple/process-animation/lifecycle checkpoint verification
+## 2026-07-15 runtime/card/camera/font checkpoint verification
 
 The release gate completed against the current source without copying legally local game data into
 the repository:
 
-- the locked default workspace suite passed 766 tests with zero failures and 62 opt-in tests
-  ignored; the separate full legally local run executed all 62 ignored tests with zero failures;
+- the locked default workspace suite passed 785 tests with zero failures and 63 opt-in tests
+  ignored; the separate full legally local run executed all 63 ignored tests with zero failures;
 - workspace Clippy passed with warnings denied across all native targets, and `crust-web` Clippy
   passed with warnings denied for `wasm32-unknown-unknown`;
 - locked optimized native and `wasm32-unknown-unknown` builds passed, as did `npm run build`;
-- the generated Wasm is 1,254,281 bytes with SHA-256
-  `c3884d74194da8f429aa879d6ac3f4b3166d51a260b2103a33ead68b1f62bdce`; the generated loader is
+- the generated Wasm is 1,263,308 bytes with SHA-256
+  `3f333d8f0d311abde88cf42a7958b38ee1a4311099115f27d3b73556e8ebc357`; the generated loader is
   46,236 bytes.
 
 The focused checks below were also completed:
@@ -530,26 +531,67 @@ The focused checks below were also completed:
   and had zero faulted objects. Live population peaked at 82, below the regression bound of 89;
   before the fix, returned children remained at PC 54 and filled all 97 slots at frame 1,437. This
   verifies no-TERM return reclamation and bounded credits spawning, not a completed ending.
+- The legally local N. Sanity → Level Complete → Title vertical-flow golden now asserts the native
+  process-lifetime `draw_count` at both exported carries, both imported runtimes, and Title's first
+  display frame. The observed sequence retained 1,906 into Level Complete, 2,419 into Title, and
+  advanced to 2,420 on Title's first display frame. Unit coverage separately proves a stream
+  remount retains a nonzero counter through
+  the two-frame loading skip (including `u32` wrap) while `LevelRestart` continues to reset it.
+- Seven source-golden `CamDeath` tests cover PC sqrt/atan quantization, signed pitch selection,
+  signed negative zoom deltas, nine-frame alignment, cooperative-tick rotation, spin acceleration
+  and checked overflow; three
+  resolver tests cover live/stale tagged objects, animation/frame/vertex validation and exact
+  world-space focus. A renderer golden consumes an explicit non-path Y/X/Z camera pose. Against the
+  legally local Cortex Power pair, the active-input 1,300-frame survey observed 117 consecutive
+  spin-death frames, 116 pose changes and a maximum count of nine, with exact first and last poses;
+  the 1,800-frame Papu Papu survey exercised six ordinary authored restarts and correctly observed
+  no spin-death frames.
+- Browser-card persistence merge tests prove that writing one physical slot refreshes only that
+  slot's `updatedAt`, identical-byte writes still refresh the selected slot, passive snapshots retain
+  unchanged envelope/slot timestamps, changed passive snapshots update only changed slots, and
+  format clears all slots while refreshing the envelope.
+- A legally local authored-title golden reaches Main Menu ready at frame 10, routes Cross to Map,
+  one Down pulse plus Cross to Load (mounted at frame 22), two Down pulses through the shared `0e`
+  Password controller, and three Down pulses to Options. The empty-card Load route now proves real
+  CardC observes `CHECKING`, issues operation-two `ClearFlag6`, and leaves a published zero-part,
+  zero-flag card instead of deadlocking at `PENDING | FLAG_6`; 26 focused card tests cover the exact
+  acknowledgement and following-update publication sequence.
+- Header-length-bounded type-three font tests now cover retail's variable record count instead of
+  assuming the C declaration's first 63 slots. The legally local corpus paired 62 text/font
+  resources, projected all 1,257 terms into 4,372 quads, and decoded all 32 CardC controller-icon
+  terms; malformed and unserialized glyph references remain checked failures.
+- The Options first-frame regression executes the exact null-linked-register instruction observed
+  in all four legal OptionsC roots and preserves strict failures for neighboring missing-link loads
+  and stores. The legally local Main Menu → Options flow mounted state six and then ran all roots
+  for 128 additional browser-ordered frames without a VM warning.
 
-The generated release was loaded in a fresh visible in-app-browser tab. An ephemeral same-origin,
-loopback-only route wrapped the supplied 632,083,536-byte raw BIN in a browser `File` and dispatched
-the ordinary local-input event because the browser harness cannot automate a native file picker.
+The browser verification build was loaded in a fresh visible in-app-browser tab. An ephemeral
+same-origin, loopback-only route wrapped the supplied 632,083,536-byte raw BIN in a browser `File`
+and dispatched the ordinary local-input event because the browser harness cannot automate a native
+file picker.
 The importer recognized 88 streams, all 44 pairs, and 219 MiB of selected extents. Title `0x19`
-rendered the Universal publisher screen at 30.00 Hz with synthesized audio; mute/unmute changed and
-restored live telemetry. A fresh direct `0x09` mount rendered N. Sanity Beach's world, Crash, and
-crate geometry, and the native pause controller changed `RUNNING → PAUSED → RUNNING`. The visible
-engineering/runtime log contained no warning or error entry. After the tab retained its in-memory
-local `File`, the bridge was stopped and deleted and the ordinary no-store server was restored.
-Root returns HTTP 200, both temporary routes return HTTP 404, and the served Wasm hash matches the
+ran its authored publisher and Main Menu sequence at 30.00 Hz with synthesized audio. At a narrow
+responsive viewport, held touch-pad taps opened the authored Options screen; it remained
+`RUNNING` with no VM warning or browser-console error. A fresh desktop direct `0x09` mount rendered
+N. Sanity Beach's world, Crash, and crate geometry. Native pause/resume and mute/unmute changed and
+restored live telemetry to `RUNNING` and `SYNTH ACTIVE`. After the tab retained its in-memory local
+`File`, the bridge was stopped and deleted and the ordinary no-store server was restored. Root
+returns HTTP 200, both temporary routes return HTTP 404, and the served Wasm hash matches the
 release hash above. The visible tab remains on live N. Sanity gameplay. Keyboard, physical gamepad,
-fullscreen, and touch presentation were not repeated in this pass; no game bytes entered Git,
-browser persistence, or the repository working tree.
+and fullscreen were not repeated in this pass; no game bytes entered Git, browser persistence, or
+the repository working tree. A final independent audit then found that the generic seek helper had
+normalized a negative authored death-camera zoom delta. The signed source-compatible correction and
+its regression passed the complete native, legally local, Clippy and release gates above; the final
+Wasm was regenerated and is what the normal server serves. Because the local-only bridge was already
+deleted, the visible in-memory tab was not remounted after that narrow correction; its observed
+positive-speed N. Sanity route is unaffected by the signed edge case.
 
 ## Reproducible commands
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy -p crust-web --target wasm32-unknown-unknown --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 C1_DISC_IMAGE=/path/to/disc.bin C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-formats --test local_disc -- --ignored --nocapture

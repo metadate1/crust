@@ -191,12 +191,23 @@ impl RetailFrameState {
     /// Creates a state that can present gameplay on its first tick.
     #[must_use]
     pub fn ready(point_count: NonZeroU16, initial_progress: i32) -> Self {
+        Self::ready_with_draw_count(point_count, initial_progress, 0)
+    }
+
+    /// Creates a state that can present gameplay on its first tick while
+    /// retaining the process-lifetime animation counter across a stream mount.
+    #[must_use]
+    pub fn ready_with_draw_count(
+        point_count: NonZeroU16,
+        initial_progress: i32,
+        draw_count: u32,
+    ) -> Self {
         Self {
             point_count,
             progress: PathProgress::clamped(initial_progress, point_count),
             tick: 0,
             draw_skip: 0,
-            draw_count: 0,
+            draw_count,
             direct_loading_image_written: false,
         }
     }
@@ -208,10 +219,21 @@ impl RetailFrameState {
     /// loading image is presented. The second tick presents gameplay.
     #[must_use]
     pub fn after_loading_image(point_count: NonZeroU16, initial_progress: i32) -> Self {
+        Self::after_loading_image_with_draw_count(point_count, initial_progress, 0)
+    }
+
+    /// Creates the post-loading-image state while retaining a nonzero native
+    /// animation counter from the stream that requested the transition.
+    #[must_use]
+    pub fn after_loading_image_with_draw_count(
+        point_count: NonZeroU16,
+        initial_progress: i32,
+        draw_count: u32,
+    ) -> Self {
         Self {
             draw_skip: LOADING_DRAW_SKIP,
             direct_loading_image_written: true,
-            ..Self::ready(point_count, initial_progress)
+            ..Self::ready_with_draw_count(point_count, initial_progress, draw_count)
         }
     }
 
@@ -437,6 +459,26 @@ mod tests {
             FrameEvent::PresentationGate {
                 draw_skip: 1,
                 render_frame: true,
+            }
+        );
+    }
+
+    #[test]
+    fn stream_mount_retains_draw_phase_through_loading_skip() {
+        let mut state =
+            RetailFrameState::after_loading_image_with_draw_count(point_count(72), 0, u32::MAX);
+
+        let first = state.tick();
+        assert_eq!(first.draw_count(), 0, "the native counter wraps");
+        assert_eq!(first.presented(), PresentedFrame::LoadingImage);
+
+        let second = state.tick();
+        assert_eq!(second.draw_count(), 1);
+        assert_eq!(
+            second.presented(),
+            PresentedFrame::Gameplay {
+                progress: PathProgress::clamped(0x200, point_count(72)),
+                draw_count: 0,
             }
         );
     }

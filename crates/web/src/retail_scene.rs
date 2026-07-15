@@ -35,6 +35,7 @@ use crust_renderer::{
     project_object_model,
 };
 use crust_sim::Angle12;
+use crust_sim::camera::RetailCameraPose;
 use crust_sim::gool::{AnimationSource, ProcessAnimationKind, ProcessTextAnimation};
 use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
 
@@ -119,6 +120,27 @@ pub struct RetailSceneProgressLocation {
     /// object-only camera. This advances independently from `draw_count`.
     pub frame_stamp: u32,
     pub draw_count: u32,
+}
+
+/// Explicit native camera transform used by non-path camera modes.
+///
+/// Ordinary gameplay derives this transform from the active ZDAT path. The
+/// spin-death camera instead mutates `cam` around an authored object vertex,
+/// while visibility and paging remain owned by that same path location.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailSceneCameraPose {
+    pub translation: [i32; 3],
+    /// Retail camera rotation order is Y, X, Z.
+    pub rotation_yxz: [i32; 3],
+}
+
+impl From<RetailCameraPose> for RetailSceneCameraPose {
+    fn from(pose: RetailCameraPose) -> Self {
+        Self {
+            translation: pose.translation,
+            rotation_yxz: pose.rotation_yxz,
+        }
+    }
 }
 
 /// Pre-GOOL island-map path flags consumed by native `GfxLoadWorlds`.
@@ -364,6 +386,7 @@ impl RetailSceneBuilder {
             RETAIL_INITIAL_DISPLAY_FLAGS,
             None,
             None,
+            None,
         )
     }
 
@@ -436,6 +459,7 @@ impl RetailSceneBuilder {
             world_display_mask,
             None,
             None,
+            None,
         )
     }
 
@@ -465,6 +489,46 @@ impl RetailSceneBuilder {
         field_of_view: u32,
         map_path_animation: Option<RetailMapPathAnimation>,
     ) -> Result<RetailScene, RetailSceneError> {
+        self.build_at_progress_with_objects_and_world_display_mask_and_fov_and_camera(
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            advance_world_ripple,
+            objects,
+            main_object,
+            world_display_mask,
+            field_of_view,
+            map_path_animation,
+            None,
+        )
+    }
+
+    /// Builds a scene with an optional explicit native camera transform.
+    ///
+    /// The override changes only projection. The active ZDAT path continues
+    /// to own SLST visibility, world selection, paging identity, and object
+    /// zone graphics exactly as it does during native `CamDeath`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same checked errors as
+    /// [`Self::build_at_progress_with_objects_and_world_display_mask_and_fov`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_progress_with_objects_and_world_display_mask_and_fov_and_camera(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        advance_world_ripple: bool,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+        world_display_mask: u32,
+        field_of_view: u32,
+        map_path_animation: Option<RetailMapPathAnimation>,
+        camera_pose: Option<RetailSceneCameraPose>,
+    ) -> Result<RetailScene, RetailSceneError> {
         build_retail_scene_cached(
             self,
             nsd,
@@ -477,6 +541,7 @@ impl RetailSceneBuilder {
             world_display_mask,
             Some(field_of_view),
             map_path_animation,
+            camera_pose,
         )
     }
 }
@@ -567,6 +632,7 @@ fn build_retail_scene_cached(
     world_display_mask: u32,
     field_of_view_override: Option<u32>,
     map_path_animation: Option<RetailMapPathAnimation>,
+    camera_pose: Option<RetailSceneCameraPose>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -639,15 +705,19 @@ fn build_retail_scene_cached(
     update_persistent_world_map_path_masks(graph, map_path_animation)?;
     let world_map_path_masks = graph.world_map_path_masks.clone();
 
-    let camera = sample_camera(
-        nsd,
-        nsf,
-        nsf_bytes,
-        &graph.zone_header,
-        &graph.zone_rect,
-        &graph.path,
-        location.path_progress,
-    )?;
+    let camera = if let Some(camera_pose) = camera_pose {
+        camera_sample_from_pose(camera_pose)
+    } else {
+        sample_camera(
+            nsd,
+            nsf,
+            nsf_bytes,
+            &graph.zone_header,
+            &graph.zone_rect,
+            &graph.path,
+            location.path_progress,
+        )?
+    };
     let camera_translation = camera.translation;
     let raw_world_camera_matrix =
         raw_camera_matrix(camera.rotation_y, camera.rotation_x, camera.rotation_z);
@@ -2147,6 +2217,20 @@ struct CameraSample {
     rotation_z: i32,
 }
 
+fn camera_sample_from_pose(pose: RetailSceneCameraPose) -> CameraSample {
+    CameraSample {
+        translation: Vec3i {
+            x: pose.translation[0] >> 8,
+            y: pose.translation[1] >> 8,
+            z: pose.translation[2] >> 8,
+        },
+        translation_fixed: pose.translation,
+        rotation_y: pose.rotation_yxz[0],
+        rotation_x: pose.rotation_yxz[1],
+        rotation_z: pose.rotation_yxz[2],
+    }
+}
+
 fn object_camera_sample(
     camera: CameraSample,
     graphics_flags: u32,
@@ -2664,6 +2748,30 @@ mod tests {
             "object bob follows GOOL time even while texture draw_count is frozen"
         );
         assert_eq!(object_camera_sample(world, 0x1000, 128), start);
+    }
+
+    #[test]
+    fn explicit_non_path_camera_pose_preserves_fixed_translation_and_yxz_rotation() {
+        let pose = RetailSceneCameraPose {
+            translation: [-257, 0x12_345, i32::MIN + 255],
+            rotation_yxz: [0x123, -0x456, 0x789],
+        };
+
+        let camera = camera_sample_from_pose(pose);
+
+        assert_eq!(camera.translation_fixed, pose.translation);
+        assert_eq!(
+            camera.translation,
+            Vec3i {
+                x: -2,
+                y: 0x123,
+                z: (i32::MIN + 255) >> 8,
+            }
+        );
+        assert_eq!(
+            [camera.rotation_y, camera.rotation_x, camera.rotation_z],
+            pose.rotation_yxz
+        );
     }
 
     #[test]

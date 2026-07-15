@@ -297,7 +297,6 @@ pub struct VirtualCard {
     published: CardSnapshot,
     staged: Option<CardSnapshot>,
     current_slot: Option<usize>,
-    scan_ticks: u8,
     flags: CardFlags,
     storage_available: bool,
 }
@@ -310,7 +309,6 @@ impl VirtualCard {
             published: CardSnapshot::EMPTY,
             staged: None,
             current_slot: None,
-            scan_ticks: 0,
             flags: CardFlags(0),
             storage_available: true,
         }
@@ -435,7 +433,6 @@ impl VirtualCard {
                 self.slots = [Slot::Empty; CARD_SLOT_COUNT];
                 self.current_slot = None;
                 self.staged = None;
-                self.scan_ticks = 0;
                 self.published = CardSnapshot::EMPTY;
                 self.flags = CardFlags(self.flags.0 & CardFlags::NEW_DEVICE.0);
                 self.flags.insert(CardFlags::CHECK_NEEDED);
@@ -461,7 +458,6 @@ impl VirtualCard {
             }
             CardOperation::Rescan => {
                 self.staged = None;
-                self.scan_ticks = 0;
                 self.published = CardSnapshot::EMPTY;
                 if !self.storage_available {
                     self.current_slot = None;
@@ -484,9 +480,11 @@ impl VirtualCard {
             return;
         }
         if self.flags.contains(CardFlags::CHECKING) {
-            let previous = self.scan_ticks;
-            self.scan_ticks = self.scan_ticks.saturating_add(1);
-            if previous == 0 {
+            // CardC's rescan state links through a first-frame transition gate before it can
+            // observe CHECKING and enter the state whose code issues ClearFlag6. The browser's
+            // synchronous scan therefore retains CHECKING until that authored acknowledgement;
+            // the following update publishes the staged snapshot and completes the handshake.
+            if self.flags.contains(CardFlags::FLAG_6) {
                 return;
             }
             self.flags.remove(CardFlags::CHECKING);
@@ -583,7 +581,6 @@ impl VirtualCard {
 
     fn operation_success(&mut self, clear_new_device: bool) {
         self.staged = None;
-        self.scan_ticks = 0;
         self.flags = if clear_new_device {
             CardFlags(0)
         } else {
@@ -593,7 +590,6 @@ impl VirtualCard {
 
     fn set_failure(&mut self, check_needed: bool) {
         self.staged = None;
-        self.scan_ticks = 0;
         self.flags = CardFlags(self.flags.0 & CardFlags::NEW_DEVICE.0);
         self.flags.insert(CardFlags::ERROR);
         if check_needed {
@@ -611,7 +607,6 @@ impl VirtualCard {
         {
             self.current_slot = None;
         }
-        self.scan_ticks = 0;
         self.flags = CardFlags(self.flags.0 & CardFlags::NEW_DEVICE.0);
     }
 }
@@ -789,6 +784,7 @@ mod tests {
         card.update();
         card.update();
         card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+        card.update();
     }
 
     fn scan_and_finish(card: &mut VirtualCard) {
@@ -858,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn rescan_exposes_retail_flag_sequence() {
+    fn rescan_retains_checking_until_authored_latch_acknowledgement() {
         let mut card = VirtualCard::new();
         card.set_slot(2, Slot::Valid(CardPayload::encode(sample_data())))
             .unwrap();
@@ -873,12 +869,18 @@ mod tests {
         assert_eq!(card.flags().bits(), 0x39);
         assert_eq!(card.part_count(), 0);
         card.update();
-        assert_eq!(card.flags().bits(), 0x31);
+        assert_eq!(card.flags().bits(), 0x39);
+        assert_eq!(card.part_count(), 0);
+        card.update();
+        assert_eq!(card.flags().bits(), 0x39);
         assert_eq!(card.part_count(), 0);
         assert_eq!(
             card.control(CardOperation::ClearFlag6, 0, None),
             Ok(CardOutcome::Complete)
         );
+        assert_eq!(card.flags().bits(), 0x19);
+        assert_eq!(card.part_count(), 0);
+        card.update();
         assert_eq!(card.flags().bits(), CardFlags::NEW_DEVICE.bits());
         assert_eq!(card.part_count(), 1);
     }
@@ -1348,6 +1350,7 @@ mod tests {
         card.update();
         card.update();
         card.control(CardOperation::ClearFlag6, 0, None).unwrap();
+        card.update();
         assert_eq!(card.part_count(), 1);
         assert_eq!(card.partinfos()[0], 3);
         assert_eq!(

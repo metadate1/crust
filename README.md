@@ -81,8 +81,9 @@ duplicate queued event, and ignored native handler failures remain available as 
 The WebGL stage transactionally replaces the camera/path scene while reusing shared
 immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
 TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
-fixed 63-glyph type-three font resource. Post-GOOL object snapshots drive their fixed-point
-projection, lighting/color modulation, ordering and the same resident TPAG cache as the world;
+header-length-bounded type-three font resources, including the extended controller-icon records
+that retail pointer-indexes beyond its 63-slot C declaration. Post-GOOL object snapshots drive
+their fixed-point projection, lighting/color modulation, ordering and the same resident TPAG cache as the world;
 the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragment half-size math
 uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
 GTE validity gate. The legal `pb0cB` trace therefore carries the authored `FruiC` scale through raw

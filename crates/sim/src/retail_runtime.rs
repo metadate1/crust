@@ -18,7 +18,7 @@ use crust_formats::{
 };
 
 use crate::{
-    camera::RetailCameraLocation,
+    camera::{GOOL_FLAG_SPIN_ACCEL, RetailCameraLocation},
     card::{CardPublishedState, SaveData},
     flow::{TITLE_FADE_START, TITLE_FADE_STEP, TitlePhase, TitleScreen},
     gool::{
@@ -40,7 +40,7 @@ use crate::{
     },
     object_bounds::{
         AnimationBoundSource, BoundTransform, bounds_intersect_asymmetric, calculate_local_bound,
-        calculate_world_bound,
+        calculate_world_bound, retail_yxy_transform,
     },
     retail_lighting::{
         ObjectDarkShaderInput, RetailObjectZoneShaderError, apply_retail_object_zone_shader,
@@ -139,6 +139,11 @@ const CAPTION_OBJECT_GLOBAL: usize = 76;
 const PBAK_STATE_GLOBAL: usize = 105;
 const FADE_COUNTER_GLOBAL: usize = 106;
 const FADE_STEP_GLOBAL: usize = 107;
+const SPIN_DEATH_CAMERA_COUNT_GLOBAL: usize = 10;
+const SPIN_DEATH_CAMERA_OBJECT_GLOBAL: usize = 36;
+const SPIN_DEATH_CAMERA_VERTEX_GLOBAL: usize = 49;
+const SPIN_DEATH_CAMERA_ZOOM_SPEED_GLOBAL: usize = 56;
+const SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL: usize = 57;
 const PBAK_CAPTION_EVENT: u32 = 0x0e00;
 const PBAK_CAPTION_EXECUTABLE: u8 = 4;
 const PBAK_CAPTION_SUBTYPE: u8 = 8;
@@ -518,6 +523,50 @@ pub struct ModelVertexBinding {
     pub model_eid: Eid,
     pub frame_index: u32,
     pub vertex_index: u32,
+}
+
+/// Fully resolved inputs consumed by retail's spinning death camera.
+///
+/// The focus vertex is copied into world space while the referenced object,
+/// animation frame, and mounted model are all live. No pair-backed bytes or
+/// compact object token escape this boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SpinDeathCameraInputs {
+    /// Live signed global ten, advanced by the camera core for its first nine
+    /// alignment iterations.
+    pub count: i32,
+    pub focus: Vec3,
+    pub zoom_speed: i32,
+    pub flip_speed: i32,
+    /// Native current-display `GOOL_FLAG_SPIN_ACCEL` (`0x40000`).
+    pub spin_accel: bool,
+    /// Current rounded cooperative timing used by `GoolObjectRotate`.
+    pub ticks_per_frame: u32,
+}
+
+/// Checked failures while resolving the authored spinning-death focus.
+#[derive(Debug, Eq, PartialEq)]
+pub enum SpinDeathCameraResolveError<E> {
+    Vm(VmError),
+    Program(E),
+    NullObjectReference,
+    InvalidObjectReference(u32),
+    /// The compact VM token has no complete live arena/VM generation pair.
+    StaleObjectReference(CollisionObjectReference),
+    MissingAnimation(RuntimeObjectHandle),
+    NonVertexAnimation(RuntimeObjectHandle),
+    MissingFrame {
+        object: RuntimeObjectHandle,
+        model_eid: Eid,
+        frame_index: u32,
+    },
+    VertexIndexOutOfRange {
+        object: RuntimeObjectHandle,
+        model_eid: Eid,
+        frame_index: u32,
+        /// Signed result of native's `cam_spin_obj_vert >> 8` operation.
+        vertex_index: i32,
+    },
 }
 
 /// Synchronous result of one browser/platform memory-card operation.
@@ -1144,16 +1193,19 @@ impl ProgramHost for NsfProgramHost<'_> {
             frame_index,
         )
         .map_err(NsfProgramError::Format)?;
-        let vertex_offset = binding
+        let Some(vertex_offset) = binding
             .vertex_index
             .checked_mul(6)
             .and_then(|offset| u16::try_from(offset).ok())
-            .ok_or_else(|| {
-                NsfProgramError::Format(FormatError::global(format!(
-                    "model {} vertex {} does not fit its six-byte frame payload",
-                    binding.model_eid, binding.vertex_index
-                )))
-            })?;
+        else {
+            return Ok(None);
+        };
+        if usize::try_from(binding.vertex_index)
+            .ok()
+            .is_none_or(|vertex_index| vertex_index >= model.frame.vertex_count())
+        {
+            return Ok(None);
+        }
         // `ObjectFrame::local_position` uses the renderer's quarter-scale
         // model domain. GoolOpTransformVectors uses the same packed vertex at
         // `<< 10`, exactly 256 times that value.
@@ -1332,6 +1384,9 @@ pub struct RetailSessionCarry {
     pub level_spawn_tags: Box<[u16]>,
     pub saved_level_state: Option<RetailLevelSnapshot>,
     pub random_seed: u32,
+    /// Native renderer animation counter. `NSKill`/`NSInit` preserve this
+    /// process-lifetime word; only `LevelRestart` resets it to zero.
+    pub draw_count: u32,
     pub respawn_count: u32,
     pub death_count: u32,
     /// Native `first_spawn`, armed by a different-level `LevelRestart` and
@@ -2147,6 +2202,7 @@ impl RetailRuntime {
             level_spawn_tags,
             saved_level_state,
             random_seed,
+            draw_count,
             respawn_count,
             death_count,
             first_spawn,
@@ -2170,6 +2226,8 @@ impl RetailRuntime {
         runtime.death_count = death_count;
         runtime.machine.set_random_seed(random_seed);
         runtime.apply_stream_mount_globals(level);
+        runtime.draw_count = draw_count;
+        runtime.machine.set_draw_count(draw_count);
         Ok(runtime)
     }
 
@@ -2196,6 +2254,7 @@ impl RetailRuntime {
                 .into_boxed_slice(),
             saved_level_state: self.saved_level_state.clone(),
             random_seed: self.machine.random_seed(),
+            draw_count: self.draw_count,
             respawn_count,
             death_count,
             first_spawn: self.pending_first_spawn
@@ -3607,6 +3666,192 @@ impl RetailRuntime {
     pub fn set_frame_timing(&mut self, ticks_current_frame: i32, ticks_per_frame: i32) {
         self.machine
             .set_frame_timing(ticks_current_frame, ticks_per_frame);
+    }
+
+    /// Resolves the live model vertex and scalar globals consumed by
+    /// `CamDeath` without retaining a native object or asset pointer.
+    pub fn resolve_spin_death_camera_inputs<H: ProgramHost>(
+        &self,
+        host: &mut H,
+    ) -> Result<SpinDeathCameraInputs, SpinDeathCameraResolveError<H::Error>> {
+        let object_word = self
+            .machine
+            .global_word(SPIN_DEATH_CAMERA_OBJECT_GLOBAL)
+            .map_err(SpinDeathCameraResolveError::Vm)?;
+        if object_word == 0 {
+            return Err(SpinDeathCameraResolveError::NullObjectReference);
+        }
+        let reference = CollisionObjectReference::from_word(object_word).ok_or(
+            SpinDeathCameraResolveError::InvalidObjectReference(object_word),
+        )?;
+        let object = self
+            .handles
+            .for_vm(reference.object())
+            .ok_or(SpinDeathCameraResolveError::StaleObjectReference(reference))?;
+        if !self.handles.is_live_pair(object) || self.arena.get(object.arena).is_none() {
+            return Err(SpinDeathCameraResolveError::StaleObjectReference(reference));
+        }
+        let vm_object = self
+            .machine
+            .object(object.vm)
+            .map_err(|_| SpinDeathCameraResolveError::StaleObjectReference(reference))?;
+        let spawned = self
+            .arena
+            .get(object.arena)
+            .ok_or(SpinDeathCameraResolveError::StaleObjectReference(reference))?;
+        let animation = vm_object
+            .animation_source()
+            .map_err(SpinDeathCameraResolveError::Vm)?
+            .ok_or(SpinDeathCameraResolveError::MissingAnimation(object))?;
+        let (model_eid, frame_count, bound_reference) = match &animation {
+            AnimationSource::ItemFive(animation_reference) => {
+                let bytes = vm_object
+                    .animation_data(*animation_reference)
+                    .map_err(SpinDeathCameraResolveError::Vm)?;
+                let descriptor = parse_gool_animation_descriptor(bytes, 0).map_err(|_| {
+                    SpinDeathCameraResolveError::Vm(VmError::InvalidAnimationReference(
+                        animation_reference.to_word(),
+                    ))
+                })?;
+                let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
+                    return Err(SpinDeathCameraResolveError::NonVertexAnimation(object));
+                };
+                (
+                    vertex.model_eid,
+                    u32::from(vertex.header.length),
+                    AnimationBoundReference::ItemFive(*animation_reference),
+                )
+            }
+            AnimationSource::Process(animation_reference) => {
+                let ProcessAnimationKind::Vertex(vertex) = animation_reference.kind() else {
+                    return Err(SpinDeathCameraResolveError::NonVertexAnimation(object));
+                };
+                (
+                    vertex.model_eid,
+                    u32::from(vertex.header.length),
+                    AnimationBoundReference::Model(vertex.model_eid),
+                )
+            }
+        };
+        let frame_index = vm_object.animation_frame() >> 8;
+        if frame_index >= frame_count {
+            return Err(SpinDeathCameraResolveError::MissingFrame {
+                object,
+                model_eid,
+                frame_index,
+            });
+        }
+        let raw_vertex_index = self
+            .machine
+            .global_word(SPIN_DEATH_CAMERA_VERTEX_GLOBAL)
+            .map_err(SpinDeathCameraResolveError::Vm)? as i32
+            >> 8;
+        let vertex_index = u32::try_from(raw_vertex_index).map_err(|_| {
+            SpinDeathCameraResolveError::VertexIndexOutOfRange {
+                object,
+                model_eid,
+                frame_index,
+                vertex_index: raw_vertex_index,
+            }
+        })?;
+
+        let bound = host
+            .animation_bound_source(AnimationBoundBinding {
+                object,
+                zone: spawned.zone(),
+                executable: spawned.origin().executable(),
+                reference: bound_reference,
+                frame_index,
+            })
+            .map_err(SpinDeathCameraResolveError::Program)?;
+        match bound {
+            Some(AnimationBoundSource::Vertex { .. }) => {}
+            Some(AnimationBoundSource::NonVertex) => {
+                return Err(SpinDeathCameraResolveError::NonVertexAnimation(object));
+            }
+            None => {
+                return Err(SpinDeathCameraResolveError::MissingFrame {
+                    object,
+                    model_eid,
+                    frame_index,
+                });
+            }
+        }
+
+        let source = host
+            .model_vertex_source(ModelVertexBinding {
+                requester: object,
+                link: object,
+                model_eid,
+                frame_index,
+                vertex_index,
+            })
+            .map_err(SpinDeathCameraResolveError::Program)?
+            .ok_or(SpinDeathCameraResolveError::VertexIndexOutOfRange {
+                object,
+                model_eid,
+                frame_index,
+                vertex_index: raw_vertex_index,
+            })?;
+        let transform = vm_object
+            .retail_transform()
+            .map_err(SpinDeathCameraResolveError::Vm)?;
+        let scale = [0_usize, 1, 2]
+            .map(|axis| source.geometry_scale[axis].wrapping_mul(transform.scale[axis]) >> 12);
+        let focus = retail_yxy_transform(
+            Vec3 {
+                x: source.local_position[0],
+                y: source.local_position[1],
+                z: source.local_position[2],
+            },
+            BoundTransform {
+                translation: Vec3 {
+                    x: transform.translation[0],
+                    y: transform.translation[1],
+                    z: transform.translation[2],
+                },
+                rotation: Angles {
+                    y: Angle12::new(transform.rotation_yxz[0]),
+                    x: Angle12::new(transform.rotation_yxz[1]),
+                    z: Angle12::new(transform.rotation_yxz[2]),
+                },
+                scale: Vec3 {
+                    x: scale[0],
+                    y: scale[1],
+                    z: scale[2],
+                },
+            },
+        );
+
+        Ok(SpinDeathCameraInputs {
+            count: self
+                .machine
+                .global_word(SPIN_DEATH_CAMERA_COUNT_GLOBAL)
+                .map_err(SpinDeathCameraResolveError::Vm)? as i32,
+            focus,
+            zoom_speed: self
+                .machine
+                .global_word(SPIN_DEATH_CAMERA_ZOOM_SPEED_GLOBAL)
+                .map_err(SpinDeathCameraResolveError::Vm)? as i32,
+            flip_speed: self
+                .machine
+                .global_word(SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL)
+                .map_err(SpinDeathCameraResolveError::Vm)? as i32,
+            spin_accel: self
+                .machine
+                .global_word(CURRENT_DISPLAY_GLOBAL)
+                .map_err(SpinDeathCameraResolveError::Vm)?
+                & GOOL_FLAG_SPIN_ACCEL
+                != 0,
+            ticks_per_frame: self.machine.ticks_per_frame(),
+        })
+    }
+
+    /// Writes back the first-nine-frame alignment counter advanced by the
+    /// death-camera core without exposing its raw GOOL global index.
+    pub fn set_spin_death_camera_count(&mut self, count: i32) -> Result<(), VmError> {
+        self.machine
+            .set_global_word(SPIN_DEATH_CAMERA_COUNT_GLOBAL, count as u32)
     }
 
     #[must_use]
@@ -8368,6 +8613,8 @@ mod tests {
         runtime.set_global_word(61, 3).unwrap();
         runtime.set_global_word(82, 0xaabb_ccdd).unwrap();
         runtime.set_global_word(79, 77).unwrap();
+        runtime.draw_count = 77;
+        runtime.machine.set_draw_count(77);
         for index in POINTER_GLOBALS {
             runtime.set_global_word(index, 0x8000_0001).unwrap();
         }
@@ -8408,7 +8655,7 @@ mod tests {
             mounted.global_word(CURRENT_DISPLAY_GLOBAL),
             Ok(INITIAL_DISPLAY_MASK)
         );
-        assert_eq!(mounted.global_word(79), Ok(0));
+        assert_eq!(mounted.global_word(79), Ok(77));
         assert_eq!(mounted.global_word(117), Ok(0x19000));
         for index in POINTER_GLOBALS {
             assert_eq!(mounted.global_word(index), Ok(0), "global {index}");
@@ -8422,7 +8669,7 @@ mod tests {
         assert_eq!(mounted.arena.spawn_table().flags(42), Some(8));
         assert_eq!(mounted.machine.spawn_flags(42), Ok(8));
         assert_eq!(mounted.frame_index(), 0);
-        assert_eq!(mounted.draw_count(), 0);
+        assert_eq!(mounted.draw_count(), 77);
         mounted.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
         assert!(mounted.level_state_context().unwrap().first_spawn);
 
@@ -9578,6 +9825,294 @@ mod tests {
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
         }
+    }
+
+    struct SpinDeathHost {
+        frame_available: bool,
+        vertex_count: u32,
+        source: ModelVertexSource,
+        bound_bindings: Vec<AnimationBoundBinding>,
+        vertex_bindings: Vec<ModelVertexBinding>,
+    }
+
+    impl SpinDeathHost {
+        fn with_vertices(vertex_count: u32) -> Self {
+            Self {
+                frame_available: true,
+                vertex_count,
+                source: ModelVertexSource {
+                    local_position: [100, 200, 300],
+                    geometry_scale: [0x1000; 3],
+                },
+                bound_bindings: Vec::new(),
+                vertex_bindings: Vec::new(),
+            }
+        }
+    }
+
+    impl ProgramHost for SpinDeathHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            VmObject::new(binding.object.vm(), vec![RETURN]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+
+        fn animation_bound_source(
+            &mut self,
+            binding: AnimationBoundBinding,
+        ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+            self.bound_bindings.push(binding);
+            Ok(self
+                .frame_available
+                .then_some(AnimationBoundSource::Vertex {
+                    vertex_kind: ObjectVertexKind::Lit,
+                    serialized_bound: Bounds3::default(),
+                    collision_center: Vec3::default(),
+                }))
+        }
+
+        fn model_vertex_source(
+            &mut self,
+            binding: ModelVertexBinding,
+        ) -> Result<Option<ModelVertexSource>, Self::Error> {
+            self.vertex_bindings.push(binding);
+            Ok((binding.vertex_index < self.vertex_count).then_some(self.source))
+        }
+    }
+
+    fn configure_spin_death_vertex_animation(
+        runtime: &mut RetailRuntime,
+        object: RuntimeObjectHandle,
+        model_eid: Eid,
+        frame_count: u8,
+        frame_index: u32,
+    ) {
+        let mut animation = vec![1, 0, frame_count, 0];
+        animation.extend_from_slice(&model_eid.raw().to_le_bytes());
+        let reference = AnimationReference::from_word(0xa700_0000).unwrap();
+        let object = runtime.machine.object_mut(object.vm).unwrap();
+        object.bind_animation_data(&animation);
+        object
+            .set_register(process_register::ANIMATION_SEQUENCE, reference.to_word())
+            .unwrap();
+        object
+            .set_register(process_register::ANIMATION_FRAME, frame_index << 8)
+            .unwrap();
+    }
+
+    #[test]
+    fn spin_death_camera_resolves_exact_live_vertex_scalars_and_timing() {
+        const DISPLAY_IMAGES: u32 = 0x20000;
+
+        let model_eid = Eid::from_name("model").unwrap();
+        let mut runtime = RetailRuntime::new_for_level(
+            SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL + 1,
+            LevelId::N_SANITY_BEACH,
+        );
+        let object = spawn_test_object(&mut runtime, ZONE, 260, 2, 0);
+        configure_spin_death_vertex_animation(&mut runtime, object, model_eid, 2, 1);
+        runtime
+            .machine
+            .object_mut(object.vm)
+            .unwrap()
+            .set_retail_transform(RetailTransform {
+                translation: [10, 20, 30],
+                rotation_yxz: [0; 3],
+                scale: [0x1000; 3],
+            })
+            .unwrap();
+        runtime
+            .set_global_word(
+                SPIN_DEATH_CAMERA_OBJECT_GLOBAL,
+                CollisionObjectReference::new(object.vm).to_word(),
+            )
+            .unwrap();
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_VERTEX_GLOBAL, 2 << 8)
+            .unwrap();
+        runtime.set_spin_death_camera_count(-3).unwrap();
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_ZOOM_SPEED_GLOBAL, (-1_000_i32) as u32)
+            .unwrap();
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL, 100)
+            .unwrap();
+        runtime.set_frame_timing(33, 34);
+        runtime
+            .set_global_word(CURRENT_DISPLAY_GLOBAL, DISPLAY_IMAGES)
+            .unwrap();
+        let mut host = SpinDeathHost::with_vertices(3);
+
+        let without_acceleration = runtime.resolve_spin_death_camera_inputs(&mut host).unwrap();
+        assert!(!without_acceleration.spin_accel);
+        runtime
+            .set_global_word(
+                CURRENT_DISPLAY_GLOBAL,
+                DISPLAY_IMAGES | GOOL_FLAG_SPIN_ACCEL,
+            )
+            .unwrap();
+        let inputs = runtime.resolve_spin_death_camera_inputs(&mut host).unwrap();
+
+        assert_eq!(
+            inputs,
+            SpinDeathCameraInputs {
+                count: -3,
+                // Retail's Q12 cosine is 4095, retaining the same three-stage
+                // truncation as transform-vectors suboperation six.
+                focus: Vec3 {
+                    x: 106,
+                    y: 212,
+                    z: 318,
+                },
+                zoom_speed: -1_000,
+                flip_speed: 100,
+                spin_accel: true,
+                ticks_per_frame: 34,
+            }
+        );
+        assert_eq!(host.bound_bindings.len(), 2);
+        assert_eq!(host.vertex_bindings.len(), 2);
+        let binding = host.vertex_bindings[1];
+        assert_eq!(binding.requester, object);
+        assert_eq!(binding.link, object);
+        assert_eq!(binding.model_eid, model_eid);
+        assert_eq!(binding.frame_index, 1);
+        assert_eq!(binding.vertex_index, 2);
+        assert_eq!(
+            runtime.global_word(SPIN_DEATH_CAMERA_COUNT_GLOBAL),
+            Ok((-3_i32) as u32)
+        );
+    }
+
+    #[test]
+    fn spin_death_camera_rejects_null_invalid_and_stale_object_references() {
+        let mut runtime = RetailRuntime::new_for_level(
+            SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL + 1,
+            LevelId::N_SANITY_BEACH,
+        );
+        let mut host = SpinDeathHost::with_vertices(1);
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::NullObjectReference)
+        );
+
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_OBJECT_GLOBAL, 0x1234_5678)
+            .unwrap();
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::InvalidObjectReference(
+                0x1234_5678
+            ))
+        );
+
+        let object = spawn_test_object(&mut runtime, ZONE, 261, 2, 0);
+        let reference = CollisionObjectReference::new(object.vm);
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_OBJECT_GLOBAL, reference.to_word())
+            .unwrap();
+        let mut report = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(object.arena, &mut report)
+            .unwrap();
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::StaleObjectReference(reference))
+        );
+    }
+
+    #[test]
+    fn spin_death_camera_rejects_non_vertex_missing_frame_and_vertex_range() {
+        let model_eid = Eid::from_name("model").unwrap();
+        let sprite_page = Eid::from_name("pageT").unwrap();
+        let mut runtime = RetailRuntime::new_for_level(
+            SPIN_DEATH_CAMERA_FLIP_SPEED_GLOBAL + 1,
+            LevelId::N_SANITY_BEACH,
+        );
+        let object = spawn_test_object(&mut runtime, ZONE, 262, 2, 0);
+        runtime
+            .set_global_word(
+                SPIN_DEATH_CAMERA_OBJECT_GLOBAL,
+                CollisionObjectReference::new(object.vm).to_word(),
+            )
+            .unwrap();
+        let mut host = SpinDeathHost::with_vertices(1);
+
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::MissingAnimation(object))
+        );
+
+        let mut sprite = vec![2, 0, 0, 0];
+        sprite.extend_from_slice(&sprite_page.raw().to_le_bytes());
+        let sprite_reference = AnimationReference::from_word(0xa700_0000).unwrap();
+        let vm_object = runtime.machine.object_mut(object.vm).unwrap();
+        vm_object.bind_animation_data(&sprite);
+        vm_object
+            .set_register(
+                process_register::ANIMATION_SEQUENCE,
+                sprite_reference.to_word(),
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::NonVertexAnimation(object))
+        );
+
+        configure_spin_death_vertex_animation(&mut runtime, object, model_eid, 1, 1);
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::MissingFrame {
+                object,
+                model_eid,
+                frame_index: 1,
+            })
+        );
+
+        configure_spin_death_vertex_animation(&mut runtime, object, model_eid, 2, 1);
+        host.frame_available = false;
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::MissingFrame {
+                object,
+                model_eid,
+                frame_index: 1,
+            })
+        );
+
+        host.frame_available = true;
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_VERTEX_GLOBAL, 1 << 8)
+            .unwrap();
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::VertexIndexOutOfRange {
+                object,
+                model_eid,
+                frame_index: 1,
+                vertex_index: 1,
+            })
+        );
+
+        runtime
+            .set_global_word(SPIN_DEATH_CAMERA_VERTEX_GLOBAL, (-1_i32) as u32)
+            .unwrap();
+        assert_eq!(
+            runtime.resolve_spin_death_camera_inputs(&mut host),
+            Err(SpinDeathCameraResolveError::VertexIndexOutOfRange {
+                object,
+                model_eid,
+                frame_index: 1,
+                vertex_index: -1,
+            })
+        );
     }
 
     struct BoxHost {

@@ -50,9 +50,17 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
    Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
    transform, zoom, held pad and prior frame stamp. Camera LevelUpdate effects apply ordered
-   zone/pager transitions before the following spawn scan. GOOL save/load effects capture and
+   zone/pager transitions before the following spawn scan. When authored display bit `0x10000`
+   selects `CamDeath`, the runtime resolves global 36's live generation-paired object, its current
+   vertex animation/frame and global 49's vertex through the mounted asset host, transforms that
+   vertex in fixed point, and advances the six persistent death-camera words plus global 10's
+   nine-frame alignment counter. The resulting non-path pose is shared by GOOL projection and
+   WebGL while the ordinary path heading remains available to player physics. GOOL save/load effects capture and
    restore owned snapshots synchronously; cross-pair requests broadcast `LEVEL_END` before an
-   asynchronous validated remount freezes the remaining tick. During attract playback, the PBAK
+   asynchronous validated remount freezes the remaining tick. The remount carry retains native's
+   process-lifetime texture/GOOL `draw_count`; the presentation mirror and first destination scene
+   are seeded from that same counter, while the distinct `LevelRestart` path resets it to zero.
+   During attract playback, the PBAK
    adapter installs its checked player/camera snapshot, RNG, bounds and spawn words, then replaces
    live controller input with each recorded 32-bit pad word and following-frame tick cadence.
    Full progression and the remaining SPU effects/voice-arbitration behavior remain later host
@@ -101,7 +109,8 @@ animation masks so mounted stream storage remains immutable. A graph-scoped side
 last native-equivalent writes during map fade-out and is replaced at the zone/path or pair boundary.
 Type-two sprites and type-five fragments
 share the checked ZXY sprite matrix. Type-four text safely formats bounded negative-stack
-arguments, resolves default or dynamic fixed-63 type-three fonts, and emits ordered
+arguments, resolves default or dynamic header-length-bounded type-three fonts (including
+controller-icon records beyond the C declaration's first 63 slots), and emits ordered
 glyph/backdrop quads; standalone type-three fonts remain resource-only. Status-B `0x200` CVTX uses
 the same 2D matrix path. Retail sprite half-size calculation keeps the raw signed scale quotient,
 masks MIPS variable shifts to five bits, and performs the source's wrapping 32-bit shift before the
@@ -343,4 +352,7 @@ automatic resume records are rejected so the browser host can move them to a tim
 key. Newer schema versions are left untouched. The simulation-side card restore does not clear
 savestate or active spawn words: those are not part of the 128-byte payload and native
 `LevelResetGlobals(1)` does not own them. The 3,592-halfword encounter registry is reset, as it is
-owned by that native transaction.
+owned by that native transaction. A virtual-card rescan stages all fifteen physical slots without
+publishing them, keeps `CHECKING` visible until authored CardC clears `FLAG_6`, then publishes parts
+and count on the following cooperative update. The browser persistence merge preserves timestamps
+for unchanged slots and refreshes only the slot or format operation that actually changed.

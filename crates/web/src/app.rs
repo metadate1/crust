@@ -32,7 +32,8 @@ use crust_renderer::title::decode_title_card;
 use crust_sim::Vec3;
 use crust_sim::camera::{
     RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
-    RetailCameraRuntime, RetailCameraStep,
+    RetailCameraPose, RetailCameraRuntime, RetailCameraStep, RetailDeathCameraInput,
+    RetailDeathCameraState,
 };
 use crust_sim::card::{
     CardOperation, CardOutcome, ResumeLoadResult, ResumeManager, SaveData, VirtualCard,
@@ -77,6 +78,7 @@ use web_sys::{
 };
 
 use crate::assets::{AssetStore, ValidatedPair};
+use crate::card_persistence::CardPersistIntent;
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
 use crate::pbak_runtime::{
@@ -615,10 +617,17 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
         let outcome = candidate.control(operation, part_index, Some(current));
 
         if outcome.is_ok() && operation.mutates_storage() {
+            let intent = match operation {
+                CardOperation::Format => CardPersistIntent::Format,
+                CardOperation::SaveSelected | CardOperation::SaveCurrent => candidate
+                    .current_slot()
+                    .map_or(CardPersistIntent::Snapshot, CardPersistIntent::WriteSlot),
+                _ => CardPersistIntent::Snapshot,
+            };
             let persisted = self
                 .storage
                 .as_mut()
-                .is_some_and(|storage| storage.persist_card(&candidate).is_ok());
+                .is_some_and(|storage| storage.persist_card(&candidate, intent).is_ok());
             if !persisted {
                 let mut failed = before;
                 failed.set_storage_available(false);
@@ -678,6 +687,8 @@ struct Runtime {
     retail_scene_builder: RetailSceneBuilder,
     retail_zone_graph: RetailZoneGraph,
     retail_camera: RetailCameraRuntime,
+    retail_death_camera: RetailDeathCameraState,
+    retail_camera_pose_override: Option<RetailCameraPose>,
     show_loading_image: bool,
     level_assets: ValidatedPair,
     retail_audio: RetailAudioEngine,
@@ -805,6 +816,7 @@ impl Runtime {
             &mut stage,
             dom,
             after_loading_image,
+            0,
             retail_point_count,
         )?;
         let retail_frame = if after_loading_image {
@@ -882,6 +894,8 @@ impl Runtime {
             retail_scene_builder,
             retail_zone_graph,
             retail_camera,
+            retail_death_camera: RetailDeathCameraState::default(),
+            retail_camera_pose_override: None,
             show_loading_image: after_loading_image,
             level_assets: pair,
             retail_audio,
@@ -1127,12 +1141,21 @@ impl Runtime {
             &mut self.stage,
             dom,
             after_loading_image,
+            retail_objects.draw_count(),
             retail_point_count,
         )?;
         let retail_frame = if after_loading_image {
-            RetailFrameState::after_loading_image(retail_point_count, 0)
+            RetailFrameState::after_loading_image_with_draw_count(
+                retail_point_count,
+                0,
+                retail_objects.draw_count(),
+            )
         } else {
-            RetailFrameState::ready(retail_point_count, 0)
+            RetailFrameState::ready_with_draw_count(
+                retail_point_count,
+                0,
+                retail_objects.draw_count(),
+            )
         };
         let first_title_boot = flow_level == LevelId::TITLE && !self.title_seen;
         self.flow
@@ -1149,6 +1172,7 @@ impl Runtime {
         self.retail_scene_builder = retail_scene_builder;
         self.retail_zone_graph = retail_zone_graph;
         self.retail_camera = retail_camera;
+        self.retail_camera_pose_override = None;
         self.retail_objects = retail_objects;
         self.last_authoritative_save = destination_authoritative_save;
         self.retail_zones = retail_zones;
@@ -1692,6 +1716,13 @@ impl Runtime {
                 } else {
                     None
                 };
+                // GfxUpdateMatrices consumes the CamUpdate/CamDeath pose
+                // before native enters GoolUpdateObjects. Keep that exact
+                // frame snapshot: a same-frame LoadState may legitimately
+                // replace the persistent camera for the following frame, but
+                // it cannot retroactively change the worlds already submitted
+                // with this one.
+                let camera_pose_override = self.retail_camera_pose_override;
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
@@ -1713,6 +1744,7 @@ impl Runtime {
                             !native_paused,
                             world_display_mask,
                             map_path_animation,
+                            camera_pose_override,
                         ));
                     }
                 }
@@ -1723,6 +1755,7 @@ impl Runtime {
                     advance_world_ripple,
                     world_display_mask,
                     map_path_animation,
+                    camera_pose_override,
                 )) = scene_location
                     && let Err(error) = self.update_retail_scene(
                         camera_location,
@@ -1731,6 +1764,7 @@ impl Runtime {
                         advance_world_ripple,
                         world_display_mask,
                         map_path_animation,
+                        camera_pose_override,
                         dom,
                     )
                 {
@@ -2560,6 +2594,7 @@ impl Runtime {
         self.retail_zone_pager = pager_preview;
         self.retail_zone_lifecycle = lifecycle_preview;
         self.retail_camera = camera_preview;
+        self.retail_camera_pose_override = None;
         self.refresh_retail_level_state_context(report.snapshot.location)?;
         self.retail_frame = RetailFrameState::ready(
             restored_point_count,
@@ -2599,6 +2634,7 @@ impl Runtime {
         advance_world_ripple: bool,
         world_display_mask: u32,
         map_path_animation: Option<RetailMapPathAnimation>,
+        camera_pose_override: Option<RetailCameraPose>,
         dom: &Dom,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
@@ -2632,7 +2668,7 @@ impl Runtime {
             .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
-            .build_at_progress_with_objects_and_world_display_mask_and_fov(
+            .build_at_progress_with_objects_and_world_display_mask_and_fov_and_camera(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -2649,6 +2685,7 @@ impl Runtime {
                 world_display_mask,
                 field_of_view,
                 map_path_animation,
+                camera_pose_override.map(Into::into),
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
@@ -2666,19 +2703,54 @@ impl Runtime {
     ) -> Result<RetailCameraStep, String> {
         let location = self.retail_camera.location();
         let display_mask = self.effective_retail_display_mask();
-        let title_profile = self.title_screen_profile();
-        let mode = self
-            .retail_zone_graph
-            .path(location.path)
-            .ok_or_else(|| {
-                format!(
-                    "camera graph has no active path {}:{}",
-                    location.path.zone, location.path.index
+        let spin_death = display_mask & 0x1_0000 != 0;
+        let step = if self.retail_objects.arena().main_object().is_none() {
+            // Native CamUpdate returns before either ordinary or death-camera
+            // work until Crash has spawned.
+            Ok(self.retail_camera.stationary_step())
+        } else if spin_death {
+            let inputs = {
+                let mut host = NsfProgramHost::new(
+                    &self.level_assets.nsd,
+                    &self.level_assets.nsf,
+                    &self.level_assets.nsf_bytes,
+                );
+                self.retail_objects
+                    .resolve_spin_death_camera_inputs(&mut host)
+                    .map_err(|error| {
+                        format!("retail spin-death focus resolution failed: {error:?}")
+                    })?
+            };
+            let mut pose = match self.retail_camera_pose_override {
+                Some(pose) => pose,
+                None => self
+                    .retail_camera
+                    .pose(&self.retail_zone_graph)
+                    .map_err(|error| error.to_string())?,
+            };
+            self.retail_death_camera.i_death_cam = inputs.count;
+            self.retail_death_camera
+                .step(
+                    &mut pose,
+                    RetailDeathCameraInput {
+                        transformed_focus: inputs.focus,
+                        flip_speed: inputs.flip_speed,
+                        zoom_speed: inputs.zoom_speed,
+                        spin_accel: inputs.spin_accel,
+                        ticks_per_frame: inputs.ticks_per_frame,
+                    },
                 )
-            })?
-            .camera_mode;
-        let step = if let Some(profile) = title_profile {
-            if profile.updates_camera() && display_mask & RETAIL_CAMERA_UPDATE != 0 {
+                .map_err(|error| format!("retail spin-death camera failed: {error:?}"))?;
+            self.retail_objects
+                .set_spin_death_camera_count(self.retail_death_camera.i_death_cam)
+                .map_err(|error| format!("retail spin-death count writeback failed: {error:?}"))?;
+            self.retail_camera_pose_override = Some(pose);
+            Ok(self.retail_camera.stationary_step())
+        } else if display_mask & RETAIL_CAMERA_UPDATE == 0 {
+            // Disabling bit two leaves the native camera transform untouched.
+            Ok(self.retail_camera.stationary_step())
+        } else if let Some(profile) = self.title_screen_profile() {
+            if profile.updates_camera() {
                 self.retail_camera.update(
                     &self.retail_zone_graph,
                     RetailCameraInput {
@@ -2688,37 +2760,49 @@ impl Runtime {
             } else {
                 Ok(self.retail_camera.stationary_step())
             }
-        } else if self.retail_objects.arena().main_object().is_none()
-            || display_mask & (0x2 | 0x1_0000) != 0x2
-        {
-            // Bit two suppresses ordinary CamUpdate. Spin-death bit 0x10000
-            // also bypasses path movement for its separate vertex-follow
-            // camera, which remains at this exact typed boundary. Native
-            // CamUpdate is likewise a no-op until Crash has spawned.
-            Ok(self.retail_camera.stationary_step())
-        } else if matches!(mode, 5 | 6)
-            && let Some(input) = self.retail_follow_input(snapshot)?
-        {
-            self.retail_camera
-                .update_follow(&self.retail_zone_graph, input)
         } else {
-            self.retail_camera.update(
-                &self.retail_zone_graph,
-                RetailCameraInput {
-                    tapped: snapshot.tapped,
-                },
-            )
+            let mode = self
+                .retail_zone_graph
+                .path(location.path)
+                .ok_or_else(|| {
+                    format!(
+                        "camera graph has no active path {}:{}",
+                        location.path.zone, location.path.index
+                    )
+                })?
+                .camera_mode;
+            if matches!(mode, 5 | 6)
+                && let Some(input) = self.retail_follow_input(snapshot)?
+            {
+                self.retail_camera
+                    .update_follow(&self.retail_zone_graph, input)
+            } else {
+                self.retail_camera.update(
+                    &self.retail_zone_graph,
+                    RetailCameraInput {
+                        tapped: snapshot.tapped,
+                    },
+                )
+            }
         }
         .map_err(|error| error.to_string())?;
+        if !spin_death && step.before != step.after {
+            // Every modeled path movement corresponds to the native
+            // LevelUpdate/CamFollow write that replaces a prior death pose.
+            self.retail_camera_pose_override = None;
+        }
         self.apply_retail_camera_effects(&step, dom)?;
         let rotation_xz = self
             .retail_camera
             .rotation_xz(&self.retail_zone_graph)
             .map_err(|error| error.to_string())?;
-        let pose = self
-            .retail_camera
-            .pose(&self.retail_zone_graph)
-            .map_err(|error| error.to_string())?;
+        let pose = match self.retail_camera_pose_override {
+            Some(pose) => pose,
+            None => self
+                .retail_camera
+                .pose(&self.retail_zone_graph)
+                .map_err(|error| error.to_string())?,
+        };
         let field_of_view = self.effective_retail_field_of_view()?;
         let screen_projection = retail_screen_projection(field_of_view).ok_or_else(|| {
             format!("retail field of view {field_of_view} has no projection constant")
@@ -3317,10 +3401,13 @@ impl Runtime {
                         "could not update the virtual-card completion slot: {error:?}"
                     )));
                 }
+                let intent = candidate
+                    .current_slot()
+                    .map_or(CardPersistIntent::Snapshot, CardPersistIntent::WriteSlot);
                 let persisted = self
                     .storage
                     .as_mut()
-                    .is_some_and(|storage| storage.persist_card(&candidate).is_ok());
+                    .is_some_and(|storage| storage.persist_card(&candidate, intent).is_ok());
                 if !persisted {
                     let mut failed = before;
                     failed.set_storage_available(false);
@@ -3580,7 +3667,7 @@ impl Runtime {
             let _ = storage.persist_resume(payload);
         }
         if let Some(storage) = &mut self.storage {
-            let _ = storage.persist_card(&self.card);
+            let _ = storage.persist_card(&self.card, CardPersistIntent::Snapshot);
         }
     }
 }
@@ -4819,9 +4906,10 @@ fn install_retail_scene_for_pair(
     stage: &mut GlStage,
     dom: &Dom,
     after_loading_image: bool,
+    initial_draw_count: u32,
     point_count: NonZeroU16,
 ) -> Result<NonZeroU16, JsValue> {
-    let draw_count = u32::from(after_loading_image);
+    let draw_count = initial_draw_count.wrapping_add(u32::from(after_loading_image));
     // Title and external-transition dummy zones legally have one-point paths.
     // The gameplay loading contract asks for point one/two, so clamp only that
     // presentation selection to the validated final point.

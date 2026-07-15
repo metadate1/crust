@@ -2637,7 +2637,9 @@ impl Runtime {
         let residual_effects = report
             .effects
             .iter()
-            .filter(|effect| !matches!(effect, VmEffect::Transition(_) | VmEffect::LoadState(_)))
+            .filter(|effect| {
+                !matches!(effect, VmEffect::Transition(_) | VmEffect::LoadState { .. })
+            })
             .cloned()
             .collect::<Vec<_>>();
         self.apply_retail_gool_level_effects(&residual_effects, dom)
@@ -2711,13 +2713,23 @@ impl Runtime {
                         false,
                     );
                 }
-                VmEffect::LoadState(_) => {
-                    self.apply_retail_hard_restart(dom)?;
-                    // The restart invalidates ordinary object identities and
-                    // native execution resumes from the restored band. No
-                    // later effect from the pre-restart frame may target it.
-                    break;
+                VmEffect::LoadState {
+                    saved_level: Some(saved_level),
+                    ..
+                } => {
+                    let replaces_live_objects = saved_level == self.level_assets.level;
+                    self.apply_retail_hard_restart_from_effect(dom, saved_level)?;
+                    if replaces_live_objects {
+                        // A same-level restart invalidates ordinary object
+                        // identities and resumes from the restored band. A
+                        // different-level LoadState only schedules `-2`, so
+                        // its authored post-load effect tail remains valid.
+                        break;
+                    }
                 }
+                VmEffect::LoadState {
+                    saved_level: None, ..
+                } => return Err("GOOL LoadState reached the browser without a saved level".into()),
                 VmEffect::Transition(level) => {
                     self.next_lid = level;
                 }
@@ -2734,12 +2746,25 @@ impl Runtime {
     }
 
     fn apply_retail_hard_restart(&mut self, dom: &Dom) -> Result<(), String> {
+        let saved_level = self
+            .retail_objects
+            .saved_level_state()
+            .map(|snapshot| snapshot.level)
+            .ok_or_else(|| "GOOL misc 12/1 has no saved level state".to_owned())?;
+        self.apply_retail_hard_restart_from_effect(dom, saved_level)
+    }
+
+    fn apply_retail_hard_restart_from_effect(
+        &mut self,
+        dom: &Dom,
+        captured_saved_level: FormatLevelId,
+    ) -> Result<(), String> {
         let snapshot = self
             .retail_objects
             .saved_level_state()
             .cloned()
             .ok_or_else(|| "GOOL misc 12/1 has no saved level state".to_owned())?;
-        if snapshot.level != self.level_assets.level {
+        if captured_saved_level != self.level_assets.level {
             let outcome = {
                 let mut host = BrowserProgramHost::new(
                     &self.level_assets.nsd,
@@ -2750,7 +2775,8 @@ impl Runtime {
                     &mut self.card,
                     &mut self.storage,
                 );
-                self.retail_objects.restart_saved_level(&mut host)
+                self.retail_objects
+                    .restart_saved_level_from_effect(&mut host, captured_saved_level)
             }
             .map_err(|error| format!("different-level restart failed: {error:?}"))?;
             let RetailRestartOutcome::DifferentLevel { .. } = outcome else {
@@ -2823,7 +2849,8 @@ impl Runtime {
                 &mut self.card,
                 &mut self.storage,
             );
-            self.retail_objects.restart_saved_level(&mut host)
+            self.retail_objects
+                .restart_saved_level_from_effect(&mut host, captured_saved_level)
         }
         .map_err(|error| format!("object hard restart failed: {error:?}"))?;
 

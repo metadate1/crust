@@ -191,9 +191,14 @@ fresh destination runtime, and restore bonus returns from the saved zone/path/pr
 Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
 same-level restart snapshot because all five bonus spawn zones are save-restricted; directly booted
 bonus completion still lacks a distinct host return destination and is not claimed as a complete
-round trip. Every LevelUpdate also republishes the destination zone's graphics flags in GOOL global
-30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch instead of
-falling through to the ordinary Title transition. WebAudio
+round trip. A legally local cross-stream characterization now carries Jungle Rollers (`0x0c`) into
+Tawna Bonus (`0x24`), runs WillC's exact WarpC/CardC confirmation path, observes `LoadState` on
+frame 301, resolves the `-2` return target, and reproduces the protected parent remount while
+checking Crash's transform, camera path/progress, box count, and all 304 spawn words. It does not
+substitute for driving the third-token pickup and physical portal collision as one uninterrupted
+playthrough. Every LevelUpdate also republishes the destination zone's graphics flags in GOOL
+global 30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch
+instead of falling through to the ordinary Title transition. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
 fallback has been removed. The native 3,592-halfword encountered-object registry is retained
 separately from each mount's fresh 304-word
@@ -246,11 +251,12 @@ dedicated main object outside Title. This fixes the Ending credits-object leak t
 filled all 97 arena slots at frame 1,437; the legally local 1,800-frame regression now peaks at 82
 live objects and proves returned slots are reused without a VM fault. This bounded lifecycle check
 does not certify the complete ending flow.
-The current clean-policy direction/button survey runs all 43 bootable pairs for 1,800
-browser-ordered simulation frames each—77,400 frames total—without a checked runtime issue. Rolling
+The current strict direction/button survey runs all 43 bootable pairs for 5,400
+browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 537 passing tests, and the locked native workspace tests, warnings-denied
-Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm build gates pass.
+The `crust-sim` library has 546 passing tests; the locked default workspace gate has 870. Native
+warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
+build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,
 recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab), and exercised the publisher
 screen, main menu, island map, and a direct N. Sanity Beach boot. The level rendered and ran at the

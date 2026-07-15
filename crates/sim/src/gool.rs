@@ -2309,7 +2309,14 @@ pub enum VmEffect {
     },
     Transition(i32),
     SaveState(ObjectHandle),
-    LoadState(ObjectHandle),
+    /// Misc 12/1 requests native `LevelRestart` at this exact instruction
+    /// boundary. The pure VM emits `saved_level: None`; the stream-owning
+    /// runtime resolves it synchronously from the protected save snapshot so
+    /// later GOOL cannot retroactively change the restart kind.
+    LoadState {
+        object: ObjectHandle,
+        saved_level: Option<LevelId>,
+    },
 }
 
 /// Asset-only input returned for transform-vectors suboperation six.
@@ -4694,7 +4701,11 @@ impl Machine {
         self.solid_query_cache = None;
     }
 
-    /// Native misc 12/1 does not return to the pre-restart instruction walk.
+    /// Whether the host must stop for a deferred same-level restart.
+    ///
+    /// Native different-level misc 12/1 only schedules `next_lid = -2` and
+    /// returns to GOOL. The stream-owning runtime therefore leaves this false
+    /// for that case and retains the emitted [`VmEffect::LoadState`].
     #[must_use]
     pub const fn level_restart_requested(&self) -> bool {
         self.level_restart_requested
@@ -6922,7 +6933,7 @@ impl Machine {
                             | VmEffect::SpawnFlagsChanged { .. }
                             | VmEffect::TransformModelVertex { .. }
                             | VmEffect::SaveState(_)
-                            | VmEffect::LoadState(_)
+                            | VmEffect::LoadState { .. }
                             | VmEffect::ResetLevelGlobals { .. }
                             | VmEffect::Paging { .. }
                     ) {
@@ -7858,6 +7869,32 @@ impl Machine {
         &self.effects
     }
 
+    /// Resolves the protected save level for the `LoadState` effect that just
+    /// crossed the synchronous stream-host boundary.
+    ///
+    /// The effect must still be the newest observation and must belong to the
+    /// same caller. This keeps the VM independent of mounted stream state
+    /// while preventing a later `SaveState` from changing the earlier request's
+    /// restart kind.
+    pub(crate) fn resolve_load_state_effect(
+        &mut self,
+        object: ObjectHandle,
+        saved_level: LevelId,
+    ) -> Result<(), VmError> {
+        let Some(VmEffect::LoadState {
+            object: pending,
+            saved_level: slot,
+        }) = self.effects.last_mut()
+        else {
+            return Err(VmError::MissingHostEffect);
+        };
+        if *pending != object || slot.is_some() {
+            return Err(VmError::MissingHostEffect);
+        }
+        *slot = Some(saved_level);
+        Ok(())
+    }
+
     fn enqueue_send_event(
         &mut self,
         request: SendEventRequest,
@@ -8509,7 +8546,7 @@ impl Machine {
                             | VmEffect::SpawnFlagsChanged { .. }
                             | VmEffect::TransformModelVertex { .. }
                             | VmEffect::SaveState(_)
-                            | VmEffect::LoadState(_)
+                            | VmEffect::LoadState { .. }
                             | VmEffect::ResetLevelGlobals { .. }
                             | VmEffect::Paging { .. }
                     ) {
@@ -10707,7 +10744,10 @@ impl Machine {
                     Ok(true)
                 }
                 1 => {
-                    self.emit(VmEffect::LoadState(handle))?;
+                    self.emit(VmEffect::LoadState {
+                        object: handle,
+                        saved_level: None,
+                    })?;
                     Ok(true)
                 }
                 2 => {
@@ -16313,7 +16353,7 @@ mod tests {
         assert_eq!(
             machine
                 .run_with_host_effects(h, 2, |machine, effect| {
-                    if matches!(effect, VmEffect::LoadState(_)) {
+                    if matches!(effect, VmEffect::LoadState { .. }) {
                         machine.request_level_restart();
                     }
                     Ok(())
@@ -16326,7 +16366,13 @@ mod tests {
         );
         assert_eq!(
             machine.effects(),
-            &[VmEffect::SaveState(h), VmEffect::LoadState(h)]
+            &[
+                VmEffect::SaveState(h),
+                VmEffect::LoadState {
+                    object: h,
+                    saved_level: None,
+                },
+            ]
         );
         machine.clear_level_restart_request();
 

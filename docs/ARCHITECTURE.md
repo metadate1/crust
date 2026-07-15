@@ -423,7 +423,13 @@ booted bonus with that synthetic snapshot still needs an explicit host return po
 claimed as a complete bonus round trip. `set_level_state_context` publishes the current zone's
 graphics flags to GOOL global 30 at initial mount, zone changes, remounts, and hard restarts before
 the next spawn/update pass. Legal bonus zones publish `0x2002`; WillC's WARP state tests bit
-`0x2000` before selecting its LoadState return path.
+`0x2000` before selecting its LoadState return path. Different-level `LoadState` preserves the
+native source-frame tail: it emits the ordered browser remount handshake without stopping the
+current interpreter, later preorder objects, or the display latch. Its synchronous host boundary
+clears bonus global 60 before that continuation and annotates the effect with the then-current saved
+level. A later SaveState may change the eventual `-2` destination, but cannot retroactively turn
+the earlier request into a same-level structural restart. Same-level `LoadState` remains a checked
+stop because its deferred restart structurally replaces the active object forest.
 
 ## Audio
 

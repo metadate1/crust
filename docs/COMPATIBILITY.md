@@ -310,7 +310,10 @@ gameplay path.
   owners. A same-level `LoadState` issued from inside a `LEVEL_END` handler still stops at a checked
   boundary because continuing that exact handler requires a resumable nested browser restart
   transaction. A legally local scan of all 44 retail pairs found zero authored occurrences of that
-  nested case. Complete asynchronous page residency timing also remains a gap.
+  nested case. Different-level loads capture their restart kind and clear bonus mode at the
+  synchronous instruction boundary; later GOOL and LEVEL_END recipients can continue without a
+  later SaveState reclassifying the earlier request. Complete asynchronous page residency timing
+  also remains a gap.
 - `crust-renderer` implements texture decode, cache keys, projection, ordering and blend-command
   rules. Its WebGL2 command backend is connected to the live stage and presents decoded loading
   images, four image-backed retail title states and camera-selected worlds. Title, Hog Wild
@@ -411,9 +414,12 @@ gameplay path.
   host return destination, so this is not evidence of a complete bonus round trip. LevelUpdate now
   publishes the current zone graphics flags into GOOL global 30 before the next object pass. All
   five legal bonus spawn zones produce `0x2002`, and the exact Tawna-bonus WillC WARP program tests
-  bit `0x2000` before its LoadState branch. This fixes a concrete bonus-routing blocker, but the
-  complete third-token, portal, `-2`, and protected parent-remount route is not yet an observed
-  end-to-end playthrough.
+  bit `0x2000` before its LoadState branch. A legally local cross-stream test carries the authentic
+  Jungle Rollers (`0x0c`) snapshot into Tawna Bonus (`0x24`), delivers WarpC's exact `0x1600`/zero
+  event, advances CardC's Cross prompt, observes `LoadState` at frame 301, and resolves sentinel
+  `-2` back to `0x0c`. It then reproduces the protected destination spawn/restart and checks the
+  restored Crash transform, camera location, box count, and every saved spawn word. The third-token
+  pickup and physical portal collision are still not one observed end-to-end playthrough.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

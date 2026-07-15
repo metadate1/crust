@@ -1755,6 +1755,10 @@ pub enum RuntimeError<E> {
     Transition(RetailTransitionError),
     PendingLevelRestartAtLevelEnd,
     SameLevelRestartDuringLevelEnd(LevelId),
+    SavedLevelChangedAfterLoad {
+        captured: LevelId,
+        current: LevelId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3956,6 +3960,27 @@ impl RetailRuntime {
         &mut self,
         host: &mut H,
     ) -> Result<RetailRestartOutcome<H::Error>, RuntimeError<H::Error>> {
+        let saved_level = self
+            .saved_level_state
+            .as_ref()
+            .ok_or(RuntimeError::MissingSavedLevelState)?
+            .level;
+        self.restart_saved_level_from_effect(host, saved_level)
+    }
+
+    /// Completes a `LoadState` whose save level was captured at the exact VM
+    /// host boundary.
+    ///
+    /// Different-level GOOL may continue after misc 12/1 and can legally emit
+    /// another `SaveState` before the browser consumes the effect. Restart kind
+    /// therefore comes from `captured_saved_level`, while a later snapshot is
+    /// still available to the eventual `-2` `LEVEL_END` resolution just as it
+    /// is in native process state.
+    pub fn restart_saved_level_from_effect<H: ProgramHost>(
+        &mut self,
+        host: &mut H,
+        captured_saved_level: LevelId,
+    ) -> Result<RetailRestartOutcome<H::Error>, RuntimeError<H::Error>> {
         let snapshot = self
             .saved_level_state
             .clone()
@@ -3963,9 +3988,10 @@ impl RetailRuntime {
         // Native clears bonus mode before even checking whether the saved
         // level differs and returning the `-2` remount sentinel.
         self.set_mount_global(BONUS_ROUND_GLOBAL, 0);
-        // Misc 12/1 stops the current interpreter/traversal immediately. The
-        // following native LevelRestart work is a fresh synchronous phase in
-        // which RESPAWN and TERM handlers must be allowed to execute.
+        // Same-level misc 12/1 stops the pointer-free traversal before this
+        // deferred structural phase. A different-level request has already
+        // completed its source interpreter/traversal and carries no live-tree
+        // mutation, but clearing the shared latch remains harmless.
         self.machine.clear_level_restart_request();
         if let Ok(value) = self.machine.global_word(RESPAWN_COUNT_GLOBAL) {
             self.respawn_count = value;
@@ -3974,15 +4000,21 @@ impl RetailRuntime {
             self.death_count = value;
         }
         let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
-        if snapshot.level != current_level {
+        if captured_saved_level != current_level {
             let context = self
                 .level_state_context
                 .as_mut()
                 .ok_or(RuntimeError::MissingLevelStateContext)?;
             context.first_spawn = true;
             return Ok(RetailRestartOutcome::DifferentLevel {
-                saved_level: snapshot.level,
+                saved_level: captured_saved_level,
                 requested_level_sentinel: -2,
+            });
+        }
+        if snapshot.level != captured_saved_level {
+            return Err(RuntimeError::SavedLevelChangedAfterLoad {
+                captured: captured_saved_level,
+                current: snapshot.level,
             });
         }
         let mut context = self
@@ -4538,11 +4570,17 @@ impl RetailRuntime {
             for effect in &emitted {
                 match effect {
                     VmEffect::Transition(level) => next_lid_after_event = *level,
-                    VmEffect::LoadState(_) => {
-                        self.consume_different_level_restart_at_level_end()?;
+                    VmEffect::LoadState {
+                        saved_level: Some(saved_level),
+                        ..
+                    } => {
+                        self.consume_different_level_restart_at_level_end(*saved_level)?;
                         next_lid_after_event = -2;
                         consumed_restart = true;
                     }
+                    VmEffect::LoadState {
+                        saved_level: None, ..
+                    } => return Err(RuntimeError::Vm(VmError::MissingHostEffect)),
                     _ => {}
                 }
             }
@@ -4574,14 +4612,12 @@ impl RetailRuntime {
         })
     }
 
-    fn consume_different_level_restart_at_level_end<E>(&mut self) -> Result<(), RuntimeError<E>> {
-        let saved_level = self
-            .saved_level_state
-            .as_ref()
-            .ok_or(RuntimeError::MissingSavedLevelState)?
-            .level;
+    fn consume_different_level_restart_at_level_end<E>(
+        &mut self,
+        captured_saved_level: LevelId,
+    ) -> Result<(), RuntimeError<E>> {
         let current_level = self.level.ok_or(RuntimeError::MissingLevelStateContext)?;
-        if saved_level == current_level {
+        if captured_saved_level == current_level {
             return Err(RuntimeError::SameLevelRestartDuringLevelEnd(current_level));
         }
         self.pending_first_spawn = true;
@@ -7083,7 +7119,7 @@ impl RetailRuntime {
     fn validate_different_level_load_state<E>(
         arena: &ObjectArena,
         handles: &HandleMap,
-        machine: &Machine,
+        machine: &mut Machine,
         level: Option<LevelId>,
         saved_level_state: Option<&RetailLevelSnapshot>,
         vm: VmObjectHandle,
@@ -7095,6 +7131,14 @@ impl RetailRuntime {
         let saved_level = saved_level_state
             .ok_or(RuntimeError::MissingSavedLevelState)?
             .level;
+        machine
+            .resolve_load_state_effect(vm, saved_level)
+            .map_err(RuntimeError::Vm)?;
+        if BONUS_ROUND_GLOBAL < machine.global_words().len() {
+            machine
+                .set_global_word(BONUS_ROUND_GLOBAL, 0)
+                .map_err(RuntimeError::Vm)?;
+        }
         let current_level = level.ok_or(RuntimeError::MissingLevelStateContext)?;
         if saved_level == current_level {
             return Err(RuntimeError::SameLevelRestartDuringLevelEnd(current_level));
@@ -7278,7 +7322,7 @@ impl RetailRuntime {
             argument_pool_slots,
             |machine, request| {
                 let result = match request {
-                    VmHostRequest::Effect(VmEffect::LoadState(vm))
+                    VmHostRequest::Effect(VmEffect::LoadState { object: vm, .. })
                         if load_state_mode == EventLoadStateMode::ContinueDifferentLevel =>
                     {
                         Self::validate_different_level_load_state(
@@ -8472,15 +8516,36 @@ impl RetailRuntime {
             return Ok(());
         }
 
-        if let VmEffect::LoadState(vm) = effect {
+        if let VmEffect::LoadState { object: vm, .. } = effect {
             let caller = handles
                 .for_vm(*vm)
                 .ok_or(RuntimeError::UnknownVmObject(*vm))?;
             Self::validate_runtime_object(arena, handles, machine, caller)?;
-            if saved_level_state.is_none() {
-                return Err(RuntimeError::MissingSavedLevelState);
+            let saved_level = saved_level_state
+                .as_ref()
+                .ok_or(RuntimeError::MissingSavedLevelState)?
+                .level;
+            machine
+                .resolve_load_state_effect(*vm, saved_level)
+                .map_err(RuntimeError::Vm)?;
+            // Native LevelRestart clears bonus mode before comparing saved
+            // and current levels. Different-level GOOL continues after this
+            // host boundary, so the write must be visible immediately rather
+            // than when the browser later consumes the remount effect.
+            if BONUS_ROUND_GLOBAL < machine.global_words().len() {
+                machine
+                    .set_global_word(BONUS_ROUND_GLOBAL, 0)
+                    .map_err(RuntimeError::Vm)?;
             }
-            machine.request_level_restart();
+            // A same-level LevelRestart synchronously replaces the active
+            // object forest, so the pointer-free host must stop this walk and
+            // perform that structural transaction at its checked boundary.
+            // A different-level restart only writes next_lid=-2/first_spawn
+            // in retail. Preserve the effect for the browser remount, but let
+            // the current interpreter, later objects, and display latch run.
+            if level.is_none_or(|current_level| current_level == saved_level) {
+                machine.request_level_restart();
+            }
             return Ok(());
         }
 
@@ -9765,10 +9830,11 @@ mod tests {
     }
 
     #[test]
-    fn level_end_load_state_selects_saved_level_and_keeps_broadcasting() {
+    fn level_end_load_kind_survives_a_later_save_and_keeps_broadcasting() {
         let current = LevelId::new_const(0x26);
         let saved = LevelId::new_const(0x09);
         let mut runtime = RetailRuntime::new_for_level(119, current);
+        let _main = spawn_test_object(&mut runtime, ZONE, 1, 0, 0);
         let loader = spawn_test_object(&mut runtime, ZONE, 14, 2, 0);
         let later = spawn_test_object(&mut runtime, ZONE, 15, 2, 0);
         runtime
@@ -9787,7 +9853,12 @@ mod tests {
             .unwrap()
             .configure_test_event_interrupt(
                 LEVEL_END_EVENT,
-                vec![misc(12, 1, 0x0be0), misc(12, 6, 0x0e00), 0x8280_0000],
+                vec![
+                    misc(12, 1, 0x0be0),
+                    misc(12, 0, 0x0be0),
+                    misc(12, 6, 0x0e00),
+                    0x8280_0000,
+                ],
             )
             .unwrap();
         runtime
@@ -9800,13 +9871,25 @@ mod tests {
             .machine
             .object_mut(later.vm)
             .unwrap()
-            .configure_test_event_interrupt(LEVEL_END_EVENT, vec![misc(12, 6, 0x0e00), 0x8280_0000])
+            .configure_test_event_interrupt(
+                LEVEL_END_EVENT,
+                vec![
+                    Instruction::encode(0x1f, 0x0be0, 0x083c),
+                    Instruction::encode(0x11, 0x0e1f, 0x0e00),
+                    misc(12, 6, 0x0e00),
+                    0x8280_0000,
+                ],
+            )
             .unwrap();
         runtime
             .machine
             .object_mut(later.vm)
             .unwrap()
             .set_register(0, 0x1234)
+            .unwrap();
+        runtime
+            .machine
+            .set_global_word(BONUS_ROUND_GLOBAL, 0x100)
             .unwrap();
 
         let report = runtime
@@ -9816,14 +9899,18 @@ mod tests {
         assert_eq!(
             report.effects,
             [
-                VmEffect::LoadState(loader.vm),
+                VmEffect::LoadState {
+                    object: loader.vm,
+                    saved_level: Some(saved),
+                },
+                VmEffect::SaveState(loader.vm),
                 VmEffect::MidiTogglePlayback {
                     object: loader.vm,
                     value: 0x4321,
                 },
                 VmEffect::MidiTogglePlayback {
                     object: later.vm,
-                    value: 0x1234,
+                    value: 0,
                 },
             ]
         );
@@ -9831,9 +9918,18 @@ mod tests {
         assert_eq!(
             report.resolved,
             ResolvedRetailLevelTransition {
-                level: saved,
+                level: current,
                 bonus_return: true,
             }
+        );
+        assert_eq!(
+            report
+                .carry
+                .saved_level_state
+                .as_ref()
+                .map(|snapshot| snapshot.level),
+            Some(current),
+            "the later SaveState mutates the eventual -2 target without changing the earlier load kind"
         );
         assert!(report.event_failures.is_empty());
         assert!(report.carry.first_spawn);
@@ -17902,7 +17998,7 @@ mod tests {
     }
 
     #[test]
-    fn misc_save_and_load_are_synchronous_and_abort_the_remainder_of_the_frame() {
+    fn same_level_misc_save_and_load_abort_for_the_deferred_structural_restart() {
         let level = LevelId::new(0x03).unwrap();
         let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, level);
         let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
@@ -17964,7 +18060,13 @@ mod tests {
         );
         assert_eq!(
             frame.effects,
-            vec![VmEffect::SaveState(main.vm), VmEffect::LoadState(main.vm)]
+            vec![
+                VmEffect::SaveState(main.vm),
+                VmEffect::LoadState {
+                    object: main.vm,
+                    saved_level: Some(level),
+                },
+            ]
         );
         assert!(runtime.machine.level_restart_requested());
         assert_eq!(
@@ -18004,6 +18106,104 @@ mod tests {
 
         runtime.restart_saved_level(&mut SnapshotHost).unwrap();
         assert!(!runtime.machine.level_restart_requested());
+    }
+
+    #[test]
+    fn different_level_misc_load_continues_the_source_frame_before_remount() {
+        let current = LevelId::new_const(0x24);
+        let saved = LevelId::new_const(0x0c);
+        let mut runtime = RetailRuntime::new_for_level(BOX_COUNT_GLOBAL + 1, current);
+        let main = spawn_test_object(&mut runtime, ZONE, 5, 0, 0);
+        let child = attach_test_child(&mut runtime, main, ZONE, 2);
+
+        runtime
+            .machine
+            .upsert_object(
+                VmObject::new(
+                    main.vm,
+                    vec![
+                        misc(12, 1, 0x0be0),
+                        // A later save deliberately changes the protected
+                        // snapshot to the mounted level. The earlier load's
+                        // captured restart kind must remain different-level.
+                        misc(12, 0, 0x0be0),
+                        Instruction::encode(0x11, 0x0805, 0x0e08),
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let mut child_vm = VmObject::new(
+            child.vm,
+            vec![
+                // Read global 60 after the different-level load boundary,
+                // then retain it in register zero for the assertion below.
+                Instruction::encode(0x1f, 0x0be0, 0x083c),
+                Instruction::encode(0x11, 0x0e1f, 0x0e00),
+            ],
+        )
+        .unwrap();
+        child_vm.set_register(0, 0x1234).unwrap();
+        runtime.machine.upsert_object(child_vm).unwrap();
+        runtime.saved_level_state = Some(level_snapshot(saved));
+        runtime.set_level_state_context(level_context(ZONE, false, vec![ZONE]));
+        runtime
+            .machine
+            .set_global_word(BONUS_ROUND_GLOBAL, 0x100)
+            .unwrap();
+        runtime
+            .machine
+            .set_global_word(NEXT_DISPLAY_GLOBAL, 0)
+            .unwrap();
+
+        let frame = runtime.run_frame(&mut SnapshotHost, 8).unwrap();
+
+        assert_eq!(
+            frame.effects,
+            vec![
+                VmEffect::LoadState {
+                    object: main.vm,
+                    saved_level: Some(saved),
+                },
+                VmEffect::SaveState(main.vm),
+            ],
+            "the browser retains the ordered remount handshake"
+        );
+        assert_eq!(frame.executions.len(), 2, "later objects still run");
+        assert!(!runtime.machine.level_restart_requested());
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(process_register::TRANSLATION_X),
+            Ok(0x500),
+            "GOOL continues after the different-level LoadState"
+        );
+        assert_eq!(
+            runtime.machine.object(child.vm).unwrap().register(0),
+            Ok(0),
+            "later preorder GOOL observes native's synchronous bonus clear"
+        );
+        assert_eq!(
+            runtime.saved_level_state().map(|snapshot| snapshot.level),
+            Some(current),
+            "the later SaveState really changes the mutable protected snapshot"
+        );
+        assert_eq!(
+            runtime.machine.global_word(CURRENT_DISPLAY_GLOBAL),
+            Ok(0),
+            "the source display latch still completes"
+        );
+        assert_eq!(
+            runtime
+                .restart_saved_level_from_effect(&mut SnapshotHost, saved)
+                .unwrap(),
+            RetailRestartOutcome::DifferentLevel {
+                saved_level: saved,
+                requested_level_sentinel: -2,
+            }
+        );
     }
 
     #[test]

@@ -834,6 +834,43 @@ is 1,322,866 bytes with SHA-256
   later transitions, bosses, a complete bonus return, or ending flows, and it is not a full retail
   parity claim.
 
+### Tawna bonus return checkpoint (2026-07-15)
+
+- Source and legal-corpus tracing corrected the authentic parent route to Jungle Rollers (`0x0c`)
+  → Tawna Bonus 1 (`0x24`). WarpC's authored `0x1600` event carries one literal-zero argument.
+  WillC sets global one to nine and waits at the CardC confirmation prompt; a tapped Cross after
+  CardC's readiness gate selects state 63, clears the global, and releases the WARP completion.
+- The legally local vertical regression now mounts the parent and bonus streams with real parsed
+  GOOL/ZDAT data, retains the complete parent snapshot through the save-restricted `0x2002` bonus
+  zone, taps Cross on deterministic frame 300, and observes WillC's `LoadState` on frame 301. It
+  resolves sentinel `-2` to `0x0c`, imports the returned carry into the parent stream, positions the
+  camera at the saved path/progress, suppresses the protected initial Crash auto-save, and performs
+  the same-level restart. Assertions cover Crash translation/rotation/scale, camera location, box
+  count, and all 304 saved spawn words after native active-bit clearing.
+- Different-level misc `12/1` now matches native control flow: it retains the ordered `LoadState`
+  effect for the browser but continues the current GOOL interpreter, later preorder objects, and
+  display latch before the next-frame remount. Bonus global 60 clears synchronously before that
+  tail, and the effect carries the saved level captured at its own boundary. Default regressions
+  cover both an ordinary frame and a LEVEL_END handler issuing a later same-level SaveState: the
+  earlier load remains different-level while the eventual `-2` target follows the newer snapshot.
+  Same-level loads still stop at the checked boundary because that deferred transaction
+  structurally replaces the live object forest.
+- The stable checkpoint passed Rustfmt, 870 locked default tests with zero failures and 74 ignored,
+  all 74 legally local opt-in tests with zero failures, warnings-denied native and Wasm Clippy, and
+  optimized native and `wasm32-unknown-unknown` builds. `npm run build` regenerated the served
+  distribution. Its 1,345,221-byte Wasm module has SHA-256
+  `74d69d81473ab74a6e87956304124185cb0dcf047fe74b2990f6244942f2c3bd`; the 46,236-byte generated
+  loader has SHA-256 `5d16cd2e5b74c8178a95006de3063a3ea3ce0aa339d6697006afcf4c3ca87ffc`.
+- The rebuilt no-store server returned HTTP 200 on `127.0.0.1:4174`, and a fresh visible in-app
+  browser load reached the local-media workspace with the Wasm boot controls, 30 Hz standby
+  telemetry, 15-slot card status, and no console entries. This checkpoint-specific browser smoke
+  did not remount the BIN because the in-app browser does not expose automated file upload; the
+  earlier foreground Chrome raw-BIN/direct-gameplay pass above remains the current browser import
+  evidence.
+- This is control-path and protected-remount evidence, not a claim that automated input collected
+  the three Tawna tokens or physically traversed the bonus portal. Those uninterrupted gameplay
+  steps remain open.
+
 ## Reproducible commands
 
 ```bash
@@ -865,6 +902,10 @@ C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_n_sanity_completion_title_vertical_flow_preserves_session_carry \
   -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot \
+  -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \
   n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact

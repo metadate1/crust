@@ -1097,7 +1097,7 @@ fn effect_kind(effect: &VmEffect) -> &'static str {
         VmEffect::AnimationFrameChanged { .. } => "animation-frame",
         VmEffect::Transition(_) => "transition",
         VmEffect::SaveState(_) => "save-state",
-        VmEffect::LoadState(_) => "load-state",
+        VmEffect::LoadState { .. } => "load-state",
     }
 }
 
@@ -1518,6 +1518,7 @@ fn active_survey_held(frame: u32) -> u32 {
 fn apply_restart(
     frame: u32,
     level: LevelId,
+    captured_saved_level: LevelId,
     graph: &RetailZoneGraph,
     camera: &mut RetailCameraRuntime,
     lifecycle: &mut ZoneLifecycle,
@@ -1529,9 +1530,9 @@ fn apply_restart(
         .saved_level_state()
         .cloned()
         .ok_or_else(|| "load-state effect has no saved snapshot".to_owned())?;
-    if snapshot.level != level {
+    if captured_saved_level != level {
         let outcome = runtime
-            .restart_saved_level(host)
+            .restart_saved_level_from_effect(host, captured_saved_level)
             .map_err(|error| format!("different-level restart: {error:?}"))?;
         return match outcome {
             RetailRestartOutcome::DifferentLevel { saved_level, .. } => Ok(Some(format!(
@@ -1562,7 +1563,7 @@ fn apply_restart(
         )
         .map_err(|error| error.to_string())?;
     let outcome = runtime
-        .restart_saved_level(host)
+        .restart_saved_level_from_effect(host, captured_saved_level)
         .map_err(|error| format!("object restart: {error:?}"))?;
     let RetailRestartOutcome::Restarted(report) = outcome else {
         return Err("same-level snapshot requested a different stream".to_owned());
@@ -1947,14 +1948,23 @@ fn survey_pair_with_runtime(
             break;
         }
 
-        if report
-            .effects
-            .iter()
-            .any(|effect| matches!(effect, VmEffect::LoadState(_)))
-        {
+        let mut load_states = report.effects.iter().filter_map(|effect| match effect {
+            VmEffect::LoadState { saved_level, .. } => Some(*saved_level),
+            _ => None,
+        });
+        let captured_load = load_states.next();
+        if load_states.next().is_some() {
+            return Err(format!(
+                "frame {frame} emitted more than one LoadState boundary"
+            ));
+        }
+        if let Some(captured_load) = captured_load {
+            let captured_load = captured_load
+                .ok_or_else(|| format!("frame {frame} emitted an unresolved LoadState boundary"))?;
             match apply_restart(
                 frame,
                 level,
+                captured_load,
                 &graph,
                 &mut camera,
                 &mut lifecycle,
@@ -2357,6 +2367,360 @@ fn bonus_zone_flags_and_warp_program_layout_match_the_legal_corpus() {
     assert_eq!(player_warp.code().get(0xa34), Some(&0x1cc4_d819));
     assert_eq!(player_death.event_map().get(9), Some(&22));
     assert_eq!(player_death.code().get(0x5fc), Some(&0x1cc0_dbe0));
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
+    // This is a deliberately cross-stream characterization, not a synthetic
+    // save-state unit test.
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let parent = LevelId::new_const(0x0c);
+    let bonus = LevelId::new_const(0x24);
+    let known_name = |level| {
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("the vertical-flow level is present in the retail catalog")
+    };
+
+    let (parent_nsd, parent_nsf, parent_nsf_bytes) =
+        parse_local_pair(&root, parent).expect("Jungle Rollers pair must parse");
+    let (_, mut parent_runtime) = survey_pair_with_runtime(
+        known_name(parent),
+        parent,
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Jungle Rollers must establish its initial retail save snapshot");
+    assert_eq!(
+        parent_runtime
+            .saved_level_state()
+            .map(|snapshot| snapshot.level),
+        Some(parent)
+    );
+    let original_parent_snapshot = parent_runtime
+        .saved_level_state()
+        .cloned()
+        .expect("Jungle Rollers must retain the complete parent snapshot");
+    let parent_transition = {
+        let mut host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
+        parent_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(bonus.get()).expect("bonus LID fits i32"),
+            )
+            .expect("the parent LEVEL_END phase must preserve the bonus target")
+    };
+    assert!(parent_transition.event_failures.is_empty());
+    assert_eq!(parent_transition.resolved.level, bonus);
+    assert!(!parent_transition.resolved.bonus_return);
+    assert_eq!(
+        parent_transition
+            .carry
+            .saved_level_state
+            .as_ref()
+            .map(|snapshot| snapshot.level),
+        Some(parent)
+    );
+
+    let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
+        parse_local_pair(&root, bonus).expect("Tawna bonus pair must parse");
+    let bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, parent_transition.carry)
+            .expect("the bonus stream must import the parent session carry");
+    let (_, mut bonus_runtime) = survey_pair_with_runtime(
+        known_name(bonus),
+        bonus,
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        bonus_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("the bonus stream must mount with the carried parent snapshot");
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&original_parent_snapshot),
+        "the save-restricted bonus spawn must not overwrite the parent return"
+    );
+
+    let find_program = |runtime: &RetailRuntime, eid: Eid| {
+        runtime
+            .arena()
+            .postorder_snapshot()
+            .expect("the bonus object forest must remain valid")
+            .into_iter()
+            .filter_map(|arena| runtime.object_for_arena(arena))
+            .find(|object| {
+                runtime
+                    .machine()
+                    .object(object.vm())
+                    .ok()
+                    .and_then(crust_sim::gool::VmObject::program_identity)
+                    .is_some_and(|identity| identity.global_eid() == eid)
+            })
+    };
+    let player = bonus_runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| bonus_runtime.object_for_arena(arena))
+        .expect("the mounted bonus stream must have Crash");
+    let warp = find_program(
+        &bonus_runtime,
+        Eid::from_name("WarpC").expect("fixed retail portal EID is valid"),
+    )
+    .expect("the Tawna bonus spawn band must contain WarpC");
+    let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    // WarpC's authored sequence is `PSHV stack, 0` followed by an EVNT with
+    // argc one (`0x87a40816`), so WillC receives the literal zero argument.
+    let dispatch = bonus_runtime
+        .dispatch_event(
+            &mut bonus_host,
+            Some(warp),
+            Some(player),
+            22 << 8,
+            Some(&[0]),
+        )
+        .expect("WarpC must synchronously select WillC's authored WARP state");
+    assert_eq!(
+        dispatch.state_change.as_ref().map(|change| change.state),
+        Some(32)
+    );
+
+    let mut load_state = None;
+    for frame in 1..=5_400_u32 {
+        bonus_runtime.set_frame_timing(34, 34);
+        let pad = if frame == 300 {
+            // CardC's authored completion prompt requires a CROSS tap before
+            // its state 63 clears global one and releases WillC's WARP loop.
+            RetailPadSnapshot {
+                tapped: PAD_CROSS,
+                held: PAD_CROSS,
+                ..RetailPadSnapshot::default()
+            }
+        } else {
+            RetailPadSnapshot::default()
+        };
+        bonus_runtime
+            .set_pad_snapshot(0, pad)
+            .expect("the bonus runtime must accept idle input");
+        let report = bonus_runtime
+            .run_frame(&mut bonus_host, INSTRUCTION_BUDGET)
+            .unwrap_or_else(|error| panic!("bonus WARP frame {frame} failed: {error:?}"));
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "bonus WARP frame {frame} faulted: {:?}",
+            report.executions
+        );
+        let load_states = report
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::LoadState { saved_level, .. } => Some(*saved_level),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !load_states.is_empty() {
+            assert_eq!(
+                load_states.len(),
+                1,
+                "one authored WARP frame must emit one LoadState"
+            );
+            let captured = load_states[0]
+                .expect("the retail runtime must resolve the WARP save level synchronously");
+            load_state = Some((frame, captured));
+            break;
+        }
+    }
+    let (load_frame, captured_saved_level) =
+        load_state.expect("WillC WARP must reach its authored LoadState branch");
+    assert_eq!(load_frame, 301);
+    assert_eq!(captured_saved_level, parent);
+    assert!(
+        !bonus_runtime.machine().level_restart_requested(),
+        "different-level LoadState must finish the source GOOL traversal"
+    );
+    assert_eq!(
+        bonus_runtime.restart_saved_level_from_effect(&mut bonus_host, captured_saved_level),
+        Ok(RetailRestartOutcome::DifferentLevel {
+            saved_level: parent,
+            requested_level_sentinel: -2,
+        })
+    );
+    let return_transition = bonus_runtime
+        .finish_level_transition(&mut bonus_host, -2)
+        .expect("the bonus LEVEL_END phase must resolve the carried parent snapshot");
+    assert!(return_transition.event_failures.is_empty());
+    assert_eq!(return_transition.next_lid_after_event, -2);
+    assert_eq!(return_transition.resolved.level, parent);
+    assert!(return_transition.resolved.bonus_return);
+
+    // Reproduce the browser's protected destination mount: place its camera
+    // at the carried path/progress, suppress the one initial Crash auto-save,
+    // then perform native's same-level LevelRestart against the parent data.
+    let expected_snapshot = return_transition
+        .carry
+        .saved_level_state
+        .clone()
+        .expect("the resolved parent mount must retain its complete snapshot");
+    assert_eq!(
+        expected_snapshot, original_parent_snapshot,
+        "the complete parent snapshot must survive bonus execution and LEVEL_END"
+    );
+    let parent_graph = graph_for_pair(parent, &parent_nsd, &parent_nsf, &parent_nsf_bytes)
+        .expect("the returned parent camera graph must parse");
+    let (parent_zones, parent_lifecycle) = zone_catalog(
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        &parent_graph,
+        parent,
+    )
+    .expect("the returned parent zone catalog must parse");
+    let game_state = return_transition
+        .carry
+        .globals
+        .get(crust_sim::gool::GAME_STATE_GLOBAL)
+        .copied()
+        .expect("the session carry contains the game-state global")
+        .cast_signed();
+    let parent_camera = RetailCameraRuntime::at_path(
+        &parent_graph,
+        expected_snapshot.location.path,
+        expected_snapshot.location.progress.raw(),
+        game_state,
+    )
+    .expect("the returned parent camera must accept the saved location");
+    assert_eq!(parent_camera.location(), expected_snapshot.location);
+
+    let mut returned_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, parent, return_transition.carry)
+            .expect("the parent stream must import the bonus return carry");
+    seed_mounted_level_context_from_globals(
+        &mut returned_runtime,
+        &parent_graph,
+        &parent_lifecycle,
+        parent_camera.location(),
+    )
+    .expect("the returned parent must publish the saved camera context");
+    let mut parent_host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
+    returned_runtime
+        .create_retail_core_objects(parent_camera.location().path.zone, &mut parent_host)
+        .expect("the returned parent core objects must materialize");
+    returned_runtime
+        .create_retail_level_misc_object(parent_camera.location().path.zone, &mut parent_host)
+        .expect("the returned parent level-misc object must materialize");
+    let returned_neighbors = parent_lifecycle
+        .next_frame_spawn_scan()
+        .iter()
+        .map(|candidate| {
+            let zone = parent_zones
+                .get(&candidate.zone)
+                .expect("the returned lifecycle zone exists in the parsed catalog");
+            NeighborZone {
+                eid: zone.eid,
+                display_flags: candidate.display_flags,
+                entities: zone.entities.as_slice(),
+            }
+        })
+        .collect::<Vec<_>>();
+    returned_runtime.set_initial_crash_save_suppressed(true);
+    let protected_spawn =
+        returned_runtime.spawn_current_zone_neighbors(&returned_neighbors, &mut parent_host);
+    returned_runtime.set_initial_crash_save_suppressed(false);
+    assert!(
+        protected_spawn
+            .iter()
+            .all(|attempt| { attempt.result.is_ok() || expected_spawn_rejection(&attempt.result) })
+    );
+    assert_eq!(
+        returned_runtime.saved_level_state(),
+        Some(&expected_snapshot),
+        "the protected Crash spawn must not replace the parent snapshot"
+    );
+
+    let RetailRestartOutcome::Restarted(restart) = returned_runtime
+        .restart_saved_level(&mut parent_host)
+        .expect("the protected parent restart must complete")
+    else {
+        panic!("the returned parent snapshot unexpectedly requested another remount");
+    };
+    assert_eq!(restart.snapshot, expected_snapshot);
+    assert!(restart.respawn_event_failures.is_empty());
+    assert!(
+        restart
+            .zone_reports
+            .iter()
+            .all(|(_, report)| report.event_failures.is_empty())
+    );
+    assert_eq!(restart.restored_box_count, expected_snapshot.box_count);
+    assert_eq!(
+        returned_runtime
+            .level_state_context()
+            .expect("the restarted parent retains a camera context")
+            .location,
+        expected_snapshot.location
+    );
+    assert_eq!(
+        returned_runtime.arena().spawn_table().snapshot(),
+        expected_snapshot.spawn_words.map(|word| word & !1),
+        "first-spawn restoration keeps all 304 saved words and clears only the active bit"
+    );
+    let returned_player = returned_runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| returned_runtime.object_for_arena(arena))
+        .and_then(|object| returned_runtime.machine().object(object.vm()).ok())
+        .expect("the restarted parent must retain Crash");
+    for (register, expected) in [
+        (
+            process_register::TRANSLATION_X,
+            expected_snapshot.player_translation[0],
+        ),
+        (
+            process_register::TRANSLATION_Y,
+            expected_snapshot.player_translation[1],
+        ),
+        (
+            process_register::TRANSLATION_Z,
+            expected_snapshot.player_translation[2],
+        ),
+        (
+            process_register::ROTATION_Y,
+            expected_snapshot.player_rotation_yxz[0],
+        ),
+        (
+            process_register::ROTATION_X,
+            expected_snapshot.player_rotation_yxz[1],
+        ),
+        (
+            process_register::ROTATION_Z,
+            expected_snapshot.player_rotation_yxz[2],
+        ),
+        (process_register::SCALE_X, expected_snapshot.player_scale[0]),
+        (process_register::SCALE_Y, expected_snapshot.player_scale[1]),
+        (process_register::SCALE_Z, expected_snapshot.player_scale[2]),
+    ] {
+        assert_eq!(
+            returned_player.register(register),
+            Ok(expected.cast_unsigned())
+        );
+    }
 }
 
 #[test]

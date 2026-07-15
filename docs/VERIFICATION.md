@@ -722,6 +722,55 @@ is 1,322,866 bytes with SHA-256
 46,236 bytes with SHA-256
 `a26ab5a1a47530af0d7ca7326da07e3dcdfb30c8dcd9dafd56523d93813f5abe`.
 
+### Live-collider, raw-hotspot, and pool-pointer closeout (2026-07-15)
+
+- A read-only source audit established that the current collider is a live link, not an index into
+  the bounded frame-candidate array. Native solid phases continue reading its translation,
+  status-B, state flags, object type, and hotspot size after a candidate rejection, and synchronous
+  handlers may replace that link before later phases. Focused Rust tests cover a current collider
+  omitted from the candidate snapshot, its retained `BOX_OBJECT` floor offset and priority
+  metadata, a handler replacement, and the source-priority self-alias case.
+- Native hotspot math forms inset `p1`/`p2` endpoints and compares their faces directly; it does not
+  require or normalize `p1 <= p2`. The exact Rolling Stones candidate that exposed the difference
+  has hotspot `0x5000` and produces reversed Z endpoints `30,361,440` and `30,361,184`. Its focused
+  active-input run completed 1,800 browser-ordered simulation frames with zero VM error, faulted
+  object, or checked runtime issue.
+- The Jaws of Darkness failure was traced to `FruiC` state 12: global six's `fruit_hud` object
+  pointer is copied into the creator link, then opcode word `0x11d08e17` reads that creator's
+  `translation.x`. Native static-pool storage retains the reclaimed process word
+  `0xffff3800` (`-51,200`). The checked representation now carries the pointer's physical pool-slot
+  provenance through this characterized global-read, stack/register, and newly written link chain,
+  and retains all initialized process registers for a reclaimed slot. Focused tests prove that
+  compact-handle reuse in a different slot still reads `-51,200`, while reuse of the original
+  physical slot retargets the read to the new occupant. Unrelated inbound links that predate target
+  reclamation are still cleared by checked teardown and were not generalized in this slice. The
+  focused Jaws active-input run then completed 1,800 clean frames.
+- `cargo test -p crust-sim --lib --locked` passed all 520 simulation-library tests. The strict
+  active-input survey ran all 43 bootable pairs for 1,800 frames each (77,400 frames total) with
+  clean-policy enforcement and no checked runtime issue. This expands the earlier 360-frame survey;
+  it remains a bounded direct-boot simulation sweep rather than full-route or browser-playthrough
+  evidence.
+- Locked native workspace tests, warnings-denied native Clippy, the optimized native workspace
+  release, warnings-denied `wasm32-unknown-unknown` `crust-web` Clippy, and the optimized Wasm build
+  all passed. The final distribution artifact is a 1,326,106-byte Wasm module with SHA-256
+  `06fc640166c7dda46c5893ecace90a9b10a4649ee53d6f4e772326a4e4c31c54`; its 46,236-byte generated
+  loader has SHA-256 `9f687eecf3266eef42bdc147c8bdc38d80dbc3d036847b9cc2b3b2c471a1a98d`.
+- The rebuilt distribution was served from `127.0.0.1:4174` and exercised in a fresh foreground
+  Google Chrome pass. The native macOS picker selected the user's legally owned raw NTSC-U BIN in
+  place. The browser recognized 88 streams, 44/44 pairs, and 219 MiB of extracted in-tab data, then
+  reached the retail publisher screen, main menu, and N. Sanity Beach island-map node through the
+  title target. A separate direct `0x09` boot visibly rendered N. Sanity Beach with Crash and crates;
+  telemetry reported `RUNNING`, 30.00 Hz, `SYNTH ACTIVE`, and level `0x09`.
+- Eight `Up` taps followed by `Z` visibly changed the gameplay frame and captured Crash in a jump.
+  The page controls changed simulation telemetry to `PAUSED` and back to `RUNNING`, audio telemetry
+  to `MUTED` and back to `SYNTH ACTIVE`, and successfully presented the live canvas fullscreen.
+  No proprietary byte was written to the repository; retail-data reads stayed in the local browser
+  tab or legally local test paths.
+- This browser pass did not inspect Chrome DevTools, perform a complete level route, or manually
+  repeat gamepad, touch, virtual-card persistence, later transitions, bosses, bonuses, or ending
+  flows. It is browser evidence for import, title presentation, direct gameplay, keyboard input,
+  audio state, pause, and fullscreen—not a full-playthrough or retail-parity claim.
+
 ## Reproducible commands
 
 ```bash
@@ -758,6 +807,17 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
   C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_ACTIVE_INPUT=1 C1_SURVEY_FRAMES=1800 \
+  C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=0x15 C1_SURVEY_ACTIVE_INPUT=1 \
+  C1_SURVEY_FRAMES=1800 C1_SURVEY_REQUIRE_CLEAN=1 \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=0x1d C1_SURVEY_ACTIVE_INPUT=1 \
+  C1_SURVEY_FRAMES=1800 C1_SURVEY_REQUIRE_CLEAN=1 \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
   every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_intro_terminal_start --locked \

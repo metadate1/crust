@@ -84,6 +84,13 @@ gameplay path.
   font offset against global animation item five. Foreign-object aliases, external-state-table
   aliases, and the rotating constant region are rejected because their backing identity/lifetime is
   not represented by the current checked token. Opcode `0x81` is the native one-cycle no-op.
+  Checked object-pointer values retain physical native pool-slot provenance along the characterized
+  Jaws global-read, process-stack/register, and newly written link chain. Initialized process-
+  register storage remains addressable after reclamation until that physical slot is reused. This
+  covers Jaws of Darkness's `FruiC` state-12 copy from global six into its creator link and the
+  subsequent `translation.x` read of
+  `0xffff3800` (`-51,200`); compact VM-handle reuse elsewhere does not retarget it, while same-slot
+  reuse does.
 - Static solid queries are refreshed from the current camera/native `cur_zone` neighborhood before
   object execution rather than remaining attached to each object's spawn zone. The per-object zone
   identity remains separately typed for object colors and zone migration. When that object zone is
@@ -142,7 +149,13 @@ gameplay path.
   GOOL/physics, while objects visited before Crash register after physics only inside the inclusive
   `±0x7d000` X/Z and `±0xaf000` Y window; rejected late objects set status-A invalid bit `0x8000`.
   The same-stamp tail also applies Crash's asymmetric accepted/priority collider links, hotspot
-  `0x1000`, and target-collider clearing on a miss.
+  `0x1000`, and target-collider clearing on a miss. A mover's current collider metadata is read from
+  the validated live link independently of this bounded candidate array and refreshed after a
+  synchronous handler; later floor/wall decisions therefore still observe a retained collider
+  omitted from the current frame snapshot. Hotspot insets preserve raw, potentially inverted
+  `p1`/`p2` axes and use the source's direct face comparisons rather than normalizing them. The
+  legally local Rolling Stones active-input regression exercises that inverted-axis case for 1,800
+  clean frames.
   Type-two sprites, type-five fragments and status-B 2D CVTX use the source ZXY sprite transform.
   Their signed half-size calculation preserves the source MIPS `SLLV`/`SRAV` low-five-bit shift
   semantics and wrapping 32-bit intermediate before checked GTE range rejection. The legal
@@ -237,6 +250,10 @@ gameplay path.
 
 ## Exact remaining parity gaps
 
+- Checked object teardown still clears inbound process links that already pointed at an object when
+  it was reclaimed. Native static-pool pointers can retain those words until physical-slot reuse.
+  The current provenance slice covers retained pointer globals and the Jaws pointer copied into its
+  creator link after reclamation; it is not yet a general model for every pre-existing stale link.
 - The browser retail runtime now instantiates displayed group-three zone entities and integrates
   the bounded arena and VM through explicit typed mappings, but it is not the complete object graph
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode
@@ -370,9 +387,13 @@ gameplay path.
   source does. Both outgoing level-end broadcasts are
   clean. This deterministic first completion loop does not establish a browser playthrough or full
   retail parity.
-  All 43 selectable starts also completed a strict 360-frame direction/button sweep with no checked
-  runtime issue. The five directly bootable bonus streams receive a one-shot same-level snapshot
-  only when a fresh host boot encounters their source save-restricted spawn zone, making direct-
+  All 43 selectable starts also completed a strict 1,800-frame direction/button sweep with no
+  checked runtime issue: 77,400 browser-ordered simulation frames in aggregate. Jaws of Darkness
+  separately completed the same 1,800-frame focused window after its reclaimed-creator pointer was
+  given physical pool-slot provenance. This bounded clean survey is not evidence that every route,
+  transition, boss, bonus, or ending was reached. The five directly bootable bonus streams receive
+  a one-shot same-level snapshot only when a fresh host boot encounters their source save-restricted
+  spawn zone, making direct-
   boot death/restart deterministic. Normal parent-to-bonus session mounts retain the parent
   snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
   host return destination, so this is not evidence of a complete bonus round trip.

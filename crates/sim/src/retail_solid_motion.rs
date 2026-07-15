@@ -272,9 +272,27 @@ impl SolidObjectZone {
     }
 }
 
+/// Validated live process fields reached through the mover's collider link.
+///
+/// Retail keeps a raw object pointer in process link six and follows it even
+/// when that object did not publish a bound into the current frame's bounded
+/// candidate list. Keeping the handle and every field read by solid motion in
+/// one value prevents an ID from silently losing its live metadata.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SolidColliderState {
+    pub id: u32,
+    pub translation: Vec3,
+    pub status_b: u32,
+    pub state_flags: u32,
+    pub object_type: u32,
+    pub hotspot_size: i32,
+}
+
 /// Runtime state of the object being moved.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SolidMotionState {
+    /// Stable ID of the moving object when hosted by the checked VM.
+    pub object_id: Option<u32>,
     pub translation: Vec3,
     /// Unscaled process velocity; floor and ceiling hits update its Y component.
     pub velocity: Vec3,
@@ -290,13 +308,14 @@ pub struct SolidMotionState {
     pub floor_impact_velocity: i32,
     pub event: u32,
     pub hotspot_size: i32,
-    /// Stable ID of the currently registered collider, if any.
-    pub collider: Option<u32>,
+    /// Live, validated object reached through process link six, if any.
+    pub collider: Option<SolidColliderState>,
 }
 
 impl Default for SolidMotionState {
     fn default() -> Self {
         Self {
+            object_id: None,
             translation: Vec3::ZERO,
             velocity: Vec3::ZERO,
             local_bound: Bounds3::default(),
@@ -334,6 +353,19 @@ pub struct SolidObjectCandidate {
     pub category: u32,
     pub object_type: u32,
     pub hotspot_size: i32,
+}
+
+impl SolidObjectCandidate {
+    fn collider_state(self) -> SolidColliderState {
+        SolidColliderState {
+            id: self.id,
+            translation: self.translation,
+            status_b: self.status_b,
+            state_flags: self.state_flags,
+            object_type: self.object_type,
+            hotspot_size: self.hotspot_size,
+        }
+    }
 }
 
 /// Process fields read by native `GoolCollide` before it mutates either
@@ -995,14 +1027,9 @@ fn stop_at_solid(
     let desired_z = checked_mul_div(checked_sub(adjusted.z, translation.z)?, 4, 8192)?
         .checked_add(16)
         .ok_or(SolidMotionError::ArithmeticOverflow)?;
-    let collider_type = state.collider.and_then(|id| {
-        candidates
-            .iter()
-            .find(|candidate| candidate.active && candidate.id == id)
-            .map(|candidate| candidate.object_type)
-    });
-    let mut nearest =
-        find_nearest_open(&bitmap, desired_x, desired_z, state.collider, collider_type);
+    let collider_id = state.collider.map(|collider| collider.id);
+    let collider_type = state.collider.map(|collider| collider.object_type);
+    let mut nearest = find_nearest_open(&bitmap, desired_x, desired_z, collider_id, collider_type);
     if nearest.is_none() && collider_type != Some(0x22) {
         if solid_replot_walls(query, translation, 0, false, &mut bitmap)? != 0 {
             solid_replot_walls(query, translation, 1, true, &mut bitmap)?;
@@ -1016,7 +1043,7 @@ fn stop_at_solid(
                 false,
             )?;
         }
-        nearest = find_nearest_open(&bitmap, desired_x, desired_z, state.collider, collider_type);
+        nearest = find_nearest_open(&bitmap, desired_x, desired_z, collider_id, collider_type);
     }
     let (adjusted_x, adjusted_z, found_open) = nearest.unwrap_or((16, 16, false));
     if found_open {
@@ -1152,11 +1179,7 @@ fn stop_at_floor(
     if let Some(object_y) = object_floor {
         floor_nodes_y = Some(object_y);
         flags = 0x0020_0001;
-        if let Some(collider) = state.collider.and_then(|id| {
-            candidates
-                .iter()
-                .find(|candidate| candidate.active && candidate.id == id)
-        }) {
+        if let Some(collider) = state.collider {
             if collider.status_b & BOX_OBJECT != 0 {
                 floor_offset = 0x19_000;
             }
@@ -1395,7 +1418,7 @@ fn highest_object_below(
         }
     }
     if let Some(candidate) = found {
-        register_object_collision(state, candidate, candidates, collider_bound, effects)?;
+        register_object_collision(state, candidate, collider_bound, effects)?;
     }
     Ok(highest)
 }
@@ -1403,18 +1426,12 @@ fn highest_object_below(
 fn register_object_collision(
     state: &mut SolidMotionState,
     candidate: SolidObjectCandidate,
-    candidates: &[SolidObjectCandidate],
     moving_bound: Bounds3,
     effects: &mut Vec<SolidEffect>,
 ) -> Result<(), SolidMotionError> {
     let current = state
         .collider
-        .filter(|current| *current != candidate.id)
-        .and_then(|current_id| {
-            candidates
-                .iter()
-                .find(|current| current.active && current.id == current_id)
-        })
+        .filter(|current| current.id != candidate.id)
         .map(|current| ObjectCollisionState {
             translation: current.translation,
             state_flags: current.state_flags,
@@ -1426,7 +1443,7 @@ fn register_object_collision(
             state_flags: state.state_flags,
             hotspot_size: state.hotspot_size,
         },
-        state.collider,
+        state.collider.map(|current| current.id),
         moving_bound,
         candidate.id,
         ObjectCollisionState {
@@ -1445,11 +1462,17 @@ fn register_object_collision(
         effects.push(SolidEffect::SetCandidateCollider {
             candidate: candidate.id,
         });
+        if state.object_id == Some(candidate.id) {
+            // `src == tgt` aliases the source-link write back onto the mover.
+            // This matters in the source-priority rejection branch, where the
+            // ordinary target assignment below is intentionally skipped.
+            state.collider = Some(candidate.collider_state());
+        }
     }
     if resolution.links != ObjectCollisionLinks::Both {
         return Ok(());
     }
-    state.collider = Some(candidate.id);
+    state.collider = Some(candidate.collider_state());
     if resolution.target_hotspot {
         state.status_a |= STATUS_HOTSPOT_COLLISION;
     }
@@ -1465,9 +1488,9 @@ fn register_object_collision(
 /// Resolves the priority, reciprocal-link, and hotspot branches shared by
 /// native `GoolCollide` callers without mutating either participant.
 ///
-/// `current` is the live object named by `target_collider` when it is available
-/// to the caller. The solid solver deliberately supplies `None` for a stale or
-/// out-of-snapshot collider, matching its existing bounded-candidate policy.
+/// `current` is the validated live object named by `target_collider`. Solid
+/// motion carries that snapshot separately from frame-bound candidates because
+/// native link six can legally name an object absent from the current list.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_object_collision(
     target: ObjectCollisionState,
@@ -1502,17 +1525,17 @@ pub(crate) fn resolve_object_collision(
     let target_hotspot = if target.hotspot_size == 0 {
         false
     } else {
-        source_bound_intersection(
+        source_raw_bound_intersection(
             inset_horizontal(target_bound, target.hotspot_size)?,
-            source_bound,
+            source_bound.into(),
         )
     };
     let source_hotspot = if source.hotspot_size == 0 {
         false
     } else {
-        source_bound_intersection(
+        source_raw_bound_intersection(
             inset_horizontal(source_bound, source.hotspot_size)?,
-            target_bound,
+            target_bound.into(),
         )
     };
     Ok(ObjectCollisionResolution {
@@ -1795,12 +1818,36 @@ fn bounds_overlap_for_floor(collider: Bounds3, node: Bounds3) -> bool {
 }
 
 fn source_bound_intersection(a: Bounds3, b: Bounds3) -> bool {
-    b.max.y >= a.min.y
-        && b.min.y < a.max.y
-        && b.min.x < a.max.x
-        && b.min.z < a.max.z
-        && b.max.x >= a.min.x
-        && b.max.z >= a.min.z
+    source_raw_bound_intersection(a.into(), b.into())
+}
+
+/// Native temporary bound endpoints before any ordering invariant is imposed.
+///
+/// Hotspot insets can legally cross on a narrow axis. Retail keeps those raw
+/// endpoints and feeds them to direct comparisons and wall loops; normalizing
+/// or rejecting them changes gameplay.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RawBound3 {
+    p1: Vec3,
+    p2: Vec3,
+}
+
+impl From<Bounds3> for RawBound3 {
+    fn from(bound: Bounds3) -> Self {
+        Self {
+            p1: bound.min,
+            p2: bound.max,
+        }
+    }
+}
+
+fn source_raw_bound_intersection(a: RawBound3, b: RawBound3) -> bool {
+    b.p2.y >= a.p1.y
+        && b.p1.y < a.p2.y
+        && b.p1.x < a.p2.x
+        && b.p1.z < a.p2.z
+        && b.p2.x >= a.p1.x
+        && b.p2.z >= a.p1.z
 }
 
 fn bound_strictly_contains(outer: Bounds3, inner: Bounds3) -> bool {
@@ -1818,8 +1865,8 @@ fn checked_translate_bound(bound: Bounds3, translation: Vec3) -> Result<Bounds3,
     Bounds3::new(min, max).ok_or(SolidMotionError::ArithmeticOverflow)
 }
 
-fn inset_horizontal(bound: Bounds3, amount: i32) -> Result<Bounds3, SolidMotionError> {
-    let min = Vec3 {
+fn inset_horizontal(bound: Bounds3, amount: i32) -> Result<RawBound3, SolidMotionError> {
+    let p1 = Vec3 {
         x: bound
             .min
             .x
@@ -1832,7 +1879,7 @@ fn inset_horizontal(bound: Bounds3, amount: i32) -> Result<Bounds3, SolidMotionE
             .checked_add(amount)
             .ok_or(SolidMotionError::ArithmeticOverflow)?,
     };
-    let max = Vec3 {
+    let p2 = Vec3 {
         x: bound
             .max
             .x
@@ -1845,7 +1892,7 @@ fn inset_horizontal(bound: Bounds3, amount: i32) -> Result<Bounds3, SolidMotionE
             .checked_sub(amount)
             .ok_or(SolidMotionError::ArithmeticOverflow)?,
     };
-    Bounds3::new(min, max).ok_or(SolidMotionError::ArithmeticOverflow)
+    Ok(RawBound3 { p1, p2 })
 }
 
 fn average_height(sum: i64, count: u32) -> Result<Option<i32>, SolidMotionError> {
@@ -2218,7 +2265,9 @@ fn plot_object_walls(
             continue;
         }
         if include_collisions
-            && state.collider == Some(candidate.id)
+            && state
+                .collider
+                .is_some_and(|collider| collider.id == candidate.id)
             && test_bound.min.y >= candidate.bounds.max.y
         {
             continue;
@@ -2246,10 +2295,10 @@ fn plot_object_walls(
                     continue;
                 }
             }
-            let x1 = checked_mul_div(checked_sub(node_bound.min.x, translation.x)?, 4, 8192)?;
-            let z1 = checked_mul_div(checked_sub(node_bound.min.z, translation.z)?, 4, 8192)?;
-            let x2 = checked_mul_div(checked_sub(node_bound.max.x, translation.x)?, 4, 8192)?;
-            let z2 = checked_mul_div(checked_sub(node_bound.max.z, translation.z)?, 4, 8192)?;
+            let x1 = checked_mul_div(checked_sub(node_bound.p1.x, translation.x)?, 4, 8192)?;
+            let z1 = checked_mul_div(checked_sub(node_bound.p1.z, translation.z)?, 4, 8192)?;
+            let x2 = checked_mul_div(checked_sub(node_bound.p2.x, translation.x)?, 4, 8192)?;
+            let z2 = checked_mul_div(checked_sub(node_bound.p2.z, translation.z)?, 4, 8192)?;
             scratch.plot_rectangle(x1, z1, x2, z2, true);
             if include_collisions {
                 for_forward_eight(x1, x2, false, |x| {
@@ -2267,7 +2316,7 @@ fn plot_object_walls(
             }
         }
         if include_collisions && source_bound_intersection(object_bound, candidate.bounds) {
-            register_object_collision(state, candidate, candidates, object_bound, effects)?;
+            register_object_collision(state, candidate, object_bound, effects)?;
         }
     }
     Ok(())
@@ -2411,6 +2460,10 @@ mod tests {
             local_bound: TEST_BOUND_EVENT,
             ..SolidMotionState::default()
         }
+    }
+
+    fn collider_id(state: &SolidMotionState) -> Option<u32> {
+        state.collider.map(|collider| collider.id)
     }
 
     #[test]
@@ -2618,6 +2671,103 @@ mod tests {
     }
 
     #[test]
+    fn inverted_retail_hotspot_endpoints_remain_raw_and_do_not_fault() {
+        let candidate_bound = Bounds3 {
+            min: Vec3 {
+                x: 1_846_176,
+                y: 1_099_440,
+                z: 30_340_960,
+            },
+            max: Vec3 {
+                x: 2_131_616,
+                y: 1_384_880,
+                z: 30_381_664,
+            },
+        };
+        let inset = inset_horizontal(candidate_bound, 20_480).unwrap();
+        assert_eq!(inset.p1.z, 30_361_440);
+        assert_eq!(inset.p2.z, 30_361_184);
+        assert!(inset.p1.z > inset.p2.z);
+
+        let between_reversed_faces = Bounds3 {
+            min: Vec3 {
+                x: 1_900_000,
+                y: 1_100_000,
+                z: 30_361_200,
+            },
+            max: Vec3 {
+                x: 1_900_100,
+                y: 1_100_100,
+                z: 30_361_300,
+            },
+        };
+        assert!(
+            !source_raw_bound_intersection(inset, between_reversed_faces.into()),
+            "native direct face comparisons must not normalize an inverted axis"
+        );
+
+        let translation = candidate_bound.min;
+        let mut state = SolidMotionState {
+            object_id: Some(1),
+            translation,
+            local_bound: Bounds3 {
+                min: Vec3::ZERO,
+                max: Vec3 {
+                    x: candidate_bound.max.x - candidate_bound.min.x,
+                    y: candidate_bound.max.y - candidate_bound.min.y,
+                    z: candidate_bound.max.z - candidate_bound.min.z,
+                },
+            },
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 21,
+            active: true,
+            translation: Vec3 {
+                x: 1_988_896,
+                y: 1_242_160,
+                z: 30_361_312,
+            },
+            bounds: candidate_bound,
+            status_b: SOLID_SIDE,
+            status_c: 0,
+            state_flags: 0,
+            category: 0x500,
+            object_type: 22,
+            hotspot_size: 20_480,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            translation,
+            0,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(collider_id(&state), Some(21));
+        assert_eq!(
+            effects,
+            [
+                SolidEffect::ObjectCollision {
+                    candidate: 21,
+                    accepted: true,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 21 },
+                SolidEffect::SetCandidateStatus {
+                    candidate: 21,
+                    status_bits: STATUS_HOTSPOT_COLLISION,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn object_wall_overlap_runs_native_collision_and_hotspot_updates() {
         let mut state = SolidMotionState {
             local_bound: Bounds3 {
@@ -2671,7 +2821,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.collider, Some(7));
+        assert_eq!(collider_id(&state), Some(7));
         assert_eq!(state.status_a & STATUS_HOTSPOT_COLLISION, 0);
         assert_eq!(
             effects,
@@ -2751,7 +2901,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.collider, Some(8));
+        assert_eq!(collider_id(&state), Some(8));
         assert_eq!(
             effects,
             [
@@ -2779,6 +2929,235 @@ mod tests {
     }
 
     #[test]
+    fn object_wall_collision_uses_live_current_missing_from_frame_candidates() {
+        let current = SolidColliderState {
+            id: 99,
+            translation: Vec3 { x: 100, y: 0, z: 0 },
+            status_b: BOX_OBJECT,
+            state_flags: 0,
+            object_type: 0x22,
+            hotspot_size: 0,
+        };
+        let mut state = SolidMotionState {
+            object_id: Some(1),
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            collider: Some(current),
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3 { x: 500, y: 0, z: 0 },
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -200,
+                    y: -10,
+                    z: -200,
+                },
+                max: Vec3 {
+                    x: 200,
+                    y: 110,
+                    z: 200,
+                },
+            },
+            status_b: 0,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 0,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            Vec3::ZERO,
+            0x0010_0000,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(state.collider, Some(current));
+        assert_eq!(
+            effects,
+            [SolidEffect::ObjectCollision {
+                candidate: 7,
+                accepted: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn out_of_snapshot_current_box_controls_floor_offset_after_rejection() {
+        let bytes = [0_u8; ZDAT_RECT_BYTES];
+        let zone = leaf_zone(0, &bytes);
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3 { x: 500, y: 0, z: 0 },
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: -100,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100_000,
+                    z: 100,
+                },
+            },
+            status_b: BOX_OBJECT | SOLID_TOP,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 0,
+        };
+        let current = SolidColliderState {
+            id: 99,
+            translation: Vec3 { x: 100, y: 0, z: 0 },
+            status_b: BOX_OBJECT,
+            state_flags: 0,
+            object_type: 0x22,
+            hotspot_size: 0,
+        };
+        let run = |status_b| {
+            let mut state = SolidMotionState {
+                object_id: Some(1),
+                collider: Some(SolidColliderState {
+                    status_b,
+                    ..current
+                }),
+                ..SolidMotionState::default()
+            };
+            let mut next_translation = Vec3::ZERO;
+            let mut query_cache = None;
+            let mut effects = Vec::new();
+            let outcome = stop_at_floor(
+                &[zone],
+                &[candidate],
+                &mut state,
+                Vec3::ZERO,
+                &mut next_translation,
+                &mut query_cache,
+                SolidMotionContext::default(),
+                &mut effects,
+            )
+            .unwrap();
+            (state, next_translation, outcome, effects)
+        };
+
+        let (boxed_state, boxed_translation, boxed, boxed_effects) = run(BOX_OBJECT);
+        assert_eq!(boxed.floor, Some(100_002));
+        assert_eq!(boxed_translation.y, 100_002);
+        assert_eq!(boxed_state.collider, Some(current));
+        assert_eq!(
+            boxed_effects,
+            [SolidEffect::ObjectCollision {
+                candidate: 7,
+                accepted: false,
+            }]
+        );
+
+        let (_, ordinary_translation, ordinary, _) = run(0);
+        assert_eq!(ordinary.floor, Some(0));
+        assert_eq!(ordinary_translation.y, 0);
+    }
+
+    #[test]
+    fn source_priority_self_candidate_replaces_the_mover_link_with_self() {
+        let mut state = SolidMotionState {
+            object_id: Some(7),
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            state_flags: 0x800,
+            collider: Some(SolidColliderState {
+                id: 99,
+                translation: Vec3 { x: 100, y: 0, z: 0 },
+                status_b: 0,
+                state_flags: 0,
+                object_type: 0,
+                hotspot_size: 0,
+            }),
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3::ZERO,
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            status_b: 0,
+            status_c: 0,
+            state_flags: 0x800,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 0,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            Vec3::ZERO,
+            0x0010_0000,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(collider_id(&state), Some(7));
+        assert_eq!(
+            effects,
+            [
+                SolidEffect::ObjectCollision {
+                    candidate: 7,
+                    accepted: false,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 7 },
+            ]
+        );
+    }
+
+    #[test]
     fn object_wall_collision_retains_native_self_candidate_semantics() {
         let mut state = SolidMotionState {
             local_bound: Bounds3 {
@@ -2794,7 +3173,14 @@ mod tests {
                 },
             },
             hotspot_size: 25,
-            collider: Some(7),
+            collider: Some(SolidColliderState {
+                id: 7,
+                translation: Vec3::ZERO,
+                status_b: 0,
+                state_flags: 0,
+                object_type: 0,
+                hotspot_size: 25,
+            }),
             ..SolidMotionState::default()
         };
         let candidate = SolidObjectCandidate {
@@ -2834,7 +3220,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.collider, Some(7));
+        assert_eq!(collider_id(&state), Some(7));
         assert_ne!(state.status_a & STATUS_HOTSPOT_COLLISION, 0);
         assert_eq!(
             effects,

@@ -116,10 +116,16 @@ An external `git archive` copy produced these results:
   pair-backed cache and active 304-word spawn table is rebuilt for the destination. Bonus return
   substitutes the saved zone/path/progress during destination initialization and protects the one
   pre-restart Crash spawn exactly as native `next_lid = -2` does.
-- Native raw pointers into the static object pool are represented by validated tagged global words
-  plus physical arena-slot storage identity. A retained Dark2 doctor pointer observes initialized
-  tombstone data until that physical slot is reused; compact VM-handle reuse in a different slot
-  does not retarget it. Global write epochs distinguish reassignment of an identical 32-bit tag.
+- Native raw pointers into the static object pool are represented by validated tagged words plus
+  physical arena-slot storage identity. In the characterized Jaws chain, provenance follows the
+  global read through process stack/register words into a newly written link; retired slots retain
+  their initialized process words rather than only a transform sidecar. A retained Dark2 doctor
+  pointer and Jaws of Darkness's global-six `fruit_hud` pointer therefore survive compact VM-handle
+  reuse in a different slot. Jaws `FruiC`
+  state 12 reads the reclaimed creator's exact `translation.x` value `0xffff3800` (`-51,200`). A
+  later object in the same physical slot retargets the native pointer, while global write epochs
+  distinguish reassignment of an identical 32-bit tag. Pre-existing inbound links are still cleared
+  by checked object teardown and remain a broader native-lifetime parity gap.
 - `LevelSaveState` and `LevelRestart` use an owned fixed-layout snapshot containing only fields the
   source actually copies. The browser preflights pager/lifecycle/camera work before irreversible
   RESPAWN/TERM delivery, then publishes restored spawn words, player transform, counters and box
@@ -144,10 +150,15 @@ An external `git archive` copy produced these results:
   preorder objects bind after physics only inside the native inclusive range, and rejected late
   objects set the bounds-invalid status bit. Host effects `0x83`/`0x84` synchronously refresh the
   persistent local bound, and the same-stamp tail applies Crash's asymmetric collider links and
-  hotspot bookkeeping. Flag-enabled `PlotObjWalls` now uses that same checked collision resolver
-  for every broad frame-bound overlap in source candidate order; flag-zero wall replots remain
-  collision-read-only. The mover link mutates during the pass, while reciprocal candidate links and
-  hotspot writes are retained as ordered typed effects. Camera crossings apply checked zone
+  hotspot bookkeeping. The current link-six collider's complete live process metadata is retained
+  independently of the bounded candidate slice and refreshed after each synchronous handler, so a
+  rejected candidate can still leave the prior collider authoritative for later floor/wall phases.
+  Flag-enabled `PlotObjWalls` now uses that same checked collision resolver for every broad
+  frame-bound overlap in source candidate order; flag-zero wall replots remain collision-read-only.
+  The mover link mutates during the pass, while reciprocal candidate links and hotspot writes are
+  retained as ordered typed effects. Hotspot insets preserve raw `p1`/`p2` ordering even when the
+  inset inverts an axis; direct source face comparisons are applied without normalizing the bound.
+  Camera crossings apply checked zone
   teardown/paging/activation, and typed
   ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
   PCM/sequencer data, with source-timed fades and typed GOOL track toggles. The browser has no

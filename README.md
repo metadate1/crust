@@ -99,6 +99,13 @@ transformed frame bound before GOOL and physics and execute the same-stamp Crash
 collision-link/hotspot tail; objects visited before Crash register after physics when they remain
 inside the exact `±0x7d000/±0xaf000/±0x7d000` box. Opcodes `0x83` and `0x84` synchronously refresh
 only the persistent local bound at their source call site.
+The mover's current collider is retained as a validated snapshot of the live link-six object's
+translation, status, state flags, object type, and hotspot size, independent of whether that object
+is present in the current bounded frame-candidate slice. Synchronous collision handlers can replace
+the link, after which the remaining native solid phases re-resolve the new live object. Hotspot
+insets also preserve their raw source endpoint order: a large inset may invert an axis, and the
+following direct face comparisons do not normalize it. This exact case previously stopped Rolling
+Stones; its legally local active-input regression now completes 1,800 clean simulation frames.
 WGEO zones with graphics flag `0x100` now apply the source ripple transform to effect-marked world
 vertices before the ordinary world matrix. The independent 16-cell signed wave uses the native
 seed, advance, wrap, absolute-value conversion, and level-specific speed/period table. Pair-scoped
@@ -112,7 +119,12 @@ exempt fog pass, and Dark2 follows the live doctor/Crash illumination point plus
 ambient ramps. Native `far_color1` scratch persists across stream mounts, including Dark2's
 intentional reuse, and hidden draw-skip frames still transform worlds before presentation. The
 doctor global retains physical pool-slot identity and initialized tombstone storage, so compact VM
-handle reuse in another slot cannot accidentally retarget it; later physical slot reuse can. The
+handle reuse in another slot cannot accidentally retarget it; later physical slot reuse can. In the
+characterized Jaws path, the same provenance follows the global read through its stack/register
+copy into a newly written link. `FruiC` copies global six's reclaimed `fruit_hud` pointer into its
+creator link and reads the retained process `translation.x` value `0xffff3800` (`-51,200`). Compact
+handle reuse in a different physical slot leaves that value intact, while reuse of the captured
+physical slot source-faithfully retargets the pointer. The
 separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and audio
 voice stealing. Accepted lightning cues decode one of the local `lt1rA`–`lt3rA` ADIO entries and
 create an ownerless delayed-key voice without copying sample bytes into the repository.
@@ -218,6 +230,18 @@ dedicated main object outside Title. This fixes the Ending credits-object leak t
 filled all 97 arena slots at frame 1,437; the legally local 1,800-frame regression now peaks at 82
 live objects and proves returned slots are reused without a VM fault. This bounded lifecycle check
 does not certify the complete ending flow.
+The current clean-policy direction/button survey runs all 43 bootable pairs for 1,800
+browser-ordered simulation frames each—77,400 frames total—without a checked runtime issue. Rolling
+Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
+The `crust-sim` library has 520 passing tests, and the locked native workspace tests, warnings-denied
+Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm build gates pass.
+A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,
+recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab), and exercised the publisher
+screen, main menu, island map, and a direct N. Sanity Beach boot. The level rendered and ran at the
+reported 30.00 Hz with synthesized audio active; keyboard movement/jump, pause/resume, mute/unmute,
+and fullscreen were visibly exercised. This remains bounded verification, not a full-playthrough
+or retail-parity claim; gamepad, touch, card persistence, and later progression were not repeated
+manually in that pass.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 

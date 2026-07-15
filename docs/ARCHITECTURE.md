@@ -202,14 +202,17 @@ encountered `(level, object)` tags. Misc-ten selectors four/five maintain its ze
 one-as-hole representation and fall through to the corresponding active-table bit update; a new
 pair clears the active table and derives bit eight only from tags for that destination level.
 
-Pointer-valued GOOL globals retain their exact 32-bit tagged words, but native pool-storage
-lifetime is modeled separately from compact VM identity. The runtime records each physical arena
-slot, its last initialized translation, and the write epoch of the global that captured it. A
-freed Dark2 `doctor` reference therefore continues reading that slot's initialized storage; it
-retargets only when the physical LIFO pool reuses the slot, even if the lowest-free VM handle was
-reused earlier for another object. A later global assignment of the same tagged word is
-distinguished by its write epoch and binds the current object. No stale Rust reference is kept or
-dereferenced.
+Pointer-valued GOOL words retain their exact 32-bit tags, but native pool-storage lifetime is
+modeled separately from compact VM identity. The runtime records each physical arena slot and its
+last initialized process-register words. For the characterized Jaws path, a checked provenance
+sidecar follows the global read through the process stack/register copy into a newly written link.
+A freed Dark2 `doctor` reference and Jaws of Darkness's global-six `fruit_hud`/creator chain
+therefore continue reading initialized storage from the captured slot. Compact-handle reuse in a
+different slot cannot retarget either pointer; physical LIFO slot reuse can. A later global
+assignment of the same tagged word is distinguished by its write epoch and binds the current
+object. Checked teardown still clears unrelated inbound links that already existed when their
+target was reclaimed; general native stale-link retention remains a documented parity gap. No
+stale Rust reference is kept or dereferenced.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
@@ -287,6 +290,13 @@ changes immediately for later candidates and motion phases; reciprocal candidate
 bits retain the same ordered effect prefix before any nested synchronous handler. This is what
 allows Box7 and CrabC to observe their native next-traversal collision links without a C pointer
 compatibility layer.
+
+The mover's current collider is a validated snapshot of all live process fields read by solid
+motion, not a lookup into the bounded candidate array. It remains authoritative when omitted from
+that frame's candidates and is re-resolved after a synchronous handler replaces link six. Object
+hotspot insets retain raw endpoint ordering as a separate bound type; an inset may reverse an axis,
+and collision/wall code applies the source's direct face comparisons without constructing a
+normalized `Bounds3`.
 
 Solid execution deliberately owns two environments. The current-camera/native `cur_zone`
 environment supplies only its current-neighbor octrees to geometry queries and refreshes at each

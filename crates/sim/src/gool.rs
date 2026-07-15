@@ -30,9 +30,9 @@ use crate::retail_physics::{
 };
 use crate::retail_solid_motion::{
     ObjectCollisionLinks, ObjectCollisionState, STATUS_HOTSPOT_COLLISION, SmoothStopMemory,
-    SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError, SolidMotionState,
-    SolidObjectCandidate, SolidObjectZone, SolidQuery, SolidZoneBoundary, SolidZoneView,
-    resolve_object_collision, solve_retail_solid_motion_with_event_handler,
+    SolidColliderState, SolidEffect, SolidLevelQuirks, SolidMotionContext, SolidMotionError,
+    SolidMotionState, SolidObjectCandidate, SolidObjectZone, SolidQuery, SolidZoneBoundary,
+    SolidZoneView, resolve_object_collision, solve_retail_solid_motion_with_event_handler,
 };
 
 /// Maximum simultaneous VM identities: the 96-object retail pool plus its
@@ -2813,6 +2813,13 @@ pub struct VmObject {
     internal: Vec<u32>,
     external: Vec<u32>,
     registers: Vec<u32>,
+    /// Physical retail-pool provenance for pointer-shaped process words.
+    ///
+    /// Compact VM handles are an implementation detail and may be reused in
+    /// a different order from native's static object pool. Keeping provenance
+    /// beside the raw word lets a copied pointer continue to name its native
+    /// storage slot after the logical object is killed.
+    register_pool_slots: Vec<Option<u8>>,
     colors: [u16; COLOR_COUNT],
     base_colors: [u16; COLOR_COUNT],
     entity_spawn_flags: Option<u16>,
@@ -2862,6 +2869,7 @@ impl VmObject {
             internal: vec![0; TABLE_WORD_COUNT],
             external: vec![0; TABLE_WORD_COUNT],
             registers,
+            register_pool_slots: vec![None; REGISTER_COUNT],
             colors: [0; COLOR_COUNT],
             base_colors: [0; COLOR_COUNT],
             entity_spawn_flags: None,
@@ -3080,10 +3088,29 @@ impl VmObject {
     }
 
     pub fn set_register(&mut self, index: usize, value: u32) -> Result<(), VmError> {
+        self.set_register_with_pool_slot(index, value, None)
+    }
+
+    fn set_register_with_pool_slot(
+        &mut self,
+        index: usize,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        if let Some(slot) = pool_slot
+            && usize::from(slot) >= MAX_OBJECTS
+        {
+            return Err(VmError::InvalidRetailPoolSlot(slot));
+        }
+        let pool_slot = pool_slot.filter(|_| CollisionObjectReference::from_word(value).is_some());
         *self
             .registers
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
+        *self
+            .register_pool_slots
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = pool_slot;
         if index < self.links.len() {
             self.links[index] =
                 CollisionObjectReference::from_word(value).map(CollisionObjectReference::object);
@@ -3101,6 +3128,13 @@ impl VmObject {
             _ => {}
         }
         Ok(())
+    }
+
+    fn register_pool_slot(&self, index: usize) -> Result<Option<u8>, VmError> {
+        self.register_pool_slots
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidRegister(index))
     }
 
     pub fn register(&self, index: usize) -> Result<u32, VmError> {
@@ -3631,6 +3665,20 @@ impl VmObject {
     }
 
     fn push_stack_word(&mut self, value: u32) -> Result<(), VmError> {
+        self.push_stack_word_with_pool_slot(value, None)
+    }
+
+    fn push_stack_word_with_pool_slot(
+        &mut self,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        if let Some(slot) = pool_slot
+            && usize::from(slot) >= MAX_OBJECTS
+        {
+            return Err(VmError::InvalidRetailPoolSlot(slot));
+        }
+        let pool_slot = pool_slot.filter(|_| CollisionObjectReference::from_word(value).is_some());
         if self.stack.len() == MAX_STACK_WORDS {
             return Err(VmError::StackOverflow(self.handle));
         }
@@ -3641,6 +3689,10 @@ impl VmObject {
             .registers
             .get_mut(index)
             .ok_or(VmError::StackOverflow(self.handle))? = value;
+        *self
+            .register_pool_slots
+            .get_mut(index)
+            .ok_or(VmError::StackOverflow(self.handle))? = pool_slot;
         self.stack.push(value);
         Ok(())
     }
@@ -3879,6 +3931,10 @@ impl VmObject {
             .ok_or(VmError::InvalidRegister(index))? = target
             .map(CollisionObjectReference::new)
             .map_or(0, CollisionObjectReference::to_word);
+        *self
+            .register_pool_slots
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = None;
         Ok(())
     }
 
@@ -3994,6 +4050,12 @@ impl VmObject {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetiredRetailProcessStorage {
+    registers: Box<[u32]>,
+    register_pool_slots: Box<[Option<u8>]>,
+}
+
 /// Re-entrant GOOL machine. Branch state belongs to each invocation, never a
 /// process-global static as in the C interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4020,6 +4082,11 @@ pub struct Machine {
     /// orders, so pointer-valued retail globals must resolve through this
     /// storage identity rather than assuming both handles keep matching.
     retired_retail_pool_translations: [Option<[i32; 3]>; MAX_OBJECTS],
+    /// Complete initialized process words retained in each now-free native
+    /// pool slot. C keeps these words in static storage after `handle.type`
+    /// is cleared, so an authored dangling pointer may still read them until
+    /// the physical slot is allocated again.
+    retired_retail_pool_registers: Vec<Option<RetiredRetailProcessStorage>>,
     globals: Vec<u32>,
     /// Physical pool slot captured when a checked global write receives a
     /// live tagged object reference. Unchanged dangling words retain this
@@ -4092,6 +4159,7 @@ impl Machine {
             retail_pool_slots_by_object: [None; MAX_OBJECTS],
             retired_retail_translations: [None; MAX_OBJECTS],
             retired_retail_pool_translations: [None; MAX_OBJECTS],
+            retired_retail_pool_registers: vec![None; MAX_OBJECTS],
             globals: vec![0; global_words],
             retail_pool_slots_by_global: vec![None; global_words],
             global_write_epochs: vec![0; global_words],
@@ -4407,6 +4475,27 @@ impl Machine {
         Ok(())
     }
 
+    fn set_global_word_with_pool_slot(
+        &mut self,
+        index: usize,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        if let Some(pool_slot) = pool_slot {
+            if usize::from(pool_slot) >= MAX_OBJECTS {
+                return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+            }
+            if CollisionObjectReference::from_word(value).is_none() {
+                return Err(VmError::InvalidObjectReference(value));
+            }
+        }
+        self.set_global_word(index, value)?;
+        if let Some(pool_slot) = pool_slot {
+            self.retail_pool_slots_by_global[index] = Some(pool_slot);
+        }
+        Ok(())
+    }
+
     /// Returns the number of checked writes observed for one global word.
     pub(crate) fn global_word_write_epoch(&self, index: usize) -> Result<u64, VmError> {
         self.global_write_epochs
@@ -4654,6 +4743,30 @@ impl Machine {
             })?;
         self.solid_frame_bound_incarnations.push(incarnation);
         Ok(())
+    }
+
+    /// Snapshots every live collider field read by native solid motion.
+    ///
+    /// Link six is independent of the frame-bound list, so the linked object
+    /// must be resolved through the checked machine table instead of inferred
+    /// from collision candidates.
+    fn solid_collider_state(&self, collider: ObjectHandle) -> Result<SolidColliderState, VmError> {
+        let object = self.object(collider)?;
+        let translation = object.retail_transform()?.translation;
+        Ok(SolidColliderState {
+            id: u32::from(collider.get()),
+            translation: Vec3 {
+                x: translation[0],
+                y: translation[1],
+                z: translation[2],
+            },
+            status_b: object.register(process_register::STATUS_B)?,
+            state_flags: object.register(process_register::STATE_FLAGS)?,
+            object_type: object
+                .program_identity
+                .map_or(0, GoolProgramIdentity::object_type),
+            hotspot_size: object.register(process_register::HOTSPOT_SIZE)? as i32,
+        })
     }
 
     /// Applies one checked, pointer-free `GoolCollide` call.
@@ -5111,7 +5224,7 @@ impl Machine {
             local_bound,
             object_zone_context,
             smooth_stop,
-            collider,
+            collider_handle,
             status_c,
             animation_stamp,
             hotspot_size,
@@ -5150,12 +5263,15 @@ impl Machine {
                 object.local_bound,
                 object_zone_context,
                 self.solid_smooth_stop,
-                object.links[6].map(|collider| u32::from(collider.get())),
+                object.links[6],
                 object.register(process_register::STATUS_C)?,
                 object.register(process_register::ANIMATION_STAMP)? as i32,
                 object.register(process_register::HOTSPOT_SIZE)? as i32,
             )
         };
+        let collider = collider_handle
+            .map(|collider| self.solid_collider_state(collider))
+            .transpose()?;
 
         let object_zone =
             object_zone_context.map_or(SolidObjectZone::Missing, |(eid, boundary)| {
@@ -5231,6 +5347,7 @@ impl Machine {
         }
 
         let solid_state = SolidMotionState {
+            object_id: Some(u32::from(handle.get())),
             translation: state.translation,
             velocity: state.velocity,
             local_bound,
@@ -5372,7 +5489,7 @@ impl Machine {
             let collider = outcome
                 .state
                 .collider
-                .and_then(|candidate| u16::try_from(candidate).ok())
+                .and_then(|candidate| u16::try_from(candidate.id).ok())
                 .and_then(ObjectHandle::new);
             object.set_link(6, collider)?;
         }
@@ -5407,7 +5524,7 @@ impl Machine {
         }
         let collider = state
             .collider
-            .and_then(|candidate| u16::try_from(candidate).ok())
+            .and_then(|candidate| u16::try_from(candidate.id).ok())
             .and_then(ObjectHandle::new);
         object.set_link(6, collider)?;
         Ok(())
@@ -5440,7 +5557,10 @@ impl Machine {
             object.register(process_register::FLOOR_IMPACT_VELOCITY)? as i32;
         state.event = object.register(process_register::EVENT)?;
         state.hotspot_size = object.register(process_register::HOTSPOT_SIZE)? as i32;
-        state.collider = object.links[6].map(|collider| u32::from(collider.get()));
+        let collider = object.links[6];
+        state.collider = collider
+            .map(|collider| self.solid_collider_state(collider))
+            .transpose()?;
         Ok(())
     }
 
@@ -5684,6 +5804,47 @@ impl Machine {
             .flatten()
     }
 
+    fn live_object_in_retail_pool_slot(&self, pool_slot: u8) -> Option<ObjectHandle> {
+        self.retail_pool_slots_by_object
+            .iter()
+            .position(|candidate| *candidate == Some(pool_slot))
+            .and_then(|index| u16::try_from(index).ok())
+            .and_then(ObjectHandle::new)
+            .filter(|handle| self.objects.contains_key(handle))
+    }
+
+    /// Reads the live occupant or the initialized static storage retained in
+    /// one physical native object-pool slot.
+    fn retail_pool_register_word(
+        &self,
+        pool_slot: u8,
+        register: usize,
+    ) -> Result<(u32, Option<u8>), VmError> {
+        if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
+            let object = self.object(handle)?;
+            return Ok((
+                object.register(register)?,
+                object.register_pool_slot(register)?,
+            ));
+        }
+        let storage = self
+            .retired_retail_pool_registers
+            .get(usize::from(pool_slot))
+            .and_then(Option::as_ref)
+            .ok_or(VmError::InvalidRetailPoolSlot(pool_slot))?;
+        let value = storage
+            .registers
+            .get(register)
+            .copied()
+            .ok_or(VmError::InvalidRegister(register))?;
+        let provenance = storage
+            .register_pool_slots
+            .get(register)
+            .copied()
+            .ok_or(VmError::InvalidRegister(register))?;
+        Ok((value, provenance))
+    }
+
     /// Removes one checked VM object and nulls every inbound process link.
     /// Active synchronous event/interrupt frames cannot be removed midway;
     /// this keeps their stack-scoped argument tokens and return addresses from
@@ -5767,6 +5928,11 @@ impl Machine {
         self.retired_retail_translations[usize::from(handle.get())] = retired_translation;
         if let Some(pool_slot) = retail_pool_slot {
             self.retired_retail_pool_translations[usize::from(pool_slot)] = retired_translation;
+            self.retired_retail_pool_registers[usize::from(pool_slot)] =
+                Some(RetiredRetailProcessStorage {
+                    registers: removed.registers.clone().into_boxed_slice(),
+                    register_pool_slots: removed.register_pool_slots.clone().into_boxed_slice(),
+                });
         }
         self.retail_pool_slots_by_object[usize::from(handle.get())] = None;
         self.advance_object_incarnation(handle);
@@ -7879,8 +8045,8 @@ impl Machine {
                 self.push(handle, value)?;
             }
             0x11 => {
-                let value = self.read_operand(handle, a)?;
-                self.write_operand(handle, b, value)?;
+                let (value, pool_slot) = self.read_operand_with_pool_slot(handle, a)?;
+                self.write_operand_with_pool_slot(handle, b, value, pool_slot)?;
             }
             0x12 => {
                 let value = u32::from(self.read_operand(handle, a)? == 0);
@@ -8035,12 +8201,17 @@ impl Machine {
                     .get(index)
                     .copied()
                     .ok_or(VmError::InvalidRegister(index))?;
-                self.push(handle, value)?;
+                let pool_slot = self
+                    .retail_pool_slots_by_global
+                    .get(index)
+                    .copied()
+                    .flatten();
+                self.push_with_pool_slot(handle, value, pool_slot)?;
             }
             0x20 => {
-                let value = self.read_operand(handle, a)?;
+                let (value, pool_slot) = self.read_operand_with_pool_slot(handle, a)?;
                 let index = (self.read_operand(handle, b)? >> 8) as usize;
-                self.set_global_word(index, value)?;
+                self.set_global_word_with_pool_slot(index, value, pool_slot)?;
             }
             0x21 => {
                 let target = Angle12::new(self.read_operand(handle, a)? as i32);
@@ -10166,6 +10337,20 @@ impl Machine {
         }
     }
 
+    fn write_storage_reference_with_pool_slot(
+        &mut self,
+        reference: StorageReference,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        if reference.region != StorageRegion::Register {
+            return self.write_storage_reference(reference, value);
+        }
+        self.object_mut(reference.object)?
+            .set_register_with_pool_slot(usize::from(reference.index), value, pool_slot)
+            .map_err(|_| VmError::InvalidStorageReference(reference.to_word()))
+    }
+
     fn write_storage_span3(
         &mut self,
         reference: StorageReference,
@@ -10268,41 +10453,70 @@ impl Machine {
     }
 
     fn read_operand(&mut self, handle: ObjectHandle, operand: Operand) -> Result<u32, VmError> {
+        self.read_operand_with_pool_slot(handle, operand)
+            .map(|(value, _)| value)
+    }
+
+    fn read_operand_with_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        operand: Operand,
+    ) -> Result<(u32, Option<u8>), VmError> {
         match operand {
             Operand::Internal(index) => self
                 .object(handle)?
                 .internal
                 .get(usize::from(index))
                 .copied()
-                .ok_or(VmError::InvalidRegister(usize::from(index))),
+                .ok_or(VmError::InvalidRegister(usize::from(index)))
+                .map(|value| (value, None)),
             Operand::External(index) => self
                 .object(handle)?
                 .external
                 .get(usize::from(index))
                 .copied()
-                .ok_or(VmError::InvalidRegister(usize::from(index))),
+                .ok_or(VmError::InvalidRegister(usize::from(index)))
+                .map(|value| (value, None)),
             Operand::Immediate(value) => {
                 self.store_input_constant(value as u32);
-                Ok(value as u32)
+                Ok((value as u32, None))
             }
             Operand::FrameRelative(offset) => {
                 let base = self.object(handle)?.frame_base;
                 let index = base
                     .checked_add_signed(isize::from(offset))
                     .ok_or(VmError::InvalidOperand(0))?;
-                self.read_aliased_process_register(handle, index)
+                let object = self.object(handle)?;
+                Ok((object.register(index)?, object.register_pool_slot(index)?))
             }
-            Operand::Null => Ok(NULL_INPUT_VALUE),
+            Operand::Null => Ok((NULL_INPUT_VALUE, None)),
             Operand::StackDouble => Err(VmError::InvalidOperand(0x0bf0)),
             Operand::ObjectRegister(index) => {
-                self.read_aliased_process_register(handle, usize::from(index))
+                let object = self.object(handle)?;
+                let index = usize::from(index);
+                Ok((object.register(index)?, object.register_pool_slot(index)?))
             }
-            Operand::Stack => self.pop(handle),
+            Operand::Stack => self.pop_with_pool_slot(handle),
             Operand::LinkRegister { link, register } => {
-                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
-                    return Ok(NULL_INPUT_VALUE);
+                let (target, pool_slot) = {
+                    let object = self.object(handle)?;
+                    (
+                        object.links[usize::from(link)],
+                        object.register_pool_slot(usize::from(link))?,
+                    )
                 };
-                self.read_aliased_process_register(target, usize::from(register))
+                if let Some(pool_slot) = pool_slot {
+                    return self.retail_pool_register_word(pool_slot, usize::from(register));
+                }
+                let Some(target) = target else {
+                    return Ok((NULL_INPUT_VALUE, None));
+                };
+                let object = self.object(target)?;
+                let register = usize::from(register);
+                Ok((
+                    object.register(register)?,
+                    object.register_pool_slot(register)?,
+                ))
             }
         }
     }
@@ -10331,15 +10545,52 @@ impl Machine {
         Ok(())
     }
 
+    fn write_operand_with_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        operand: Operand,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        if let Some(reference) = self.output_reference(handle, operand)? {
+            self.write_storage_reference_with_pool_slot(reference, value, pool_slot)?;
+        }
+        Ok(())
+    }
+
     fn push(&mut self, handle: ObjectHandle, value: u32) -> Result<(), VmError> {
         self.object_mut(handle)?.push_stack_word(value)
     }
 
-    fn pop(&mut self, handle: ObjectHandle) -> Result<u32, VmError> {
+    fn push_with_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
         self.object_mut(handle)?
+            .push_stack_word_with_pool_slot(value, pool_slot)
+    }
+
+    fn pop(&mut self, handle: ObjectHandle) -> Result<u32, VmError> {
+        self.pop_with_pool_slot(handle).map(|(value, _)| value)
+    }
+
+    fn pop_with_pool_slot(&mut self, handle: ObjectHandle) -> Result<(u32, Option<u8>), VmError> {
+        let object = self.object_mut(handle)?;
+        let stack_index = object
             .stack
-            .pop()
-            .ok_or(VmError::StackUnderflow(handle))
+            .len()
+            .checked_sub(1)
+            .ok_or(VmError::StackUnderflow(handle))?;
+        let register_index = (object.initial_stack_pointer as usize)
+            .checked_add(stack_index)
+            .ok_or(VmError::StackOverflow(handle))?;
+        let pool_slot = object.register_pool_slot(register_index)?;
+        let value = object.stack.pop().ok_or(VmError::StackUnderflow(handle))?;
+        // Native only moves SP. The popped process word and its pointer bits
+        // remain in static storage until a later push overwrites that slot.
+        Ok((value, pool_slot))
     }
 
     fn jump_relative(&mut self, handle: ObjectHandle, offset: i64) -> Result<(), VmError> {
@@ -13384,6 +13635,106 @@ mod tests {
         assert_eq!(
             current_override.object(source).unwrap().links[6],
             Some(target)
+        );
+    }
+
+    #[test]
+    fn solid_motion_refresh_resolves_live_collider_outside_frame_bounds() {
+        let mover = handle(0);
+        let first = handle(1);
+        let second = handle(2);
+        let mut mover_object = VmObject::new(mover, Vec::new()).unwrap();
+        mover_object.set_link(6, Some(first)).unwrap();
+
+        let mut first_object = VmObject::new(first, Vec::new()).unwrap();
+        first_object
+            .set_retail_transform(RetailTransform {
+                translation: [100, 200, 300],
+                ..RetailTransform::default()
+            })
+            .unwrap();
+        first_object
+            .set_register(
+                process_register::STATUS_B,
+                crate::retail_solid_motion::BOX_OBJECT,
+            )
+            .unwrap();
+        first_object
+            .set_register(process_register::STATE_FLAGS, 0x800)
+            .unwrap();
+        first_object
+            .set_register(process_register::HOTSPOT_SIZE, 17)
+            .unwrap();
+        first_object.configure_test_program_identity_with_type(0, 0x22);
+
+        let mut second_object = VmObject::new(second, Vec::new()).unwrap();
+        second_object
+            .set_retail_transform(RetailTransform {
+                translation: [-400, -500, -600],
+                ..RetailTransform::default()
+            })
+            .unwrap();
+        second_object
+            .set_register(process_register::STATUS_B, 0x1234)
+            .unwrap();
+        second_object
+            .set_register(process_register::STATE_FLAGS, 0x5678)
+            .unwrap();
+        second_object
+            .set_register(process_register::HOTSPOT_SIZE, 23)
+            .unwrap();
+        second_object.configure_test_program_identity_with_type(0, 11);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(mover_object).unwrap();
+        machine.insert_object(first_object).unwrap();
+        machine.insert_object(second_object).unwrap();
+        assert!(machine.frame_bounds().is_empty());
+
+        let mut state = SolidMotionState::default();
+        machine
+            .refresh_live_solid_motion_state(mover, &mut state)
+            .unwrap();
+        assert_eq!(
+            state.collider,
+            Some(SolidColliderState {
+                id: u32::from(first.get()),
+                translation: Vec3 {
+                    x: 100,
+                    y: 200,
+                    z: 300,
+                },
+                status_b: crate::retail_solid_motion::BOX_OBJECT,
+                state_flags: 0x800,
+                object_type: 0x22,
+                hotspot_size: 17,
+            })
+        );
+
+        // A synchronous handler may replace link six. The refresh must follow
+        // that post-handler link instead of retaining the pre-dispatch object.
+        machine
+            .object_mut(mover)
+            .unwrap()
+            .set_link(6, Some(second))
+            .unwrap();
+        machine
+            .refresh_live_solid_motion_state(mover, &mut state)
+            .unwrap();
+        assert_eq!(
+            state.collider,
+            Some(SolidColliderState {
+                id: u32::from(second.get()),
+                translation: Vec3 {
+                    x: -400,
+                    y: -500,
+                    z: -600,
+                },
+                status_b: 0x1234,
+                state_flags: 0x5678,
+                object_type: 11,
+                hotspot_size: 23,
+            })
         );
     }
 
@@ -17159,6 +17510,89 @@ mod tests {
         assert_eq!(machine.retail_global_pool_slot(0), Ok(Some(8)));
         machine.set_global_word(0, 0).unwrap();
         assert_eq!(machine.retail_global_pool_slot(0), Ok(None));
+    }
+
+    fn global_pool_pointer_reader(handle: ObjectHandle) -> VmObject {
+        VmObject::new(
+            handle,
+            vec![
+                // GLBR global six (`fruit_hud`), then the exact Jaws FruiC
+                // state-12 pointer copy and linked trans.x read.
+                0x1fbe_0806,
+                Instruction::encode(0x11, STACK, 0x0e04),
+                Instruction::encode(0x11, 0x0d08, 0x0e17),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn global_pool_pointer_reads_retired_static_process_storage_after_compact_reuse() {
+        let fruit = handle(1);
+        let reader = handle(7);
+        let mut fruit_object = VmObject::new(fruit, vec![0]).unwrap();
+        fruit_object.set_register(8, 0xffff_3800).unwrap();
+        let mut machine = Machine::new(7);
+        machine.insert_object(fruit_object).unwrap();
+        machine.bind_retail_pool_slot(fruit, 1).unwrap();
+        machine
+            .set_global_word(6, CollisionObjectReference::new(fruit).to_word())
+            .unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(fruit, 1)
+            .unwrap();
+
+        // Compact handle one is independently reused twice in the legal Jaws
+        // route. Its later pool identity and register contents must not alter
+        // the unchanged native pointer stored in global six.
+        let mut unrelated = VmObject::new(fruit, vec![0]).unwrap();
+        unrelated.set_register(8, 0x00e8_0700).unwrap();
+        machine.insert_object(unrelated).unwrap();
+        machine.bind_retail_pool_slot(fruit, 4).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(fruit, 4)
+            .unwrap();
+
+        machine
+            .insert_object(global_pool_pointer_reader(reader))
+            .unwrap();
+        machine.run(reader, 3).unwrap();
+
+        let reader = machine.object(reader).unwrap();
+        assert_eq!(reader.register(23), Ok(0xffff_3800));
+        assert_eq!(reader.register_pool_slot(4), Ok(Some(1)));
+    }
+
+    #[test]
+    fn global_pool_pointer_observes_a_replacement_in_the_same_physical_slot() {
+        let fruit = handle(1);
+        let replacement = handle(2);
+        let reader = handle(7);
+        let mut fruit_object = VmObject::new(fruit, vec![0]).unwrap();
+        fruit_object.set_register(8, 0xffff_3800).unwrap();
+        let mut machine = Machine::new(7);
+        machine.insert_object(fruit_object).unwrap();
+        machine.bind_retail_pool_slot(fruit, 1).unwrap();
+        machine
+            .set_global_word(6, CollisionObjectReference::new(fruit).to_word())
+            .unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(fruit, 1)
+            .unwrap();
+
+        let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object.set_register(8, 0x1234_5600).unwrap();
+        machine.insert_object(replacement_object).unwrap();
+        machine.bind_retail_pool_slot(replacement, 1).unwrap();
+        machine
+            .insert_object(global_pool_pointer_reader(reader))
+            .unwrap();
+        machine.run(reader, 3).unwrap();
+
+        assert_eq!(
+            machine.object(reader).unwrap().register(23),
+            Ok(0x1234_5600)
+        );
     }
 
     #[test]

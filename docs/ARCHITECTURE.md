@@ -202,17 +202,35 @@ encountered `(level, object)` tags. Misc-ten selectors four/five maintain its ze
 one-as-hole representation and fall through to the corresponding active-table bit update; a new
 pair clears the active table and derives bit eight only from tags for that destination level.
 
-Pointer-valued GOOL words retain their exact 32-bit tags, but native pool-storage lifetime is
-modeled separately from compact VM identity. The runtime records each physical arena slot and its
-last initialized process-register words. For the characterized Jaws path, a checked provenance
-sidecar follows the global read through the process stack/register copy into a newly written link.
-A freed Dark2 `doctor` reference and Jaws of Darkness's global-six `fruit_hud`/creator chain
-therefore continue reading initialized storage from the captured slot. Compact-handle reuse in a
-different slot cannot retarget either pointer; physical LIFO slot reuse can. A later global
-assignment of the same tagged word is distinguished by its write epoch and binds the current
-object. Checked teardown still clears unrelated inbound links that already existed when their
-target was reclaimed; general native stale-link retention remains a documented parity gap. No
-stale Rust reference is kept or dereferenced.
+Pointer-valued GOOL words retain their exact 32-bit tags, while a sidecar records the native
+physical pool slot independently from compact VM identity. Globals capture provenance when written;
+rewriting the same raw tag advances its write epoch and captures the current slot. Before retail
+reclaim, the machine captures provenance for every pre-existing pointer-shaped process link,
+register, stack word, and internal/external data-table word that does not already have an older
+identity. MOV, stack, and linked-register copies carry that sidecar. Existing provenance wins when
+the same compact tag has already become a dangling pointer, so compact-handle reuse in another slot
+cannot silently retarget it.
+
+The 96 ordinary slots begin as native's ascending `free_objects` chain. Binding preflights handle,
+slot, occupancy, and free-list membership before installation is committed; unlinking an arbitrary
+slot reconnects its predecessor. Reclaim captures process storage, overwrites the freed object's
+parent with a distinct checked `&free_objects` tag, points its sibling at the previous free-list
+head, clears its child link, and pushes the slot at the head. The separately allocated main slot is
+never inserted into that ordinary chain and clears its three intrusive-tree links on release.
+Linked process-register reads and writes select the current occupant when the slot is live and the
+retired register array when it is free; nested pointer writes retain their own provenance, and a
+later occupant of the same physical slot source-faithfully retargets the old link. Translation
+writes also update the retained translation view used by hosted lighting.
+
+A replacement first inherits the slot's retained process array, then `GoolObjectInit` applies its
+selective in-place writes. Raw `sp`, `pc`, `fp`, `tp`, and `ep` words and the other source-listed
+fields reset; process words not written by initialization remain intact. The Dark2 `doctor`, Jaws
+of Darkness `fruit_hud`/creator chain, and Dr. N. Brio `BoxsC` creator links all use this same model.
+No stale Rust reference is kept or dereferenced. Writes that would mutate an ordinary free slot's
+three allocator-owned link words are rejected transactionally instead of reproducing native
+malformed-list behavior. Still outside this slice are address-taking through a free-slot link,
+provenance sidecars for event/spawn arguments, retained non-process colors/bounds/animation, and
+byte-exact dedicated-main allocation and reinitialization behavior.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
@@ -259,9 +277,10 @@ A `RETURN` with no call frame remains a normal halt for synthetic `VmObject::new
 program parsed from retail GOOL instead reports `InvalidInitialReturn`, matching the zero saved
 frame pointer in the native initial frame. The preorder host consumes that signal before display or
 child traversal and releases the complete subtree through the no-signal kill path: no TERM handler
-runs, typed links/audio state are cleared, and the dedicated main object retains its non-Title
-protection. This distinction prevents state-level returns such as Ending's credits children from
-parking indefinitely while preserving the small synthetic-VM API's historical halt contract.
+runs, audio ownership is cleared, and retail process links follow the pool teardown above while the
+dedicated main object retains its non-Title protection. This distinction prevents state-level
+returns such as Ending's credits children from parking indefinitely while preserving the small
+synthetic-VM API's historical halt contract.
 `SZON` uses a typed host effect: it scans the current ZDAT header's neighbors in reverse serialized
 order, tests inclusive Q24.8 rectangles with explicit wrapping arithmetic, and changes the linked
 object's zone only when a match exists. Misc 12/7 deliberately uses the other header order: it

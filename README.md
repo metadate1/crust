@@ -118,16 +118,28 @@ random, ruins, boss and thunder sequence; combined Dark applies lightning before
 exempt fog pass, and Dark2 follows the live doctor/Crash illumination point plus torch distance and
 ambient ramps. Native `far_color1` scratch persists across stream mounts, including Dark2's
 intentional reuse, and hidden draw-skip frames still transform worlds before presentation. The
-doctor global retains physical pool-slot identity and initialized tombstone storage, so compact VM
-handle reuse in another slot cannot accidentally retarget it; later physical slot reuse can. In the
-characterized Jaws path, the same provenance follows the global read through its stack/register
-copy into a newly written link. `FruiC` copies global six's reclaimed `fruit_hud` pointer into its
-creator link and reads the retained process `translation.x` value `0xffff3800` (`-51,200`). Compact
-handle reuse in a different physical slot leaves that value intact, while reuse of the captured
-physical slot source-faithfully retargets the pointer. The
-separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and audio
-voice stealing. Accepted lightning cues decode one of the local `lt1rA`–`lt3rA` ADIO entries and
-create an ownerless delayed-key voice without copying sample bytes into the repository.
+doctor global and pointer-shaped process words retain physical pool-slot identity beside their raw
+32-bit tags. Before a retail object is reclaimed, the VM captures provenance for existing process
+links, registers, stack words, and internal/external MOV storage instead of nulling inbound links.
+Linked register reads and writes address the live occupant when the slot is allocated and its
+retained process storage while the slot is free; reusing that same physical slot retargets the old
+pointer, while compact-handle reuse elsewhere does not. The 96 ordinary slots follow the native
+free-list parent/sibling mutations and LIFO reuse. The dedicated main slot stays outside that list,
+and pool binding is preflighted before it is committed so a failed association cannot leave a
+partially installed object.
+
+Reallocation seeds the replacement from the slot's retained process words, then applies native's
+selective in-place initialization. Raw `sp`, `pc`, `fp`, `tp`, and `ep` words are reset along with
+the other source-initialized fields; untouched process words keep their previous values. This
+covers Jaws of Darkness's reclaimed `fruit_hud` copy/read and the legal Dr. N. Brio boundary where
+eight live `BoxsC` children retain creator link four after `BriOC` is reclaimed. Address-taking
+through a free-slot link, event/spawn argument provenance sidecars, retained non-process
+colors/bounds/animation, and byte-exact dedicated-main allocation/reinitialization remain open.
+Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
+deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
+The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and
+audio voice stealing. Accepted lightning cues decode one of the local `lt1rA`–`lt3rA` ADIO entries
+and create an ownerless delayed-key voice without copying sample bytes into the repository.
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
@@ -233,7 +245,7 @@ does not certify the complete ending flow.
 The current clean-policy direction/button survey runs all 43 bootable pairs for 1,800
 browser-ordered simulation frames each—77,400 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 520 passing tests, and the locked native workspace tests, warnings-denied
+The `crust-sim` library has 537 passing tests, and the locked native workspace tests, warnings-denied
 Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,
 recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab), and exercised the publisher

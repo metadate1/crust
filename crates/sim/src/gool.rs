@@ -18,7 +18,7 @@ use crate::math::{
     Angle12, Angles, Bounds3, Vec2, Vec3, approximate_distance, euclidean_distance, integer_sqrt,
     seek,
 };
-use crate::object_arena::{OBJECT_ARENA_CAPACITY, SPAWN_TABLE_CAPACITY};
+use crate::object_arena::{OBJECT_ARENA_CAPACITY, OBJECT_POOL_CAPACITY, SPAWN_TABLE_CAPACITY};
 use crate::object_bounds::{
     BoundTransform, FrameBound, FrameBounds, FrameBoundsError, bounds_intersect_asymmetric,
     point_in_bound, retail_yxy_transform,
@@ -146,6 +146,16 @@ const COLLISION_OBJECT_REFERENCE_BITS: u32 = 0x7f;
 const COLLISION_OBJECT_REFERENCE_SHIFT: u32 = 2;
 const COLLISION_OBJECT_REFERENCE_MASK: u32 =
     COLLISION_OBJECT_REFERENCE_BITS << COLLISION_OBJECT_REFERENCE_SHIFT;
+/// Checked aligned stand-in for native `&free_objects`.
+///
+/// This deliberately is not an object reference: retail's free-list parent is
+/// a `gool_handle *`, not a `gool_object *`. Keeping a distinct tag preserves
+/// raw word identity without allowing ordinary object resolution to treat the
+/// allocator root as a live process.
+const RETAIL_FREE_LIST_ROOT_REFERENCE: u32 = 0xa200_0000;
+const PROCESS_LINK_PARENT: usize = 1;
+const PROCESS_LINK_SIBLING: usize = 2;
+const PROCESS_LINK_CHILDREN: usize = 3;
 const EVENT_ARGUMENT_REFERENCE_TAG: u32 = 0xc000_0000;
 const EVENT_ARGUMENT_REFERENCE_GENERATION_BITS: u32 = 0x0fff_ffff;
 const EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT: u32 = 2;
@@ -234,6 +244,14 @@ pub mod process_register {
     pub const STATUS_C: usize = 28;
     pub const SUBTYPE: usize = 29;
     pub const PID_FLAGS: usize = 30;
+    /// Native process pointers. The checked VM keeps their authoritative
+    /// values in typed interpreter state, so their raw union words must never
+    /// inherit pointer bits from a previous physical-pool occupant.
+    pub const STACK_POINTER: usize = 31;
+    pub const PROGRAM_COUNTER: usize = 32;
+    pub const FRAME_POINTER: usize = 33;
+    pub const TRANSITION_POINTER: usize = 34;
+    pub const EVENT_POINTER: usize = 35;
     pub const ONCE_POINTER: usize = 36;
     pub const MISC_VALUE: usize = 37;
     pub const ACK: usize = 38;
@@ -2560,6 +2578,20 @@ pub enum VmError {
     InvalidPadPort(usize),
     InvalidSpawnId(u16),
     InvalidRetailPoolSlot(u8),
+    RetailPoolSlotOccupied {
+        slot: u8,
+        object: ObjectHandle,
+    },
+    RetailPoolSlotMismatch {
+        object: ObjectHandle,
+        bound: Option<u8>,
+        requested: u8,
+    },
+    RetailPoolSlotUnavailable(u8),
+    RetailFreePoolLinkMutation {
+        slot: u8,
+        register: usize,
+    },
     EntityPathTooLong(usize),
     EntityPathProgressOutOfBounds {
         progress: i32,
@@ -2812,6 +2844,10 @@ pub struct VmObject {
     frame_base: usize,
     internal: Vec<u32>,
     external: Vec<u32>,
+    /// Native object pointers copied into GOOL data tables retain the same
+    /// physical-pool identity as pointers copied into process registers.
+    internal_pool_slots: Vec<Option<u8>>,
+    external_pool_slots: Vec<Option<u8>>,
     registers: Vec<u32>,
     /// Physical retail-pool provenance for pointer-shaped process words.
     ///
@@ -2868,6 +2904,8 @@ impl VmObject {
             frame_base: SYNTHETIC_STACK_POINTER,
             internal: vec![0; TABLE_WORD_COUNT],
             external: vec![0; TABLE_WORD_COUNT],
+            internal_pool_slots: vec![None; TABLE_WORD_COUNT],
+            external_pool_slots: vec![None; TABLE_WORD_COUNT],
             registers,
             register_pool_slots: vec![None; REGISTER_COUNT],
             colors: [0; COLOR_COUNT],
@@ -3137,6 +3175,57 @@ impl VmObject {
             .ok_or(VmError::InvalidRegister(index))
     }
 
+    /// Captures the native static-pool identity behind every live
+    /// pointer-shaped process word that does not already carry one.
+    ///
+    /// Compact VM handles can be reused independently from retail's object
+    /// pool. This pass runs before a pool occupant is reclaimed, while every
+    /// live word can still be mapped unambiguously to its physical slot.
+    /// Existing provenance always wins: the same compact tag may already be
+    /// a dangling pointer to a different slot from an earlier incarnation.
+    fn capture_live_retail_pool_slots(&mut self, pool_slots_by_object: &[Option<u8>; MAX_OBJECTS]) {
+        for (words, pool_slots) in [
+            (&self.internal, &mut self.internal_pool_slots),
+            (&self.external, &mut self.external_pool_slots),
+            (&self.registers, &mut self.register_pool_slots),
+        ] {
+            for (value, retained_pool_slot) in words.iter().copied().zip(pool_slots.iter_mut()) {
+                if retained_pool_slot.is_some() {
+                    continue;
+                }
+                let Some(reference) = CollisionObjectReference::from_word(value) else {
+                    continue;
+                };
+                *retained_pool_slot = pool_slots_by_object
+                    .get(usize::from(reference.object().get()))
+                    .copied()
+                    .flatten();
+            }
+        }
+    }
+
+    /// Restores the process words that physically remain in a reclaimed
+    /// native object-pool slot before `GoolObjectInit` selectively overwrites
+    /// them. Program/state metadata lives outside this byte-level storage and
+    /// deliberately keeps the values parsed for the replacement object.
+    fn inherit_retail_process_storage(&mut self, storage: &RetiredRetailProcessStorage) {
+        for (index, initialized) in storage.initialized_registers.iter().copied().enumerate() {
+            if !initialized {
+                continue;
+            }
+            self.registers[index] = storage.registers[index];
+            self.register_pool_slots[index] = storage.register_pool_slots[index];
+        }
+        for (index, link) in self.links.iter_mut().enumerate() {
+            *link = self
+                .registers
+                .get(index)
+                .copied()
+                .and_then(CollisionObjectReference::from_word)
+                .map(CollisionObjectReference::object);
+        }
+    }
+
     pub fn register(&self, index: usize) -> Result<u32, VmError> {
         self.registers
             .get(index)
@@ -3165,7 +3254,10 @@ impl VmObject {
         // the state frame so overlapping process words follow that order.
         self.stack.clear();
         self.animation_wait = None;
-        self.set_retail_transform(RetailTransform::default())?;
+        // `GoolObjectInit` is an in-place selective initializer. Fields not
+        // listed here retain the last word stored in this physical pool slot.
+        // Parent/root transform initialization is applied by the runtime,
+        // which owns the checked intrusive-tree context.
         for register in [
             process_register::MISC_A_X,
             process_register::MISC_A_Y,
@@ -3178,29 +3270,23 @@ impl VmObject {
             process_register::MODE_FLAGS_C,
             process_register::STATUS_B,
             process_register::PID_FLAGS,
+            process_register::STACK_POINTER,
+            process_register::PROGRAM_COUNTER,
+            process_register::FRAME_POINTER,
+            process_register::TRANSITION_POINTER,
+            process_register::EVENT_POINTER,
             process_register::ONCE_POINTER,
-            process_register::MISC_VALUE,
             process_register::ACK,
-            process_register::ANIMATION_STAMP,
-            process_register::ANIMATION_COUNTER,
             process_register::ANIMATION_SEQUENCE,
             process_register::ANIMATION_FRAME,
             process_register::ENTITY_REFERENCE,
             process_register::PATH_PROGRESS,
             process_register::PATH_LENGTH,
-            process_register::FLOOR_Y,
             process_register::SPEED,
             process_register::INVINCIBILITY_STATE,
-            process_register::INVINCIBILITY_STAMP,
             process_register::FLOOR_IMPACT_STAMP,
-            process_register::FLOOR_IMPACT_VELOCITY,
             process_register::SIZE,
-            process_register::EVENT,
-            process_register::CAMERA_ZOOM,
-            process_register::ANGULAR_VELOCITY_Y,
             process_register::HOTSPOT_SIZE,
-            process_register::UNKNOWN_150,
-            process_register::UNKNOWN_154,
         ] {
             self.set_register(register, 0)?;
         }
@@ -3866,6 +3952,10 @@ impl VmObject {
         self.code.clone_from(&program.code);
         self.external.fill(0);
         self.external[..program.external.len()].copy_from_slice(&program.external);
+        // A state rebind selects a different native external entry. Its data
+        // words cannot inherit pointer provenance captured for the previous
+        // entry merely because this checked VM reuses one backing vector.
+        self.external_pool_slots.fill(None);
         self.page_count = self.page_count.max(program.page_count);
         for page in &program.resident_pages {
             if !self.resident_pages.contains(page) {
@@ -3909,6 +3999,7 @@ impl VmObject {
             .internal
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
+        self.internal_pool_slots[index] = None;
         Ok(())
     }
 
@@ -3917,6 +4008,7 @@ impl VmObject {
             .external
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
+        self.external_pool_slots[index] = None;
         Ok(())
     }
 
@@ -4054,6 +4146,52 @@ impl VmObject {
 struct RetiredRetailProcessStorage {
     registers: Box<[u32]>,
     register_pool_slots: Box<[Option<u8>]>,
+    /// Words with deterministic native contents that allocation must inherit.
+    /// Initial malloc storage only has allocator links; reclaimed process
+    /// storage and authored free-slot writes initialize their complete cells.
+    initialized_registers: Box<[bool]>,
+}
+
+impl RetiredRetailProcessStorage {
+    fn initial_free_pool_slot(next: Option<u8>) -> Self {
+        let mut registers = vec![0; REGISTER_COUNT].into_boxed_slice();
+        let mut register_pool_slots = vec![None; REGISTER_COUNT].into_boxed_slice();
+        let mut initialized_registers = vec![false; REGISTER_COUNT].into_boxed_slice();
+        registers[PROCESS_LINK_PARENT] = RETAIL_FREE_LIST_ROOT_REFERENCE;
+        initialized_registers[PROCESS_LINK_PARENT] = true;
+        initialized_registers[PROCESS_LINK_SIBLING] = true;
+        initialized_registers[PROCESS_LINK_CHILDREN] = true;
+        if let Some(next) = next {
+            registers[PROCESS_LINK_SIBLING] = retail_pool_slot_reference_word(next);
+            register_pool_slots[PROCESS_LINK_SIBLING] = Some(next);
+        }
+        Self {
+            registers,
+            register_pool_slots,
+            initialized_registers,
+        }
+    }
+
+    fn set_free_pool_sibling(&mut self, next: Option<u8>) {
+        self.registers[PROCESS_LINK_SIBLING] = next.map_or(0, retail_pool_slot_reference_word);
+        self.register_pool_slots[PROCESS_LINK_SIBLING] = next;
+    }
+}
+
+const fn retail_pool_slot_reference_word(pool_slot: u8) -> u32 {
+    COLLISION_OBJECT_REFERENCE_TAG | ((pool_slot as u32) << COLLISION_OBJECT_REFERENCE_SHIFT)
+}
+
+fn initial_retail_pool_registers() -> Vec<Option<RetiredRetailProcessStorage>> {
+    (0..MAX_OBJECTS)
+        .map(|slot| {
+            if slot >= OBJECT_POOL_CAPACITY {
+                return None;
+            }
+            let next = (slot + 1 < OBJECT_POOL_CAPACITY).then_some((slot + 1) as u8);
+            Some(RetiredRetailProcessStorage::initial_free_pool_slot(next))
+        })
+        .collect()
 }
 
 /// Re-entrant GOOL machine. Branch state belongs to each invocation, never a
@@ -4087,6 +4225,12 @@ pub struct Machine {
     /// is cleared, so an authored dangling pointer may still read them until
     /// the physical slot is allocated again.
     retired_retail_pool_registers: Vec<Option<RetiredRetailProcessStorage>>,
+    /// Head-to-tail physical slots beneath native `free_objects`.
+    ///
+    /// `GoolInitAllocTable` links ordinary slots `0..96` in ascending order.
+    /// Allocation unlinks one slot and kill inserts it at the head. The
+    /// separately allocated main/player slot never participates.
+    retail_free_pool_slots: Vec<u8>,
     globals: Vec<u32>,
     /// Physical pool slot captured when a checked global write receives a
     /// live tagged object reference. Unchanged dangling words retain this
@@ -4114,6 +4258,7 @@ pub struct Machine {
     camera_rotation_xz: i32,
     pads: [RetailPadSnapshot; RETAIL_PAD_COUNT],
     operand_constants: [u32; 2],
+    operand_constant_pool_slots: [Option<u8>; 2],
     input_constant_index: usize,
     output_constant_index: usize,
     event_argument_scopes: Vec<EventArgumentsScope>,
@@ -4159,7 +4304,8 @@ impl Machine {
             retail_pool_slots_by_object: [None; MAX_OBJECTS],
             retired_retail_translations: [None; MAX_OBJECTS],
             retired_retail_pool_translations: [None; MAX_OBJECTS],
-            retired_retail_pool_registers: vec![None; MAX_OBJECTS],
+            retired_retail_pool_registers: initial_retail_pool_registers(),
+            retail_free_pool_slots: (0..OBJECT_POOL_CAPACITY as u8).collect(),
             globals: vec![0; global_words],
             retail_pool_slots_by_global: vec![None; global_words],
             global_write_epochs: vec![0; global_words],
@@ -4181,6 +4327,7 @@ impl Machine {
             camera_rotation_xz: 0,
             pads: [RetailPadSnapshot::default(); RETAIL_PAD_COUNT],
             operand_constants: [0; 2],
+            operand_constant_pool_slots: [None; 2],
             input_constant_index: 0,
             output_constant_index: 0,
             event_argument_scopes: Vec::with_capacity(MAX_CALL_DEPTH),
@@ -4796,7 +4943,7 @@ impl Machine {
         };
         let target_object = self.object(target)?;
         let target_state = snapshot(target_object)?;
-        let target_collider = target_object.links[6];
+        let target_collider = self.resolve_process_link(target, 6)?;
         let source_state = snapshot(self.object(source)?)?;
         let current = if target_collider.is_some_and(|current| current != source)
             && source_state.state_flags & 0x800 == 0
@@ -5019,14 +5166,8 @@ impl Machine {
         mut event_handler: impl FnMut(&mut Self, ObjectHandle, ObjectHandle, u32),
     ) -> Result<bool, VmError> {
         let incarnation = self.object_incarnation(handle)?;
-        let (
-            invincibility_state,
-            invincibility_stamp,
-            status_a,
-            status_b,
-            is_main_player,
-            collider,
-        ) = {
+        let collider = self.resolve_process_link(handle, 6)?;
+        let (invincibility_state, invincibility_stamp, status_a, status_b, is_main_player) = {
             let object = self.object(handle)?;
             (
                 object.register(process_register::INVINCIBILITY_STATE)?,
@@ -5034,7 +5175,6 @@ impl Machine {
                 object.register(process_register::STATUS_A)?,
                 object.register(process_register::STATUS_B)?,
                 object.is_main_player,
-                object.links[6],
             )
         };
         // Both source operands are unsigned words. Assignment to its signed
@@ -5219,12 +5359,12 @@ impl Machine {
             SolidEffect,
         ) -> bool,
     ) -> Result<bool, VmError> {
+        let collider_handle = self.resolve_process_link(handle, 6)?;
         let (
             environment,
             local_bound,
             object_zone_context,
             smooth_stop,
-            collider_handle,
             status_c,
             animation_stamp,
             hotspot_size,
@@ -5263,7 +5403,6 @@ impl Machine {
                 object.local_bound,
                 object_zone_context,
                 self.solid_smooth_stop,
-                object.links[6],
                 object.register(process_register::STATUS_C)?,
                 object.register(process_register::ANIMATION_STAMP)? as i32,
                 object.register(process_register::HOTSPOT_SIZE)? as i32,
@@ -5557,7 +5696,7 @@ impl Machine {
             object.register(process_register::FLOOR_IMPACT_VELOCITY)? as i32;
         state.event = object.register(process_register::EVENT)?;
         state.hotspot_size = object.register(process_register::HOTSPOT_SIZE)? as i32;
-        let collider = object.links[6];
+        let collider = self.resolve_process_link(handle, 6)?;
         state.collider = collider
             .map(|collider| self.solid_collider_state(collider))
             .transpose()?;
@@ -5771,18 +5910,91 @@ impl Machine {
             .ok_or(VmError::UnknownObject(handle))
     }
 
-    /// Associates a live compact VM object with its validated physical
-    /// native pool slot before authored code can publish an object pointer.
-    pub(crate) fn bind_retail_pool_slot(
-        &mut self,
+    /// Validates a proposed physical-pool association without requiring the
+    /// replacement VM object to be installed first.
+    pub(crate) fn preflight_retail_pool_slot_binding(
+        &self,
         handle: ObjectHandle,
         pool_slot: u8,
     ) -> Result<(), VmError> {
         if usize::from(pool_slot) >= MAX_OBJECTS {
             return Err(VmError::InvalidRetailPoolSlot(pool_slot));
         }
+        let bound = self.retail_pool_slots_by_object[usize::from(handle.get())];
+        if bound.is_some() && bound != Some(pool_slot) {
+            return Err(VmError::RetailPoolSlotMismatch {
+                object: handle,
+                bound,
+                requested: pool_slot,
+            });
+        }
+        if let Some(object) = self.live_object_in_retail_pool_slot(pool_slot)
+            && object != handle
+        {
+            return Err(VmError::RetailPoolSlotOccupied {
+                slot: pool_slot,
+                object,
+            });
+        }
+        if usize::from(pool_slot) < OBJECT_POOL_CAPACITY
+            && bound != Some(pool_slot)
+            && !self.retail_free_pool_slots.contains(&pool_slot)
+        {
+            return Err(VmError::RetailPoolSlotUnavailable(pool_slot));
+        }
+        Ok(())
+    }
+
+    /// Commits a pool-slot association after a successful preflight and
+    /// object installation. The shared validation keeps runtime replacement
+    /// transactional when a malformed binding names an occupied slot.
+    pub(crate) fn bind_retail_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        pool_slot: u8,
+    ) -> Result<(), VmError> {
         self.object(handle)?;
+        self.preflight_retail_pool_slot_binding(handle, pool_slot)?;
+        let bound = self.retail_pool_slots_by_object[usize::from(handle.get())];
+        if usize::from(pool_slot) < OBJECT_POOL_CAPACITY && bound != Some(pool_slot) {
+            let position = self
+                .retail_free_pool_slots
+                .iter()
+                .position(|candidate| *candidate == pool_slot)
+                .expect("preflight proved the ordinary retail pool slot is free");
+            let predecessor = position
+                .checked_sub(1)
+                .and_then(|index| self.retail_free_pool_slots.get(index))
+                .copied();
+            let successor = self.retail_free_pool_slots.get(position + 1).copied();
+            if let Some(predecessor) = predecessor {
+                self.retired_retail_pool_registers[usize::from(predecessor)]
+                    .as_mut()
+                    .expect("every free ordinary slot retains its process storage")
+                    .set_free_pool_sibling(successor);
+            }
+            self.retail_free_pool_slots.remove(position);
+        }
         self.retail_pool_slots_by_object[usize::from(handle.get())] = Some(pool_slot);
+        Ok(())
+    }
+
+    /// Seeds a replacement object from the initialized process words retained
+    /// by its physical native pool slot. Never-used ordinary slots expose the
+    /// deterministic allocator links written by `GoolInitAllocTable`. Words
+    /// that native allocation left indeterminate retain the replacement's
+    /// authored or checked-default values until selective initialization.
+    pub(crate) fn seed_retail_pool_slot_storage(
+        &self,
+        pool_slot: u8,
+        object: &mut VmObject,
+    ) -> Result<(), VmError> {
+        if usize::from(pool_slot) >= MAX_OBJECTS {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+        }
+        if let Some(storage) = self.retired_retail_pool_registers[usize::from(pool_slot)].as_ref() {
+            object.inherit_retail_process_storage(storage);
+        }
         Ok(())
     }
 
@@ -5813,6 +6025,60 @@ impl Machine {
             .filter(|handle| self.objects.contains_key(handle))
     }
 
+    fn live_pool_slot_for_word(&self, value: u32, retained: Option<u8>) -> Option<u8> {
+        retained.or_else(|| {
+            CollisionObjectReference::from_word(value).and_then(|reference| {
+                self.retail_pool_slots_by_object
+                    .get(usize::from(reference.object().get()))
+                    .copied()
+                    .flatten()
+            })
+        })
+    }
+
+    /// Resolves a checked object token through its captured native pool
+    /// identity. A dangling pool pointer must never fall back to the compact
+    /// handle encoded in its raw word: that handle may already name an
+    /// unrelated object in another physical slot.
+    fn resolve_pool_backed_object_reference(
+        &self,
+        reference: CollisionObjectReference,
+        pool_slot: Option<u8>,
+    ) -> Result<ObjectHandle, VmError> {
+        let object = match pool_slot {
+            Some(pool_slot) => self
+                .live_object_in_retail_pool_slot(pool_slot)
+                .ok_or(VmError::UnknownObject(reference.object()))?,
+            None => reference.object(),
+        };
+        self.object(object)?;
+        Ok(object)
+    }
+
+    /// Resolves one process link through its native physical-pool identity.
+    ///
+    /// A provenance-bearing word may outlive its original logical object.
+    /// While the slot is free, callers that require a live object see no
+    /// target; after native LIFO reuse, the same pointer names the replacement
+    /// occupant even when Rust assigned that object a different compact VM
+    /// handle. Link-register reads have a separate retained-storage path for
+    /// the free-slot interval.
+    fn resolve_process_link(
+        &self,
+        handle: ObjectHandle,
+        link: usize,
+    ) -> Result<Option<ObjectHandle>, VmError> {
+        let object = self.object(handle)?;
+        let cached = *object
+            .links
+            .get(link)
+            .ok_or(VmError::InvalidRegister(link))?;
+        match object.register_pool_slot(link)? {
+            Some(pool_slot) => Ok(self.live_object_in_retail_pool_slot(pool_slot)),
+            None => Ok(cached),
+        }
+    }
+
     /// Reads the live occupant or the initialized static storage retained in
     /// one physical native object-pool slot.
     fn retail_pool_register_word(
@@ -5822,10 +6088,10 @@ impl Machine {
     ) -> Result<(u32, Option<u8>), VmError> {
         if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
             let object = self.object(handle)?;
-            return Ok((
-                object.register(register)?,
-                object.register_pool_slot(register)?,
-            ));
+            let value = object.register(register)?;
+            let provenance =
+                self.live_pool_slot_for_word(value, object.register_pool_slot(register)?);
+            return Ok((value, provenance));
         }
         let storage = self
             .retired_retail_pool_registers
@@ -5842,7 +6108,95 @@ impl Machine {
             .get(register)
             .copied()
             .ok_or(VmError::InvalidRegister(register))?;
-        Ok((value, provenance))
+        Ok((value, self.live_pool_slot_for_word(value, provenance)))
+    }
+
+    /// Writes one register through a native static-pool pointer. Free slots
+    /// remain ordinary initialized storage, so authored SR/MOV operations can
+    /// mutate a reclaimed object before the slot is reused. Mutating the
+    /// three allocator-owned link words is rejected: the bounded arena owns
+    /// allocation order and cannot safely reproduce a corrupted C free list.
+    fn write_retail_pool_register_word(
+        &mut self,
+        pool_slot: u8,
+        register: usize,
+        value: u32,
+        provenance: Option<u8>,
+    ) -> Result<(), VmError> {
+        if usize::from(pool_slot) >= MAX_OBJECTS {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+        }
+        if let Some(provenance) = provenance
+            && usize::from(provenance) >= MAX_OBJECTS
+        {
+            return Err(VmError::InvalidRetailPoolSlot(provenance));
+        }
+        let provenance = self
+            .live_pool_slot_for_word(value, provenance)
+            .filter(|_| CollisionObjectReference::from_word(value).is_some());
+        if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
+            return self
+                .object_mut(handle)?
+                .set_register_with_pool_slot(register, value, provenance);
+        }
+
+        if self.retail_free_pool_slots.contains(&pool_slot)
+            && matches!(
+                register,
+                PROCESS_LINK_PARENT | PROCESS_LINK_SIBLING | PROCESS_LINK_CHILDREN
+            )
+        {
+            let storage = self
+                .retired_retail_pool_registers
+                .get(usize::from(pool_slot))
+                .and_then(Option::as_ref)
+                .ok_or(VmError::InvalidRetailPoolSlot(pool_slot))?;
+            let current_value = storage
+                .registers
+                .get(register)
+                .copied()
+                .ok_or(VmError::InvalidRegister(register))?;
+            let current_provenance = storage
+                .register_pool_slots
+                .get(register)
+                .copied()
+                .ok_or(VmError::InvalidRegister(register))?;
+            if (current_value, current_provenance) != (value, provenance) {
+                return Err(VmError::RetailFreePoolLinkMutation {
+                    slot: pool_slot,
+                    register,
+                });
+            }
+        }
+
+        let storage = self
+            .retired_retail_pool_registers
+            .get_mut(usize::from(pool_slot))
+            .and_then(Option::as_mut)
+            .ok_or(VmError::InvalidRetailPoolSlot(pool_slot))?;
+        *storage
+            .registers
+            .get_mut(register)
+            .ok_or(VmError::InvalidRegister(register))? = value;
+        *storage
+            .register_pool_slots
+            .get_mut(register)
+            .ok_or(VmError::InvalidRegister(register))? = provenance;
+        *storage
+            .initialized_registers
+            .get_mut(register)
+            .ok_or(VmError::InvalidRegister(register))? = true;
+
+        if let Some(axis) = register.checked_sub(process_register::TRANSLATION_X)
+            && axis < 3
+            && let Some(translation) = self
+                .retired_retail_pool_translations
+                .get_mut(usize::from(pool_slot))
+                .and_then(Option::as_mut)
+        {
+            translation[axis] = value as i32;
+        }
+        Ok(())
     }
 
     /// Removes one checked VM object and nulls every inbound process link.
@@ -5917,10 +6271,66 @@ impl Machine {
         handle: ObjectHandle,
         retail_pool_slot: Option<u8>,
     ) -> Result<VmObject, VmError> {
-        let removed = self
+        if let Some(requested) = retail_pool_slot {
+            let bound = self.retail_pool_slots_by_object[usize::from(handle.get())];
+            if bound != Some(requested) {
+                return Err(VmError::RetailPoolSlotMismatch {
+                    object: handle,
+                    bound,
+                    requested,
+                });
+            }
+        }
+        let mut removed = self
             .objects
             .remove(&handle)
             .ok_or(VmError::UnknownObject(handle))?;
+        if let Some(pool_slot) = retail_pool_slot {
+            // Capture every live pointer before clearing this compact
+            // handle's physical identity. This includes pointers already
+            // stored in other objects and nested pointer words retained in
+            // the object that is about to become static free-slot storage.
+            let mut live_pool_slots = self.retail_pool_slots_by_object;
+            live_pool_slots[usize::from(handle.get())] = Some(pool_slot);
+            removed.capture_live_retail_pool_slots(&live_pool_slots);
+            for object in self.objects.values_mut() {
+                object.capture_live_retail_pool_slots(&live_pool_slots);
+            }
+
+            if usize::from(pool_slot) < OBJECT_POOL_CAPACITY {
+                debug_assert!(
+                    !self.retail_free_pool_slots.contains(&pool_slot),
+                    "a bound ordinary pool slot cannot already be free"
+                );
+                let previous_head = self.retail_free_pool_slots.first().copied();
+                removed.set_register_with_pool_slot(
+                    PROCESS_LINK_PARENT,
+                    RETAIL_FREE_LIST_ROOT_REFERENCE,
+                    None,
+                )?;
+                removed.set_register_with_pool_slot(
+                    PROCESS_LINK_SIBLING,
+                    previous_head.map_or(0, retail_pool_slot_reference_word),
+                    previous_head,
+                )?;
+                // Recursive kill has already removed every child from this
+                // object's intrusive list before the object itself is linked
+                // beneath `free_objects`.
+                removed.set_register_with_pool_slot(PROCESS_LINK_CHILDREN, 0, None)?;
+                self.retail_free_pool_slots.insert(0, pool_slot);
+            } else {
+                // The separately allocated player/main object is temporarily
+                // passed through AddChild in native kill, then explicitly
+                // detached without changing the ordinary free-list head.
+                for link in [
+                    PROCESS_LINK_PARENT,
+                    PROCESS_LINK_SIBLING,
+                    PROCESS_LINK_CHILDREN,
+                ] {
+                    removed.set_register_with_pool_slot(link, 0, None)?;
+                }
+            }
+        }
         let retired_translation = removed
             .retail_transform()
             .ok()
@@ -5932,6 +6342,7 @@ impl Machine {
                 Some(RetiredRetailProcessStorage {
                     registers: removed.registers.clone().into_boxed_slice(),
                     register_pool_slots: removed.register_pool_slots.clone().into_boxed_slice(),
+                    initialized_registers: vec![true; REGISTER_COUNT].into_boxed_slice(),
                 });
         }
         self.retail_pool_slots_by_object[usize::from(handle.get())] = None;
@@ -5941,10 +6352,15 @@ impl Machine {
         // unserviced request can never be delivered after its sender dies.
         self.pending_send_events
             .retain(|pending| pending.request.sender != handle || pending.servicing);
-        for object in self.objects.values_mut() {
-            for index in 0..object.links.len() {
-                if object.links[index] == Some(handle) {
-                    object.set_link(index, None)?;
+        if retail_pool_slot.is_none() {
+            // Synthetic/non-retail machines have no physical storage
+            // identity through which a stale link could be represented.
+            // Preserve their checked teardown contract.
+            for object in self.objects.values_mut() {
+                for index in 0..object.links.len() {
+                    if object.links[index] == Some(handle) {
+                        object.set_link(index, None)?;
+                    }
                 }
             }
         }
@@ -7884,7 +8300,7 @@ impl Machine {
         // GoolOpSendEvent. Keep that value stable across B/condition stack
         // translation just as the native local `recipient` does.
         let linked_recipient = if matches!(opcode, 0x87 | 0x90) {
-            self.object(handle)?.links[usize::from(mode)]
+            self.resolve_process_link(handle, usize::from(mode))?
         } else {
             None
         };
@@ -8000,7 +8416,19 @@ impl Machine {
                     .ok_or(VmError::ArithmeticOverflow)?;
                 self.push(handle, value as u32)?;
             }
-            0x04 => self.binary_push(handle, a, b, |left, right| u32::from(left == right))?,
+            0x04 => {
+                // Native compares physical pointer words. Compact VM handles
+                // can be reused independently, so provenance-bearing object
+                // references compare by their stable pool-slot identity.
+                let (right, right_pool_slot) = self.read_operand_with_pool_slot(handle, a)?;
+                let (left, left_pool_slot) = self.read_operand_with_pool_slot(handle, b)?;
+                let equal = match (left_pool_slot, right_pool_slot) {
+                    (Some(left), Some(right)) => left == right,
+                    (None, None) => left == right,
+                    _ => false,
+                };
+                self.push(handle, u32::from(equal))?;
+            }
             0x05 => self.binary_push(handle, a, b, |left, right| {
                 u32::from(right != 0 && left != 0)
             })?,
@@ -8233,7 +8661,7 @@ impl Machine {
             0x23 => {
                 let link = ((word >> 12) & 7) as usize;
                 let color = ((word >> 15) & 0x3f) as usize;
-                let value = if let Some(target) = self.object(handle)?.links[link] {
+                let value = if let Some(target) = self.resolve_process_link(handle, link)? {
                     u32::from(self.object(target)?.color(color)?)
                 } else {
                     NULL_INPUT_VALUE
@@ -8247,7 +8675,7 @@ impl Machine {
                 let value = self.read_operand(handle, b)? as u16;
                 let link = ((word >> 12) & 7) as usize;
                 let color = ((word >> 15) & 0x3f) as usize;
-                if let Some(target) = self.object(handle)?.links[link] {
+                if let Some(target) = self.resolve_process_link(handle, link)? {
                     self.object_mut(target)?.set_color(color, value)?;
                 }
             }
@@ -8504,12 +8932,12 @@ impl Machine {
                         let input = input.ok_or(VmError::InvalidOperand(instruction.operand_b))?;
                         let vertex_index = self.read_storage_reference(input)? >> 8;
                         let link_index = ((word >> 21) & 7) as u8;
-                        let link = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                            VmError::MissingLink {
+                        let link = self
+                            .resolve_process_link(handle, usize::from(link_index))?
+                            .ok_or(VmError::MissingLink {
                                 object: handle,
                                 link: link_index,
-                            },
-                        )?;
+                            })?;
                         let Some(source) = self.object(link)?.animation_source()? else {
                             return Ok(None);
                         };
@@ -8888,7 +9316,7 @@ impl Machine {
             .current_solid_environment
             .clone()
             .ok_or(VmError::MissingSolidEnvironment(handle))?;
-        let parent = self.object(handle)?.links[1];
+        let parent = self.resolve_process_link(handle, 1)?;
         let player_related = if self.object(handle)?.is_main_player {
             true
         } else if let Some(parent) = parent {
@@ -8990,10 +9418,12 @@ impl Machine {
                 if parent_colors { 5 } else { 1 }
             };
             let active_parent = if parent_colors {
-                let parent = self.object(handle)?.links[1].ok_or(VmError::MissingLink {
-                    object: handle,
-                    link: 1,
-                })?;
+                let parent = self
+                    .resolve_process_link(handle, 1)?
+                    .ok_or(VmError::MissingLink {
+                        object: handle,
+                        link: 1,
+                    })?;
                 (self.object(parent)?.register(process_register::STATUS_B)? & 0x0400_0000 != 0)
                     .then_some(parent)
             } else {
@@ -9168,22 +9598,22 @@ impl Machine {
         reference: StorageReference,
     ) -> Result<Option<ObjectHandle>, VmError> {
         if reference.region == StorageRegion::Register && reference.index < 8 {
-            let target = self.object(reference.object)?.links[usize::from(reference.index)];
+            let target =
+                self.resolve_process_link(reference.object, usize::from(reference.index))?;
             if let Some(target) = target {
                 self.object(target)?;
             }
             return Ok(target);
         }
 
-        let raw = self.read_storage_reference(reference)?;
+        let (raw, pool_slot) = self.read_storage_reference_with_pool_slot(reference)?;
         if raw == 0 {
             return Ok(None);
         }
-        let object = CollisionObjectReference::from_word(raw)
-            .map(CollisionObjectReference::object)
+        let reference = CollisionObjectReference::from_word(raw)
             .ok_or(VmError::InvalidAudioObjectReference(raw))?;
-        self.object(object)?;
-        Ok(Some(object))
+        self.resolve_pool_backed_object_reference(reference, pool_slot)
+            .map(Some)
     }
 
     fn decode_audio_control_argument(
@@ -9642,12 +10072,14 @@ impl Machine {
     fn store_input_constant(&mut self, value: u32) -> usize {
         self.input_constant_index ^= 1;
         self.operand_constants[self.input_constant_index] = value;
+        self.operand_constant_pool_slots[self.input_constant_index] = None;
         self.input_constant_index
     }
 
     fn store_output_constant(&mut self, value: u32) -> usize {
         self.output_constant_index ^= 1;
         self.operand_constants[self.output_constant_index] = value;
+        self.operand_constant_pool_slots[self.output_constant_index] = None;
         self.output_constant_index
     }
 
@@ -9685,12 +10117,12 @@ impl Machine {
             }
             1 | 6 => {
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let target = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let mut source = if primary == 1 {
                     self.object(handle)?.process_vector(0)?
                 } else {
@@ -9731,12 +10163,12 @@ impl Machine {
                     operand: instruction as u16 & 0x0fff,
                 })?;
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let target = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let source = self.object(target)?.process_vector(0)?;
                 let destination = self.read_storage_span3(input)?.map(|value| value as i32);
                 let status_b = self.object(handle)?.register(process_register::STATUS_B)?;
@@ -9757,7 +10189,11 @@ impl Machine {
                 })?;
                 let link_index = ((instruction >> 12) & 7) as u8;
                 let register = (self.read_storage_reference(input)? >> 8) as usize;
-                let Some(target) = self.object(handle)?.links[usize::from(link_index)] else {
+                let retained_pool_slot = self
+                    .object(handle)?
+                    .register_pool_slot(usize::from(link_index))?;
+                let target = self.resolve_process_link(handle, usize::from(link_index))?;
+                if retained_pool_slot.is_none() && target.is_none() {
                     // Keep this compatibility read instruction-exact. Stores,
                     // other registers, and every other absent process link
                     // remain checked failures instead of inheriting C's null
@@ -9770,26 +10206,40 @@ impl Machine {
                         object: handle,
                         link: link_index,
                     });
-                };
+                }
                 if primary == 3 {
-                    let value = self.object(target)?.register(register)?;
-                    self.push(handle, value)?;
+                    let (value, provenance) = if let Some(pool_slot) = retained_pool_slot {
+                        self.retail_pool_register_word(pool_slot, register)?
+                    } else {
+                        let object = self.object(target.expect("checked live target"))?;
+                        let value = object.register(register)?;
+                        let retained = object.register_pool_slot(register)?;
+                        (value, self.live_pool_slot_for_word(value, retained))
+                    };
+                    self.push_with_pool_slot(handle, value, provenance)?;
                 } else {
                     // Translation of GOP B happens before this pop, matching
                     // the native two-stack-word set-register form.
-                    let value = self.pop(handle)?;
-                    self.object_mut(target)?.set_register(register, value)?;
+                    let (value, provenance) = self.pop_with_pool_slot(handle)?;
+                    if let Some(pool_slot) = retained_pool_slot {
+                        self.write_retail_pool_register_word(
+                            pool_slot, register, value, provenance,
+                        )?;
+                    } else {
+                        self.object_mut(target.expect("checked live target"))?
+                            .set_register_with_pool_slot(register, value, provenance)?;
+                    }
                 }
                 Ok(false)
             }
             5 => {
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let target = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let source = self.object(handle)?.process_vector(0)?;
                 let destination = self.object(target)?.process_vector(0)?;
                 let angle = i32::from(
@@ -9856,12 +10306,12 @@ impl Machine {
             }
             9 => {
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let target = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let point = input
                     .map(|input| {
                         self.read_storage_span3(input)
@@ -10000,12 +10450,12 @@ impl Machine {
                         operand: instruction as u16 & 0x0fff,
                     })?;
                     let link_index = ((instruction >> 12) & 7) as u8;
-                    let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                        VmError::MissingLink {
+                    let target = self
+                        .resolve_process_link(handle, usize::from(link_index))?
+                        .ok_or(VmError::MissingLink {
                             object: handle,
                             link: link_index,
-                        },
-                    )?;
+                        })?;
                     let source = self.read_storage_span3(input)?.map(|value| value as i32);
                     let destination = self.object(target)?.process_vector(0)?;
                     let horizontal = euclidean_distance(
@@ -10051,12 +10501,12 @@ impl Machine {
                     operand: instruction as u16 & 0x0fff,
                 })?;
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let origin = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let origin = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let event = self.read_storage_reference(input)?;
                 self.emit(VmEffect::FindNearestObject {
                     requester: handle,
@@ -10073,12 +10523,12 @@ impl Machine {
                     operand: instruction as u16 & 0x0fff,
                 })?;
                 let link_index = ((instruction >> 12) & 7) as u8;
-                let target = self.object(handle)?.links[usize::from(link_index)].ok_or(
-                    VmError::MissingLink {
+                let target = self
+                    .resolve_process_link(handle, usize::from(link_index))?
+                    .ok_or(VmError::MissingLink {
                         object: handle,
                         link: link_index,
-                    },
-                )?;
+                    })?;
                 let point = self.read_storage_span3(input)?.map(|value| value as i32);
                 let target_object = self.object(target)?;
                 let translation = target_object.process_vector(0)?;
@@ -10134,15 +10584,14 @@ impl Machine {
         reference: StorageReference,
     ) -> Result<ObjectHandle, VmError> {
         if reference.region == StorageRegion::Register && reference.index < 8 {
-            return self.object(reference.object)?.links[usize::from(reference.index)]
+            return self
+                .resolve_process_link(reference.object, usize::from(reference.index))?
                 .ok_or(VmError::InvalidObjectReference(0));
         }
-        let raw = self.read_storage_reference(reference)?;
-        let object = CollisionObjectReference::from_word(raw)
-            .map(CollisionObjectReference::object)
-            .ok_or(VmError::InvalidObjectReference(raw))?;
-        self.object(object)?;
-        Ok(object)
+        let (raw, pool_slot) = self.read_storage_reference_with_pool_slot(reference)?;
+        let reference =
+            CollisionObjectReference::from_word(raw).ok_or(VmError::InvalidObjectReference(raw))?;
+        self.resolve_pool_backed_object_reference(reference, pool_slot)
     }
 
     fn input_reference(
@@ -10180,7 +10629,7 @@ impl Machine {
             Operand::Null => return Ok(None),
             Operand::StackDouble => return Err(VmError::UnsupportedReferenceOperand(0x0bf0)),
             Operand::LinkRegister { link, register } => {
-                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
+                let Some(target) = self.resolve_process_link(handle, usize::from(link))? else {
                     return Ok(None);
                 };
                 self.read_aliased_process_register(target, usize::from(register))?;
@@ -10245,7 +10694,7 @@ impl Machine {
             Operand::Null => return Ok(None),
             Operand::StackDouble => return Err(VmError::UnsupportedReferenceOperand(0x0bf0)),
             Operand::LinkRegister { link, register } => {
-                let Some(target) = self.object(handle)?.links[usize::from(link)] else {
+                let Some(target) = self.resolve_process_link(handle, usize::from(link))? else {
                     return Ok(None);
                 };
                 self.read_aliased_process_register(target, usize::from(register))?;
@@ -10300,41 +10749,44 @@ impl Machine {
         }
     }
 
+    fn read_storage_reference_with_pool_slot(
+        &self,
+        reference: StorageReference,
+    ) -> Result<(u32, Option<u8>), VmError> {
+        let value = self.read_storage_reference(reference)?;
+        let index = usize::from(reference.index);
+        let retained = match reference.region {
+            StorageRegion::Internal => self
+                .object(reference.object)?
+                .internal_pool_slots
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word()))?,
+            StorageRegion::External => self
+                .object(reference.object)?
+                .external_pool_slots
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word()))?,
+            StorageRegion::Register => self
+                .object(reference.object)?
+                .register_pool_slot(index)
+                .map_err(|_| VmError::InvalidStorageReference(reference.to_word()))?,
+            StorageRegion::Constant => self
+                .operand_constant_pool_slots
+                .get(index)
+                .copied()
+                .ok_or(VmError::InvalidStorageReference(reference.to_word()))?,
+        };
+        Ok((value, self.live_pool_slot_for_word(value, retained)))
+    }
+
     fn write_storage_reference(
         &mut self,
         reference: StorageReference,
         value: u32,
     ) -> Result<(), VmError> {
-        let index = usize::from(reference.index);
-        match reference.region {
-            StorageRegion::Internal => {
-                *self
-                    .object_mut(reference.object)?
-                    .internal
-                    .get_mut(index)
-                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
-                Ok(())
-            }
-            StorageRegion::External => {
-                *self
-                    .object_mut(reference.object)?
-                    .external
-                    .get_mut(index)
-                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
-                Ok(())
-            }
-            StorageRegion::Register => self
-                .object_mut(reference.object)?
-                .set_register(index, value)
-                .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
-            StorageRegion::Constant => {
-                *self
-                    .operand_constants
-                    .get_mut(index)
-                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
-                Ok(())
-            }
-        }
+        self.write_storage_reference_with_pool_slot(reference, value, None)
     }
 
     fn write_storage_reference_with_pool_slot(
@@ -10343,12 +10795,56 @@ impl Machine {
         value: u32,
         pool_slot: Option<u8>,
     ) -> Result<(), VmError> {
-        if reference.region != StorageRegion::Register {
-            return self.write_storage_reference(reference, value);
+        if let Some(pool_slot) = pool_slot
+            && usize::from(pool_slot) >= MAX_OBJECTS
+        {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
         }
-        self.object_mut(reference.object)?
-            .set_register_with_pool_slot(usize::from(reference.index), value, pool_slot)
-            .map_err(|_| VmError::InvalidStorageReference(reference.to_word()))
+        let pool_slot = self
+            .live_pool_slot_for_word(value, pool_slot)
+            .filter(|_| CollisionObjectReference::from_word(value).is_some());
+        let index = usize::from(reference.index);
+        match reference.region {
+            StorageRegion::Internal => {
+                let object = self.object_mut(reference.object)?;
+                *object
+                    .internal
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                *object
+                    .internal_pool_slots
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = pool_slot;
+                Ok(())
+            }
+            StorageRegion::External => {
+                let object = self.object_mut(reference.object)?;
+                *object
+                    .external
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                *object
+                    .external_pool_slots
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = pool_slot;
+                Ok(())
+            }
+            StorageRegion::Register => self
+                .object_mut(reference.object)?
+                .set_register_with_pool_slot(index, value, pool_slot)
+                .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
+            StorageRegion::Constant => {
+                *self
+                    .operand_constants
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = value;
+                *self
+                    .operand_constant_pool_slots
+                    .get_mut(index)
+                    .ok_or(VmError::InvalidStorageReference(reference.to_word()))? = pool_slot;
+                Ok(())
+            }
+        }
     }
 
     fn write_storage_span3(
@@ -10463,20 +10959,12 @@ impl Machine {
         operand: Operand,
     ) -> Result<(u32, Option<u8>), VmError> {
         match operand {
-            Operand::Internal(index) => self
-                .object(handle)?
-                .internal
-                .get(usize::from(index))
-                .copied()
-                .ok_or(VmError::InvalidRegister(usize::from(index)))
-                .map(|value| (value, None)),
-            Operand::External(index) => self
-                .object(handle)?
-                .external
-                .get(usize::from(index))
-                .copied()
-                .ok_or(VmError::InvalidRegister(usize::from(index)))
-                .map(|value| (value, None)),
+            Operand::Internal(index) => self.read_storage_reference_with_pool_slot(
+                StorageReference::checked(handle, StorageRegion::Internal, usize::from(index))?,
+            ),
+            Operand::External(index) => self.read_storage_reference_with_pool_slot(
+                StorageReference::checked(handle, StorageRegion::External, usize::from(index))?,
+            ),
             Operand::Immediate(value) => {
                 self.store_input_constant(value as u32);
                 Ok((value as u32, None))
@@ -10487,16 +10975,23 @@ impl Machine {
                     .checked_add_signed(isize::from(offset))
                     .ok_or(VmError::InvalidOperand(0))?;
                 let object = self.object(handle)?;
-                Ok((object.register(index)?, object.register_pool_slot(index)?))
+                let value = object.register(index)?;
+                let retained = object.register_pool_slot(index)?;
+                Ok((value, self.live_pool_slot_for_word(value, retained)))
             }
             Operand::Null => Ok((NULL_INPUT_VALUE, None)),
             Operand::StackDouble => Err(VmError::InvalidOperand(0x0bf0)),
             Operand::ObjectRegister(index) => {
                 let object = self.object(handle)?;
                 let index = usize::from(index);
-                Ok((object.register(index)?, object.register_pool_slot(index)?))
+                let value = object.register(index)?;
+                let retained = object.register_pool_slot(index)?;
+                Ok((value, self.live_pool_slot_for_word(value, retained)))
             }
-            Operand::Stack => self.pop_with_pool_slot(handle),
+            Operand::Stack => {
+                let (value, retained) = self.pop_with_pool_slot(handle)?;
+                Ok((value, self.live_pool_slot_for_word(value, retained)))
+            }
             Operand::LinkRegister { link, register } => {
                 let (target, pool_slot) = {
                     let object = self.object(handle)?;
@@ -10508,15 +11003,17 @@ impl Machine {
                 if let Some(pool_slot) = pool_slot {
                     return self.retail_pool_register_word(pool_slot, usize::from(register));
                 }
-                let Some(target) = target else {
+                let Some(target) = self
+                    .resolve_process_link(handle, usize::from(link))?
+                    .or(target)
+                else {
                     return Ok((NULL_INPUT_VALUE, None));
                 };
                 let object = self.object(target)?;
                 let register = usize::from(register);
-                Ok((
-                    object.register(register)?,
-                    object.register_pool_slot(register)?,
-                ))
+                let value = object.register(register)?;
+                let retained = object.register_pool_slot(register)?;
+                Ok((value, self.live_pool_slot_for_word(value, retained)))
             }
         }
     }
@@ -10539,10 +11036,7 @@ impl Machine {
         operand: Operand,
         value: u32,
     ) -> Result<(), VmError> {
-        if let Some(reference) = self.output_reference(handle, operand)? {
-            self.write_storage_reference(reference, value)?;
-        }
-        Ok(())
+        self.write_operand_with_pool_slot(handle, operand, value, None)
     }
 
     fn write_operand_with_pool_slot(
@@ -10552,6 +11046,25 @@ impl Machine {
         value: u32,
         pool_slot: Option<u8>,
     ) -> Result<(), VmError> {
+        if let Operand::LinkRegister { link, register } = operand {
+            let retained = self.object(handle)?.register_pool_slot(usize::from(link))?;
+            if let Some(target_pool_slot) = retained {
+                return self.write_retail_pool_register_word(
+                    target_pool_slot,
+                    usize::from(register),
+                    value,
+                    pool_slot,
+                );
+            }
+            if let Some(target) = self.resolve_process_link(handle, usize::from(link))? {
+                self.object_mut(target)?.set_register_with_pool_slot(
+                    usize::from(register),
+                    value,
+                    pool_slot,
+                )?;
+            }
+            return Ok(());
+        }
         if let Some(reference) = self.output_reference(handle, operand)? {
             self.write_storage_reference_with_pool_slot(reference, value, pool_slot)?;
         }
@@ -17482,6 +17995,656 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_retail_pool_starts_as_the_native_free_chain_and_unlinks_a_binding() {
+        let mut machine = Machine::new(0);
+        let initial_slots = (0..OBJECT_POOL_CAPACITY)
+            .map(|slot| u8::try_from(slot).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(machine.retail_free_pool_slots, initial_slots);
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_PARENT),
+            Ok((RETAIL_FREE_LIST_ROOT_REFERENCE, None))
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_SIBLING),
+            Ok((retail_pool_slot_reference_word(1), Some(1)))
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(95, PROCESS_LINK_SIBLING),
+            Ok((0, None))
+        );
+
+        let object = handle(7);
+        machine
+            .insert_object(VmObject::new(object, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(object, 7).unwrap();
+
+        assert_eq!(
+            machine.retail_free_pool_slots,
+            initial_slots
+                .into_iter()
+                .filter(|slot| *slot != 7)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(6, PROCESS_LINK_SIBLING),
+            Ok((retail_pool_slot_reference_word(8), Some(8))),
+            "unlinking an arbitrary free slot must reconnect its predecessor"
+        );
+    }
+
+    #[test]
+    fn ordinary_retail_pool_removal_is_lifo_and_head_binding_reuses_the_slot() {
+        let first = handle(0);
+        let second = handle(1);
+        let replacement = handle(2);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(first, vec![0]).unwrap())
+            .unwrap();
+        machine
+            .insert_object(VmObject::new(second, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(first, 0).unwrap();
+        machine.bind_retail_pool_slot(second, 1).unwrap();
+
+        machine
+            .remove_object_from_retail_pool_slot(first, 0)
+            .unwrap();
+        assert_eq!(&machine.retail_free_pool_slots[..3], &[0, 2, 3]);
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_PARENT),
+            Ok((RETAIL_FREE_LIST_ROOT_REFERENCE, None))
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_SIBLING),
+            Ok((retail_pool_slot_reference_word(2), Some(2)))
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_CHILDREN),
+            Ok((0, None))
+        );
+
+        machine
+            .remove_object_from_retail_pool_slot(second, 1)
+            .unwrap();
+        assert_eq!(&machine.retail_free_pool_slots[..4], &[1, 0, 2, 3]);
+        assert_eq!(
+            machine.retail_pool_register_word(1, PROCESS_LINK_SIBLING),
+            Ok((retail_pool_slot_reference_word(0), Some(0)))
+        );
+
+        machine
+            .insert_object(VmObject::new(replacement, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(replacement, 1).unwrap();
+        assert_eq!(&machine.retail_free_pool_slots[..3], &[0, 2, 3]);
+        assert_eq!(
+            machine.live_object_in_retail_pool_slot(1),
+            Some(replacement)
+        );
+
+        let after_first_binding = machine.clone();
+        machine.bind_retail_pool_slot(replacement, 1).unwrap();
+        assert_eq!(
+            machine, after_first_binding,
+            "repeating an identical binding must not pop another free slot"
+        );
+    }
+
+    #[test]
+    fn free_pool_allocator_links_reject_authored_mutation_without_diverging() {
+        let target = handle(0);
+        let writer = handle(1);
+        let dynamic_writer = handle(2);
+        let mut writer_object =
+            VmObject::new(writer, vec![Instruction::encode(0x11, 0x0e0a, 0x0d02)]).unwrap();
+        writer_object.set_link(4, Some(target)).unwrap();
+        writer_object.set_register(10, 0).unwrap();
+        let mut dynamic_writer_object =
+            VmObject::new(dynamic_writer, vec![misc(4, 0, REG0) | (4 << 12)]).unwrap();
+        dynamic_writer_object.set_link(4, Some(target)).unwrap();
+        dynamic_writer_object
+            .set_register(0, (PROCESS_LINK_CHILDREN as u32) << 8)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(target, 1).unwrap();
+        machine.insert_object(writer_object).unwrap();
+        machine.insert_object(dynamic_writer_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(target, 1)
+            .unwrap();
+        let free_slots = machine.retail_free_pool_slots.clone();
+        let sibling = machine
+            .retail_pool_register_word(1, PROCESS_LINK_SIBLING)
+            .unwrap();
+
+        assert_eq!(
+            machine.run(writer, 1),
+            Err(VmError::RetailFreePoolLinkMutation {
+                slot: 1,
+                register: PROCESS_LINK_SIBLING,
+            })
+        );
+        assert_eq!(machine.retail_free_pool_slots, free_slots);
+        assert_eq!(
+            machine.retail_pool_register_word(1, PROCESS_LINK_SIBLING),
+            Ok(sibling),
+            "a rejected stale write must leave both visible storage and allocator order intact"
+        );
+
+        machine
+            .write_retail_pool_register_word(1, PROCESS_LINK_SIBLING, sibling.0, sibling.1)
+            .unwrap();
+        assert_eq!(machine.retail_free_pool_slots, free_slots);
+
+        machine.push(dynamic_writer, 0x100).unwrap();
+        assert_eq!(
+            machine.run(dynamic_writer, 1),
+            Err(VmError::RetailFreePoolLinkMutation {
+                slot: 1,
+                register: PROCESS_LINK_CHILDREN,
+            })
+        );
+        assert_eq!(machine.retail_free_pool_slots, free_slots);
+        assert_eq!(
+            machine.retail_pool_register_word(1, PROCESS_LINK_CHILDREN),
+            Ok((0, None))
+        );
+
+        for register in [
+            PROCESS_LINK_PARENT,
+            PROCESS_LINK_SIBLING,
+            PROCESS_LINK_CHILDREN,
+        ] {
+            let retained = machine.retail_pool_register_word(1, register).unwrap();
+            assert_eq!(
+                machine.write_retail_pool_register_word(
+                    1,
+                    register,
+                    retained.0 ^ 0x0100,
+                    retained.1,
+                ),
+                Err(VmError::RetailFreePoolLinkMutation { slot: 1, register })
+            );
+            assert_eq!(
+                machine.retail_pool_register_word(1, register),
+                Ok(retained),
+                "free-list link register {register} must reject mutation atomically"
+            );
+        }
+        assert_eq!(machine.retail_free_pool_slots, free_slots);
+    }
+
+    #[test]
+    fn dedicated_main_pool_slot_never_enters_the_ordinary_free_chain() {
+        let main = handle(OBJECT_POOL_CAPACITY as u16);
+        let initial_free_slots = (0..OBJECT_POOL_CAPACITY)
+            .map(|slot| u8::try_from(slot).unwrap())
+            .collect::<Vec<_>>();
+        let mut main_object = VmObject::new(main, vec![0]).unwrap();
+        main_object
+            .set_link(PROCESS_LINK_PARENT, Some(handle(0)))
+            .unwrap();
+        main_object
+            .set_link(PROCESS_LINK_SIBLING, Some(handle(1)))
+            .unwrap();
+        main_object
+            .set_link(PROCESS_LINK_CHILDREN, Some(handle(2)))
+            .unwrap();
+        let mut machine = Machine::new(0);
+        assert!(
+            machine.retired_retail_pool_registers[OBJECT_POOL_CAPACITY].is_none(),
+            "the separately allocated main process is not part of GoolInitAllocTable"
+        );
+        machine.insert_object(main_object).unwrap();
+        machine
+            .bind_retail_pool_slot(main, OBJECT_POOL_CAPACITY as u8)
+            .unwrap();
+        assert_eq!(machine.retail_free_pool_slots, initial_free_slots);
+
+        let after_first_binding = machine.clone();
+        machine
+            .bind_retail_pool_slot(main, OBJECT_POOL_CAPACITY as u8)
+            .unwrap();
+        assert_eq!(machine, after_first_binding);
+        machine
+            .remove_object_from_retail_pool_slot(main, OBJECT_POOL_CAPACITY as u8)
+            .unwrap();
+
+        assert_eq!(machine.retail_free_pool_slots, initial_free_slots);
+        for link in [
+            PROCESS_LINK_PARENT,
+            PROCESS_LINK_SIBLING,
+            PROCESS_LINK_CHILDREN,
+        ] {
+            assert_eq!(
+                machine.retail_pool_register_word(OBJECT_POOL_CAPACITY as u8, link),
+                Ok((0, None)),
+                "native kill explicitly detaches main link {link}"
+            );
+        }
+    }
+
+    #[test]
+    fn retail_pool_slot_binding_and_removal_reject_identity_aliases_transactionally() {
+        let first = handle(0);
+        let second = handle(1);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(first, vec![0]).unwrap())
+            .unwrap();
+        machine
+            .insert_object(VmObject::new(second, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(first, 7).unwrap();
+        let bound_snapshot = machine.clone();
+
+        assert_eq!(
+            machine.bind_retail_pool_slot(second, 7),
+            Err(VmError::RetailPoolSlotOccupied {
+                slot: 7,
+                object: first,
+            })
+        );
+        assert_eq!(machine, bound_snapshot);
+        assert_eq!(
+            machine.bind_retail_pool_slot(first, 8),
+            Err(VmError::RetailPoolSlotMismatch {
+                object: first,
+                bound: Some(7),
+                requested: 8,
+            })
+        );
+        assert_eq!(machine, bound_snapshot);
+        assert_eq!(
+            machine.remove_object_from_retail_pool_slot(first, 8),
+            Err(VmError::RetailPoolSlotMismatch {
+                object: first,
+                bound: Some(7),
+                requested: 8,
+            })
+        );
+        assert_eq!(machine, bound_snapshot);
+        machine.bind_retail_pool_slot(first, 7).unwrap();
+        assert_eq!(machine, bound_snapshot);
+        assert_eq!(machine.object(first).unwrap().handle(), first);
+        assert_eq!(machine.object(second).unwrap().handle(), second);
+        assert_eq!(
+            machine.retail_pool_slots_by_object[usize::from(first.get())],
+            Some(7)
+        );
+        assert_eq!(
+            machine.retail_pool_slots_by_object[usize::from(second.get())],
+            None
+        );
+    }
+
+    #[test]
+    fn preexisting_link_keeps_physical_pool_identity_across_compact_and_slot_reuse() {
+        let original = handle(0);
+        let holder = handle(1);
+        let replacement = handle(2);
+        let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        original_object.set_register(8, 0x1111_1100).unwrap();
+        let mut holder_object = VmObject::new(holder, vec![0]).unwrap();
+        holder_object.set_link(4, Some(original)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(original_object).unwrap();
+        machine.bind_retail_pool_slot(original, 1).unwrap();
+        machine.insert_object(holder_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, 1)
+            .unwrap();
+
+        assert_eq!(machine.object(holder).unwrap().links[4], Some(original));
+        assert_eq!(
+            machine.object(holder).unwrap().register_pool_slot(4),
+            Ok(Some(1))
+        );
+        assert_eq!(
+            machine
+                .read_operand(
+                    holder,
+                    Operand::LinkRegister {
+                        link: 4,
+                        register: 8,
+                    },
+                )
+                .unwrap(),
+            0x1111_1100
+        );
+
+        let mut unrelated_reuse = VmObject::new(original, vec![0]).unwrap();
+        unrelated_reuse.set_register(8, 0x4444_4400).unwrap();
+        machine.insert_object(unrelated_reuse).unwrap();
+        machine.bind_retail_pool_slot(original, 4).unwrap();
+        assert_eq!(
+            machine
+                .read_operand(
+                    holder,
+                    Operand::LinkRegister {
+                        link: 4,
+                        register: 8,
+                    },
+                )
+                .unwrap(),
+            0x1111_1100,
+            "compact-handle reuse in another slot must not retarget the old pointer"
+        );
+
+        let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object.set_register(8, 0x2222_2200).unwrap();
+        machine.insert_object(replacement_object).unwrap();
+        machine.bind_retail_pool_slot(replacement, 1).unwrap();
+        assert_eq!(
+            machine.resolve_process_link(holder, 4),
+            Ok(Some(replacement))
+        );
+        assert_eq!(
+            machine
+                .read_operand(
+                    holder,
+                    Operand::LinkRegister {
+                        link: 4,
+                        register: 8,
+                    },
+                )
+                .unwrap(),
+            0x2222_2200,
+            "reuse of the same physical slot must retarget the old pointer"
+        );
+    }
+
+    #[test]
+    fn null_link_read_and_killed_slot_zero_are_distinct() {
+        let target = handle(0);
+        let holder = handle(1);
+        let mut holder_object = VmObject::new(holder, vec![0]).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(target, 1).unwrap();
+        machine.insert_object(holder_object.clone()).unwrap();
+        assert_eq!(
+            machine
+                .read_operand(
+                    holder,
+                    Operand::LinkRegister {
+                        link: 4,
+                        register: 8,
+                    },
+                )
+                .unwrap(),
+            NULL_INPUT_VALUE
+        );
+
+        holder_object.set_link(4, Some(target)).unwrap();
+        *machine.object_mut(holder).unwrap() = holder_object;
+        machine
+            .remove_object_from_retail_pool_slot(target, 1)
+            .unwrap();
+        assert_eq!(
+            machine
+                .read_operand(
+                    holder,
+                    Operand::LinkRegister {
+                        link: 4,
+                        register: 8,
+                    },
+                )
+                .unwrap(),
+            0,
+            "a non-null free-slot pointer reads retained zero, not the null compatibility word"
+        );
+    }
+
+    #[test]
+    fn linked_mov_updates_retired_register_and_translation_storage() {
+        let target = handle(0);
+        let writer = handle(1);
+        let value = 0x8765_4300;
+        let mut writer_object =
+            VmObject::new(writer, vec![Instruction::encode(0x11, 0x0e0a, 0x0d08)]).unwrap();
+        writer_object.set_link(4, Some(target)).unwrap();
+        writer_object.set_register(10, value).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(target, 1).unwrap();
+        machine.insert_object(writer_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(target, 1)
+            .unwrap();
+
+        machine.run(writer, 1).unwrap();
+        assert_eq!(machine.retail_pool_register_word(1, 8), Ok((value, None)));
+        assert_eq!(
+            machine.retired_retail_pool_translation(1),
+            Some([value as i32, 0, 0])
+        );
+    }
+
+    #[test]
+    fn dynamic_retired_register_store_and_load_preserve_nested_pool_pointer() {
+        let retired = handle(0);
+        let pointee = handle(1);
+        let actor = handle(2);
+        let pointee_word = CollisionObjectReference::new(pointee).to_word();
+        let old_pointee_value = 0x1111_1100;
+        let new_pointee_value = 0x3333_3300;
+        let mut pointee_object = VmObject::new(pointee, vec![0]).unwrap();
+        pointee_object.set_register(8, old_pointee_value).unwrap();
+        let mut actor_object = VmObject::new(
+            actor,
+            vec![
+                misc(4, 0, REG0) | (4 << 12),
+                misc(3, 0, REG0) | (4 << 12),
+                Instruction::encode(0x11, STACK, 0x0e06),
+                Instruction::encode(0x11, 0x0d88, 0x0e17),
+            ],
+        )
+        .unwrap();
+        actor_object.set_link(4, Some(retired)).unwrap();
+        actor_object.set_register(0, 5 << 8).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(retired, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(retired, 1).unwrap();
+        machine.insert_object(pointee_object).unwrap();
+        machine.bind_retail_pool_slot(pointee, 2).unwrap();
+        machine.insert_object(actor_object).unwrap();
+        machine
+            .push_with_pool_slot(actor, pointee_word, Some(2))
+            .unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(retired, 1)
+            .unwrap();
+
+        machine.run(actor, 1).unwrap();
+        assert_eq!(
+            machine.retail_pool_register_word(1, 5),
+            Ok((pointee_word, Some(2)))
+        );
+
+        machine
+            .remove_object_from_retail_pool_slot(pointee, 2)
+            .unwrap();
+        let mut compact_reuse = VmObject::new(pointee, vec![0]).unwrap();
+        compact_reuse.set_register(8, new_pointee_value).unwrap();
+        machine.insert_object(compact_reuse).unwrap();
+        machine.bind_retail_pool_slot(pointee, 3).unwrap();
+        machine.run(actor, 3).unwrap();
+
+        let actor_object = machine.object(actor).unwrap();
+        assert_eq!(actor_object.register_pool_slot(6), Ok(Some(2)));
+        assert_eq!(actor_object.register(23), Ok(old_pointee_value));
+    }
+
+    #[test]
+    fn object_pointer_equality_uses_physical_pool_identity() {
+        let original = handle(0);
+        let actor = handle(1);
+        let replacement = handle(2);
+        let original_word = CollisionObjectReference::new(original).to_word();
+        let replacement_word = CollisionObjectReference::new(replacement).to_word();
+        let mut actor_object = VmObject::new(
+            actor,
+            vec![
+                Instruction::encode(0x04, 0x0e0a, 0x0e0b),
+                Instruction::encode(0x04, 0x0e0a, 0x0e0c),
+            ],
+        )
+        .unwrap();
+        actor_object.set_register(10, original_word).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(original, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(original, 1).unwrap();
+        machine.insert_object(actor_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, 1)
+            .unwrap();
+
+        machine
+            .insert_object(VmObject::new(original, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(original, 4).unwrap();
+        machine
+            .insert_object(VmObject::new(replacement, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(replacement, 1).unwrap();
+        machine
+            .object_mut(actor)
+            .unwrap()
+            .set_register(11, original_word)
+            .unwrap();
+        machine
+            .object_mut(actor)
+            .unwrap()
+            .set_register(12, replacement_word)
+            .unwrap();
+
+        machine.run(actor, 2).unwrap();
+        assert_eq!(
+            machine.object(actor).unwrap().stack(),
+            &[0, 1],
+            "the same compact token in another slot differs, while different tokens in one slot compare equal"
+        );
+    }
+
+    #[test]
+    fn mov_through_internal_storage_preserves_pool_pointer_identity() {
+        let target = handle(0);
+        let actor = handle(1);
+        let pointer = CollisionObjectReference::new(target).to_word();
+        let mut actor_object = VmObject::new(
+            actor,
+            vec![
+                Instruction::encode(0x11, 0x0e0a, 7),
+                Instruction::encode(0x04, 7, 0x0e0a),
+            ],
+        )
+        .unwrap();
+        actor_object.set_register(10, pointer).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(target, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(target, 5).unwrap();
+        machine.insert_object(actor_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(target, 5)
+            .unwrap();
+
+        machine.run(actor, 2).unwrap();
+        let actor = machine.object(actor).unwrap();
+        assert_eq!(actor.internal[7], pointer);
+        assert_eq!(actor.internal_pool_slots[7], Some(5));
+        assert_eq!(actor.stack(), &[1]);
+    }
+
+    #[test]
+    fn direct_table_overwrite_and_state_rebind_clear_pointer_provenance() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![0]).unwrap();
+        object.internal_pool_slots[0] = Some(5);
+        object.external_pool_slots[0] = Some(5);
+
+        object.set_internal(0, 0x1111_1100).unwrap();
+        object.set_external(0, 0x2222_2200).unwrap();
+        assert_eq!(object.internal_pool_slots[0], None);
+        assert_eq!(object.external_pool_slots[0], None);
+
+        object.external_pool_slots[0] = Some(5);
+        let target = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: GOOL_PC_NONE,
+            },
+            Vec::new(),
+            vec![0x3333_3300],
+        )
+        .unwrap();
+        object.rebind_state_program(&target, &[], 0).unwrap();
+
+        assert_eq!(object.external[0], 0x3333_3300);
+        assert!(object.external_pool_slots.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn object_argument_decoders_follow_pool_identity_after_compact_reuse() {
+        let original = handle(0);
+        let actor = handle(1);
+        let replacement = handle(2);
+        let pointer = CollisionObjectReference::new(original).to_word();
+        let mut actor_object = VmObject::new(actor, vec![0]).unwrap();
+        actor_object.set_register(10, pointer).unwrap();
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(original, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(original, 5).unwrap();
+        machine.insert_object(actor_object).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, 5)
+            .unwrap();
+
+        machine
+            .insert_object(VmObject::new(original, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(original, 6).unwrap();
+        machine
+            .insert_object(VmObject::new(replacement, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(replacement, 5).unwrap();
+        let reference = StorageReference::checked(actor, StorageRegion::Register, 10).unwrap();
+
+        assert_eq!(
+            machine.decode_misc_object_argument(reference),
+            Ok(replacement)
+        );
+        assert_eq!(
+            machine.decode_audio_object_argument(reference),
+            Ok(Some(replacement))
+        );
+    }
+
+    #[test]
     fn tagged_global_captures_physical_pool_slot_when_written_not_when_read() {
         let object = handle(0);
         let tagged = CollisionObjectReference::new(object).to_word();
@@ -17592,6 +18755,105 @@ mod tests {
         assert_eq!(
             machine.object(reader).unwrap().register(23),
             Ok(0x1234_5600)
+        );
+    }
+
+    #[test]
+    fn reclaimed_pool_storage_is_selectively_initialized_in_place() {
+        let original = handle(0);
+        let replacement = handle(1);
+        let retained = [
+            (process_register::TRANSLATION_X, 0x1111_1100),
+            (process_register::MISC_VALUE, 0x2222_2200),
+            (process_register::ANIMATION_STAMP, 0x3333_3300),
+            (process_register::ANIMATION_COUNTER, 0x4444_4400),
+            (process_register::FLOOR_Y, 0x5555_5500),
+            (process_register::INVINCIBILITY_STAMP, 0x6666_6600),
+            (process_register::FLOOR_IMPACT_VELOCITY, 0x7777_7700),
+            (process_register::EVENT, 0x8888_8800),
+            (process_register::CAMERA_ZOOM, 0x9999_9900),
+            (process_register::ANGULAR_VELOCITY_Y, 0xaaaa_aa00),
+            (process_register::UNKNOWN_150, 0xbbbb_bb00),
+            (process_register::UNKNOWN_154, 0xcccc_cc00),
+        ];
+        let reset = [
+            process_register::MISC_A_X,
+            process_register::STATUS_B,
+            process_register::PID_FLAGS,
+            process_register::STACK_POINTER,
+            process_register::PROGRAM_COUNTER,
+            process_register::FRAME_POINTER,
+            process_register::TRANSITION_POINTER,
+            process_register::EVENT_POINTER,
+            process_register::ACK,
+            process_register::ANIMATION_SEQUENCE,
+            process_register::ANIMATION_FRAME,
+            process_register::PATH_LENGTH,
+            process_register::SPEED,
+            process_register::INVINCIBILITY_STATE,
+            process_register::FLOOR_IMPACT_STAMP,
+            process_register::SIZE,
+            process_register::HOTSPOT_SIZE,
+        ];
+        let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        for (register, value) in retained {
+            original_object.set_register(register, value).unwrap();
+        }
+        for register in reset {
+            original_object.set_register(register, 0xdead_beef).unwrap();
+        }
+        let mut machine = Machine::new(0);
+        machine.insert_object(original_object).unwrap();
+        machine.bind_retail_pool_slot(original, 1).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, 1)
+            .unwrap();
+
+        let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object
+            .set_register(process_register::STATUS_C, 0x1234)
+            .unwrap();
+        replacement_object
+            .set_register(process_register::STATE_FLAGS, 0x5678)
+            .unwrap();
+        machine
+            .seed_retail_pool_slot_storage(1, &mut replacement_object)
+            .unwrap();
+        replacement_object.initialize_retail_process(7, 99).unwrap();
+
+        for (register, value) in retained {
+            assert_eq!(
+                replacement_object.register(register),
+                Ok(value),
+                "register {register} is not written by native Init"
+            );
+        }
+        for register in reset {
+            assert_eq!(
+                replacement_object.register(register),
+                Ok(0),
+                "register {register} must be cleared by native Init"
+            );
+        }
+        assert_eq!(
+            replacement_object.register(process_register::STATUS_C),
+            Ok(0x1234)
+        );
+        assert_eq!(
+            replacement_object.register(process_register::STATE_FLAGS),
+            Ok(0x5678)
+        );
+        assert_eq!(
+            replacement_object.register(process_register::SUBTYPE),
+            Ok(7)
+        );
+        assert_eq!(
+            replacement_object.register(process_register::STATE_STAMP),
+            Ok(99)
+        );
+        assert_eq!(
+            replacement_object.register(process_register::VOICE_ID),
+            Ok((-2_i32) as u32)
         );
     }
 

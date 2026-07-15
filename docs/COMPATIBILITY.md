@@ -84,13 +84,20 @@ gameplay path.
   font offset against global animation item five. Foreign-object aliases, external-state-table
   aliases, and the rotating constant region are rejected because their backing identity/lifetime is
   not represented by the current checked token. Opcode `0x81` is the native one-cycle no-op.
-  Checked object-pointer values retain physical native pool-slot provenance along the characterized
-  Jaws global-read, process-stack/register, and newly written link chain. Initialized process-
-  register storage remains addressable after reclamation until that physical slot is reused. This
-  covers Jaws of Darkness's `FruiC` state-12 copy from global six into its creator link and the
-  subsequent `translation.x` read of
-  `0xffff3800` (`-51,200`); compact VM-handle reuse elsewhere does not retarget it, while same-slot
-  reuse does.
+  Checked object-pointer values retain physical native pool-slot provenance across globals,
+  pre-existing process links, registers and stack words, plus internal/external MOV storage. Retail
+  reclaim captures missing provenance before removing the logical identity instead of clearing
+  inbound links. Linked register loads and stores address either the live occupant or the retained
+  free-slot process array, preserve nested pointer provenance, and retarget only when the same
+  physical slot is reused. The ordinary 96-slot allocator reproduces the native ascending initial
+  free chain, arbitrary-slot unlink, reclaim-time parent/sibling/child mutations, and LIFO reuse;
+  binding is preflighted and committed transactionally. Authored writes that would corrupt those
+  three allocator-owned words while a slot is free are rejected rather than reproducing unsafe
+  malformed-list behavior. Reused slots inherit their process array before selective
+  initialization resets the source-listed fields, including raw `sp`, `pc`, `fp`, `tp`, and `ep`,
+  while untouched words persist. This covers Jaws of Darkness's `FruiC` state-12
+  creator read of `0xffff3800` (`-51,200`) and Dr. N. Brio's live `BoxsC` creator links after their
+  `BriOC` target is reclaimed.
 - Static solid queries are refreshed from the current camera/native `cur_zone` neighborhood before
   object execution rather than remaining attached to each object's spawn zone. The per-object zone
   identity remains separately typed for object colors and zone migration. When that object zone is
@@ -250,10 +257,14 @@ gameplay path.
 
 ## Exact remaining parity gaps
 
-- Checked object teardown still clears inbound process links that already pointed at an object when
-  it was reclaimed. Native static-pool pointers can retain those words until physical-slot reuse.
-  The current provenance slice covers retained pointer globals and the Jaws pointer copied into its
-  creator link after reclamation; it is not yet a general model for every pre-existing stale link.
+- Pool-backed register access is broader than pointer/address emulation. LEA-style address-taking
+  through a link whose slot is free is not represented. Event and child-spawn argument vectors do
+  not yet carry pool-provenance sidecars, and retired slots retain process registers and translation
+  rather than the complete non-process color, collision-bound, or animation state. The 96-slot
+  ordinary free list is modeled, while the dedicated main slot is only kept outside that list and
+  detached on release; its byte-exact separate allocation, release, and reinitialization nuances
+  remain incomplete. Synthetic non-retail VM teardown deliberately retains its older checked
+  inbound-link clearing contract.
 - The browser retail runtime now instantiates displayed group-three zone entities and integrates
   the bounded arena and VM through explicit typed mappings, but it is not the complete object graph
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode

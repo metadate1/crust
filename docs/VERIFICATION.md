@@ -738,37 +738,57 @@ is 1,322,866 bytes with SHA-256
 - The Jaws of Darkness failure was traced to `FruiC` state 12: global six's `fruit_hud` object
   pointer is copied into the creator link, then opcode word `0x11d08e17` reads that creator's
   `translation.x`. Native static-pool storage retains the reclaimed process word
-  `0xffff3800` (`-51,200`). The checked representation now carries the pointer's physical pool-slot
-  provenance through this characterized global-read, stack/register, and newly written link chain,
-  and retains all initialized process registers for a reclaimed slot. Focused tests prove that
-  compact-handle reuse in a different slot still reads `-51,200`, while reuse of the original
-  physical slot retargets the read to the new occupant. Unrelated inbound links that predate target
-  reclamation are still cleared by checked teardown and were not generalized in this slice. The
+  `0xffff3800` (`-51,200`). The checked representation now carries physical pool provenance through
+  globals, pre-existing process links, registers/stack, and internal/external MOV storage. Focused
+  tests exercise live and free-slot register reads/writes, nested pointer provenance, physical
+  pointer equality, compact-handle reuse in another slot, and retargeting when the original slot is
+  reused. Raw internal/external replacement clears stale provenance, and object-valued audio and
+  miscellaneous opcode consumers follow captured physical slots across compact-handle reuse. The
   focused Jaws active-input run then completed 1,800 clean frames.
-- `cargo test -p crust-sim --lib --locked` passed all 520 simulation-library tests. The strict
+- Allocator tests cover the ascending 96-slot native free chain, arbitrary-slot unlink, LIFO
+  reclaim, ordinary freed-object parent/sibling/child mutations, dedicated-main exclusion, and
+  transactional binding failures. Reuse tests seed the retained process array before selective
+  initialization and prove raw `sp`, `pc`, `fp`, `tp`, and `ep` are reset while fields native does
+  not initialize retain their slot values.
+- The ignored legal regression
+  `brio_boxsc_creator_link_survives_brioc_pool_reclaim` runs Dr. N. Brio through the same bounded
+  browser-order input path. At frame 405 it observes eight live `BoxsC` objects linked to `BriOC`;
+  frame 406 reclaims that creator while all eight boxes remain live. The test verifies every link
+  four process word retains the original non-null pointer and reports no faulted object. Its focused
+  invocation passed one test with zero failures.
+- This retained-storage slice does not yet cover address-taking through a free-slot link,
+  event/spawn argument provenance sidecars, retired non-process colors/bounds/animation, or the
+  byte-exact separate allocation and reinitialization details of the dedicated main slot. It also
+  deliberately rejects writes to an ordinary free slot's allocator-owned parent/sibling/children
+  words instead of attempting to reproduce native malformed-list behavior.
+- `cargo test -p crust-sim --lib --locked` passed all 537 simulation-library tests. The strict
   active-input survey ran all 43 bootable pairs for 1,800 frames each (77,400 frames total) with
   clean-policy enforcement and no checked runtime issue. This expands the earlier 360-frame survey;
   it remains a bounded direct-boot simulation sweep rather than full-route or browser-playthrough
   evidence.
-- Locked native workspace tests, warnings-denied native Clippy, the optimized native workspace
-  release, warnings-denied `wasm32-unknown-unknown` `crust-web` Clippy, and the optimized Wasm build
-  all passed. The final distribution artifact is a 1,326,106-byte Wasm module with SHA-256
-  `06fc640166c7dda46c5893ecace90a9b10a4649ee53d6f4e772326a4e4c31c54`; its 46,236-byte generated
-  loader has SHA-256 `9f687eecf3266eef42bdc147c8bdc38d80dbc3d036847b9cc2b3b2c471a1a98d`.
+- All 861 locked default workspace tests and the complete 72-test legally local opt-in sweep passed
+  with zero failures. Locked native workspace tests, warnings-denied native Clippy, the optimized
+  native workspace release, warnings-denied `wasm32-unknown-unknown` `crust-web` Clippy, and the
+  optimized Wasm build all passed. The final distribution artifact is a 1,337,759-byte Wasm module
+  with SHA-256
+  `b078aca54e9484b161e2e7ce1c9b0e2d89e7a5c8e8bfcd312382b9ed81a734c0`; its 46,236-byte generated
+  loader has SHA-256 `986d18af7d9e4108a2f28fced2206df17020ebde743171a1d3636afb61943c79`.
 - The rebuilt distribution was served from `127.0.0.1:4174` and exercised in a fresh foreground
   Google Chrome pass. The native macOS picker selected the user's legally owned raw NTSC-U BIN in
   place. The browser recognized 88 streams, 44/44 pairs, and 219 MiB of extracted in-tab data, then
   reached the retail publisher screen, main menu, and N. Sanity Beach island-map node through the
   title target. A separate direct `0x09` boot visibly rendered N. Sanity Beach with Crash and crates;
   telemetry reported `RUNNING`, 30.00 Hz, `SYNTH ACTIVE`, and level `0x09`.
-- Eight `Up` taps followed by `Z` visibly changed the gameplay frame and captured Crash in a jump.
+- Six `Up` taps followed by `Z` visibly changed the final-build gameplay frame. Chrome DevTools
+  reported zero console messages after local import, direct boot, audio start, and keyboard input.
+  In the earlier browser pass, eight `Up` taps followed by `Z` captured Crash in a jump.
   The page controls changed simulation telemetry to `PAUSED` and back to `RUNNING`, audio telemetry
   to `MUTED` and back to `SYNTH ACTIVE`, and successfully presented the live canvas fullscreen.
   No proprietary byte was written to the repository; retail-data reads stayed in the local browser
   tab or legally local test paths.
-- This browser pass did not inspect Chrome DevTools, perform a complete level route, or manually
-  repeat gamepad, touch, virtual-card persistence, later transitions, bosses, bonuses, or ending
-  flows. It is browser evidence for import, title presentation, direct gameplay, keyboard input,
+- These browser passes did not perform a complete level route or manually repeat gamepad, touch,
+  virtual-card persistence, later transitions, bosses, bonuses, or ending flows. It is browser
+  evidence for import, title presentation, direct gameplay, keyboard input,
   audio state, pause, and fullscreen—not a full-playthrough or retail-parity claim.
 
 ## Reproducible commands
@@ -805,6 +825,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \
   n_sanity_a3_authored_crate_pair_has_native_bidirectional_links -- --ignored --exact
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_runtime --locked \
+  brio_boxsc_creator_link_survives_brioc_pool_reclaim -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_LEVEL=11 C1_SURVEY_FRAMES=360 \
   C1_SURVEY_REQUIRE_CLEAN=1 cargo test -p crust-sim --test local_retail_idle_survey --locked \
   every_bootable_pair_runs_a_browser_ordered_idle_window -- --ignored --nocapture

@@ -8,11 +8,17 @@ use crust_formats::stream::{
     LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
     parse_nsf,
 };
-use crust_sim::gool::{CollisionObjectReference, RetailPadSnapshot, VmEffect, process_register};
+use crust_sim::camera::{RetailCameraInput, RetailCameraRuntime};
+use crust_sim::gool::{
+    CollisionObjectReference, MAX_OBJECTS, ObjectHandle as VmObjectHandle, RetailPadSnapshot,
+    RetailTransformVectorsCamera, VmEffect, process_register,
+};
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
-use crust_sim::retail_runtime::{NsfProgramHost, ProgramHost, RetailRuntime};
+use crust_sim::retail_runtime::{
+    NsfProgramHost, ProgramHost, RetailLevelStateContext, RetailRuntime,
+};
 use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, SpawnScanZone, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
 };
@@ -226,6 +232,195 @@ fn ripper_roo_mount_creates_authored_root_controller_before_zone_scan() {
     assert_eq!(frame.executions.len(), 1);
     assert_eq!(frame.executions[0].object, controller);
     assert!(frame.executions[0].result.is_ok());
+    assert_eq!(runtime.faulted_object_count(), 0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn brio_boxsc_creator_link_survives_brioc_pool_reclaim() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::new_const(0x1b);
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let zone = graph.spawn_path().zone;
+    let entry = nsf.resolve_entry(&nsd, zone).unwrap();
+    let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let entities = (0..header.entity_count)
+        .map(|entity_index| {
+            let item_index =
+                usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+            ZoneEntity::parse(entry.item(item_index).unwrap().bytes(&nsf_bytes).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let neighbors = [NeighborZone {
+        eid: zone,
+        // The initial LevelUpdate marks the current-zone band loaded,
+        // displayed, and activation-scannable before the first entity pass.
+        display_flags: header.display_flags | 7,
+        entities: &entities,
+    }];
+
+    let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+    let mut runtime = RetailRuntime::new_for_level(256, level);
+    runtime.set_level_state_context(RetailLevelStateContext {
+        location: camera.location(),
+        graphics_flags: graph.zone(zone).unwrap().graphics_flags,
+        box_count: 0,
+        checkpoint_id: -1,
+        checkpoint_translation: [0; 3],
+        first_spawn: false,
+        active_neighbor_zones: vec![zone],
+    });
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    runtime.create_retail_core_objects(zone, &mut host).unwrap();
+    runtime
+        .create_retail_level_misc_object(zone, &mut host)
+        .unwrap();
+
+    let boxsc = retail_eid("BoxsC");
+    let brioc = retail_eid("BriOC");
+    let mut held_previous = 0;
+    let mut held_previous_2 = 0;
+    let mut tapped_previous = 0;
+    let mut creator = None;
+    let mut creator_word = 0;
+    let mut retained_children = Vec::new();
+    for frame in 1_u32..=406 {
+        runtime.set_frame_timing(34, 34);
+        let held = match (frame - 1) % 120 {
+            0..=31 => 0x1000,
+            32..=39 => 0x1040,
+            40..=55 => 0x2000,
+            56..=63 => 0x2080,
+            64..=71 => 0x0040,
+            72..=79 => 0x4000,
+            80..=87 => 0x8000,
+            88..=95 => 0x0020,
+            96..=103 => 0x0010,
+            104 => 0x0800,
+            _ => 0,
+        };
+        let tapped = held & !held_previous;
+        runtime
+            .set_pad_snapshot(
+                0,
+                RetailPadSnapshot {
+                    tapped,
+                    held,
+                    held_previous,
+                    tapped_previous,
+                    held_previous_2,
+                },
+            )
+            .unwrap();
+        held_previous_2 = held_previous;
+        held_previous = held;
+        tapped_previous = tapped;
+
+        let _ = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        runtime.advance_level_shader().unwrap();
+        let camera_step = if runtime.current_display_mask() & 2 == 0 {
+            camera.stationary_step()
+        } else {
+            camera.update(&graph, RetailCameraInput::default()).unwrap()
+        };
+        let location = camera_step.after;
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location,
+            graphics_flags: graph.zone(location.path.zone).unwrap().graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: vec![zone],
+        });
+        let pose = camera.pose(&graph).unwrap();
+        runtime.set_frame_context(camera_step.game_state, camera.rotation_xz(&graph).unwrap());
+        runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+            pose.translation,
+            pose.rotation_yxz,
+            288,
+        ));
+        let report = runtime.run_frame(&mut host, 67).unwrap();
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "Brio frame {frame} crossed a checked VM boundary: {:?}",
+            report
+                .executions
+                .iter()
+                .filter(|execution| execution.result.is_err())
+                .collect::<Vec<_>>()
+        );
+
+        if frame == 405 {
+            for handle in (0..MAX_OBJECTS)
+                .filter_map(|index| u16::try_from(index).ok())
+                .filter_map(VmObjectHandle::new)
+            {
+                let Ok(object) = runtime.machine().object(handle) else {
+                    continue;
+                };
+                if object
+                    .program_identity()
+                    .is_none_or(|identity| identity.global_eid() != boxsc)
+                {
+                    continue;
+                }
+                let word = object.register(4).unwrap();
+                let Some(reference) = CollisionObjectReference::from_word(word) else {
+                    continue;
+                };
+                let Ok(creator_object) = runtime.machine().object(reference.object()) else {
+                    continue;
+                };
+                if creator_object
+                    .program_identity()
+                    .is_some_and(|identity| identity.global_eid() == brioc)
+                {
+                    creator.get_or_insert(reference);
+                    if creator_word == 0 {
+                        creator_word = word;
+                    }
+                    assert_eq!(word, creator_word);
+                    retained_children.push(handle);
+                }
+            }
+            assert_eq!(
+                retained_children.len(),
+                8,
+                "the legal frame-405 trace must expose the authored Brio box wave"
+            );
+        }
+    }
+
+    let creator = creator.expect("the authored frame-405 BoxsC wave must retain creator BriOC");
+    assert_eq!(
+        runtime.object_for_vm(creator.object()),
+        None,
+        "BriOC must take its authored frame-406 reclaim path"
+    );
+    for child in retained_children {
+        let object = runtime
+            .machine()
+            .object(child)
+            .expect("BoxsC must remain live across its creator's reclaim");
+        assert_eq!(
+            object.register(4).unwrap(),
+            creator_word,
+            "native link four retains the reclaimed physical pool pointer"
+        );
+    }
     assert_eq!(runtime.faulted_object_count(), 0);
 }
 

@@ -8892,6 +8892,9 @@ impl RetailRuntime {
                 });
             }
             let install_result = (|| {
+                machine
+                    .seed_retail_pool_slot_storage(object.arena.slot(), &mut vm_object)
+                    .map_err(RuntimeError::Vm)?;
                 let environment = host
                     .zone_environment(binding_zone)
                     .map_err(RuntimeError::Program)?;
@@ -8910,10 +8913,7 @@ impl RetailRuntime {
                     vm_object.bind_retail_solid_environment(environment);
                 }
                 Self::initialize_vm_links(arena, handles, machine, object, &mut vm_object)?;
-                Self::install_vm_object(machine, vm_object)?;
-                machine
-                    .bind_retail_pool_slot(object.vm, object.arena.slot())
-                    .map_err(RuntimeError::Vm)?;
+                Self::install_vm_object(machine, vm_object, object.arena.slot())?;
                 arena
                     .set_state_flags(
                         arena_handle,
@@ -8961,6 +8961,9 @@ impl RetailRuntime {
                 actual: vm_object.handle(),
             });
         }
+        self.machine
+            .seed_retail_pool_slot_storage(binding.object.arena.slot(), &mut vm_object)
+            .map_err(RuntimeError::Vm)?;
         let environment = host
             .zone_environment(binding.zone)
             .map_err(RuntimeError::Program)?;
@@ -8985,10 +8988,7 @@ impl RetailRuntime {
             binding.object,
             &mut vm_object,
         )?;
-        Self::install_vm_object(&mut self.machine, vm_object)?;
-        self.machine
-            .bind_retail_pool_slot(binding.object.vm, binding.object.arena.slot())
-            .map_err(RuntimeError::Vm)?;
+        Self::install_vm_object(&mut self.machine, vm_object, binding.object.arena.slot())?;
         let is_entity_enemy = matches!(binding.origin, ProgramOrigin::Entity(_))
             && self
                 .machine
@@ -9028,33 +9028,47 @@ impl RetailRuntime {
         vm_object
             .initialize_retail_process(binding.subtype, machine.frames_elapsed())
             .map_err(RuntimeError::Vm)?;
+        if binding.executable == 0 {
+            vm_object
+                .set_register(process_register::CAMERA_ZOOM, 0)
+                .map_err(RuntimeError::Vm)?;
+        }
         vm_object.set_main_player_identity(binding.object.arena.is_dedicated_main());
 
-        match binding.origin {
-            ProgramOrigin::Entity(entity) => vm_object
+        let spawned = arena
+            .get(binding.object.arena)
+            .ok_or(RuntimeError::UnknownArenaObject(binding.object.arena))?;
+        match spawned.parent() {
+            TreeParent::Object(parent_arena) => {
+                let parent = handles
+                    .for_arena(parent_arena)
+                    .ok_or(RuntimeError::UnknownArenaObject(parent_arena))?;
+                let transform = machine
+                    .object(parent.vm)
+                    .map_err(RuntimeError::Vm)?
+                    .retail_transform()
+                    .map_err(RuntimeError::Vm)?;
+                vm_object
+                    .set_retail_transform(transform)
+                    .map_err(RuntimeError::Vm)?;
+            }
+            TreeParent::Root(_) => {
+                let mut transform = vm_object.retail_transform().map_err(RuntimeError::Vm)?;
+                transform.rotation_yxz = [0; 3];
+                transform.scale = [0x1000; 3];
+                vm_object
+                    .set_retail_transform(transform)
+                    .map_err(RuntimeError::Vm)?;
+            }
+        }
+
+        if let ProgramOrigin::Entity(entity) = binding.origin {
+            vm_object
                 .initialize_retail_entity(
                     entity,
                     environment.map_or([0; 3], |environment| environment.origin),
                 )
-                .map_err(RuntimeError::Vm)?,
-            ProgramOrigin::RuntimeChild { .. } => {
-                let spawned = arena
-                    .get(binding.object.arena)
-                    .ok_or(RuntimeError::UnknownArenaObject(binding.object.arena))?;
-                if let TreeParent::Object(parent_arena) = spawned.parent() {
-                    let parent = handles
-                        .for_arena(parent_arena)
-                        .ok_or(RuntimeError::UnknownArenaObject(parent_arena))?;
-                    let transform = machine
-                        .object(parent.vm)
-                        .map_err(RuntimeError::Vm)?
-                        .retail_transform()
-                        .map_err(RuntimeError::Vm)?;
-                    vm_object
-                        .set_retail_transform(transform)
-                        .map_err(RuntimeError::Vm)?;
-                }
-            }
+                .map_err(RuntimeError::Vm)?;
         }
 
         if let Some(environment) = environment {
@@ -9075,9 +9089,18 @@ impl RetailRuntime {
         object: RuntimeObjectHandle,
         vm_object: &mut VmObject,
     ) -> Result<(), RuntimeError<E>> {
-        vm_object
-            .set_link(0, Some(object.vm))
-            .map_err(RuntimeError::Vm)?;
+        for (link, target) in [
+            (0, Some(object.vm)),
+            (1, None),
+            (2, None),
+            (3, None),
+            (4, None),
+            (5, None),
+            (6, None),
+            (7, None),
+        ] {
+            vm_object.set_link(link, target).map_err(RuntimeError::Vm)?;
+        }
         let spawned = arena
             .get(object.arena)
             .ok_or(RuntimeError::UnknownArenaObject(object.arena))?;
@@ -9100,21 +9123,27 @@ impl RetailRuntime {
                 .set_link(2, Some(sibling.vm))
                 .map_err(RuntimeError::Vm)?;
         }
-        if let Some(main_arena) = arena.main_object()
-            && let Some(main) = handles.for_arena(main_arena)
-        {
-            vm_object
-                .set_link(5, Some(main.vm))
-                .map_err(RuntimeError::Vm)?;
-        }
+        let player = arena
+            .main_object()
+            .and_then(|main_arena| handles.for_arena(main_arena))
+            .map(|main| main.vm);
+        vm_object.set_link(5, player).map_err(RuntimeError::Vm)?;
         Ok(())
     }
 
     fn install_vm_object<E>(
         machine: &mut Machine,
         vm_object: VmObject,
+        pool_slot: u8,
     ) -> Result<(), RuntimeError<E>> {
-        machine.upsert_object(vm_object).map_err(RuntimeError::Vm)
+        let handle = vm_object.handle();
+        machine
+            .preflight_retail_pool_slot_binding(handle, pool_slot)
+            .map_err(RuntimeError::Vm)?;
+        machine.upsert_object(vm_object).map_err(RuntimeError::Vm)?;
+        machine
+            .bind_retail_pool_slot(handle, pool_slot)
+            .map_err(RuntimeError::Vm)
     }
 
     fn refresh_player_links<E>(
@@ -10605,6 +10634,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn materialize_rejects_an_occupied_pool_slot_without_leaking_a_vm_object() {
+        let mut runtime = RetailRuntime::new(0);
+        let entity = entity(279, 2, 0);
+        let arena = runtime
+            .arena
+            .spawn_entity(ZONE, EntitySpawnDescriptor::from(&entity))
+            .unwrap();
+        let target = runtime.handles.reserve::<()>(arena).unwrap();
+        let blocker = VmObjectHandle::new(95).unwrap();
+        assert_ne!(target.vm, blocker);
+        runtime
+            .machine
+            .insert_object(VmObject::new(blocker, vec![RETURN]).unwrap())
+            .unwrap();
+        runtime
+            .machine
+            .bind_retail_pool_slot(blocker, target.arena.slot())
+            .unwrap();
+        let before = runtime.machine.clone();
+
+        let result = runtime.materialize(
+            ProgramBinding {
+                object: target,
+                zone: ZONE,
+                executable: entity.executable,
+                subtype: entity.subtype,
+                origin: ProgramOrigin::Entity(&entity),
+            },
+            &mut SnapshotHost,
+        );
+
+        assert_eq!(
+            result,
+            Err(RuntimeError::Vm(VmError::RetailPoolSlotOccupied {
+                slot: target.arena.slot(),
+                object: blocker,
+            }))
+        );
+        assert_eq!(runtime.machine, before);
+        assert_eq!(
+            runtime.machine.object(target.vm),
+            Err(VmError::UnknownObject(target.vm))
+        );
+    }
+
+    #[test]
+    fn vm_install_rejects_a_pool_slot_mismatch_without_replacing_the_live_object() {
+        let mut machine = Machine::new(0);
+        let handle = VmObjectHandle::new(0).unwrap();
+        let mut original = VmObject::new(handle, vec![RETURN]).unwrap();
+        original.set_register(TEST_SCALAR_REGISTER_A, 1).unwrap();
+        machine.insert_object(original).unwrap();
+        machine.bind_retail_pool_slot(handle, 3).unwrap();
+        let before = machine.clone();
+
+        let mut replacement = VmObject::new(handle, vec![RETURN]).unwrap();
+        replacement.set_register(TEST_SCALAR_REGISTER_A, 2).unwrap();
+        assert_eq!(
+            RetailRuntime::install_vm_object::<()>(&mut machine, replacement, 4),
+            Err(RuntimeError::Vm(VmError::RetailPoolSlotMismatch {
+                object: handle,
+                bound: Some(3),
+                requested: 4,
+            }))
+        );
+        assert_eq!(machine, before);
+        assert_eq!(
+            machine
+                .object(handle)
+                .unwrap()
+                .register(TEST_SCALAR_REGISTER_A),
+            Ok(1)
+        );
+    }
+
     struct SpinDeathHost {
         frame_available: bool,
         vertex_count: u32,
@@ -11938,6 +12043,41 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn reclaimed_runtime_slot_starts_from_retained_process_storage() {
+        let mut runtime = RetailRuntime::new(0);
+        let original = spawn_test_object(&mut runtime, ZONE, 280, 2, 0);
+        {
+            let object = runtime.machine.object_mut(original.vm).unwrap();
+            object
+                .set_register(process_register::MISC_VALUE, 0x1234_5600)
+                .unwrap();
+            object
+                .set_register(process_register::CAMERA_ZOOM, 0x2345_6700)
+                .unwrap();
+            object
+                .set_register(process_register::STATUS_B, 0xffff_ffff)
+                .unwrap();
+        }
+        let mut report = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(original.arena, &mut report)
+            .unwrap();
+
+        let replacement = spawn_test_object(&mut runtime, ZONE, 281, 2, 0);
+        assert_eq!(replacement.arena.slot(), original.arena.slot());
+        let object = runtime.machine.object(replacement.vm).unwrap();
+        assert_eq!(
+            object.register(process_register::MISC_VALUE),
+            Ok(0x1234_5600)
+        );
+        assert_eq!(
+            object.register(process_register::CAMERA_ZOOM),
+            Ok(0x2345_6700)
+        );
+        assert_eq!(object.register(process_register::STATUS_B), Ok(0));
+    }
+
     fn install_szon_program(
         runtime: &mut RetailRuntime,
         requester: RuntimeObjectHandle,
@@ -12313,6 +12453,10 @@ mod tests {
         vm_object.set_link(1, Some(parent.vm)).unwrap();
         vm_object.set_link(4, Some(parent.vm)).unwrap();
         runtime.machine.upsert_object(vm_object).unwrap();
+        runtime
+            .machine
+            .bind_retail_pool_slot(object.vm, object.arena.slot())
+            .unwrap();
         object
     }
 

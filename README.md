@@ -180,10 +180,12 @@ it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c
 outgoing `LEVEL_END` broadcasts complete without a checked handler failure, and the carried map,
 count, unlock, island-camera, RNG and draw state remain exact. The same uninterrupted test imports
 that carry into Jungle Rollers, flings both early PlanC hazards, breaks four counted boxes, and
-reaches checkpoint entity 46 at frame 1,117. It completes 1,500 Jungle frames at `0u_cZ` path one
-with the exact saved checkpoint translation/count, no restart, death camera, below-zero or terminal
-fall, VM error, faulted object, or checked issue. This is a deterministic simulation integration
-test, not a claim that a complete browser playthrough or full Jungle route is certified.
+reaches checkpoint entity 46 at frame 1,117 with the exact saved checkpoint translation/count. It
+then continues through the remaining main-path route and enters the end `WarpC`. The warp emits
+`Transition(0x2d)` at frame 2,546 with a live counted box total of `0x1000` and no restart, death
+camera, below-zero or terminal fall, VM error, faulted object, or checked issue. This is a
+deterministic native simulation integration test, not a claim that a complete browser playthrough
+or the following Level Complete screen was exercised.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

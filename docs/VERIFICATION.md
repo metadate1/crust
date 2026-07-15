@@ -1025,10 +1025,13 @@ is 1,322,866 bytes with SHA-256
   saved state, RNG-B, respawn/death counters, or `first_spawn` did not. Both values are intentionally
   process-lifetime in the source, so no incompatible mount reset was added. The committed
   phase-robust route instead uses authored attacks at the live hazard phases and reaches checkpoint
-  entity 46 at frame 1,117. Its 1,500-frame exact-carry golden retains RNG-A/draw continuity, saves
-  the `0x400` pre-increment box count, advances the live count to `0x500`, and ends at `0u_cZ` path
-  one/progress 5,344 with no restart, below-zero or terminal fall, VM error, faulted object, or
-  checked issue. Full Jungle completion after that checkpoint remains open.
+  entity 46 at frame 1,117. Its exact-carry golden retains RNG-A/draw continuity, saves the `0x400`
+  pre-increment box count, advances the live count to `0x500`, and continues through the remaining
+  main-path zones. It reaches `0O_cZ` path zero/progress 17,836, enters the end `WarpC`, and emits
+  `Transition(0x2d)` at frame 2,546 with live count `0x1000`, RNG-A `0x742c4322`, and draw count
+  5,223. There is no restart, below-zero or terminal fall, VM error, faulted object, or checked issue.
+  This focused native legal-data run does not claim a browser playthrough or exercise the following
+  Level Complete screen.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1083,7 +1086,7 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_carry \
+  authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

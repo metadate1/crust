@@ -453,10 +453,11 @@ gameplay path.
   incompatible. The former fresh-boot controller entered Crash state 23 at frame 532 and restarted
   at frame 648. A phase-robust exact-carry regression now flings both early PlanC hazards and
   reaches checkpoint entity 46 at frame 1,117 with its exact translation, a saved pre-increment box
-  count of `0x400`, and a live count of `0x500`. It completes 1,500 clean Jungle frames at `0u_cZ`
-  path one/progress 5,344 without a restart, death camera, below-zero or terminal fall, VM error,
-  faulted object, or checked issue. The uninterrupted route from that checkpoint to Jungle
-  completion remains open.
+  count of `0x400`, and a live count of `0x500`. The same uninterrupted route proceeds through the
+  remaining main-path zones, raises the live counted-box total to `0x1000`, enters the end `WarpC` at
+  `0O_cZ` path zero/progress 17,836, and emits `Transition(0x2d)` at frame 2,546. It does so without a
+  restart, death camera, below-zero or terminal fall, VM error, faulted object, or checked issue.
+  This is exact native simulation evidence, not a complete browser playthrough.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

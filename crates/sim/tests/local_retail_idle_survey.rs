@@ -7,7 +7,8 @@
 //! camera/player-state route using only retail directional, jump, and spin pad
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
 //! A separate vertical-flow test retains the authored session carry across
-//! N. Sanity Beach, Level Complete, and Title without writing any game data.
+//! N. Sanity Beach, Level Complete, Title/Map, and Jungle Rollers through its
+//! end warp without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -281,6 +282,8 @@ impl JungleRouteController {
         if !triggered {
             return PAD_UP;
         }
+        // The upper 0J correction must be purely lateral; adding the usual
+        // forward hold misses the narrow authored path alignment.
         self.active_uses_forward = !(self.stage == 32 && camera.path.zone == zone_0j_upper);
         self.active = Some(match self.stage {
             3 | 5 | 7 | 21 => RouteAction {
@@ -357,6 +360,8 @@ impl JungleRouteController {
                 ..RouteAction::default()
             },
             41 => RouteAction {
+                // An eight-frame tap reaches WarpC's exact proximity gate
+                // without carrying the jump beyond the transition window.
                 button: PAD_CROSS,
                 button_frames: 8,
                 ..RouteAction::default()
@@ -4530,10 +4535,6 @@ fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_car
     assert_eq!(jungle_survey.death_camera_frames, 0);
     assert!(jungle_survey.first_below_zero.is_none());
     assert!(jungle_survey.first_terminal_fall.is_none());
-    assert_eq!(
-        jungle_survey.terminal.as_deref(),
-        Some("frame 2546 requested level transition to 0x2d")
-    );
     assert_eq!(
         jungle_survey.next_lid,
         Some((2_546, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))

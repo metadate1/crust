@@ -460,8 +460,17 @@ gameplay path.
   The same carry completes the following Level Complete screen at frame 306, returns to Title, and
   takes the Map's Up/Cross route to The Great Gate `0x12` at frame 253. Map `LEVEL_END` preserves
   current level three, level count one, three unlocked levels, RNG `0x4a04f4bf`, and draw count
-  5,782. The Great Gate accepts that carry and executes one clean mounted frame. This is exact native
-  handoff evidence, not Great Gate gameplay coverage or a complete browser playthrough.
+  5,782. The Great Gate accepts that carry and follows a phase-robust retail-pad route through
+  `a1_iZ`-`a9_iZ`, the wide pit, the `WalOC` rotating-log phases, and the first three arrow-crate
+  bounces. Checkpoint crate 76 emits `SaveState` at frame 1,152 with the exact `0x900` pre-increment
+  count and translation `[20991488, -8397312, 127744]`; the live count advances to `0xa00`. The same
+  route proceeds through `b3_iZ`-`c7_iZ`, the snake, later logs and gaps, and five more boxes. It
+  enters the normal end `WarpC` and emits `Transition(0x2d)` at frame 2,372 with live count `0xf00`,
+  RNG `0x9ada2711`, and draw count 8,154. Across the Great Gate leg it records 97 successful spawns,
+  39,979 clean executions, and 34 lifecycle zone transitions without a restart, death camera,
+  terminal fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch,
+  box-complete gem evaluation, following Level Complete screen, and browser playthrough remain open;
+  this is exact native main-route integration coverage rather than a full player-facing claim.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

@@ -188,9 +188,18 @@ frame 306, and the remounted Map takes Up/Cross to select The Great Gate `0x12` 
 `1c_pZ` path zero
 and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
 state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
-complete without a checked handler failure. A single clean first frame verifies that The Great Gate
-can import the carry; this deterministic native integration test is not Great Gate gameplay
-coverage or a browser-playthrough claim.
+complete without a checked handler failure. The Great Gate then runs a phase-robust retail-pad
+route to completion: it clears the horizontal `a1_iZ`-through-`a9_iZ` opening, crosses the wide pit,
+cycles the `WalOC` logs through their safe phases, and chains the first three arrow-crate bounces.
+Checkpoint crate 76 emits its exact `SaveState` at frame 1,152 with pre-increment box count `0x900`,
+checkpoint translation `[20991488, -8397312, 127744]`, and live count `0xa00`. The route continues
+through `b3_iZ`-`c7_iZ`, clears the snake and later hazards, breaks five more boxes, enters the normal
+end `WarpC`, and emits `Transition(0x2d)` at frame 2,372 with 15 counted boxes. The terminal boundary
+retains the exact carried phase at RNG `0x9ada2711`/draw count 8,154, after 97 successful spawns,
+39,979 clean executions, and 34 lifecycle zone transitions, with no restart, death camera, terminal
+fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch, box-complete gem
+evaluation, following Level Complete screen, and browser playthrough remain outside this native
+integration claim.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

@@ -1035,10 +1035,18 @@ is 1,322,866 bytes with SHA-256
   and draw count 5,529. After Title remount, the same 120-idle/Up/120-idle/Cross schedule selects The
   Great Gate `0x12` on Map frame 253 at `1c_pZ` path zero/progress `0x0200`. Its checked Map
   `LEVEL_END` carry has current map level three, level count one, three unlocked levels, island state
-  one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes one mounted
-  frame with 12 successful spawns, 30 clean executions, zero faults, and draw count 5,783. That
-  single frame proves session handoff only; it is not Great Gate gameplay coverage or a browser
-  playthrough claim.
+  one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes a phase-robust
+  retail-pad main route with 97 successful spawns, 39,979 clean executions, 34 lifecycle zone
+  transitions, 15 counted boxes, and no restart, death camera, terminal fall, VM error, faulted
+  object, or checked issue. It traverses `a1_iZ`-`a9_iZ`, crosses the wide pit, observes `WalOC`
+  state two, waits through the later rising-log phase, and chains the first three arrow-crate
+  bounces. Checkpoint crate 76 emits one `SaveState` at frame 1,152 with pre-increment box count
+  `0x900` and checkpoint translation `[20991488, -8397312, 127744]`; the live count advances to
+  `0xa00`. It then traverses `b3_iZ`-`c7_iZ`, clears the snake and later hazards, breaks five more
+  boxes, and enters the normal end `WarpC`. That warp emits `Transition(0x2d)` at frame 2,372 with
+  Crash at `[3483392, -4780693, 83712]`, live count `0xf00`, four unlocked levels, RNG `0x9ada2711`,
+  and draw count 8,154. The yellow-gem alternate branch, box-complete gem evaluation, following
+  Level Complete screen, and browser execution are not covered by this native golden.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

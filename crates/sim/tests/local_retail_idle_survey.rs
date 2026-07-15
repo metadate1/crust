@@ -8,7 +8,8 @@
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
 //! A separate vertical-flow test retains the authored session carry across
 //! N. Sanity Beach, Jungle Rollers, both Level Complete screens, the Title map,
-//! and the first mounted Great Gate frame without writing any game data.
+//! and The Great Gate's normal main route through its end `WarpC` transition
+//! without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -100,6 +101,7 @@ enum SurveyInputProfile {
     ForwardWithActions,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
+    GreatGatePhaseRobust,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +119,7 @@ impl SurveyInputProfile {
             Self::ForwardWithActions => "forward-with-actions",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
+            Self::GreatGatePhaseRobust => "great-gate-phase-robust",
         }
     }
 
@@ -126,6 +129,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweepToTransition
                 | Self::ForwardWithActions
                 | Self::JunglePhaseRobust
+                | Self::GreatGatePhaseRobust
         )
     }
 }
@@ -963,11 +967,770 @@ impl NSanityRouteController {
     }
 }
 
+/// State-anchored route through The Great Gate's normal end `WarpC`. The
+/// opening sequence is anchored to the end of Crash's authored spawn animation
+/// and the first climb waits for grounded camera locations. Past that anchor,
+/// short pad windows preserve the authentic carried hazard phase through the
+/// checkpoint, rotating logs, later gaps, and final warp.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct GreatGateRouteController {
+    opening_stage: u8,
+    opening_ready_frames: u8,
+    stage: u8,
+    active: Option<RouteAction>,
+    action_tick: u8,
+}
+
+impl GreatGateRouteController {
+    // Keep equal actions as separate numbered stages so the deterministic
+    // route remains auditable against its frame-by-frame pad trace.
+    #[allow(clippy::match_same_arms)]
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        if let Some(action) = self.active {
+            let held = action.held(self.action_tick);
+            self.action_tick = self.action_tick.saturating_add(1);
+            if self.action_tick >= action.total_frames() {
+                self.active = None;
+                self.action_tick = 0;
+                if self.opening_stage < 12 {
+                    self.opening_stage = self.opening_stage.saturating_add(1);
+                } else {
+                    self.stage = self.stage.saturating_add(1);
+                }
+            }
+            return held;
+        }
+
+        let Some(player) = player else {
+            return 0;
+        };
+        let a1 = Eid::from_name("a1_iZ").expect("fixed Great Gate route EID is valid");
+        let a2 = Eid::from_name("a2_iZ").expect("fixed Great Gate route EID is valid");
+        let a4 = Eid::from_name("a4_iZ").expect("fixed Great Gate route EID is valid");
+        let a5 = Eid::from_name("a5_iZ").expect("fixed Great Gate route EID is valid");
+        let a6 = Eid::from_name("a6_iZ").expect("fixed Great Gate route EID is valid");
+        let a7 = Eid::from_name("a7_iZ").expect("fixed Great Gate route EID is valid");
+        let a8 = Eid::from_name("a8_iZ").expect("fixed Great Gate route EID is valid");
+        let a9 = Eid::from_name("a9_iZ").expect("fixed Great Gate route EID is valid");
+        let b0 = Eid::from_name("b0_iZ").expect("fixed Great Gate route EID is valid");
+        let grounded = player.status_a & 1 != 0;
+        let progress = camera.progress.raw();
+
+        if self.opening_stage < 12 {
+            if self.opening_stage == 0 && self.opening_ready_frames < 4 {
+                let ready = camera.path.zone == a1
+                    && camera.path.index == 0
+                    && progress == 0
+                    && player.state == 1
+                    && grounded;
+                self.opening_ready_frames = if ready {
+                    self.opening_ready_frames.saturating_add(1)
+                } else {
+                    0
+                };
+                return 0;
+            }
+            self.active = Some(match self.opening_stage {
+                0 => RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 11,
+                    button: PAD_CROSS,
+                    button_frames: 11,
+                    ..RouteAction::default()
+                },
+                1 => RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 6,
+                    ..RouteAction::default()
+                },
+                2 => RouteAction {
+                    direction: PAD_RIGHT,
+                    direction_frames: 16,
+                    ..RouteAction::default()
+                },
+                3 => RouteAction {
+                    direction: PAD_UP | PAD_LEFT,
+                    direction_frames: 19,
+                    ..RouteAction::default()
+                },
+                4 => RouteAction {
+                    direction: PAD_DOWN | PAD_RIGHT,
+                    direction_frames: 13,
+                    ..RouteAction::default()
+                },
+                5 => RouteAction {
+                    direction: PAD_DOWN | PAD_RIGHT,
+                    direction_frames: 8,
+                    button: PAD_SQUARE,
+                    button_frames: 8,
+                    ..RouteAction::default()
+                },
+                6 => RouteAction {
+                    direction: PAD_UP | PAD_RIGHT,
+                    direction_frames: 22,
+                    ..RouteAction::default()
+                },
+                7 => RouteAction {
+                    button: PAD_CROSS,
+                    button_frames: 24,
+                    ..RouteAction::default()
+                },
+                8 => RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 26,
+                    button: PAD_CROSS,
+                    button_frames: 26,
+                    ..RouteAction::default()
+                },
+                9 => RouteAction {
+                    direction: PAD_RIGHT,
+                    direction_frames: 15,
+                    button: PAD_CROSS,
+                    button_frames: 15,
+                    ..RouteAction::default()
+                },
+                10 => RouteAction {
+                    direction: PAD_LEFT,
+                    direction_frames: 22,
+                    button: PAD_CROSS,
+                    button_frames: 22,
+                    ..RouteAction::default()
+                },
+                11 => RouteAction {
+                    direction: PAD_RIGHT,
+                    direction_frames: 39,
+                    button: PAD_CROSS,
+                    button_frames: 39,
+                    ..RouteAction::default()
+                },
+                _ => unreachable!("all Great Gate opening stages are matched"),
+            });
+            return self.held(camera, Some(player));
+        }
+
+        let triggered = match self.stage {
+            0
+            | 2
+            | 4
+            | 6
+            | 8
+            | 10
+            | 11
+            | 13
+            | 15
+            | 17
+            | 18
+            | 19
+            | 21
+            | 23
+            | 25
+            | 27
+            | 29..=39
+            | 41..=106 => true,
+            1 => camera.path.zone == a2 && camera.path.index == 1 && player.state == 13 && grounded,
+            3 => camera.path.zone == a4 && camera.path.index == 0 && grounded,
+            5 => camera.path.zone == a5 && progress >= 4_300 && grounded,
+            7 => camera.path.zone == a5 && progress >= 17_700 && grounded,
+            9 => camera.path.zone == a6 && progress >= 2_100 && grounded,
+            12 => camera.path.zone == a6 && progress >= 12_400 && grounded,
+            14 => camera.path.zone == a6 && progress >= 30_400 && grounded,
+            16 => camera.path.zone == a7 && progress >= 27_200 && grounded,
+            20 => camera.path.zone == a8 && progress >= 5_600 && grounded,
+            22 => camera.path.zone == a8 && progress >= 24_900 && grounded,
+            24 => camera.path.zone == a9 && progress >= 18_700 && grounded,
+            26 => {
+                camera.path.zone == b0 && camera.path.index == 0 && progress >= 22_800 && grounded
+            }
+            28 => {
+                camera.path.zone == b0 && camera.path.index == 1 && player.state == 13 && grounded
+            }
+            40 => camera.path.zone == b0 && camera.path.index == 1 && grounded,
+            _ => false,
+        };
+        if !triggered {
+            return 0;
+        }
+        self.active = Some(match self.stage {
+            0 => RouteAction {
+                direction_frames: 17,
+                ..RouteAction::default()
+            },
+            1 | 3 | 7 | 12 | 18 | 20 | 24 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            2 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 80,
+                ..RouteAction::default()
+            },
+            4 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 60,
+                ..RouteAction::default()
+            },
+            5 | 22 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            6 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            8 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 17,
+                ..RouteAction::default()
+            },
+            9 => RouteAction {
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            10 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 39,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 39,
+                ..RouteAction::default()
+            },
+            11 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 1,
+                ..RouteAction::default()
+            },
+            13 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 23,
+                ..RouteAction::default()
+            },
+            14 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            15 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 44,
+                ..RouteAction::default()
+            },
+            16 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 5,
+                button: PAD_SQUARE,
+                button_frames: 5,
+                ..RouteAction::default()
+            },
+            17 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                ..RouteAction::default()
+            },
+            19 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 28,
+                ..RouteAction::default()
+            },
+            21 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 26,
+                ..RouteAction::default()
+            },
+            23 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 38,
+                ..RouteAction::default()
+            },
+            25 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 54,
+                ..RouteAction::default()
+            },
+            26 => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            27 => RouteAction {
+                direction_frames: 7,
+                ..RouteAction::default()
+            },
+            28 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 1,
+                button: PAD_SQUARE,
+                button_frames: 1,
+                ..RouteAction::default()
+            },
+            29 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 2,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 2,
+                ..RouteAction::default()
+            },
+            30 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 4,
+                button: PAD_CROSS,
+                button_frames: 4,
+                ..RouteAction::default()
+            },
+            31 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 3,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 3,
+                ..RouteAction::default()
+            },
+            32 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 2,
+                button: PAD_CROSS,
+                button_frames: 2,
+                ..RouteAction::default()
+            },
+            33 | 37 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 5,
+                button: PAD_CROSS,
+                button_frames: 5,
+                ..RouteAction::default()
+            },
+            34 | 36 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 3,
+                ..RouteAction::default()
+            },
+            35 => RouteAction {
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            38 => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            39 => RouteAction {
+                direction_frames: 2,
+                ..RouteAction::default()
+            },
+            40 | 43 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // Let the rotating log settle under Crash, then use its horizontal
+            // top as the takeoff point for the authored arrow-crate climb.
+            41 => RouteAction {
+                direction_frames: 14,
+                ..RouteAction::default()
+            },
+            42 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 2,
+                ..RouteAction::default()
+            },
+            44 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 30,
+                ..RouteAction::default()
+            },
+            // One neutral frame leaves Crash flush with the arrow crate.
+            45 => RouteAction {
+                direction_frames: 1,
+                ..RouteAction::default()
+            },
+            // A one-frame left bias on the next jump triggers the launch while
+            // preserving the stable b1 camera phase.
+            46 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 1,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // Chain the next two arrow crates while their authored launch
+            // states own vertical motion. The neutral windows wait for each
+            // bounce; short right holds select the next crate's landing face.
+            47 => RouteAction {
+                direction_frames: 5,
+                ..RouteAction::default()
+            },
+            48 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 16,
+                ..RouteAction::default()
+            },
+            49 => RouteAction {
+                direction_frames: 9,
+                ..RouteAction::default()
+            },
+            50 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 12,
+                ..RouteAction::default()
+            },
+            // Steer off the third arrow crate onto b3's left-hand ground,
+            // break the authored checkpoint crate, and cross its first gap.
+            51 => RouteAction {
+                direction_frames: 10,
+                ..RouteAction::default()
+            },
+            52 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 32,
+                ..RouteAction::default()
+            },
+            53 => RouteAction {
+                direction_frames: 5,
+                ..RouteAction::default()
+            },
+            54 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 8,
+                button: PAD_SQUARE,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            55 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 15,
+                ..RouteAction::default()
+            },
+            56 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            57 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 21,
+                ..RouteAction::default()
+            },
+            // The preceding jump bounces off the authored enemy. Wait until
+            // Crash returns to stable ground before ending this golden window.
+            58 => RouteAction {
+                direction_frames: 6,
+                ..RouteAction::default()
+            },
+            59 => RouteAction {
+                direction_frames: 1,
+                ..RouteAction::default()
+            },
+            60 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 10,
+                ..RouteAction::default()
+            },
+            61 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            62 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            63 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 8,
+                button: PAD_SQUARE,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            64 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 12,
+                ..RouteAction::default()
+            },
+            65 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            66 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 4,
+                ..RouteAction::default()
+            },
+            // Two timed spins clear b4's authored enemies without disturbing
+            // the continuous leftward gap approach.
+            67 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 8,
+                button: PAD_SQUARE,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            68 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 18,
+                ..RouteAction::default()
+            },
+            69 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            70 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 26,
+                ..RouteAction::default()
+            },
+            71 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            72 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 52,
+                ..RouteAction::default()
+            },
+            73 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            74 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 24,
+                ..RouteAction::default()
+            },
+            75 => RouteAction {
+                direction: PAD_DOWN | PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            76 => RouteAction {
+                direction: PAD_DOWN | PAD_LEFT,
+                direction_frames: 96,
+                ..RouteAction::default()
+            },
+            77 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 2,
+                ..RouteAction::default()
+            },
+            78 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            79 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 21,
+                ..RouteAction::default()
+            },
+            80 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            81 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 31,
+                ..RouteAction::default()
+            },
+            82 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            83 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 50,
+                ..RouteAction::default()
+            },
+            84 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            85 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 51,
+                ..RouteAction::default()
+            },
+            86 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 17,
+                ..RouteAction::default()
+            },
+            87 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            88 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 72,
+                ..RouteAction::default()
+            },
+            89 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // Move into c3's safe depth lane and jump its rising log.
+            90 => RouteAction {
+                direction: PAD_UP | PAD_LEFT,
+                direction_frames: 22,
+                ..RouteAction::default()
+            },
+            91 => RouteAction {
+                direction: PAD_UP | PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // c4's first WalOC rises before Crash can reach it directly.
+            // Brake clear of its face, wait for lowered state four, then use
+            // one jump onto the log and a second jump off its far edge.
+            92 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 18,
+                ..RouteAction::default()
+            },
+            93 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 8,
+                ..RouteAction::default()
+            },
+            94 => RouteAction {
+                direction_frames: 50,
+                ..RouteAction::default()
+            },
+            95 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            96 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 8,
+                ..RouteAction::default()
+            },
+            97 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // Cross the rest of c4 and jump the c5 entry gap.
+            98 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 62,
+                ..RouteAction::default()
+            },
+            99 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // Land in front of Tawna-token crate 113 and break it before
+            // continuing toward c6.
+            100 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 11,
+                ..RouteAction::default()
+            },
+            101 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 8,
+                button: PAD_SQUARE,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            // Jump off c6's lowered WalOC, then cross the final gap into c7.
+            102 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 51,
+                ..RouteAction::default()
+            },
+            103 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS | PAD_SQUARE,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            104 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 18,
+                ..RouteAction::default()
+            },
+            105 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            // The held direction ends at normal WarpC entity 33; its authored
+            // state owns Crash until it emits the Level Complete transition.
+            106 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 250,
+                ..RouteAction::default()
+            },
+            _ => unreachable!("all triggered Great Gate stages are matched"),
+        });
+        self.held(camera, Some(player))
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurveyInputController {
     profile: SurveyInputProfile,
     n_sanity: NSanityRouteController,
     jungle: JungleRouteController,
+    great_gate: GreatGateRouteController,
 }
 
 impl SurveyInputController {
@@ -985,6 +1748,13 @@ impl SurveyInputController {
                 stage: 0,
                 active: None,
                 active_uses_forward: false,
+                action_tick: 0,
+            },
+            great_gate: GreatGateRouteController {
+                opening_stage: 0,
+                opening_ready_frames: 0,
+                stage: 0,
+                active: None,
                 action_tick: 0,
             },
         }
@@ -1011,6 +1781,7 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::JunglePhaseRobust => self.jungle.held(camera, player),
+            SurveyInputProfile::GreatGatePhaseRobust => self.great_gate.held(camera, player),
         }
     }
 }
@@ -1109,6 +1880,7 @@ struct LevelSurvey {
     checkpoint_samples: Vec<(u32, i32, [i32; 3])>,
     saved_box_count_samples: Vec<(u32, i32)>,
     spawn_flag_samples: Vec<(u32, u16, u32)>,
+    observed_program_states: BTreeSet<(Eid, u16)>,
     early_direct_send_samples: Vec<(u32, u32)>,
     next_lid: Option<(u32, i32)>,
 }
@@ -1163,6 +1935,7 @@ impl LevelSurvey {
             checkpoint_samples: Vec::new(),
             saved_box_count_samples: Vec::new(),
             spawn_flag_samples: Vec::new(),
+            observed_program_states: BTreeSet::new(),
             early_direct_send_samples: Vec::new(),
             next_lid: None,
         }
@@ -2434,6 +3207,13 @@ fn survey_pair_with_runtime(
         };
         survey.executions += report.executions.len() as u64;
         for execution in &report.executions {
+            if let Ok(vm) = runtime.machine().object(execution.object.vm())
+                && let Some(identity) = vm.program_identity()
+            {
+                survey
+                    .observed_program_states
+                    .insert((identity.global_eid(), vm.state()));
+            }
             if let Err(error) = &execution.result {
                 survey.execution_errors += 1;
                 let context = fault_context(&runtime, nsd, nsf, nsf_bytes, execution.object);
@@ -2532,11 +3312,17 @@ fn survey_pair_with_runtime(
         let player = player_trace(&runtime)?;
         survey.observe_progress(frame, camera.location(), player);
         if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
-            && matches!(input_profile, SurveyInputProfile::ForwardWithActions)
-            && frame >= 300
+            && matches!(
+                input_profile,
+                SurveyInputProfile::ForwardWithActions | SurveyInputProfile::GreatGatePhaseRobust
+            )
+            && (input_profile == SurveyInputProfile::GreatGatePhaseRobust
+                || frame >= 300
+                || frame <= 120)
         {
             eprintln!(
-                "route f{frame} held={held:#06x} camera={:?} player={player:?}",
+                "route[{}] f{frame} held={held:#06x} camera={:?} player={player:?}",
+                input_profile.label(),
                 camera.location()
             );
         }
@@ -4878,41 +5664,140 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
         &great_gate_nsf_bytes,
         great_gate_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::Idle,
-        1,
+        SurveyInputProfile::GreatGatePhaseRobust,
+        2_600,
     )
-    .expect("The Great Gate must execute its first mounted frame");
-    assert_eq!(great_gate_survey.frames, 1);
-    assert_eq!(great_gate_survey.successful_spawns, 12);
-    assert_eq!(great_gate_survey.executions, 30);
-    assert_eq!(great_gate_survey.zone_transitions, 0);
+    .expect("The Great Gate must execute through its end WarpC transition");
+    assert_eq!(great_gate_survey.frames, 2_372);
+    assert_eq!(great_gate_survey.successful_spawns, 97);
+    assert_eq!(great_gate_survey.executions, 39_979);
+    assert_eq!(great_gate_survey.zone_transitions, 34);
+    assert_eq!(great_gate_survey.camera_ranges.len(), 30);
+    assert_eq!(great_gate_survey.camera_path_changes, 37);
+    assert_eq!(great_gate_survey.last_camera_path_change, 2_272);
     assert_eq!(great_gate_survey.restarts, 0);
     assert!(great_gate_survey.restart_frames.is_empty());
     assert_eq!(great_gate_survey.death_camera_frames, 0);
     assert!(great_gate_survey.first_terminal_fall.is_none());
-    assert!(great_gate_survey.terminal.is_none());
-    assert!(great_gate_survey.next_lid.is_none());
+    assert_eq!(
+        great_gate_survey.terminal.as_deref(),
+        Some("frame 2372 requested level transition to 0x2d")
+    );
+    assert_eq!(
+        great_gate_survey.next_lid,
+        Some((2_372, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+    );
     assert_eq!(great_gate_survey.faulted_objects, 0);
     assert_eq!(great_gate_survey.execution_errors, 0);
+    assert_eq!(
+        great_gate_survey.box_count_samples,
+        [
+            (1, 0),
+            (58, 0x100),
+            (78, 0x200),
+            (92, 0x300),
+            (112, 0x400),
+            (299, 0x500),
+            (300, 0x600),
+            (514, 0x700),
+            (769, 0x800),
+            (779, 0x900),
+            (1_152, 0xa00),
+            (1_472, 0xb00),
+            (1_473, 0xc00),
+            (1_474, 0xd00),
+            (1_758, 0xe00),
+            (2_167, 0xf00),
+        ]
+    );
+    assert_eq!(
+        great_gate_survey.checkpoint_samples,
+        [
+            (1, -1, [-563_968, 2_236_928, 15_717_376]),
+            (515, -1, [15_871_744, -10_670_848, 127_744]),
+            (1_152, 76 << 8, [20_991_488, -8_397_312, 127_744]),
+        ]
+    );
+    assert_eq!(great_gate_survey.saved_box_count_samples, [(1_152, 0x900)]);
+    assert!(
+        great_gate_survey
+            .spawn_flag_samples
+            .contains(&(1_054, 63, 3)),
+        "the carried route must trigger the first vertical arrow crate"
+    );
+    assert!(
+        great_gate_survey
+            .spawn_flag_samples
+            .contains(&(1_152, 76, 9)),
+        "the carried route must break checkpoint crate 76"
+    );
+    assert_eq!(
+        great_gate_survey.effect_counts.get("send-event").copied(),
+        Some(162)
+    );
+    assert_eq!(
+        great_gate_survey.effect_counts.get("transition").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        great_gate_survey.effect_counts.get("save-state").copied(),
+        Some(1)
+    );
     assert!(
         great_gate_survey.is_clean(),
-        "The Great Gate first carried frame reached a checked boundary: {}",
+        "The Great Gate end-Warp route must remain clean: {}",
         great_gate_survey.summary()
     );
     let great_gate_camera = great_gate_survey
         .final_camera
-        .expect("The Great Gate first frame retains a camera location");
+        .expect("The Great Gate end-Warp route retains a camera location");
     assert_eq!(
         great_gate_camera.path,
         RetailPathId {
-            zone: Eid::from_name("a1_iZ").expect("fixed Great Gate spawn-zone EID is valid"),
+            zone: Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid"),
             index: 0,
         }
     );
-    assert_eq!(great_gate_camera.progress.raw(), 499);
+    assert_eq!(great_gate_camera.progress.raw(), 5_292);
     assert_eq!(
         great_gate_survey.final_player_translation,
-        Some([11_570_944, -12_697_600, 306_944])
+        Some([3_483_392, -4_780_693, 83_712])
+    );
+    assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xf00));
+    assert_eq!(
+        great_gate_runtime.global_word(CHECKPOINT_ID_GLOBAL),
+        Ok(76 << 8)
+    );
+    assert_eq!(
+        CHECKPOINT_TRANSLATION_GLOBALS.map(|index| {
+            great_gate_runtime
+                .global_word(index)
+                .expect("checkpoint translation global is readable")
+                .cast_signed()
+        }),
+        [20_991_488, -8_397_312, 127_744]
+    );
+
+    let waloc = Eid::from_name("WalOC").expect("fixed rotating-log EID is valid");
+    assert!(
+        great_gate_survey
+            .observed_program_states
+            .contains(&(waloc, 2)),
+        "the route must flip the rotating log into its horizontal state before climbing"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed warp EID is valid");
+    let crash = Eid::from_name("WillC").expect("fixed player EID is valid");
+    assert!(
+        great_gate_survey
+            .observed_program_states
+            .contains(&(warp, 1)),
+        "the route must activate the normal end WarpC"
+    );
+    assert!(
+        great_gate_survey
+            .observed_program_states
+            .contains(&(crash, 32)),
+        "WarpC must hand Crash to authored warp state 32"
     );
     assert_eq!(
         [
@@ -4926,19 +5811,19 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
         ]
         .map(|index| great_gate_runtime.global_word(index).unwrap()),
         [
-            0x100,
+            0x500,
             TitleScreen::Map.raw(),
             TitleScreen::Map.raw(),
             3,
             1,
-            3,
+            4,
             0,
         ]
     );
-    assert_eq!(great_gate_runtime.machine().random_seed(), 0xe0c8_f942);
-    assert_eq!(great_gate_runtime.draw_count(), 5_783);
+    assert_eq!(great_gate_runtime.machine().random_seed(), 0x9ada_2711);
+    assert_eq!(great_gate_runtime.draw_count(), 8_154);
     eprintln!(
-        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate first frame draw {}",
+        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {})",
         n_sanity_survey.next_lid.unwrap().0,
         n_sanity_draw_count,
         completion_survey.next_lid.unwrap().0,
@@ -4949,6 +5834,7 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
         jungle_completion_survey.next_lid.unwrap().0,
         5_529,
         5_782,
+        great_gate_survey.frames,
         great_gate_runtime.draw_count(),
     );
 }

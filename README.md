@@ -176,16 +176,20 @@ card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity em
 imports that carry and emits Title `0x19` at
 frame 513, and Title imports the second carry into its parsed graph, ZDAT entities, lifecycle, and
 map camera schedule. The post-completion Map unlocks level two; after the authored Up/Cross route
-it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. All four
-outgoing `LEVEL_END` broadcasts complete without a checked handler failure, and the carried map,
-count, unlock, island-camera, RNG and draw state remain exact. The same uninterrupted test imports
-that carry into Jungle Rollers, flings both early PlanC hazards, breaks four counted boxes, and
+it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. The
+same uninterrupted test imports that carry into Jungle Rollers, flings both early PlanC hazards,
+breaks four counted boxes, and
 reaches checkpoint entity 46 at frame 1,117 with the exact saved checkpoint translation/count. It
 then continues through the remaining main-path route and enters the end `WarpC`. The warp emits
 `Transition(0x2d)` at frame 2,546 with a live counted box total of `0x1000` and no restart, death
-camera, below-zero or terminal fall, VM error, faulted object, or checked issue. This is a
-deterministic native simulation integration test, not a claim that a complete browser playthrough
-or the following Level Complete screen was exercised.
+camera, below-zero or terminal fall, VM error, faulted object, or checked issue. Jungle's checked
+`LEVEL_END` raises the unlocked count to three; its Level Complete screen emits Title on frame 306,
+and the remounted Map takes Up/Cross to select The Great Gate `0x12` on frame 253 at `1c_pZ` path zero
+and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
+state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
+complete without a checked handler failure. A single clean first frame verifies that The Great Gate
+can import the carry; this deterministic native integration test is not Great Gate gameplay
+coverage or a browser-playthrough claim.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

@@ -457,7 +457,11 @@ gameplay path.
   remaining main-path zones, raises the live counted-box total to `0x1000`, enters the end `WarpC` at
   `0O_cZ` path zero/progress 17,836, and emits `Transition(0x2d)` at frame 2,546. It does so without a
   restart, death camera, below-zero or terminal fall, VM error, faulted object, or checked issue.
-  This is exact native simulation evidence, not a complete browser playthrough.
+  The same carry completes the following Level Complete screen at frame 306, returns to Title, and
+  takes the Map's Up/Cross route to The Great Gate `0x12` at frame 253. Map `LEVEL_END` preserves
+  current level three, level count one, three unlocked levels, RNG `0x4a04f4bf`, and draw count
+  5,782. The Great Gate accepts that carry and executes one clean mounted frame. This is exact native
+  handoff evidence, not Great Gate gameplay coverage or a complete browser playthrough.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

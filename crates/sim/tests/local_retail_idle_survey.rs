@@ -4212,7 +4212,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_carry() {
+fn authored_first_two_completions_reach_great_gate_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -4491,15 +4491,6 @@ fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_car
         jungle_rollers_carry.draw_count, 2_677,
         "post-completion Map draw-count drift"
     );
-    eprintln!(
-        "vertical-flow: initial Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} with draw count {}; Level Complete -> Title at frame {} with draw count {}; post-completion Map -> Jungle Rollers at frame 253 with draw count {}",
-        n_sanity_survey.next_lid.unwrap().0,
-        n_sanity_draw_count,
-        completion_survey.next_lid.unwrap().0,
-        completion_draw_count,
-        jungle_rollers_carry.draw_count,
-    );
-
     let jungle = LevelId::new_const(0x0c);
     let (jungle_nsd, jungle_nsf, jungle_nsf_bytes) =
         parse_local_pair(&root, jungle).expect("Jungle Rollers pair must parse");
@@ -4516,7 +4507,7 @@ fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_car
         2_677,
         "Jungle Rollers must inherit the authentic Map draw count"
     );
-    let (jungle_survey, jungle_runtime) = survey_pair_with_runtime(
+    let (jungle_survey, mut jungle_runtime) = survey_pair_with_runtime(
         known_name(jungle),
         jungle,
         &jungle_nsd,
@@ -4618,6 +4609,348 @@ fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_car
     );
     assert_eq!(jungle_runtime.machine().random_seed(), 0x742c_4322);
     assert_eq!(jungle_runtime.draw_count(), 5_223);
+
+    let jungle_completion_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&jungle_nsd, &jungle_nsf, &jungle_nsf_bytes);
+        let report = jungle_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+            )
+            .expect("Jungle Rollers LEVEL_END must export a session carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "Jungle Rollers LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(
+            report.requested_lid,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()
+        );
+        assert_eq!(report.next_lid_after_event, report.requested_lid);
+        assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| jungle_completion_carry.globals[index]),
+        [
+            0x500,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            2,
+            1,
+            3,
+            0,
+        ]
+    );
+    assert_eq!(jungle_completion_carry.random_seed, 0x742c_4322);
+    assert_eq!(jungle_completion_carry.draw_count, 5_223);
+    let jungle_completion_runtime = RetailRuntime::new_from_session(
+        GLOBAL_WORDS,
+        LevelId::LEVEL_COMPLETE,
+        jungle_completion_carry,
+    )
+    .expect("Level Complete must import Jungle Rollers' session carry");
+    let (jungle_completion_survey, mut jungle_completion_runtime) = survey_pair_with_runtime(
+        known_name(LevelId::LEVEL_COMPLETE),
+        LevelId::LEVEL_COMPLETE,
+        &completion_nsd,
+        &completion_nsf,
+        &completion_nsf_bytes,
+        jungle_completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        COMPLETION_FRAMES,
+    )
+    .expect("Jungle Rollers' Level Complete runtime must execute");
+    assert_eq!(jungle_completion_survey.frames, 306);
+    assert_eq!(jungle_completion_survey.zone_transitions, 0);
+    assert_eq!(jungle_completion_survey.restarts, 0);
+    assert!(jungle_completion_survey.restart_frames.is_empty());
+    assert_eq!(jungle_completion_survey.death_camera_frames, 0);
+    assert!(jungle_completion_survey.first_below_zero.is_none());
+    assert!(jungle_completion_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        jungle_completion_survey.next_lid,
+        Some((306, i32::try_from(LevelId::TITLE.get()).unwrap()))
+    );
+    assert_eq!(jungle_completion_survey.faulted_objects, 0);
+    assert_eq!(jungle_completion_survey.execution_errors, 0);
+    assert_eq!(
+        jungle_completion_survey
+            .effect_counts
+            .get("transition")
+            .copied(),
+        Some(1)
+    );
+    assert!(
+        jungle_completion_survey.is_clean(),
+        "Jungle Rollers' Level Complete screen reached a checked boundary: {}",
+        jungle_completion_survey.summary()
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| jungle_completion_runtime.global_word(index).unwrap()),
+        [
+            0x300,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            2,
+            1,
+            3,
+            0,
+        ]
+    );
+    assert_eq!(
+        jungle_completion_runtime.machine().random_seed(),
+        0xa442_cb3a
+    );
+    assert_eq!(jungle_completion_runtime.draw_count(), 5_529);
+
+    let post_jungle_title_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+        let report = jungle_completion_runtime
+            .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+            .expect("second Level Complete LEVEL_END must export a Title carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "second Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(
+            report.requested_lid,
+            i32::try_from(LevelId::TITLE.get()).unwrap()
+        );
+        assert_eq!(report.next_lid_after_event, report.requested_lid);
+        assert_eq!(report.resolved.level, LevelId::TITLE);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_jungle_title_carry.globals[index]),
+        [
+            0x300,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            2,
+            1,
+            3,
+            0,
+        ]
+    );
+    assert_eq!(post_jungle_title_carry.random_seed, 0xa442_cb3a);
+    assert_eq!(post_jungle_title_carry.draw_count, 5_529);
+    let mut post_jungle_map = AuthoredTitleMapHarness::from_session(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        post_jungle_title_carry,
+    );
+    assert_eq!(post_jungle_map.runtime.draw_count(), 5_529);
+    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0xa442_cb3a);
+    post_jungle_map.wait_until_ready(64);
+    assert_eq!(post_jungle_map.frame, 10);
+    for _ in 0..120 {
+        post_jungle_map.step(0);
+    }
+    post_jungle_map.tap(PAD_UP);
+    for _ in 0..120 {
+        post_jungle_map.step(0);
+    }
+    post_jungle_map.step(PAD_CROSS);
+    let great_gate = LevelId::new_const(0x12);
+    let great_gate_lid = i32::try_from(great_gate.get()).unwrap();
+    assert_eq!(post_jungle_map.frame, 253);
+    assert_eq!(post_jungle_map.transitions, [(253, great_gate_lid)]);
+    assert_eq!(
+        post_jungle_map.camera.location().path,
+        RetailPathId {
+            zone: Eid::from_name("1c_pZ").expect("fixed third map-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(post_jungle_map.camera.location().progress.raw(), 0x0200);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_jungle_map.runtime.global_word(index).unwrap()),
+        [
+            0,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            3,
+            1,
+            3,
+            1,
+        ]
+    );
+    assert_eq!(post_jungle_map.runtime.faulted_object_count(), 0);
+    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x4a04_f4bf);
+    assert_eq!(post_jungle_map.runtime.draw_count(), 5_782);
+
+    let great_gate_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let report = post_jungle_map
+            .runtime
+            .finish_level_transition(&mut host, great_gate_lid)
+            .expect("post-Jungle Title Map must export The Great Gate carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "post-Jungle Map LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.requested_lid, great_gate_lid);
+        assert_eq!(report.next_lid_after_event, great_gate_lid);
+        assert_eq!(report.resolved.level, great_gate);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| great_gate_carry.globals[index]),
+        [
+            0,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            3,
+            1,
+            3,
+            1,
+        ]
+    );
+    assert_eq!(great_gate_carry.random_seed, 0x4a04_f4bf);
+    assert_eq!(great_gate_carry.draw_count, 5_782);
+    let (great_gate_nsd, great_gate_nsf, great_gate_nsf_bytes) =
+        parse_local_pair(&root, great_gate).expect("The Great Gate pair must parse");
+    let great_gate_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry)
+            .expect("The Great Gate must import the second-completion map carry");
+    let (great_gate_survey, great_gate_runtime) = survey_pair_with_runtime(
+        known_name(great_gate),
+        great_gate,
+        &great_gate_nsd,
+        &great_gate_nsf,
+        &great_gate_nsf_bytes,
+        great_gate_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("The Great Gate must execute its first mounted frame");
+    assert_eq!(great_gate_survey.frames, 1);
+    assert_eq!(great_gate_survey.successful_spawns, 12);
+    assert_eq!(great_gate_survey.executions, 30);
+    assert_eq!(great_gate_survey.zone_transitions, 0);
+    assert_eq!(great_gate_survey.restarts, 0);
+    assert!(great_gate_survey.restart_frames.is_empty());
+    assert_eq!(great_gate_survey.death_camera_frames, 0);
+    assert!(great_gate_survey.first_terminal_fall.is_none());
+    assert!(great_gate_survey.terminal.is_none());
+    assert!(great_gate_survey.next_lid.is_none());
+    assert_eq!(great_gate_survey.faulted_objects, 0);
+    assert_eq!(great_gate_survey.execution_errors, 0);
+    assert!(
+        great_gate_survey.is_clean(),
+        "The Great Gate first carried frame reached a checked boundary: {}",
+        great_gate_survey.summary()
+    );
+    let great_gate_camera = great_gate_survey
+        .final_camera
+        .expect("The Great Gate first frame retains a camera location");
+    assert_eq!(
+        great_gate_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a1_iZ").expect("fixed Great Gate spawn-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(great_gate_camera.progress.raw(), 499);
+    assert_eq!(
+        great_gate_survey.final_player_translation,
+        Some([11_570_944, -12_697_600, 306_944])
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| great_gate_runtime.global_word(index).unwrap()),
+        [
+            0x100,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            3,
+            1,
+            3,
+            0,
+        ]
+    );
+    assert_eq!(great_gate_runtime.machine().random_seed(), 0xe0c8_f942);
+    assert_eq!(great_gate_runtime.draw_count(), 5_783);
+    eprintln!(
+        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate first frame draw {}",
+        n_sanity_survey.next_lid.unwrap().0,
+        n_sanity_draw_count,
+        completion_survey.next_lid.unwrap().0,
+        completion_draw_count,
+        2_677,
+        jungle_survey.next_lid.unwrap().0,
+        5_223,
+        jungle_completion_survey.next_lid.unwrap().0,
+        5_529,
+        5_782,
+        great_gate_runtime.draw_count(),
+    );
 }
 
 #[test]

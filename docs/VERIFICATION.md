@@ -1030,8 +1030,15 @@ is 1,322,866 bytes with SHA-256
   main-path zones. It reaches `0O_cZ` path zero/progress 17,836, enters the end `WarpC`, and emits
   `Transition(0x2d)` at frame 2,546 with live count `0x1000`, RNG-A `0x742c4322`, and draw count
   5,223. There is no restart, below-zero or terminal fall, VM error, faulted object, or checked issue.
-  This focused native legal-data run does not claim a browser playthrough or exercise the following
-  Level Complete screen.
+  Jungle `LEVEL_END` resolves Level Complete with current map level two, level count one, and three
+  unlocked levels. The second Level Complete screen emits Title on frame 306 at RNG `0xa442cb3a`
+  and draw count 5,529. After Title remount, the same 120-idle/Up/120-idle/Cross schedule selects The
+  Great Gate `0x12` on Map frame 253 at `1c_pZ` path zero/progress `0x0200`. Its checked Map
+  `LEVEL_END` carry has current map level three, level count one, three unlocked levels, island state
+  one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes one mounted
+  frame with 12 successful spawns, 30 clean executions, zero faults, and draw count 5,783. That
+  single frame proves session handoff only; it is not Great Gate gameplay coverage or a browser
+  playthrough claim.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1086,7 +1093,7 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_carry \
+  authored_first_two_completions_reach_great_gate_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

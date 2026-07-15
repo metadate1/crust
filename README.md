@@ -182,9 +182,10 @@ breaks four counted boxes, and reaches checkpoint entity 46 at frame 1,117 with 
 checkpoint translation/count. It then continues through the remaining main-path route and enters
 the end `WarpC`. The warp emits
 `Transition(0x2d)` at frame 2,546 with a live counted box total of `0x1000` and no restart, death
-camera, below-zero or terminal fall, VM error, faulted object, or checked issue. Jungle's checked
-`LEVEL_END` raises the unlocked count to three; its Level Complete screen emits Title on frame 306,
-and the remounted Map takes Up/Cross to select The Great Gate `0x12` on frame 253 at `1c_pZ` path zero
+camera, below-zero or terminal fall, VM error, faulted object, or checked issue. Jungle raises the
+unlocked count to three before its checked `LEVEL_END`; its Level Complete screen emits Title on
+frame 306, and the remounted Map takes Up/Cross to select The Great Gate `0x12` on frame 253 at
+`1c_pZ` path zero
 and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
 state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
 complete without a checked handler failure. A single clean first frame verifies that The Great Gate

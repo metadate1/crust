@@ -144,7 +144,11 @@ An external `git archive` copy produced these results:
   preorder objects bind after physics only inside the native inclusive range, and rejected late
   objects set the bounds-invalid status bit. Host effects `0x83`/`0x84` synchronously refresh the
   persistent local bound, and the same-stamp tail applies Crash's asymmetric collider links and
-  hotspot bookkeeping. Camera crossings apply checked zone teardown/paging/activation, and typed
+  hotspot bookkeeping. Flag-enabled `PlotObjWalls` now uses that same checked collision resolver
+  for every broad frame-bound overlap in source candidate order; flag-zero wall replots remain
+  collision-read-only. The mover link mutates during the pass, while reciprocal candidate links and
+  hotspot writes are retained as ordered typed effects. Camera crossings apply checked zone
+  teardown/paging/activation, and typed
   ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
   PCM/sequencer data, with source-timed fades and typed GOOL track toggles. The browser has no
   procedural sine fallback. Effects remain data rather than unchecked host pointers; exact SPU

@@ -2041,7 +2041,7 @@ impl WallScratch {
 fn plot_walls(
     query: &SolidQuery,
     candidates: &[SolidObjectCandidate],
-    state: &SolidMotionState,
+    state: &mut SolidMotionState,
     translation: Vec3,
     context: SolidMotionContext,
     scratch: &mut WallScratch,
@@ -2175,7 +2175,7 @@ fn for_reverse_eight(start: i32, end: i32, inclusive: bool, mut visit: impl FnMu
 #[allow(clippy::too_many_arguments)]
 fn plot_object_walls(
     candidates: &[SolidObjectCandidate],
-    state: &SolidMotionState,
+    state: &mut SolidMotionState,
     translation: Vec3,
     current_world_graphics_flags: u32,
     scratch: &mut WallScratch,
@@ -2213,7 +2213,7 @@ fn plot_object_walls(
         },
     )
     .ok_or(SolidMotionError::ArithmeticOverflow)?;
-    for candidate in candidates {
+    for candidate in candidates.iter().copied() {
         if !candidate.active {
             continue;
         }
@@ -2267,10 +2267,7 @@ fn plot_object_walls(
             }
         }
         if include_collisions && source_bound_intersection(object_bound, candidate.bounds) {
-            effects.push(SolidEffect::ObjectCollision {
-                candidate: candidate.id,
-                accepted: state.collider.is_none() || state.collider == Some(candidate.id),
-            });
+            register_object_collision(state, candidate, candidates, object_bound, effects)?;
         }
     }
     Ok(())
@@ -2618,6 +2615,315 @@ mod tests {
         .unwrap();
         assert!(outcome.stopped_by_wall);
         assert!(outcome.state.translation.x < 10_000);
+    }
+
+    #[test]
+    fn object_wall_overlap_runs_native_collision_and_hotspot_updates() {
+        let mut state = SolidMotionState {
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3::ZERO,
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -200,
+                    y: -10,
+                    z: -200,
+                },
+                max: Vec3 {
+                    x: 200,
+                    y: 110,
+                    z: 200,
+                },
+            },
+            status_b: 0,
+            status_c: 0,
+            state_flags: 0,
+            category: 0x300,
+            object_type: 0,
+            hotspot_size: 25,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            Vec3::ZERO,
+            0x0010_0000,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(state.collider, Some(7));
+        assert_eq!(state.status_a & STATUS_HOTSPOT_COLLISION, 0);
+        assert_eq!(
+            effects,
+            [
+                SolidEffect::ObjectCollision {
+                    candidate: 7,
+                    accepted: true,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 7 },
+                SolidEffect::SetCandidateStatus {
+                    candidate: 7,
+                    status_bits: STATUS_HOTSPOT_COLLISION,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn object_wall_collisions_update_priority_in_candidate_order() {
+        let mut state = SolidMotionState {
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            ..SolidMotionState::default()
+        };
+        let candidate = |id, x| SolidObjectCandidate {
+            id,
+            active: true,
+            translation: Vec3 { x, y: 0, z: 0 },
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -200,
+                    y: -10,
+                    z: -200,
+                },
+                max: Vec3 {
+                    x: 200,
+                    y: 110,
+                    z: 200,
+                },
+            },
+            status_b: 0,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 0,
+        };
+        let mut priority_override = candidate(10, 100);
+        priority_override.state_flags = 0x800;
+        let candidates = [
+            candidate(7, 80),
+            candidate(8, 20),
+            candidate(9, 90),
+            priority_override,
+        ];
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &candidates,
+            &mut state,
+            Vec3::ZERO,
+            0x0010_0000,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(state.collider, Some(8));
+        assert_eq!(
+            effects,
+            [
+                SolidEffect::ObjectCollision {
+                    candidate: 7,
+                    accepted: true,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 7 },
+                SolidEffect::ObjectCollision {
+                    candidate: 8,
+                    accepted: true,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 8 },
+                SolidEffect::ObjectCollision {
+                    candidate: 9,
+                    accepted: false,
+                },
+                SolidEffect::ObjectCollision {
+                    candidate: 10,
+                    accepted: false,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 10 },
+            ]
+        );
+    }
+
+    #[test]
+    fn object_wall_collision_retains_native_self_candidate_semantics() {
+        let mut state = SolidMotionState {
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            hotspot_size: 25,
+            collider: Some(7),
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3::ZERO,
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            status_b: 0,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 25,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            Vec3::ZERO,
+            0x0010_0000,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(state.collider, Some(7));
+        assert_ne!(state.status_a & STATUS_HOTSPOT_COLLISION, 0);
+        assert_eq!(
+            effects,
+            [
+                SolidEffect::ObjectCollision {
+                    candidate: 7,
+                    accepted: true,
+                },
+                SolidEffect::SetCandidateCollider { candidate: 7 },
+                SolidEffect::SetCandidateStatus {
+                    candidate: 7,
+                    status_bits: STATUS_HOTSPOT_COLLISION,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn object_wall_replot_and_inactive_candidates_do_not_mutate_collisions() {
+        let mut state = SolidMotionState {
+            local_bound: Bounds3 {
+                min: Vec3 {
+                    x: -100,
+                    y: 0,
+                    z: -100,
+                },
+                max: Vec3 {
+                    x: 100,
+                    y: 100,
+                    z: 100,
+                },
+            },
+            ..SolidMotionState::default()
+        };
+        let candidate = SolidObjectCandidate {
+            id: 7,
+            active: true,
+            translation: Vec3::ZERO,
+            bounds: Bounds3 {
+                min: Vec3 {
+                    x: -200,
+                    y: -10,
+                    z: -200,
+                },
+                max: Vec3 {
+                    x: 200,
+                    y: 110,
+                    z: 200,
+                },
+            },
+            status_b: SOLID_SIDE,
+            status_c: 0,
+            state_flags: 0,
+            category: 0,
+            object_type: 0,
+            hotspot_size: 25,
+        };
+        let mut scratch = WallScratch::default();
+        let mut effects = Vec::new();
+
+        plot_object_walls(
+            &[candidate],
+            &mut state,
+            Vec3::ZERO,
+            0,
+            &mut scratch,
+            &mut effects,
+            false,
+        )
+        .unwrap();
+        assert_eq!(state.collider, None);
+        assert!(effects.is_empty());
+
+        let inactive = SolidObjectCandidate {
+            active: false,
+            ..candidate
+        };
+        plot_object_walls(
+            &[inactive],
+            &mut state,
+            Vec3::ZERO,
+            0,
+            &mut scratch,
+            &mut effects,
+            true,
+        )
+        .unwrap();
+        assert_eq!(state.collider, None);
+        assert!(effects.is_empty());
     }
 
     #[test]

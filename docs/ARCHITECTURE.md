@@ -279,6 +279,15 @@ including accepted/priority collider links, hotspot `0x1000`, and target-collide
 miss. Solid helper queries consume typed `0xa300_0000` references, live status/size, source padding,
 first-hit/highest/tie ordering and parent sizing.
 
+Stopped-by-solid movement also preserves `PlotObjWalls`' two source modes. A flag-zero replot may
+add side geometry but cannot mutate collision state. A flag-one pass walks animation-derived frame
+bounds in registration order and runs the shared checked `GoolCollide` resolver for every broad
+object-bound overlap, even when the candidate did not contribute a side wall. The mover's collider
+changes immediately for later candidates and motion phases; reciprocal candidate links and hotspot
+bits retain the same ordered effect prefix before any nested synchronous handler. This is what
+allows Box7 and CrabC to observe their native next-traversal collision links without a C pointer
+compatibility layer.
+
 Solid execution deliberately owns two environments. The current-camera/native `cur_zone`
 environment supplies only its current-neighbor octrees to geometry queries and refreshes at each
 camera-zone change. Each VM object separately retains its typed object-zone EID and object-zone

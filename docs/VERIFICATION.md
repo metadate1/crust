@@ -368,15 +368,17 @@ The final checks below were run against this change set on 2026-07-14:
   that authored N. Sanity `a3_9Z` entities 23 and 24 are linked in both directions.
 - the corrected legally local 2,100-frame N. Sanity invocation passes. Its controller follows
   `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits the authored
-  `Transition(0x2d)` at frame 1,906. It records 18 zone transitions, 42 observed paths, 65
-  successful spawns and 32,808 GOOL executions with zero restarts, below-zero or terminal falls,
+  `Transition(0x2d)` at frame 1,900. It records 18 zone transitions, 42 observed paths, 65
+  successful spawns and 40,881 GOOL executions with zero restarts, below-zero or terminal falls,
   VM errors or faulted objects. The former b5/b6 stop was caused by missing test-controller route
   actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
-  lane. Correcting those inputs required no camera or collision runtime change. This deterministic
+  lane. Correcting those inputs required no camera or collision runtime change. Restoring the
+  source's flag-enabled `PlotObjWalls` collision calls accounts for the current timing and early
+  interaction changes. This deterministic
   local test is not a browser playthrough or a claim of full retail parity.
 - `authored_n_sanity_completion_title_vertical_flow_preserves_session_carry` passes against the
   legally local stream directory. It reaches N. Sanity's authored `Transition(0x2d)` at frame
-  1,906, finishes the outgoing `LEVEL_END`, imports the resulting `RetailSessionCarry` into Level
+  1,900, finishes the outgoing `LEVEL_END`, imports the resulting `RetailSessionCarry` into Level
   Complete, reaches that pair's authored `Transition(0x19)` at frame 513, finishes the second
   `LEVEL_END`, and imports its carry into Title. The destination contexts are seeded from carried
   globals 62, 69, and 102–104; both broadcasts report zero checked handler failures, and Title's
@@ -535,8 +537,8 @@ The focused checks below were also completed:
   verifies no-TERM return reclamation and bounded credits spawning, not a completed ending.
 - The legally local N. Sanity → Level Complete → Title vertical-flow golden now asserts the native
   process-lifetime `draw_count` at both exported carries, both imported runtimes, and Title's first
-  display frame. The observed sequence retained 1,906 into Level Complete, 2,419 into Title, and
-  advanced to 2,420 on Title's first display frame. Unit coverage separately proves a stream
+  display frame. The observed sequence retained 1,900 into Level Complete, 2,413 into Title, and
+  advanced to 2,414 on Title's first display frame. Unit coverage separately proves a stream
   remount retains a nonzero counter through
   the two-frame loading skip (including `u32` wrap) while `LevelRestart` continues to reset it.
 - Seven source-golden `CamDeath` tests cover PC sqrt/atan quantization, signed pitch selection,
@@ -677,25 +679,29 @@ keyboard, physical gamepad, touch, fullscreen, or persistence reload was not exe
 pass. No game data entered Git, browser persistence, or the repository tree.
 
 The legally local N. Sanity interaction regression additionally follows the retail-authored first
-CrabC and BoxsC contacts, then records box-count transitions at frames 337, 527, 768, 793, and 867.
+Box7, CrabC and Box12 contacts, then records nine ordinary box-count transitions at frames 207,
+334, 512, 644, 651, 683, 685, 762, and 787 before the checkpoint at frame 861.
 Its fresh VM checkpoint global begins at native `LevelResetGlobals(1)` sentinel `-1`, rather than
 relying on a host-side context to mask a zero-initialized process word.
-Checkpoint entity 19 saves `0x400` synchronously before its handler's later live increment to
-`0x500`, with checkpoint ID `0x1300` and translation
+Checkpoint entity 19 saves `0x900` synchronously before its handler's later live increment to
+`0xa00`, with checkpoint ID `0x1300` and translation
 `[1_945_600, 4_135_168, 24_165_632]`. Suppressing the route controller's jump in `a8_9Z` permits
-the authored TurtC collision: the death camera begins at frame 1,041, changes pose on 116 of its 117
-frames with native maximum count nine, and restart completes at frame 1,156. The frame-1,157 trace
+the authored TurtC collision: the death camera begins at frame 1,035, changes pose on 116 of its 117
+frames with native maximum count nine, and restart completes at frame 1,150. The frame-1,151 trace
 sample observes `LevelInitMisc(0)`'s reset to zero; checkpoint respawn recounts to `0x100` at frame
-1,158. The run emits one save and one load handshake, retains the checkpoint identity, and reports
+1,152. The run emits one save and one load handshake, retains the checkpoint identity, and reports
 no VM error, fault,
 terminal fall, or level transition.
 
-The same comparison identified one deliberately unresolved boundary: Rust installs the first
-Crash/Crab collider early enough for CrabC's authored direct opcode `0x87` to send event `0x300`
-before the instrumented C run does. Its PC `0x3b` ground-contact gate, PC `0x3c` event instruction,
-argument `0x6400`, and C/Rust pre-interpreter collision ordering agree. No event suppression or
-entity special case was added; the next comparison must align animation-frame bounds and player
-trajectory by native `frames_elapsed` before changing collision logic.
+A paired reference-C oracle with an exact cooperative 34-tick clock confirms the early sequence.
+Native C FE203/204/205 corresponds to Rust survey frames 205/206/207: `PlotObjWalls` links Crash and
+Box7, Crash sends `0x400`, and Box7 publishes its counted spawn state. C FE308–310 corresponds to
+Rust frames 310–312: `PlotObjWalls` links CrabC while it is still in state one, Crash sends `0x400`,
+and CrabC enters its defeat state before the next traversal. The direct-send tail is exactly
+`(311, 0x400), (312, 0x1000), (312, 0x400)` and contains no `0x300`. C then matches the CrabC
+`0x1d00` send to Box12 and Box12's frame-334 count. Earlier rAF-driven C runs shifted
+`frames_elapsed` relative to the camera and were not deterministic goldens. No event suppression or
+entity special case was added.
 
 The rebuilt browser artifact was then mounted from the user's exact 632,083,536-byte raw BIN through
 a localhost-only one-shot response. The browser recognized 88 streams and all 44 pairs, displayed
@@ -707,12 +713,12 @@ and no helper listener or proprietary byte remained in the repository or served 
 physical gamepad, touch, fullscreen, persistence reload, and the newly characterized checkpoint
 death route were not repeated manually in this browser pass.
 
-For this change set, 833 locked default tests and the complete 71-test legally local opt-in sweep
+For this change set, 837 locked default tests and the complete 71-test legally local opt-in sweep
 passed with zero failures. The separate clean-policy active-input survey covered all 43 selectable
 pairs for 360 frames. Formatting, warnings-denied native and Wasm Clippy, the optimized native
 workspace build, optimized Wasm build, and web distribution build also passed. The generated Wasm
-is 1,322,709 bytes with SHA-256
-`967937a4836da5fe5e1b7d43dfe4a860bcf2a43d74d53a6bbcc08a99dbbce37b`; the generated loader is
+is 1,322,866 bytes with SHA-256
+`68314577df1e2afdf6bdb0c30b3db529b8fd2ced0abfd71583289e783c08c9e8`; the generated loader is
 46,236 bytes with SHA-256
 `a26ab5a1a47530af0d7ca7326da07e3dcdfb30c8dcd9dafd56523d93813f5abe`.
 

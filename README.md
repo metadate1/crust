@@ -124,26 +124,29 @@ rectangle/graphics/water fallback, never extra geometry candidates. A previously
 faulted object, death restart, below-zero position, or terminal fall. The current native-schedule
 characterization also completes: a legally local 2,100-frame invocation follows
 `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits
-`Transition(0x2d)` at frame 1,906. It records 18 zone transitions, 42 observed paths, 65 successful
-spawns and 32,808 GOOL executions with zero restarts, falls, VM errors or faulted objects. The
+`Transition(0x2d)` at frame 1,900. It records 18 zone transitions, 42 observed paths, 65 successful
+spawns and 40,881 GOOL executions with zero restarts, falls, VM errors or faulted objects. The
 former b5/b6 stop came from missing route actions in the test controller at authored static cells;
 the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
-actions required no camera or collision runtime change. `docs/VERIFICATION.md` records the exact
-invocation and boundaries.
+actions required no camera or collision runtime change. The current six-frame change instead comes
+from restoring `PlotObjWalls(flag=1)`'s ordered `GoolCollide` calls for overlapping frame bounds.
+`docs/VERIFICATION.md` records the exact invocation and boundaries.
 An opt-in legally local vertical-flow test now keeps the native process session intact across the
-whole first completion loop. N. Sanity emits `Transition(0x2d)` at frame 1,906, its checked
+whole first completion loop. N. Sanity emits `Transition(0x2d)` at frame 1,900, its checked
 `LEVEL_END` phase exports `RetailSessionCarry`, Level Complete imports that carry and emits
 `Transition(0x19)` at frame 513, and Title imports the second carry with its graph, zones, and
 host-owned MDAT boundary intact. Both outgoing `LEVEL_END` broadcasts complete without a checked
 handler failure. This is a deterministic simulation integration test, not a claim that a complete
 browser playthrough or later retail progression is certified.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
-CrabC defeat, four ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
+CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
-restart. The checkpoint snapshot contains `0x400` before the handler's later live increment to
-`0x500`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,156; the next trace
-sample observes zero at frame 1,157, and the respawned checkpoint recounts to `0x100` at frame
-1,158. This is a focused deterministic route, not broad checkpoint/death certification.
+restart. The checkpoint snapshot contains `0x900` before the handler's later live increment to
+`0xa00`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,150; the next trace
+sample observes zero at frame 1,151, and the respawned checkpoint recounts to `0x100` at frame
+1,152. A fixed-34-tick reference-C oracle confirms the early Box7, CrabC and Box12 contact order;
+the Crab gate does not emit the previously observed premature direct event `0x300`. This is a
+focused deterministic route, not broad checkpoint/death certification.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.

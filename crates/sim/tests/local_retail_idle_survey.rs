@@ -38,7 +38,8 @@ use crust_sim::{
     gool::{
         CodeAddress, CodeSegment, CollisionObjectReference, GoolProgramIdentity,
         ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
-        RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect, process_register,
+        RetailPadSnapshot, RetailTransformVectorsCamera, SendEventTarget, VmEffect,
+        process_register,
     },
     object_arena::{NeighborZone, SpawnError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
@@ -843,6 +844,7 @@ struct LevelSurvey {
     checkpoint_samples: Vec<(u32, i32, [i32; 3])>,
     saved_box_count_samples: Vec<(u32, i32)>,
     spawn_flag_samples: Vec<(u32, u16, u32)>,
+    early_direct_send_samples: Vec<(u32, u32)>,
     next_lid: Option<(u32, i32)>,
 }
 
@@ -896,6 +898,7 @@ impl LevelSurvey {
             checkpoint_samples: Vec::new(),
             saved_box_count_samples: Vec::new(),
             spawn_flag_samples: Vec::new(),
+            early_direct_send_samples: Vec::new(),
             next_lid: None,
         }
     }
@@ -1013,7 +1016,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -1055,6 +1058,7 @@ impl LevelSurvey {
             self.checkpoint_samples,
             self.saved_box_count_samples,
             self.spawn_flag_samples,
+            self.early_direct_send_samples,
             self.effect_counts,
             self.first_effect_samples,
             self.issue_counts,
@@ -1831,6 +1835,15 @@ fn survey_pair_with_runtime(
         }
         for effect in &report.effects {
             survey.record_effect(frame, effect);
+            if frame <= 360
+                && survey.early_direct_send_samples.len() < 128
+                && let VmEffect::SendEvent(request) = effect
+                && matches!(request.target, SendEventTarget::Direct { .. })
+            {
+                survey
+                    .early_direct_send_samples
+                    .push((frame, request.event));
+            }
             if let VmEffect::Transition(next_lid) = effect {
                 survey.next_lid.get_or_insert((frame, *next_lid));
             }
@@ -2432,41 +2445,68 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         "the authored route must not cross either observed fall boundary: {}",
         survey.summary()
     );
+    if frames >= 320 {
+        let crab_contact_sends = survey
+            .early_direct_send_samples
+            .iter()
+            .copied()
+            .filter(|(frame, _)| (300..=320).contains(frame))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            crab_contact_sends,
+            [(311, 0x400), (312, 0x1000), (312, 0x400)],
+            "the first Crab contact window must retain its source-ordered spin/defeat events: {}",
+            survey.summary()
+        );
+        assert!(
+            !survey
+                .early_direct_send_samples
+                .iter()
+                .any(|(frame, event)| (300..=320).contains(frame) && *event == 0x300),
+            "CrabC's grounded-contact gate must not emit its direct 0x300 event before the authored defeat: {}",
+            survey.summary()
+        );
+    }
     if frames >= 900 {
         assert!(
             survey.box_count_samples.starts_with(&[
                 (1, 0),
-                (337, 0x100),
-                (527, 0x200),
-                (768, 0x300),
-                (793, 0x400),
-                (867, 0x500),
+                (207, 0x100),
+                (334, 0x200),
+                (512, 0x300),
+                (644, 0x400),
+                (651, 0x500),
+                (683, 0x600),
+                (685, 0x700),
+                (762, 0x800),
+                (787, 0x900),
+                (861, 0xa00),
             ]),
-            "the authored route must break the first five counted boxes at their native frame boundaries: {}",
+            "the authored route must break the first nine counted boxes and checkpoint at its deterministic source-ordered boundaries: {}",
             survey.summary()
         );
         assert_eq!(
             survey.checkpoint_samples,
             [
                 (1, -1, [0, 0, 0]),
-                (867, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+                (861, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
             ],
             "entity 19 must capture the first retail checkpoint: {}",
             survey.summary()
         );
         assert!(
-            survey.spawn_flag_samples.contains(&(315, 14, 3)),
+            survey.spawn_flag_samples.contains(&(312, 14, 3)),
             "the first CrabC defeat must publish entity 14's native spawn flags: {}",
             survey.summary()
         );
         assert!(
-            survey.spawn_flag_samples.contains(&(337, 12, 3)),
+            survey.spawn_flag_samples.contains(&(334, 12, 3)),
             "the first BoxsC break must publish entity 12's native spawn flags: {}",
             survey.summary()
         );
         assert_eq!(
             survey.saved_box_count_samples,
-            [(867, 0x400)],
+            [(861, 0x900)],
             "the checkpoint must save the live pre-increment box count at its synchronous source boundary: {}",
             survey.summary()
         );
@@ -2519,10 +2559,10 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
             survey.summary()
         );
     }
-    if frames >= 2_000 {
+    if frames >= 1_900 {
         assert_eq!(
-            survey.next_lid.map(|(_, lid)| lid),
-            Some(0x2d),
+            survey.next_lid,
+            Some((1_900, 0x2d)),
             "the authored end warp must request Level Complete: {}",
             survey.summary()
         );
@@ -2570,13 +2610,18 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
         survey.box_count_samples,
         [
             (1, 0),
-            (337, 0x100),
-            (527, 0x200),
-            (768, 0x300),
-            (793, 0x400),
-            (867, 0x500),
-            (1_157, 0),
-            (1_158, 0x100),
+            (207, 0x100),
+            (334, 0x200),
+            (512, 0x300),
+            (644, 0x400),
+            (651, 0x500),
+            (683, 0x600),
+            (685, 0x700),
+            (762, 0x800),
+            (787, 0x900),
+            (861, 0xa00),
+            (1_151, 0),
+            (1_152, 0x100),
         ],
         "same-level restart must reproduce native LevelInitMisc box reset and checkpoint respawn accounting"
     );
@@ -2584,19 +2629,23 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (867, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+            (861, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
         ],
         "the checkpoint identity and spawn translation must survive the death restart"
     );
-    assert_eq!(survey.saved_box_count_samples, [(867, 0x400)]);
-    assert!(survey.spawn_flag_samples.contains(&(315, 14, 3)));
-    assert!(survey.spawn_flag_samples.contains(&(337, 12, 3)));
-    assert_eq!(survey.restart_frames, [1_156]);
+    assert_eq!(survey.saved_box_count_samples, [(861, 0x900)]);
+    assert!(survey.spawn_flag_samples.contains(&(312, 14, 3)));
+    assert!(survey.spawn_flag_samples.contains(&(334, 12, 3)));
+    assert_eq!(survey.restart_frames, [1_150]);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("load-state"), Some(&1));
     assert_eq!(survey.death_camera_frames, 117);
     assert_eq!(survey.death_camera_pose_changes, 116);
     assert_eq!(survey.death_camera_max_count, 9);
+    assert_eq!(
+        survey.first_death_camera_pose.map(|(frame, _pose)| frame),
+        Some(1_035)
+    );
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
     assert!(survey.next_lid.is_none());

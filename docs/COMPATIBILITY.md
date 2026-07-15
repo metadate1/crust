@@ -354,11 +354,13 @@ gameplay path.
   terminal fall. An intermediate native-schedule run later stopped at the b5/b6 boundary; that is
   retained only as historical evidence, not a current progression gap. The corrected legally local
   2,100-frame controller route follows `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches
-  `b7_9Z`'s `WarpC`, and emits `Transition(0x2d)` at frame 1,906. It records 18 zone transitions,
-  42 observed paths, 65 successful spawns and 32,808 GOOL executions with zero restarts, falls, VM
+  `b7_9Z`'s `WarpC`, and emits `Transition(0x2d)` at frame 1,900. It records 18 zone transitions,
+  42 observed paths, 65 successful spawns and 40,881 GOOL executions with zero restarts, falls, VM
   errors or faulted objects. The intermediate b5/b6 stop was caused by missing test-controller route
   actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
-  lane. Correcting those route actions required no camera or collision runtime change. This
+  lane. Correcting those route actions required no camera or collision runtime change. The current
+  timing and interaction sequence additionally includes the restored flag-enabled `PlotObjWalls`
+  `GoolCollide` path for every overlapping frame bound. This
   deterministic route now feeds a separate legally local cross-pair test: N. Sanity's checked
   `LEVEL_END` exports a session carry, Level Complete imports it and reaches its authored
   `Transition(0x19)` at frame 513, and Title imports the second carry with a valid graph, zone
@@ -375,13 +377,14 @@ gameplay path.
   snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
   host return destination, so this is not evidence of a complete bonus round trip.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
-  is defeated, BoxsC entity 12 and the next three counted boxes break, checkpoint entity 19 saves
-  the source-ordered pre-increment count `0x400` before the live count reaches `0x500`, and TurtC
+  is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
+  saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
   entity 39 drives the authored death camera and same-level checkpoint restart. Fresh runtime
   initialization also publishes native checkpoint sentinel `-1` directly to VM global 69.
-  A paired trace still observes CrabC's authored `0x300` contact event earlier in Rust than in the
-  instrumented C run. The opcode, gate, and pre-interpreter collision order match source; aligning
-  the first animation-frame AABB/trajectory difference remains open. Broader collision and later
+  A fixed-34-tick paired reference-C trace confirms the early Box7, CrabC and Box12 contact order.
+  Rust's contact-window direct events are `0x400`, then `0x1000`/`0x400`; CrabC's grounded-contact
+  gate does not emit `0x300`. The earlier contrary C observation came from rAF-derived clock phase,
+  not a collision special case. Broader collision and later
   Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain open. A legally
   local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
   credits children, reaches at least 64 authored credits-child spawns, reuses arena generations,

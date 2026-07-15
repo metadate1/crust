@@ -33,21 +33,26 @@ use crust_formats::{
 use crust_sim::{
     camera::{
         RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
-        RetailCameraPose, RetailCameraRuntime, RetailDeathCameraInput, RetailDeathCameraState,
+        RetailCameraOutcome, RetailCameraPose, RetailCameraRuntime, RetailDeathCameraInput,
+        RetailDeathCameraState, RetailIslandCameraInput,
     },
+    card::{SaveData, VirtualCard},
+    flow::{TitlePhase, TitleScreen},
     gool::{
-        CodeAddress, CodeSegment, CollisionObjectReference, GoolProgramIdentity,
-        ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
-        RetailPadSnapshot, RetailTransformVectorsCamera, SendEventTarget, VmEffect,
-        process_register,
+        CURRENT_MAP_LEVEL_GLOBAL, CodeAddress, CodeSegment, CollisionObjectReference,
+        GAME_STATE_GLOBAL, GoolProgramIdentity, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL,
+        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, PagingHostOperation,
+        PagingHostRequest, PagingHostResponse, RetailPadSnapshot, RetailTransformVectorsCamera,
+        SAVED_TITLE_STATE_GLOBAL, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, process_register,
     },
     object_arena::{NeighborZone, SpawnError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
-        CURRENT_ZONE_FLAGS_GLOBAL, NsfProgramError, NsfProgramHost, ProgramHost,
-        RetailLevelStateContext, RetailRestartOutcome, RetailRuntime, RetailSessionCarry,
-        RuntimeError, RuntimeObjectHandle, ZoneTerminationMode,
+        CURRENT_ZONE_FLAGS_GLOBAL, ISLAND_CAMERA_ROTATION_GLOBAL, ISLAND_CAMERA_STATE_GLOBAL,
+        NsfProgramError, NsfProgramHost, ProgramHost, RetailLevelStateContext,
+        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RuntimeError, RuntimeObjectHandle,
+        ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
@@ -65,6 +70,7 @@ const DEFAULT_SURVEY_FRAMES: u32 = 360;
 const DEFAULT_PROGRESSION_FRAMES: u32 = 18_000;
 const MAX_SURVEY_FRAMES: u32 = 108_000;
 const EMPTY_TERMINAL_WINDOW: u32 = 8;
+const TITLE_MAP_DISPLAY_MASK: u32 = 0x20_ffff;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
 ];
@@ -1231,6 +1237,350 @@ fn seed_mounted_level_context_from_globals(
         active_neighbor_zones: lifecycle.active_neighbor_zones(),
     });
     Ok(())
+}
+
+struct AuthoredTitleMapHarness<'assets> {
+    nsd: &'assets Nsd,
+    nsf: &'assets Nsf,
+    nsf_bytes: &'assets [u8],
+    graph: RetailZoneGraph,
+    zones: BTreeMap<Eid, OwnedZone>,
+    lifecycle: ZoneLifecycle,
+    camera: RetailCameraRuntime,
+    runtime: RetailRuntime,
+    card: VirtualCard,
+    frame: u32,
+    held_previous: u32,
+    held_previous_2: u32,
+    tapped_previous: u32,
+    transitions: Vec<(u32, i32)>,
+}
+
+impl<'assets> AuthoredTitleMapHarness<'assets> {
+    fn fresh(nsd: &'assets Nsd, nsf: &'assets Nsf, nsf_bytes: &'assets [u8]) -> Self {
+        let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+        runtime
+            .restore_card_save_data(SaveData {
+                level_count: 1,
+                initial_lives: 4 << 8,
+                sfx_volume: 255,
+                music_volume: 255,
+                ..SaveData::default()
+            })
+            .expect("fresh map progression must come from the retail card payload path");
+        Self::from_runtime(nsd, nsf, nsf_bytes, runtime)
+    }
+
+    fn from_session(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        carry: RetailSessionCarry,
+    ) -> Self {
+        let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, carry)
+            .expect("Title Map must import the preceding authored session carry");
+        Self::from_runtime(nsd, nsf, nsf_bytes, runtime)
+    }
+
+    fn from_runtime(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        mut runtime: RetailRuntime,
+    ) -> Self {
+        let graph =
+            graph_for_pair(LevelId::TITLE, nsd, nsf, nsf_bytes).expect("Title graph must parse");
+        let (zones, lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, LevelId::TITLE)
+            .expect("Title zone catalog must parse");
+        let camera = RetailCameraRuntime::new(&graph).expect("Title camera must initialize");
+        runtime
+            .configure_retail_title(TitleScreen::Map, false)
+            .expect("Title Map state must configure");
+        let mut harness = Self {
+            nsd,
+            nsf,
+            nsf_bytes,
+            graph,
+            zones,
+            lifecycle,
+            camera,
+            runtime,
+            card: VirtualCard::new(),
+            frame: 0,
+            held_previous: 0,
+            held_previous_2: 0,
+            tapped_previous: 0,
+            transitions: Vec::new(),
+        };
+        harness.mount();
+        harness
+    }
+
+    fn mount(&mut self) {
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let teardown = self
+            .runtime
+            .terminate_all_objects(&mut host)
+            .expect("Title Map teardown must execute");
+        assert!(
+            teardown.event_failures.is_empty(),
+            "Title Map teardown handlers must complete cleanly: {:?}",
+            teardown.event_failures
+        );
+        self.runtime
+            .set_global_word(NEXT_DISPLAY_GLOBAL, TITLE_MAP_DISPLAY_MASK)
+            .expect("Title Map display mask global must exist");
+        let zone = Eid::from_name("1a_pZ").expect("fixed Title Map zone EID is valid");
+        let path = RetailPathId { zone, index: 0 };
+        self.lifecycle
+            .transition_with_marker(zone, true)
+            .expect("Title Map lifecycle transition must execute");
+        let camera_step = self
+            .camera
+            .level_update(&self.graph, path, 0, 2)
+            .expect("Title Map camera LevelUpdate must execute");
+        assert_eq!(camera_step.after.path, path);
+        let graphics_flags = self
+            .graph
+            .zone(zone)
+            .expect("Title Map zone must be present in the graph")
+            .graphics_flags;
+        self.runtime
+            .set_level_state_context(RetailLevelStateContext {
+                location: camera_step.after,
+                graphics_flags,
+                box_count: 0,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+                first_spawn: false,
+                active_neighbor_zones: self.lifecycle.active_neighbor_zones(),
+            });
+    }
+
+    fn step(&mut self, held: u32) {
+        self.frame += 1;
+        self.runtime.set_frame_timing(34, 34);
+        self.card.update();
+        self.runtime
+            .publish_card_state(self.card.published_state())
+            .expect("Title Map must publish the card state before spawning");
+        let neighbors = self
+            .lifecycle
+            .next_frame_spawn_scan()
+            .iter()
+            .map(|candidate| {
+                let zone = self
+                    .zones
+                    .get(&candidate.zone)
+                    .expect("Title Map spawn zone must be cataloged");
+                NeighborZone {
+                    eid: zone.eid,
+                    display_flags: candidate.display_flags,
+                    entities: zone.entities.as_slice(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let attempts = {
+            let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+            self.runtime
+                .spawn_current_zone_neighbors(&neighbors, &mut host)
+        };
+        assert!(
+            attempts.iter().all(|attempt| {
+                attempt.result.is_ok()
+                    || matches!(
+                        attempt.result,
+                        Err(RuntimeError::Spawn(
+                            SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
+                        ))
+                    )
+            }),
+            "Title Map frame {} spawn mismatch: {attempts:?}",
+            self.frame
+        );
+
+        self.update_camera();
+        let tapped = held & !self.held_previous;
+        let snapshot = RetailPadSnapshot {
+            tapped,
+            held,
+            tapped_previous: self.tapped_previous,
+            held_previous: self.held_previous,
+            held_previous_2: self.held_previous_2,
+        };
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let report = self
+            .runtime
+            .run_frame_before_display_with_traversal_hook(
+                &mut host,
+                INSTRUCTION_BUDGET,
+                |runtime, _host, _point| {
+                    runtime
+                        .set_pad_snapshot(0, snapshot)
+                        .map_err(RuntimeError::Vm)
+                },
+            )
+            .unwrap_or_else(|error| panic!("Title Map frame {} runtime: {error:?}", self.frame));
+        self.held_previous_2 = self.held_previous;
+        self.held_previous = held;
+        self.tapped_previous = tapped;
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "Title Map frame {} execution mismatch: {:?}",
+            self.frame,
+            report
+                .executions
+                .iter()
+                .filter(|execution| execution.result.is_err())
+                .collect::<Vec<_>>()
+        );
+        self.transitions
+            .extend(report.effects.iter().filter_map(|effect| match effect {
+                VmEffect::Transition(level) => Some((self.frame, *level)),
+                _ => None,
+            }));
+        let action = self
+            .runtime
+            .begin_retail_title_update()
+            .expect("Title Map update must begin");
+        assert_eq!(
+            action, None,
+            "Title Map must not request another title screen"
+        );
+        self.runtime
+            .finish_retail_title_update()
+            .expect("Title Map update must finish");
+        self.runtime
+            .finish_deferred_display_frame()
+            .expect("Title Map display boundary must finish");
+        assert_eq!(
+            self.runtime.faulted_object_count(),
+            0,
+            "Title Map frame {} retained a faulted object",
+            self.frame
+        );
+    }
+
+    fn update_camera(&mut self) {
+        let presentation = self
+            .runtime
+            .retail_title_presentation()
+            .expect("Title Map presentation must be readable")
+            .expect("Title Map presentation must be configured");
+        if presentation.screen != TitleScreen::Map || self.runtime.arena().main_object().is_none() {
+            return;
+        }
+        let island_cam_state = self
+            .runtime
+            .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+            .expect("island camera state global must exist")
+            .cast_signed();
+        let island_cam_rot_x = self
+            .runtime
+            .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+            .expect("island camera rotation global must exist")
+            .cast_signed();
+        let step = self
+            .camera
+            .update_with_island(
+                &self.graph,
+                RetailCameraInput {
+                    tapped: self.tapped_previous,
+                },
+                Some(RetailIslandCameraInput {
+                    island_cam_state,
+                    island_cam_rot_x,
+                }),
+            )
+            .expect("authored Title Map camera update must execute");
+        let island_writeback = match step.outcome {
+            RetailCameraOutcome::IslandAdvanced {
+                mode,
+                state_before,
+                state_after,
+                ..
+            } => Some((mode, state_before, state_after)),
+            _ => None,
+        };
+        if let Some((7, _, state_after)) = island_writeback {
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .expect("mode-seven island state writeback must succeed");
+        }
+        for effect in &step.effects {
+            let RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags,
+            } = *effect
+            else {
+                continue;
+            };
+            if before.path.zone != after.path.zone {
+                self.lifecycle
+                    .transition_with_marker(after.path.zone, flags & 2 != 0)
+                    .expect("Title Map cross-zone lifecycle transition must execute");
+            }
+            let existing = self
+                .runtime
+                .level_state_context()
+                .expect("Title Map level context must remain mounted")
+                .clone();
+            let graphics_flags = self
+                .graph
+                .zone(after.path.zone)
+                .expect("Title Map destination zone must be present")
+                .graphics_flags;
+            self.runtime
+                .set_level_state_context(RetailLevelStateContext {
+                    location: after,
+                    graphics_flags,
+                    box_count: existing.box_count,
+                    checkpoint_id: existing.checkpoint_id,
+                    checkpoint_translation: existing.checkpoint_translation,
+                    first_spawn: existing.first_spawn,
+                    active_neighbor_zones: self.lifecycle.active_neighbor_zones(),
+                });
+        }
+        if let Some((8, _, state_after)) = island_writeback {
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .expect("mode-eight island state writeback must succeed");
+        }
+        self.runtime.set_frame_context(
+            step.game_state,
+            self.camera
+                .rotation_xz(&self.graph)
+                .expect("Title Map camera rotation must resolve"),
+        );
+    }
+
+    fn wait_until_ready(&mut self, limit: u32) {
+        for _ in 0..limit {
+            if self
+                .runtime
+                .retail_title_presentation()
+                .expect("Title Map presentation must be readable")
+                .is_some_and(|title| title.phase == TitlePhase::Ready)
+            {
+                return;
+            }
+            self.step(0);
+        }
+        panic!(
+            "Title Map did not become ready by frame {}: {:?}",
+            self.frame,
+            self.runtime.retail_title_presentation()
+        );
+    }
+
+    fn tap(&mut self, button: u32) {
+        self.step(button);
+        self.step(0);
+    }
 }
 
 fn screen_projection(field_of_view: u32) -> Result<u32, String> {
@@ -3619,24 +3969,73 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
             .expect("vertical-flow level is present in the retail catalog")
     };
 
+    let title = LevelId::TITLE;
+    let (title_nsd, title_nsf, title_nsf_bytes) =
+        parse_local_pair(&root, title).expect("Title pair must parse");
+    let mut initial_map = AuthoredTitleMapHarness::fresh(&title_nsd, &title_nsf, &title_nsf_bytes);
+    initial_map.wait_until_ready(64);
+    assert_eq!(initial_map.frame, 10, "initial Title Map ready-frame drift");
+    initial_map.step(PAD_CROSS);
+    assert_eq!(
+        initial_map.transitions,
+        [(11, i32::try_from(LevelId::N_SANITY_BEACH.get()).unwrap())],
+        "the first unlocked map node must request N. Sanity Beach"
+    );
+    let initial_map_carry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let report = initial_map
+            .runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(LevelId::N_SANITY_BEACH.get()).unwrap(),
+            )
+            .expect("initial Title Map LEVEL_END must export a session carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "initial Title Map LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.resolved.level, LevelId::N_SANITY_BEACH);
+        assert!(!report.resolved.bonus_return);
+        report.carry
+    };
+
     let n_sanity = LevelId::N_SANITY_BEACH;
     let (n_sanity_nsd, n_sanity_nsf, n_sanity_nsf_bytes) =
         parse_local_pair(&root, n_sanity).expect("N. Sanity pair must parse");
+    let n_sanity_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, n_sanity, initial_map_carry)
+            .expect("N. Sanity must import the authored initial-map carry");
+    assert_eq!(n_sanity_runtime.global_word(GAME_STATE_GLOBAL), Ok(0));
+    assert_eq!(
+        n_sanity_runtime.global_word(TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Map.raw())
+    );
+    assert_eq!(
+        n_sanity_runtime.global_word(SAVED_TITLE_STATE_GLOBAL),
+        Ok(TitleScreen::Map.raw())
+    );
+    assert_eq!(
+        n_sanity_runtime.global_word(CURRENT_MAP_LEVEL_GLOBAL),
+        Ok(1)
+    );
+    assert_eq!(n_sanity_runtime.global_word(LEVEL_COUNT_GLOBAL), Ok(1));
+    assert_eq!(n_sanity_runtime.global_word(LEVELS_UNLOCKED_GLOBAL), Ok(1));
     let (n_sanity_survey, mut n_sanity_runtime) = survey_pair_with_runtime(
         known_name(n_sanity),
         n_sanity,
         &n_sanity_nsd,
         &n_sanity_nsf,
         &n_sanity_nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, n_sanity),
-        LevelContextSource::FreshBoot,
+        n_sanity_runtime,
+        LevelContextSource::SessionGlobals,
         SurveyInputProfile::ForwardWithActions,
         N_SANITY_FRAMES,
     )
     .expect("N. Sanity authored route must execute");
     assert_eq!(
-        n_sanity_survey.next_lid.map(|(_, level)| level),
-        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        n_sanity_survey.next_lid,
+        Some((1_900, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap())),
         "N. Sanity's authored end warp must request Level Complete: {}",
         n_sanity_survey.summary()
     );
@@ -3653,9 +4052,9 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
     );
 
     let n_sanity_draw_count = n_sanity_runtime.draw_count();
-    assert!(
-        n_sanity_draw_count > 0,
-        "the completed source level must have advanced the native draw counter"
+    assert_eq!(
+        n_sanity_draw_count, 1_911,
+        "N. Sanity completion draw-count drift"
     );
     let completion_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&n_sanity_nsd, &n_sanity_nsf, &n_sanity_nsf_bytes);
@@ -3696,8 +4095,8 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
     )
     .expect("Level Complete authored runtime must execute");
     assert_eq!(
-        completion_survey.next_lid.map(|(_, level)| level),
-        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        completion_survey.next_lid,
+        Some((513, i32::try_from(LevelId::TITLE.get()).unwrap())),
         "authored completion input must request Title: {}",
         completion_survey.summary()
     );
@@ -3708,7 +4107,10 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
     );
 
     let completion_draw_count = completion_runtime.draw_count();
-    assert!(completion_draw_count > n_sanity_draw_count);
+    assert_eq!(
+        completion_draw_count, 2_424,
+        "Level Complete draw-count drift"
+    );
     let title_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
         let report = completion_runtime
@@ -3725,64 +4127,118 @@ fn authored_n_sanity_completion_title_vertical_flow_preserves_session_carry() {
         report.carry
     };
 
-    let title = LevelId::TITLE;
-    let (title_nsd, title_nsf, title_nsf_bytes) =
-        parse_local_pair(&root, title).expect("Title pair must parse");
-    let mut title_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, title, title_carry)
-        .expect("Title must import Level Complete's session carry");
-    assert_eq!(title_runtime.draw_count(), completion_draw_count);
-    let title_graph = graph_for_pair(title, &title_nsd, &title_nsf, &title_nsf_bytes)
-        .expect("Title graph must parse");
-    let (_, title_lifecycle) = zone_catalog(
+    assert_eq!(title_carry.globals[GAME_STATE_GLOBAL], 0x300);
+    assert_eq!(
+        title_carry.globals[TITLE_STATE_GLOBAL],
+        TitleScreen::Map.raw()
+    );
+    assert_eq!(
+        title_carry.globals[SAVED_TITLE_STATE_GLOBAL],
+        TitleScreen::Map.raw()
+    );
+    assert_eq!(title_carry.globals[CURRENT_MAP_LEVEL_GLOBAL], 1);
+    assert_eq!(title_carry.globals[LEVEL_COUNT_GLOBAL], 1);
+    assert_eq!(title_carry.globals[LEVELS_UNLOCKED_GLOBAL], 2);
+
+    let mut post_completion_map = AuthoredTitleMapHarness::from_session(
         &title_nsd,
         &title_nsf,
         &title_nsf_bytes,
-        &title_graph,
-        title,
-    )
-    .expect("Title zone catalog must parse");
-    let title_camera =
-        RetailCameraRuntime::new(&title_graph).expect("Title camera runtime must initialize");
-    seed_mounted_level_context_from_globals(
-        &mut title_runtime,
-        &title_graph,
-        &title_lifecycle,
-        title_camera.location(),
-    )
-    .expect("Title mount context must use the carried retail globals");
-    let mut title_host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-    let title_core = title_runtime
-        .create_retail_core_objects(title_camera.location().path.zone, &mut title_host)
-        .expect("Title core runtime must boot cleanly");
-    assert_eq!(
-        title_core, None,
-        "Title intentionally has no gameplay HUD/core roots; its MDAT objects are host-owned"
+        title_carry,
     );
-    title_runtime.set_frame_timing(34, 34);
-    title_runtime
-        .set_pad_snapshot(0, RetailPadSnapshot::default())
-        .expect("Title must accept an idle retail pad snapshot");
-    let title_frame = title_runtime
-        .run_frame(&mut title_host, INSTRUCTION_BUDGET)
-        .expect("Title's empty core frame must remain a valid runtime frame");
-    assert_eq!(title_runtime.level(), Some(title));
-    assert!(title_runtime.level_state_context().is_some());
-    assert!(title_runtime.arena().is_empty());
-    assert!(title_frame.executions.is_empty());
-    assert!(title_frame.effects.is_empty());
-    assert_eq!(title_runtime.faulted_object_count(), 0);
     assert_eq!(
-        title_runtime.draw_count(),
-        completion_draw_count.wrapping_add(1),
-        "Title's first display frame must continue the cross-stream phase"
+        post_completion_map.runtime.draw_count(),
+        completion_draw_count
+    );
+    post_completion_map.wait_until_ready(64);
+    assert_eq!(
+        post_completion_map.frame, 10,
+        "post-completion Title Map ready-frame drift"
+    );
+    for _ in 0..120 {
+        post_completion_map.step(0);
+    }
+    post_completion_map.tap(PAD_UP);
+    for _ in 0..120 {
+        post_completion_map.step(0);
+    }
+    post_completion_map.step(PAD_CROSS);
+    assert_eq!(
+        post_completion_map.frame, 253,
+        "post-completion Map input-frame drift"
+    );
+    assert_eq!(
+        post_completion_map.transitions,
+        [(253, 0x0c)],
+        "Up then Cross must request Jungle Rollers"
+    );
+    let post_map_location = post_completion_map.camera.location();
+    assert_eq!(
+        post_map_location.path,
+        RetailPathId {
+            zone: Eid::from_name("1b_pZ").expect("fixed second map-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(post_map_location.progress.raw(), 0x0b00);
+    assert_eq!(
+        post_completion_map
+            .runtime
+            .global_word(CURRENT_MAP_LEVEL_GLOBAL),
+        Ok(2)
+    );
+    assert_eq!(
+        post_completion_map.runtime.global_word(LEVEL_COUNT_GLOBAL),
+        Ok(1)
+    );
+    assert_eq!(
+        post_completion_map
+            .runtime
+            .global_word(LEVELS_UNLOCKED_GLOBAL),
+        Ok(2)
+    );
+    assert_eq!(
+        post_completion_map
+            .runtime
+            .global_word(ISLAND_CAMERA_STATE_GLOBAL),
+        Ok(1)
+    );
+    assert_eq!(
+        post_completion_map.runtime.faulted_object_count(),
+        0,
+        "post-completion Map must retain no faulted authored object"
+    );
+    let jungle_rollers_carry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let report = post_completion_map
+            .runtime
+            .finish_level_transition(&mut host, 0x0c)
+            .expect("Title Map LEVEL_END must export the Jungle Rollers carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "post-completion Map LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.requested_lid, 0x0c);
+        assert_eq!(report.next_lid_after_event, 0x0c);
+        assert_eq!(report.resolved.level, LevelId::new_const(0x0c));
+        assert!(!report.resolved.bonus_return);
+        report.carry
+    };
+    assert_eq!(jungle_rollers_carry.globals[CURRENT_MAP_LEVEL_GLOBAL], 2);
+    assert_eq!(jungle_rollers_carry.globals[LEVEL_COUNT_GLOBAL], 1);
+    assert_eq!(jungle_rollers_carry.globals[LEVELS_UNLOCKED_GLOBAL], 2);
+    assert_eq!(
+        jungle_rollers_carry.draw_count, 2_677,
+        "post-completion Map draw-count drift"
     );
     eprintln!(
-        "vertical-flow: N. Sanity -> Level Complete at frame {} with draw count {}; Level Complete -> Title at frame {} with draw count {}; Title first frame advanced to {}",
+        "vertical-flow: initial Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} with draw count {}; Level Complete -> Title at frame {} with draw count {}; post-completion Map -> Jungle Rollers at frame 253 with draw count {}",
         n_sanity_survey.next_lid.unwrap().0,
         n_sanity_draw_count,
         completion_survey.next_lid.unwrap().0,
         completion_draw_count,
-        title_runtime.draw_count(),
+        jungle_rollers_carry.draw_count,
     );
 }
 

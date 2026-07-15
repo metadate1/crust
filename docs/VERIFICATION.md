@@ -756,11 +756,11 @@ is 1,322,866 bytes with SHA-256
   frame 406 reclaims that creator while all eight boxes remain live. The test verifies every link
   four process word retains the original non-null pointer and reports no faulted object. Its focused
   invocation passed one test with zero failures.
-- This retained-storage slice does not yet cover address-taking through a free-slot link,
-  event/spawn argument provenance sidecars, retired non-process colors/bounds/animation, or the
-  byte-exact separate allocation and reinitialization details of the dedicated main slot. It also
-  deliberately rejects writes to an ordinary free slot's allocator-owned parent/sibling/children
-  words instead of attempting to reproduce native malformed-list behavior.
+- At this checkpoint, address-taking through a free-slot link and event/spawn sidecars were not yet
+  covered; both were closed by later checkpoints. The current model still does not retain an
+  ordinary replacement's prior local-bound bytes or expose the dedicated main allocation's extra
+  0x100-byte stack tail. It deliberately rejects writes to an ordinary free slot's allocator-owned
+  parent/sibling/children words instead of attempting to reproduce native malformed-list behavior.
 - `cargo test -p crust-sim --lib --locked` passed all 537 simulation-library tests. The strict
   active-input survey ran all 43 bootable pairs for 1,800 frames each (77,400 frames total) with
   clean-policy enforcement and no checked runtime issue. This expands the earlier 360-frame survey;
@@ -983,6 +983,60 @@ is 1,322,866 bytes with SHA-256
   `npm run build`, checked by the stale-bundle guard, and served from the ordinary repository
   server; the delivery summary reports its exact clean build identity.
 
+### Physical storage, one-point path, and first-completion route checkpoint (2026-07-15)
+
+- Linked GOOL address-taking now uses a disjoint aligned `0xa100_0000` storage tag carrying the
+  physical arena slot and complete 508-word register index. Decode rejects nonzero low bits,
+  reserved payload bits, slot 97 or greater, and register 508 or greater. References retain their
+  storage through reclamation, retarget only when the same physical slot is reused, and do not
+  follow unrelated compact-handle reuse. Scalar writes preserve the allocator-link rejection
+  error; three-word translation writes preflight the complete span and cannot partially mutate
+  retained state.
+- The separately allocated player/main object has retained backing at physical slot 96
+  from machine construction. Every live object's link five remains non-null through a missing-main
+  interval, main teardown, and later main reuse. Its first pre-main translation write initializes
+  both the retained register words and the cached translation view. Focused tests cover live,
+  reclaimed and same-slot-reused LEA sources and destinations; malformed tags; protected allocator
+  links; cross-decoder tag rejection; exact vector transactionality; and a logical handle 96 bound
+  to an unrelated ordinary slot.
+- Transform selector `0x85/0` returns point zero for a declared one-point path before performing any
+  index arithmetic, including for fractional and extreme signed progress. The legally local Title
+  pair contains exactly one matching `IsldC` entity: zone `1a_pZ`, entity zero, id one, executable
+  59, item byte range `2889040..2889068`, and point `[99, 200, 200]`. At progress `0x110`, the C
+  ordering indexes six bytes beginning two bytes before the following item and reaches its relocated
+  parent pointer, so the original result is address-dependent undefined behavior rather than a
+  stable value to reproduce. The Rust stationary result is the explicit safe contract.
+- The legally local continuous route now starts from a fresh authored Map initialized through the
+  card-payload restore path instead of seeded scalar globals. Map requests N. Sanity Beach on frame
+  11; N. Sanity requests Level Complete on frame 1,900 at draw count 1,911; Level Complete requests
+  Title on frame 513 at draw count 2,424; and the post-completion Map settles, takes Up then Cross,
+  and requests Jungle Rollers on frame 253 at draw count 2,677. Those frames and draw counts are
+  explicit regression assertions. The final camera is `1b_pZ` path zero at progress `0x0b00`; map
+  level two, level count one, two unlocked levels, and island state one survive the session carries.
+  Every checked execution and `LEVEL_END` handler succeeds, with zero faulted objects.
+- A temporary replay harness outside the repository imported that exact carry into Jungle Rollers
+  and classified the first fresh-controller divergence. With authentic RNG-A `0xc5f24260` and draw
+  count 2,677, Crash enters gameplay-death state 23 on frame 532 and restarts on frame 648 without a
+  checked VM fault. Replacing either RNG-A with its fresh `0x00003039` value or draw count with zero
+  independently avoids the death and matches the fresh route through 16 camera paths at frame 700.
+  Replacing globals (including checkpoint translation), spawn tags, saved level state, RNG-B,
+  respawn/death counters, or `first_spawn` does not. Source inspection confirms RNG-A and draw count
+  are intentionally process-lifetime across `NSKill`/`NSInit`; the former savestate is overwritten
+  by Jungle's first Crash spawn, and stale spawn translation is gated by checkpoint id `-1`.
+  Therefore no source-incompatible mount reset was added: the open gap is a phase-robust Jungle
+  controller/full route, not a session-carry defect.
+- Rustfmt, native and Wasm Clippy with warnings denied, eight dependency-free Node tests, all 890
+  non-ignored locked workspace tests, all 78 legally local ignored tests, the native workspace
+  release, the `wasm32-unknown-unknown` web release, `npm run build`, and the distribution verifier
+  passed. The simulation library contributed 555 active tests to the default gate.
+- The checkpoint-specific in-app-browser pass loaded the release picker at 1,280 pixels wide,
+  exposed the matching build identity in the DOM, reported 43 playable pairs, 30 Hz standby and all
+  15 virtual-card slots, showed no horizontal overflow, and produced no warning/error diagnostics.
+  It did not inject local game bytes into this exact artifact: the browser automation API cannot
+  operate the native file chooser, so the authored completion route above is native legal-data
+  evidence rather than a new browser gameplay claim. The user can select the local BIN or S0-S3
+  streams directly in the visible page; those bytes remain local to the tab.
+
 ## Reproducible commands
 
 ```bash
@@ -1004,6 +1058,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --test local_title_mdat_runtime --locked \
   authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --test local_title_mdat_runtime --locked \
+  map_island_one_point_trailing_path_alias_is_characterized \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

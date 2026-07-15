@@ -143,8 +143,12 @@ covers Jaws of Darkness's reclaimed `fruit_hud` copy/read and the legal Dr. N. B
 eight live `BoxsC` children retain creator link four after `BriOC` is reclaimed. Event argv,
 mapped-state rebinds, and child-spawn creation arguments carry the same physical-slot provenance;
 copying a pointer through EARG or an owned host request therefore cannot retarget it through compact
-handle reuse. Address-taking through a free-slot link, retained non-process colors/bounds/animation,
-and byte-exact dedicated-main allocation/reinitialization remain open.
+handle reuse. Linked address-taking now uses a separate validated 32-bit physical-pool storage tag:
+it remains readable and writable while a slot is free and retargets only when that exact slot is
+reused. The separately allocated player/main address is non-null from machine initialization,
+persists through Title teardown, and remains outside the ordinary free list. Exact retention of an
+ordinary replacement's preexisting local-bound bytes and the dedicated allocation's extra 0x100
+stack-tail bytes remain open; legal-corpus audits have not yet observed either boundary in use.
 Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
 deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
 The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and
@@ -166,12 +170,17 @@ actions required no camera or collision runtime change. The current six-frame ch
 from restoring `PlotObjWalls(flag=1)`'s ordered `GoolCollide` calls for overlapping frame bounds.
 `docs/VERIFICATION.md` records the exact invocation and boundaries.
 An opt-in legally local vertical-flow test now keeps the native process session intact across the
-whole first completion loop. N. Sanity emits `Transition(0x2d)` at frame 1,900, its checked
-`LEVEL_END` phase exports `RetailSessionCarry`, Level Complete imports that carry and emits
-`Transition(0x19)` at frame 513, and Title imports the second carry with its graph, zones, and
-host-owned MDAT boundary intact. Both outgoing `LEVEL_END` broadcasts complete without a checked
-handler failure. This is a deterministic simulation integration test, not a claim that a complete
-browser playthrough or later retail progression is certified.
+whole first completion loop and its next map choice. A fresh authored Map initialized through the
+card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity emits Level Complete
+`0x2d` at frame 1,900, its checked `LEVEL_END` phase exports `RetailSessionCarry`; Level Complete
+imports that carry and emits Title `0x19` at
+frame 513, and Title imports the second carry into its parsed graph, ZDAT entities, lifecycle, and
+map camera schedule. The post-completion Map unlocks level two; after the authored Up/Cross route
+it reaches `1b_pZ` path zero at progress `0x0b00` and emits Jungle Rollers `0x0c` on frame 253. All four
+outgoing `LEVEL_END` broadcasts complete without a checked handler failure, and the carried map,
+count, unlock, island-camera and draw state remain exact. This is a deterministic simulation
+integration test, not a claim that a complete browser playthrough or later retail progression is
+certified.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

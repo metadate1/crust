@@ -621,6 +621,50 @@ fn authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local NTSC-U game data"]
+fn map_island_one_point_trailing_path_alias_is_characterized() {
+    let (nsd, nsf, nsf_bytes) = load_legally_local_title_pair();
+    let zone = Eid::from_name("1a_pZ").unwrap();
+    let entry = nsf.resolve_entry(&nsd, zone).unwrap();
+    let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let entry_range = entry.byte_range();
+    let mut matches = 0;
+    for entity_index in 0..header.entity_count {
+        let item_index = usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+        let item = entry.item(item_index).unwrap();
+        let entity = ZoneEntity::parse(item.bytes(&nsf_bytes).unwrap()).unwrap();
+        if entity.executable != 59 || entity.path_points.len() != 1 {
+            continue;
+        }
+        matches += 1;
+        let item_range = item.byte_range();
+        assert_eq!(entity.id, 1);
+        assert_eq!(item_range.len(), 28);
+        let point = entity.path_points.first().unwrap();
+        assert_eq!([point.x, point.y, point.z], [99, 200, 200]);
+        let alias_start =
+            item_range.start + ZoneEntity::HEADER_BYTE_LEN + ZoneEntityPathPoint::BYTE_LEN;
+        let alias_end = alias_start + ZoneEntityPathPoint::BYTE_LEN;
+        assert!(alias_end <= entry_range.end);
+        let next_range = entry.item(item_index + 1).unwrap().byte_range();
+        assert_eq!(next_range.start, item_range.end);
+        assert_eq!(alias_start + 2, next_range.start);
+        assert_eq!(&nsf_bytes[alias_start..alias_end], &[0; 6]);
+        eprintln!(
+            "IsldC entity={entity_index} id={} item={item_range:?} len={} entry={entry_range:?} alias={:02x?} next={:?}",
+            entity.id,
+            item_range.len(),
+            &nsf_bytes[alias_start..alias_end],
+            Some(next_range),
+        );
+    }
+    assert_eq!(
+        matches, 1,
+        "the retail title pair must contain exactly one IsldC one-point alias"
+    );
+}
+
 fn default_title_save() -> SaveData {
     SaveData {
         level_count: 1,

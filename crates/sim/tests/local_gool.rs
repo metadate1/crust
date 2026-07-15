@@ -292,7 +292,7 @@ fn toxic_waste_barrel_lea_installs_and_resolves_its_process_animation() {
         .register(process_register::ANIMATION_SEQUENCE)
         .unwrap();
     let reference = StorageReference::from_word(word).unwrap();
-    assert_eq!(reference.object(), handle);
+    assert_eq!(reference.object(), Some(handle));
     assert_eq!(reference.region(), StorageRegion::Register);
     assert_eq!(u32::from(reference.index()), expected_index);
     assert_eq!(machine.read_storage_reference(reference), Ok(0));

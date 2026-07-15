@@ -50,8 +50,10 @@ An external `git archive` copy produced these results:
   Child-spawn opcodes stop at a synchronous host boundary, then continue in the same hosted
   interpreter invocation before the next instruction. They pop arguments for every signed count
   and expose `0x91`'s bounded reclaim permission rather than an alternate parent. Opcode `0x14`
-  preserves native input-before-output address translation while storing a checked process-local
-  handle rather than a pointer; opcode `0x81` preserves the native switch's one-cycle no-op.
+  preserves native input-before-output address translation while storing either a checked logical
+  object handle or a physical retail-pool slot rather than a pointer. Physical-slot references
+  remain valid through reclamation and follow exact-slot reuse; opcode `0x81` preserves the native
+  switch's one-cycle no-op.
 - Retail GOOL animation item five is retained as owned bytes. All five descriptor families are
   bounds-checked at unaligned byte offsets, and vertex descriptors resolve TGEO plus exact
   SVTX/CVTX frames through the mounted pair only. Type-three fonts consume the exact glyph count

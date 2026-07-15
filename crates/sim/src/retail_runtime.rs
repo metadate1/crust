@@ -35,7 +35,7 @@ use crate::{
     },
     math::{Angle12, Angles, Bounds3, Vec3},
     object_arena::{
-        ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, NeighborZone, ObjectArena,
+        ENEMY_OBJECT_ROOT, EntitySpawnDescriptor, NeighborZone, OBJECT_POOL_CAPACITY, ObjectArena,
         ObjectHandle as ArenaObjectHandle, ROOT_HANDLE_COUNT, RootHandle, RuntimeCreateError,
         SPAWN_TABLE_CAPACITY, SpawnError, SpawnedObject, TreeError, TreeParent, ZONE_OBJECT_ROOT,
     },
@@ -100,6 +100,10 @@ const ACTIVE_ZONE_DISPLAY_BIT: u32 = 2;
 const SPAWNABLE_ENTITY_GROUP: u16 = 3;
 const ZONE_TERMINATION_STATUS_B_IMMUNE: u32 = 0x0100_0000;
 const ZONE_TERMINATION_STATE_IMMUNE: u32 = 0x0004_0000;
+/// Native allocates `player` separately at initialization and every successful
+/// `GoolObjectInit` stores that non-null address in process link five, even
+/// while no logical main/Crash object occupies it.
+const DEDICATED_PLAYER_POOL_SLOT: u8 = OBJECT_POOL_CAPACITY as u8;
 
 // `gool_globals` words whose C values are native pointers. A stream remount
 // destroys every pointee. Retaining compact Rust handles here could alias a
@@ -7964,7 +7968,7 @@ impl RetailRuntime {
             vm_object.set_link(1, parent).map_err(RuntimeError::Vm)?;
             vm_object.set_link(2, sibling).map_err(RuntimeError::Vm)?;
             vm_object.set_link(3, child).map_err(RuntimeError::Vm)?;
-            vm_object.set_link(5, player).map_err(RuntimeError::Vm)?;
+            Self::set_player_link(vm_object, player).map_err(RuntimeError::Vm)?;
         }
         Ok(())
     }
@@ -9295,8 +9299,19 @@ impl RetailRuntime {
             .main_object()
             .and_then(|main_arena| handles.for_arena(main_arena))
             .map(|main| main.vm);
-        vm_object.set_link(5, player).map_err(RuntimeError::Vm)?;
+        Self::set_player_link(vm_object, player).map_err(RuntimeError::Vm)?;
         Ok(())
+    }
+
+    fn set_player_link(
+        vm_object: &mut VmObject,
+        live_player: Option<VmObjectHandle>,
+    ) -> Result<(), VmError> {
+        let target_token = live_player.unwrap_or_else(|| {
+            VmObjectHandle::new(OBJECT_POOL_CAPACITY as u16)
+                .expect("the dedicated retail player slot fits the VM handle range")
+        });
+        vm_object.set_retail_pool_link(5, target_token, DEDICATED_PLAYER_POOL_SLOT)
     }
 
     fn install_vm_object<E>(
@@ -9329,11 +9344,8 @@ impl RetailRuntime {
             )
             .expect("index came from the VM handle capacity");
             if handles.for_vm(vm).is_some() {
-                machine
-                    .object_mut(vm)
-                    .map_err(RuntimeError::Vm)?
-                    .set_link(5, player)
-                    .map_err(RuntimeError::Vm)?;
+                let vm_object = machine.object_mut(vm).map_err(RuntimeError::Vm)?;
+                Self::set_player_link(vm_object, player).map_err(RuntimeError::Vm)?;
             }
         }
         Ok(())
@@ -12364,6 +12376,61 @@ mod tests {
             .result
             .as_ref()
             .unwrap()
+    }
+
+    #[test]
+    fn player_link_keeps_dedicated_allocation_while_main_is_inactive() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::TITLE);
+        let ordinary = spawn_test_object(&mut runtime, ZONE, 270, 2, 0);
+        let inactive_link = runtime.machine.object(ordinary.vm).unwrap();
+        let inactive_word = inactive_link.register(5).unwrap();
+        assert!(CollisionObjectReference::from_word(inactive_word).is_some());
+        assert_eq!(
+            inactive_link.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT)),
+            "GoolObjectInit points at the separately allocated player even before it is active"
+        );
+
+        let main = spawn_test_object(&mut runtime, ZONE, 271, 0, 0);
+        assert!(main.arena.is_dedicated_main());
+        let live_link = runtime.machine.object(ordinary.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(live_link.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(main.vm)
+        );
+        assert_eq!(
+            live_link.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
+        );
+
+        let mut report = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(main.arena, &mut report)
+            .unwrap();
+        assert_eq!(runtime.arena.main_object(), None);
+        let reclaimed_link = runtime.machine.object(ordinary.vm).unwrap();
+        assert!(
+            CollisionObjectReference::from_word(reclaimed_link.register(5).unwrap()).is_some(),
+            "title teardown must not turn the persistent player allocation into a null pointer"
+        );
+        assert_eq!(
+            reclaimed_link.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
+        );
+
+        let replacement = spawn_test_object(&mut runtime, ZONE, 272, 0, 0);
+        assert!(replacement.arena.is_dedicated_main());
+        let reused_link = runtime.machine.object(ordinary.vm).unwrap();
+        assert_eq!(
+            CollisionObjectReference::from_word(reused_link.register(5).unwrap())
+                .map(CollisionObjectReference::object),
+            Some(replacement.vm)
+        );
+        assert_eq!(
+            reused_link.register_pool_slot(5),
+            Ok(Some(DEDICATED_PLAYER_POOL_SLOT))
+        );
     }
 
     #[test]

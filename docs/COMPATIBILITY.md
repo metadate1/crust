@@ -76,7 +76,8 @@ gameplay path.
   complete typed audio calls synchronously before the following instruction. Execution,
   checked-error and quarantined-object counts are exposed through the engineering log/debug
   surface. Opcode `0x14` (LEA) keeps native input-before-output address translation and represents
-  process-local animations with checked same-object handles. Internal and register aliases support
+  logical storage with checked object handles and linked registers with physical-pool handles.
+  Process-local animations use the same-object subset. Internal and register aliases support
   complete bounded descriptors for type-one vertex models, type-two sprites,
   type-four local text terms, and type-five fragments; type one also supplies its model to the local
   collision-bound path. Type-three font selections, type zero, and unknown type bytes retain their
@@ -84,6 +85,11 @@ gameplay path.
   font offset against global animation item five. Foreign-object aliases, external-state-table
   aliases, and the rotating constant region are rejected because their backing identity/lifetime is
   not represented by the current checked token. Opcode `0x81` is the native one-cycle no-op.
+  Transform selector `0x85/0` treats a declared one-point entity path as stationary before indexing.
+  This is the intentional safe meaning of the source's later one-point return: Title's island
+  controller reaches progress `0x110`, where the original C has already indexed into the next
+  entity's relocated pointer and therefore has no stable 32-bit result to preserve. Multi-point
+  malformed progress remains a checked failure.
   Checked object-pointer values retain physical native pool-slot provenance across globals,
   pre-existing process links, registers and stack words, plus internal/external MOV storage. Retail
   reclaim captures missing provenance before removing the logical identity instead of clearing
@@ -263,15 +269,19 @@ gameplay path.
 
 ## Exact remaining parity gaps
 
-- Pool-backed register access is broader than pointer/address emulation. LEA-style address-taking
-  through a link whose slot is free is not represented. Event and child-spawn argument vectors now
-  retain validated pool-provenance sidecars through EARG, mapped state rebind, synchronous send, and
-  reused-slot child initialization. Retired slots retain process registers and translation rather
-  than the complete non-process color, collision-bound, or animation state. The 96-slot
-  ordinary free list is modeled, while the dedicated main slot is only kept outside that list and
-  detached on release; its byte-exact separate allocation, release, and reinitialization nuances
-  remain incomplete. Synthetic non-retail VM teardown deliberately retains its older checked
-  inbound-link clearing contract.
+- Pool-backed linked-register addresses are represented with a validated aligned 32-bit tag carrying
+  the physical slot and full register index. They remain readable/writable through the free interval,
+  retarget on exact physical-slot reuse, and never follow unrelated compact-handle reuse. Event and
+  child-spawn argument vectors retain the same validated provenance through EARG, mapped state
+  rebind, synchronous send, and reused-slot child initialization. Complete vector writes are
+  preflighted so a rejected allocator-link mutation cannot partially update retained storage. The
+  96-slot ordinary free list is modeled; slot 96 represents the separately allocated player from
+  initialization onward and link five stays non-null through Title teardown. Retained local-bound
+  bytes on ordinary-slot reuse and the dedicated allocation's extra 0x100 stack-tail bytes remain
+  unmodeled, but a legal-corpus audit has not observed either boundary being consumed. Colors and
+  animation are overwritten/reset on successful source initialization and are not retained-state
+  gaps. Synthetic non-retail VM teardown deliberately retains its older checked inbound-link
+  clearing contract.
 - The browser retail runtime now instantiates displayed group-three zone entities and integrates
   the bounded arena and VM through explicit typed mappings, but it is not the complete object graph
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode
@@ -405,15 +415,18 @@ gameplay path.
   lane. Correcting those route actions required no camera or collision runtime change. The current
   timing and interaction sequence additionally includes the restored flag-enabled `PlotObjWalls`
   `GoolCollide` path for every overlapping frame bound. This
-  deterministic route now feeds a separate legally local cross-pair test: N. Sanity's checked
-  `LEVEL_END` exports a session carry, Level Complete imports it and reaches its authored
-  `Transition(0x19)` at frame 513, and Title imports the second carry with a valid graph, zone
-  context, and intentionally empty gameplay-core frame. The process-lifetime `draw_count` now
-  remains phase-continuous through both `NSKill`/`NSInit` boundaries and advances again on Title's
-  first display frame; same-level and bonus-return `LevelRestart` still reset it exactly where the
-  source does. Both outgoing level-end broadcasts are
-  clean. This deterministic first completion loop does not establish a browser playthrough or full
-  retail parity.
+  deterministic route now feeds a separate legally local cross-pair test that starts from a fresh
+  authored Title Map initialized through the card-payload restore path. Map requests N. Sanity
+  Beach on frame 11. N. Sanity's checked
+  `LEVEL_END` exports a session carry, Level Complete imports it and reaches authored Title
+  `Transition(0x19)` on frame 513, and Title imports the second carry into its parsed graph, ZDAT
+  entities, lifecycle, and map camera schedule. The post-completion Map unlocks level two, reaches
+  `1b_pZ` path zero at progress `0x0b00`, and requests Jungle Rollers on frame 253. Process-lifetime
+  `draw_count` remains
+  phase-continuous through the three imported remounts and the fourth exported carry; same-level
+  and bonus-return `LevelRestart` still reset it exactly where the source does. All four outgoing
+  level-end broadcasts are clean. This deterministic first completion loop and next map handoff do
+  not establish a browser playthrough or full retail parity.
   All 43 selectable starts also completed a strict 1,800-frame direction/button sweep with no
   checked runtime issue: 77,400 browser-ordered simulation frames in aggregate. Jaws of Darkness
   separately completed the same 1,800-frame focused window after its reclaimed-creator pointer was
@@ -435,6 +448,13 @@ gameplay path.
   the third-token save/fade/status/`0x24` transition, and WarpC's parsed proximity/status gate at
   its exact quantized boundaries. Together they cover the control path, but they are not one
   uninterrupted pad-driven or browser playthrough.
+  A bounded local replay imported the authentic first-completion carry into Jungle Rollers and
+  showed why the existing fresh-boot controller cannot simply be reused as a progression proof:
+  source-retained RNG-A and `draw_count` independently alter its hazard/animation phase. The
+  authentic phase enters Crash state 23 at frame 532 and restarts at frame 648 with no VM fault;
+  replacing either value with its fresh-boot value avoids that collision. The C source preserves
+  both values across `NSKill`/`NSInit`, so resetting them would be incompatible. A phase-robust
+  uninterrupted Jungle route after the authentic carry remains open.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

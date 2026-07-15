@@ -242,9 +242,14 @@ three allocator-owned link words are rejected transactionally instead of reprodu
 malformed-list behavior. Event-service argv scopes, mapped-state changes, direct/broadcast send
 requests, and child-spawn argument vectors copy a parallel physical-slot sidecar. Sidecars are
 validated before mutation, survive EARG/stack copies, and are applied to a child only after its
-reused slot storage is seeded. Still outside this slice are address-taking through a free-slot
-link, retained non-process colors/bounds/animation, and byte-exact dedicated-main allocation and
-reinitialization behavior.
+reused slot storage is seeded. Linked address translation uses a disjoint aligned storage tag that
+contains the physical slot and complete 508-word register index. It can address retained storage
+while the slot is free, follows only same-slot reuse, and preflights complete vector writes before
+mutation. The dedicated player allocation has initialized slot-96 backing before its first logical
+main object and every live object's link five retains that address across Title teardown. Still
+outside this model are retained local-bound bytes on successful ordinary-slot reuse and the
+dedicated allocation's extra 0x100 bytes beyond `gool_object`; legal traces have not demonstrated
+either boundary in use.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
@@ -271,14 +276,18 @@ reads the complete five-word pad history. State rebind executes captured once co
 stamp and the target transition block after it, synchronously preserving nested calls, returns and
 host effects. The complete `0x85` selector family covers path orientation, perspective, velocity
 aiming, source no-op case three, scaled/unscaled object transforms, checked model-vertex lookup and
-the camera-relative audio transform. The complete `0x8e` family covers static/object solid
+the camera-relative audio transform. A declared one-point entity path is stationary for every
+progress word. This intentionally moves the source's later one-point return ahead of indexing: the
+retail Title island reaches progress `0x110`, where the original C otherwise aliases the next
+entity's relocated parent pointer and becomes address-dependent undefined behavior. Multi-point
+paths retain strict checked indexing. The complete `0x8e` family covers static/object solid
 response, all directional surface variants, entity-color scaling and source no-op case seven.
 Opcode `0x14` (LEA) translates its input address before its output address, preserves null and stack
-side effects, and stores a checked process-local handle rather than a pointer. Same-object internal
-and register aliases are decoded from their live words on each VM read, then copied as a fully
-owned, bounded descriptor into the display snapshot. Type one carries its model EID into the
-pair-scoped vertex/bound resolver; types two, four, and five use the existing sprite, text, and
-fragment paths; type three consumes its header but remains a resource-only no-draw selection.
+side effects, and stores a checked logical-object or physical-pool handle rather than a pointer.
+Same-object internal and register aliases are decoded from their live words on each VM read, then
+copied as a fully owned, bounded descriptor into the display snapshot. Type one carries its model
+EID into the pair-scoped vertex/bound resolver; types two, four, and five use the existing sprite,
+text, and fragment paths; type three consumes its header but remains a resource-only no-draw selection.
 Process text retains local NUL-delimited terms while resolving its font word offset against global
 item five. Type zero and unknown bytes follow the native transform-switch default with no draw and
 the standard non-vertex bound, including the observed Toxic Waste `BaraC` use. A foreign-object

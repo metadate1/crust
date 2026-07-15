@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use crust_formats::disc::{DiscImage, DiscStreamSet};
 use crust_formats::stream::{
-    KNOWN_LEVELS, LevelId, PolygonId, SlstDirection, SlstItem, StreamKind, StreamName,
-    WorldGeometry, WorldMapPathList, WorldMapPathRecord, ZoneHeader, ZonePath, ZoneRect, parse_nsd,
-    parse_nsf, parse_world_geometry,
+    KNOWN_LEVELS, LevelId, PolygonId, RetailZoneGraph, SlstDirection, SlstItem, StreamKind,
+    StreamName, WorldGeometry, WorldMapPathList, WorldMapPathRecord, ZoneHeader, ZonePath,
+    ZoneRect, parse_nsd, parse_nsf, parse_world_geometry,
 };
 
 const WGEO_ENTRY_TYPE: u32 = 3;
@@ -66,6 +66,118 @@ fn validate_polygon_references(
             world.polygons.len()
         );
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicWorldShader {
+    Lightning,
+    Dark,
+    Dark2,
+}
+
+fn dynamic_world_shader(flags: u32) -> Option<DynamicWorldShader> {
+    if flags & 0x400 != 0 {
+        Some(DynamicWorldShader::Dark2)
+    } else if flags & 0x210 == 0x210 {
+        Some(DynamicWorldShader::Dark)
+    } else if flags & 0x10 != 0 || flags & 0x100 != 0 {
+        // Fog and Ripple precede the Lightning-only branch in the source
+        // world-render dispatch.
+        None
+    } else if flags & 0x200 != 0 {
+        Some(DynamicWorldShader::Lightning)
+    } else {
+        None
+    }
+}
+
+/// Characterizes every ZDAT that selects a dynamic world shader in the legal
+/// NTSC-U stream corpus. Only stable identifiers and aggregate fingerprints
+/// are retained here; user-supplied stream bytes remain outside the repository.
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn dynamic_world_shader_zones_match_the_reachable_retail_corpus() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let mut counts = [0_usize; 3];
+    let mut fingerprints = [0xcbf2_9ce4_8422_2325_u64; 3];
+    let mut all_fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+    let mut reachable_count = 0_usize;
+    let mut reachable_fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+
+    for level in KNOWN_LEVELS {
+        let nsd_bytes = read_stream(
+            Some(&root),
+            None,
+            StreamName::new(level.id, StreamKind::Nsd),
+        );
+        let nsf_bytes = read_stream(
+            Some(&root),
+            None,
+            StreamName::new(level.id, StreamKind::Nsf),
+        );
+        let nsd = parse_nsd(&nsd_bytes, level.id)
+            .unwrap_or_else(|error| panic!("{} NSD: {error}", level.name));
+        let nsf = parse_nsf(&nsf_bytes, &nsd)
+            .unwrap_or_else(|error| panic!("{} NSF: {error}", level.name));
+
+        let mut targets = Vec::new();
+        for entry in nsf
+            .entries()
+            .filter(|entry| entry.entry_type == ZDAT_ENTRY_TYPE)
+        {
+            let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap())
+                .unwrap_or_else(|error| panic!("{} ZDAT {}: {error}", level.name, entry.eid));
+            let flags = header.graphics.flags;
+            let Some(shader) = dynamic_world_shader(flags) else {
+                continue;
+            };
+            let shader_index = match shader {
+                DynamicWorldShader::Lightning => 0,
+                DynamicWorldShader::Dark => 1,
+                DynamicWorldShader::Dark2 => 2,
+            };
+            counts[shader_index] += 1;
+            for fingerprint in [&mut fingerprints[shader_index], &mut all_fingerprint] {
+                mix_fingerprint(fingerprint, level.id.get());
+                mix_fingerprint(fingerprint, entry.eid.raw());
+                mix_fingerprint(fingerprint, flags);
+            }
+            targets.push((entry.eid, flags));
+        }
+
+        if !targets.is_empty() {
+            let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes)
+                .unwrap_or_else(|error| panic!("{} reachable zone graph: {error}", level.name));
+            for (eid, flags) in targets {
+                assert!(
+                    graph.zone(eid).is_some(),
+                    "{} dynamic-shader ZDAT {eid} is not reachable from the LDAT spawn",
+                    level.name
+                );
+                reachable_count += 1;
+                mix_fingerprint(&mut reachable_fingerprint, level.id.get());
+                mix_fingerprint(&mut reachable_fingerprint, eid.raw());
+                mix_fingerprint(&mut reachable_fingerprint, flags);
+            }
+        }
+    }
+
+    assert_eq!(counts, [362, 115, 80]);
+    assert_eq!(counts.into_iter().sum::<usize>(), 557);
+    assert_eq!(fingerprints[0], 0x08e7_ab50_6b45_d34d);
+    assert_eq!(fingerprints[1], 0x79a4_940a_2403_1991);
+    assert_eq!(fingerprints[2], 0xb3d6_ec0e_c99b_d149);
+    assert_eq!(all_fingerprint, 0xa771_e6a0_07ea_d119);
+    assert_eq!(reachable_count, 557);
+    assert_eq!(reachable_fingerprint, all_fingerprint);
+    eprintln!(
+        "dynamic world-shader characterization: {} Lightning, {} Dark, {} Dark2; \
+         all {reachable_count} targets reachable; fingerprint {all_fingerprint:#018x}",
+        counts[0], counts[1], counts[2]
+    );
 }
 
 /// Characterizes the four authored title-map ZDATs without copying any

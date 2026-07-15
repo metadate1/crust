@@ -241,7 +241,10 @@ impl RetailAudioEngine {
             sfx_volume,
             voice_master_volume: scaled_option_volume(sfx_volume),
             ramp_rate: DEFAULT_RAMP_RATE,
-            random_seed: 12_345,
+            // Native `randb` uses zero-initialized process BSS. Browser hosts
+            // synchronize this stream with level shaders at source-order
+            // subsystem boundaries.
+            random_seed: 0,
             completed_sample_rekey_count: 0,
         })
     }
@@ -277,10 +280,17 @@ impl RetailAudioEngine {
         self.voice_master_volume = scaled_option_volume(value);
     }
 
-    /// Restores the deterministic retail random stream used only by the loud
-    /// equal-priority steal guard.
+    /// Restores native's process-global RNG-B word before audio allocation.
+    /// The browser host reconciles this same stream with dynamic lighting and
+    /// PBAK selection at their source-ordered subsystem boundaries.
     pub const fn set_random_seed(&mut self, seed: u32) {
         self.random_seed = seed;
+    }
+
+    /// Current native RNG-B word after any voice-allocation draws.
+    #[must_use]
+    pub const fn random_seed(&self) -> u32 {
+        self.random_seed
     }
 
     /// Restores the 32-bit voice-id counter for save-state or wrap testing.
@@ -378,6 +388,28 @@ impl RetailAudioEngine {
                 Ok(AudioHostResponse::ControlApplied)
             }
         }
+    }
+
+    /// Applies the non-GOOL thunder transaction emitted by
+    /// `ShaderParamsUpdate`: set next-voice pitch, arm delayed key-on, then
+    /// create an ownerless SFX voice. The registered sample must already be
+    /// present, exactly like the ordinary synchronous create boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RetailAudioError::MissingSample`] when the mounted audio
+    /// cache does not contain `adio`.
+    pub fn create_unowned_delayed_voice(
+        &mut self,
+        adio: Eid,
+        volume: i32,
+        pitch: u32,
+        delayed_key_counter: u32,
+    ) -> Result<i32, RetailAudioError> {
+        self.template.pitch = pitch as i16;
+        self.template.delayed_key_counter = delayed_key_counter as u16;
+        self.template.flags |= FLAG_DELAYED_KEY;
+        self.create_voice_with_owner(adio, volume, None)
     }
 
     /// Mixes interleaved stereo output through the existing deterministic
@@ -492,6 +524,15 @@ impl RetailAudioEngine {
     }
 
     fn create_voice(&mut self, request: AudioVoiceCreateRequest) -> Result<i32, RetailAudioError> {
+        self.create_voice_with_owner(request.adio, request.volume, Some(request.object))
+    }
+
+    fn create_voice_with_owner(
+        &mut self,
+        adio: Eid,
+        volume: i32,
+        owner: Option<ObjectHandle>,
+    ) -> Result<i32, RetailAudioError> {
         if self.sfx_volume == 0 {
             return Ok(0);
         }
@@ -505,17 +546,14 @@ impl RetailAudioEngine {
         }
         let sample = self
             .samples
-            .get(&request.adio)
+            .get(&adio)
             .cloned()
-            .ok_or(RetailAudioError::MissingSample(request.adio))?;
+            .ok_or(RetailAudioError::MissingSample(adio))?;
 
         let mut parameters = self.template;
-        let scaled = request
-            .volume
-            .wrapping_mul(i32::from(self.voice_master_volume))
-            >> 14;
+        let scaled = volume.wrapping_mul(i32::from(self.voice_master_volume)) >> 14;
         parameters.amplitude = scaled as i16;
-        parameters.owner = Some(request.object);
+        parameters.owner = owner;
         if parameters.flags & FLAG_RAMPING != 0 {
             parameters.ramp_step = wrapping_div(
                 i32::from(parameters.target_amplitude)
@@ -533,7 +571,7 @@ impl RetailAudioEngine {
         self.voices[index] = RetailVoice {
             id,
             parameters,
-            adio: Some(request.adio),
+            adio: Some(adio),
             sample: Some(sample),
             keyed: false,
             volume_left: volume,
@@ -1015,6 +1053,32 @@ mod tests {
         assert_eq!(template.delay_counter, 1);
         assert_eq!(template.sustain_counter, 128);
         assert_eq!(template.owner, None);
+    }
+
+    #[test]
+    fn shader_thunder_creates_an_ownerless_delayed_voice_and_resets_template() {
+        let sample_eid = eid("lt1rA");
+        let mut engine = engine_with_sample(23, sample_eid);
+
+        let id = engine
+            .create_unowned_delayed_voice(sample_eid, 0x2800, 0x0555, 3)
+            .unwrap();
+        let voice = engine.voice(23).unwrap();
+        assert_eq!(voice.id, id);
+        assert_eq!(voice.parameters.owner, None);
+        assert_eq!(voice.parameters.pitch, 0x0555);
+        assert_eq!(voice.parameters.delayed_key_counter, 3);
+        assert!(!voice.keyed);
+        assert_eq!(
+            engine.next_voice_template(),
+            RetailVoiceParameters::default()
+        );
+
+        engine.tick_30_hz();
+        engine.tick_30_hz();
+        assert!(!engine.voice(23).unwrap().keyed);
+        engine.tick_30_hz();
+        assert!(engine.voice(23).unwrap().keyed);
     }
 
     #[test]

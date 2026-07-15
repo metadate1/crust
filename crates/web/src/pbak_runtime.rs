@@ -3,14 +3,14 @@
 
 use core::fmt;
 
-use crust_formats::binary::Eid;
+use crust_formats::binary::{EID_ALPHABET, Eid};
 use crust_formats::stream::{
-    Nsd, Nsf, PBAK_ENTRY_TYPE, PBAK_SPAWN_WORD_COUNT, PbakHeader, PbakLayout, RetailPathId,
-    RetailZoneGraph, load_pbak_entry,
+    Nsd, Nsf, PBAK_SPAWN_WORD_COUNT, PbakHeader, PbakLayout, RetailPathId, RetailZoneGraph,
+    load_pbak_entry,
 };
 use crust_sim::camera::{GAME_STATE_CUTSCENE, RetailCameraLocation, RetailCameraRuntime};
 use crust_sim::demo::{Demo, DemoEnd, DemoError, DemoFrame, DemoPlayer, DemoStep};
-use crust_sim::gool::RetailPadSnapshot;
+use crust_sim::gool::{RetailPadSnapshot, retail_random};
 use crust_sim::math::{Bounds3, Vec3};
 use crust_sim::object_arena::SPAWN_TABLE_CAPACITY;
 use crust_sim::retail_runtime::RetailLevelSnapshot;
@@ -24,6 +24,7 @@ pub(crate) struct PreparedPbak {
     pub crash_bound: Bounds3,
     pub player: DemoPlayer,
     recorded_ticks_per_frame: Box<[i32]>,
+    recorded_ticks_elapsed: Box<[u32]>,
 }
 
 impl PreparedPbak {
@@ -119,6 +120,26 @@ impl RetailPbakPlayback {
                     .copied()
             })
             .flatten()
+    }
+
+    /// Absolute source clock installed by the preceding PBAK `GLUpdate` and
+    /// visible to the current pre-camera shader update.
+    ///
+    /// Crash consumes frame `n` at `PadUpdatePbak` and advances native's
+    /// `cur_pbak_frame` before that same frame's `GLUpdate`. The clock written
+    /// there is consequently frame `n + 1`, which is also the next unconsumed
+    /// `frame_cursor` here. Cursor zero has not passed a PBAK `GLUpdate` yet,
+    /// while an ending/returning playback no longer satisfies its state-two
+    /// clock gate.
+    #[must_use]
+    pub fn pre_shader_ticks_elapsed(&self) -> Option<u32> {
+        if !matches!(self.phase, PlaybackPhase::Playing) || self.frame_cursor == 0 {
+            return None;
+        }
+        self.prepared
+            .recorded_ticks_elapsed
+            .get(self.frame_cursor)
+            .copied()
     }
 
     /// Source timing on either side of the next Crash pad boundary.
@@ -277,7 +298,9 @@ impl RetailPbakPlayback {
 /// A checked incompatibility at the parser/runtime handoff.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PbakRuntimeError {
-    MultipleEntries(usize),
+    EntryCountOverflow(usize),
+    MissingSelectedEntry { eid: Eid, index: u32, count: usize },
+    InvalidLevelAlphabet(u32),
     Format(String),
     EmptyRecording,
     LevelMismatch { expected: u32, recorded: u32 },
@@ -290,12 +313,18 @@ pub(crate) enum PbakRuntimeError {
 impl fmt::Display for PbakRuntimeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MultipleEntries(count) => {
-                write!(
-                    formatter,
-                    "stream contains {count} PBAK entries; expected at most one"
-                )
-            }
+            Self::EntryCountOverflow(count) => write!(
+                formatter,
+                "stream contains {count} PBAK entries, beyond retail's 32-bit count"
+            ),
+            Self::MissingSelectedEntry { eid, index, count } => write!(
+                formatter,
+                "retail PBAK choice {index} of {count} names absent entry {eid}"
+            ),
+            Self::InvalidLevelAlphabet(level) => write!(
+                formatter,
+                "retail PBAK level {level:#x} is outside the 64-character EID alphabet"
+            ),
             Self::Format(error) => formatter.write_str(error),
             Self::EmptyRecording => formatter.write_str("PBAK recording has no pad frames"),
             Self::LevelMismatch { expected, recorded } => write!(
@@ -318,23 +347,36 @@ impl fmt::Display for PbakRuntimeError {
     }
 }
 
-/// Selects and prepares the sole PBAK entry present in a retail level stream.
+/// Runs native `PbakChoose` against the mounted pair and prepares its selected
+/// recording. Every nonempty choice consumes the caller's process-global
+/// RNG-B stream, including the retail corpus's one-entry levels.
 pub(crate) fn prepare_pair_pbak(
     metadata: &Nsd,
     nsf: &Nsf,
     nsf_bytes: &[u8],
     graph: &RetailZoneGraph,
+    random_seed_b: &mut u32,
 ) -> Result<Option<PreparedPbak>, PbakRuntimeError> {
-    let entries = nsf
-        .entries()
-        .filter(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
-        .collect::<Vec<_>>();
-    let Some(entry) = entries.first().copied() else {
+    // NSCountEntries examines still-unrelocated NSD PTE names through
+    // NSEIDType, where a trailing `B` denotes type 19. Do not substitute an
+    // NSF iteration: malformed metadata must affect the choice exactly where
+    // it did natively, then fail safely when the selected entry is resolved.
+    let entry_count = pbak_entry_count(metadata);
+    if entry_count == 0 {
         return Ok(None);
-    };
-    if entries.len() != 1 {
-        return Err(PbakRuntimeError::MultipleEntries(entries.len()));
     }
+    let count = u32::try_from(entry_count)
+        .map_err(|_| PbakRuntimeError::EntryCountOverflow(entry_count))?;
+    let selected_index = retail_random(count, random_seed_b);
+    let selected_eid = pbak_choice_eid(selected_index, metadata.level())?;
+    let entry = metadata
+        .pte(selected_eid)
+        .and_then(|_| nsf.resolve_entry(metadata, selected_eid).ok())
+        .ok_or(PbakRuntimeError::MissingSelectedEntry {
+            eid: selected_eid,
+            index: selected_index,
+            count: usize::try_from(count).expect("u32 count fits usize"),
+        })?;
     let header = load_pbak_entry(entry, nsf_bytes)
         .map_err(|error| PbakRuntimeError::Format(error.to_string()))?;
     let path = RetailPathId {
@@ -352,6 +394,39 @@ pub(crate) fn prepare_pair_pbak(
         index: path.index,
     })?;
     prepare_header(entry.eid, &header, metadata.level(), camera.location()).map(Some)
+}
+
+fn pbak_entry_count(metadata: &Nsd) -> usize {
+    metadata
+        .page_table
+        .iter()
+        .filter(|pte| pte.eid.name_bytes().is_some_and(|name| name[4] == b'B'))
+        .count()
+}
+
+/// Exact five-byte name built by source `PbakChoose`: `pb` + (`'0'` +
+/// choice) + level alphabet character + `B`. `NSStringToEID` contributes a
+/// zero digit for a byte outside its alphabet; retaining that quirk lets a
+/// malformed multi-entry stream fail as a checked missing-entry error instead
+/// of silently selecting a different recording.
+fn pbak_choice_eid(
+    index: u32,
+    level: crust_formats::stream::LevelId,
+) -> Result<Eid, PbakRuntimeError> {
+    let mut name = *b"pb00B";
+    name[2] = b'0'.wrapping_add(index.to_le_bytes()[0]);
+    name[3] = EID_ALPHABET
+        .get(level.get() as usize)
+        .copied()
+        .ok_or(PbakRuntimeError::InvalidLevelAlphabet(level.get()))?;
+    let mut value = 0_u32;
+    for byte in name {
+        value <<= 6;
+        if let Some(digit) = EID_ALPHABET.iter().position(|candidate| *candidate == byte) {
+            value |= u32::try_from(digit).expect("retail alphabet has 64 entries");
+        }
+    }
+    Ok(Eid::from_raw((value << 1) | 1))
 }
 
 fn prepare_header(
@@ -386,6 +461,12 @@ fn prepare_header(
     )
     .map_err(PbakRuntimeError::Demo)?;
     let recorded_ticks_per_frame = recorded_frame_timings(header);
+    let recorded_ticks_elapsed = header
+        .frames
+        .iter()
+        .map(|frame| frame.ticks_elapsed.cast_unsigned())
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
     let snapshot = RetailLevelSnapshot {
         player_translation: header.save_state.player_translation,
         // Serialized PBAK order is X/Y/Z. The process register block is the
@@ -421,6 +502,7 @@ fn prepare_header(
         crash_bound,
         player: DemoPlayer::new(demo),
         recorded_ticks_per_frame,
+        recorded_ticks_elapsed,
     })
 }
 
@@ -480,8 +562,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crust_formats::stream::{
-        KNOWN_LEVELS, LevelId, PBAK_ENTRY_TYPE, PbakBound, PbakFrame, PbakLayout, PbakLevelState,
-        StreamKind, StreamName, parse_nsd, parse_nsf,
+        KNOWN_LEVELS, LevelId, PbakBound, PbakFrame, PbakLayout, PbakLevelState, StreamKind,
+        StreamName, parse_nsd, parse_nsf,
     };
     use crust_sim::demo::{DemoEnd, DemoStep};
     use crust_sim::retail_frame::PathProgress;
@@ -547,6 +629,37 @@ mod tests {
                 period: at_per_frame,
             },
         }
+    }
+
+    #[test]
+    fn pbak_choose_uses_source_name_and_advances_single_entry_rng_b() {
+        let level = LevelId::new_const(0x0a);
+        assert_eq!(
+            pbak_choice_eid(0, level).unwrap(),
+            Eid::from_name("pb0aB").unwrap()
+        );
+        assert_eq!(
+            pbak_choice_eid(1, level).unwrap(),
+            Eid::from_name("pb1aB").unwrap()
+        );
+        // `':'` is outside alpha_map, so NSStringToEID contributes digit zero.
+        assert_eq!(
+            pbak_choice_eid(10, level).unwrap(),
+            pbak_choice_eid(0, level).unwrap()
+        );
+        assert_eq!(
+            pbak_choice_eid(0, LevelId::new_const(64)),
+            Err(PbakRuntimeError::InvalidLevelAlphabet(64))
+        );
+
+        let mut seed_b = 0;
+        assert_eq!(retail_random(1, &mut seed_b), 0);
+        assert_eq!(seed_b, 12_345);
+        assert_eq!(retail_random(1, &mut seed_b), 0);
+        assert_eq!(seed_b, 0xd3dc_167e);
+
+        let mut many_seed = 0;
+        assert_eq!(retail_random(9, &mut many_seed), 4);
     }
 
     #[test]
@@ -680,6 +793,7 @@ mod tests {
         assert!(playback.is_armed());
         assert!(!playback.uses_crash_boundary());
         assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.pre_shader_ticks_elapsed(), None);
         assert_eq!(playback.frame_timing(40, 51), None);
         assert_eq!(
             playback.advance_input(0x1000),
@@ -694,6 +808,7 @@ mod tests {
         playback.mark_started();
         assert!(playback.uses_crash_boundary());
         assert_eq!(playback.pending_recorded_ticks_per_frame(), Some(34));
+        assert_eq!(playback.pre_shader_ticks_elapsed(), None);
         assert_eq!(playback.frame_timing(40, 51), Some(timing(40, 51, 40, 34)));
         assert_eq!(
             playback.advance_pad_boundary(0x0800),
@@ -709,6 +824,7 @@ mod tests {
         assert!(playback.is_returning());
         assert!(playback.uses_crash_boundary());
         assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.pre_shader_ticks_elapsed(), None);
         assert_eq!(playback.frame_timing(40, 51), Some(timing(17, 51, 17, 51)));
         assert_eq!(playback.take_end(), None);
         assert_eq!(
@@ -722,7 +838,7 @@ mod tests {
     }
 
     #[test]
-    fn start_frame_switches_tpf_at_crash_then_later_frames_are_prepublished() {
+    fn start_frame_switches_tpf_then_gl_prepublishes_the_next_frames_clock() {
         let mut timeline = header(PbakLayout::SpawnWords304);
         timeline.draw_stamp = 100;
         timeline.ticks_per_frame = 34;
@@ -751,6 +867,15 @@ mod tests {
         playback.mark_started();
 
         for (index, expected) in [34, 34, 51].into_iter().enumerate() {
+            assert_eq!(
+                playback.pre_shader_ticks_elapsed(),
+                match index {
+                    0 => None,
+                    1 => Some(134),
+                    2 => Some(185),
+                    _ => unreachable!(),
+                }
+            );
             let pending = playback.pending_recorded_ticks_per_frame();
             assert_eq!(pending, Some(expected));
             assert_eq!(
@@ -769,11 +894,58 @@ mod tests {
             let (input, end) = playback.advance_pad_boundary(0);
             assert_eq!(input.ticks_per_frame, Some(expected));
             assert_eq!(end.is_some(), index == 2);
+            assert_eq!(
+                playback.pre_shader_ticks_elapsed(),
+                match index {
+                    0 => Some(134),
+                    1 => Some(185),
+                    2 => None,
+                    _ => unreachable!(),
+                },
+                "PadUpdate advances the source cursor before the same-frame GLUpdate"
+            );
         }
 
         assert!(playback.is_returning());
         assert_eq!(playback.pending_recorded_ticks_per_frame(), None);
+        assert_eq!(playback.pre_shader_ticks_elapsed(), None);
         assert_eq!(playback.frame_timing(40, 34), Some(timing(17, 34, 17, 34)));
+    }
+
+    #[test]
+    fn interrupted_pad_frame_advances_the_cursor_but_suppresses_gl_clock_publish() {
+        let mut timeline = header(PbakLayout::SpawnWords304);
+        timeline.frames = vec![
+            PbakFrame {
+                ticks_elapsed: 120,
+                held: 1,
+            },
+            PbakFrame {
+                ticks_elapsed: 134,
+                held: 2,
+            },
+        ];
+        let prepared = prepare_header(
+            Eid::from_name("pb0aB").unwrap(),
+            &timeline,
+            LevelId::N_SANITY_BEACH,
+            location(),
+        )
+        .unwrap();
+        let mut playback = RetailPbakPlayback::new(prepared);
+        playback.mark_started();
+
+        assert_eq!(playback.pre_shader_ticks_elapsed(), None);
+        let (input, end) = playback.advance_pad_boundary(0x0800);
+        assert_eq!(input.held, 1);
+        assert_eq!(end, Some(DemoEnd::Interrupted));
+        assert_eq!(playback.frame_cursor, 1);
+        assert!(playback.is_returning());
+        assert_eq!(
+            playback.pre_shader_ticks_elapsed(),
+            None,
+            "native changes PBAK state before GLUpdate, so frame one is not published"
+        );
     }
 
     #[test]
@@ -814,6 +986,7 @@ mod tests {
         );
         let mut recordings = 0_usize;
         let mut frames = 0_usize;
+        let mut random_seed_b = 0_u32;
         for known in KNOWN_LEVELS {
             let nsd_path = root.join(StreamName::new(known.id, StreamKind::Nsd).filename());
             let nsf_path = root.join(StreamName::new(known.id, StreamKind::Nsf).filename());
@@ -823,22 +996,43 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
             let metadata = parse_nsd(&nsd_bytes, known.id).unwrap();
             let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
-            let count = nsf
-                .entries()
-                .filter(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
-                .count();
-            if count == 0 {
+            let count = pbak_entry_count(&metadata);
+            if !metadata.is_bootable() {
+                assert_eq!(count, 0, "{} index-only PBAK count", known.id);
                 continue;
             }
             let graph = RetailZoneGraph::from_pair(&metadata, &nsf, &nsf_bytes).unwrap();
-            let prepared = prepare_pair_pbak(&metadata, &nsf, &nsf_bytes, &graph)
-                .unwrap()
-                .expect("counted PBAK entry must prepare");
+            let seed_before = random_seed_b;
+            let prepared =
+                prepare_pair_pbak(&metadata, &nsf, &nsf_bytes, &graph, &mut random_seed_b).unwrap();
+            if count == 0 {
+                assert!(prepared.is_none(), "{} zero-entry choice", known.id);
+                assert_eq!(random_seed_b, seed_before, "{} zero-entry seed", known.id);
+                continue;
+            }
+            assert_eq!(count, 1, "{} PbakChoose entry count", known.id);
+            let prepared = prepared.expect("counted PBAK entry must prepare");
+            let mut expected_seed = seed_before;
+            assert_eq!(retail_random(1, &mut expected_seed), 0);
+            assert_eq!(random_seed_b, expected_seed);
+            assert_eq!(
+                prepared.eid,
+                pbak_choice_eid(0, known.id).unwrap(),
+                "{} selected PBAK EID",
+                known.id
+            );
             assert_eq!(prepared.snapshot.level, known.id);
             let frame_count = prepared.frame_count();
             let mut playback = RetailPbakPlayback::new(prepared);
             playback.mark_started();
             for frame_index in 0..frame_count {
+                assert_eq!(
+                    playback.pre_shader_ticks_elapsed(),
+                    (frame_index != 0)
+                        .then(|| playback.prepared.recorded_ticks_elapsed[frame_index]),
+                    "{} frame {frame_index} pre-shader clock",
+                    known.id
+                );
                 let pending = playback
                     .pending_recorded_ticks_per_frame()
                     .expect("each legal recorded frame has pending timing");
@@ -853,6 +1047,16 @@ mod tests {
                 let (input, end) = playback.advance_pad_boundary(0);
                 assert_eq!(input.ticks_per_frame, Some(pending));
                 assert_eq!(end.is_some(), frame_index + 1 == frame_count);
+                assert_eq!(
+                    playback.pre_shader_ticks_elapsed(),
+                    playback
+                        .prepared
+                        .recorded_ticks_elapsed
+                        .get(frame_index + 1)
+                        .copied(),
+                    "{} frame {frame_index} post-pad GL clock",
+                    known.id
+                );
             }
             assert!(playback.is_returning());
             assert_eq!(playback.frame_timing(40, 51), Some(timing(17, 51, 17, 51)));
@@ -861,5 +1065,6 @@ mod tests {
         }
         assert_eq!(recordings, 9);
         assert_eq!(frames, 10_966);
+        assert_eq!(random_seed_b, 0xaf5a_ad71);
     }
 }

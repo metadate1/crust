@@ -40,14 +40,15 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    and drops excessive lag instead of replaying an unbounded catch-up burst. Its high-level flow
    value is a passive mount/presentation mirror; gameplay, title, completion, bonus, boss, intro and
    ending progression remain owned by mounted retail GOOL. Each tick publishes card and pad state,
-   consumes any prior-frame level request, then performs spawn, camera and GOOL in source order. A
+   consumes any prior-frame level request, then performs spawn, camera, a frame-start texture-page
+   snapshot, and GOOL in source order. A
    title tick continues through `TitleUpdate`, any synchronous `TitleLoadState`, and `GLUpdate`
    before the passive mirror observes the loaded screen. A one-frame swap latch preserves native's
    immediate opaque overlay even when the loaded GOOL requests another fade in that same update.
-   A presented gameplay tick
-   selects the exact `RetailCameraRuntime`
-   zone/path/progress, executes GOOL, snapshots the live
-   arena in retail preorder, and atomically builds one pair-scoped world/object command stream.
+   A presented gameplay tick selects the exact `RetailCameraRuntime` zone/path/progress, freezes
+   world texture/filter membership, executes GOOL, captures owned display records at each object's
+   post-update/pre-child boundary in retail preorder, and atomically builds one pair-scoped
+   world/object command stream.
    Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
    transform, zoom, held pad and prior frame stamp. Camera LevelUpdate effects apply ordered
    zone/pager transitions before the following spawn scan. When authored display bit `0x10000`
@@ -96,13 +97,15 @@ texture hits/misses, but are not a substitute for browser frame-time measurement
 two-tick gate keeps the loading image visible until the first gameplay presentation; the loading
 overlay no longer uses a browser-frame timeout.
 
-The same builder consumes immutable post-GOOL `RetailRenderObject` snapshots. It resolves unaligned
-renderable animation references through the mounted pair's GOOL item five, accepts the 3D SVTX/CVTX
-vertex path, loads the exact TGEO/frame variant, and applies retail object-local YXZ rotation,
-scale, lighting, face culling and depth. World and object texture requests are collected before a
-single cache freeze and filtered through the current ZDAT load list. Commands share one texture
-manifest, and reversed object insertion is placed ahead of the already compensated world stream to
-preserve the source's head-insert ordering-table behavior. On title level `0x19`, state 15 enables
+The same builder consumes immutable, ordered `RetailDisplayRecord`s captured after each object's
+update and before child traversal. It resolves unaligned renderable animation references through
+the mounted pair's GOOL item five, accepts the 3D SVTX/CVTX vertex path, loads the exact TGEO/frame
+variant, and applies retail object-local YXZ rotation, scale, lighting, face culling and depth. One
+exact Pager slot snapshot freezes frame-start world requests and the source load-list filter. Before
+each object is projected, its recorded live `(EID, generation, page)` map is replayed into the same
+cache, preserving mid-frame paging changes without re-reading the final arena. Commands share one
+texture manifest, and reversed object insertion is placed ahead of the already compensated world
+stream to preserve the source's head-insert ordering-table behavior. On title level `0x19`, state 15 enables
 a checked WGEO item-three path program. Its group cursor persists across ZDAT world order, globals
 73 and 75 select groups 0–31 and 32–63, and frame-local polygon copies receive the effective
 animation masks so mounted stream storage remains immutable. A graph-scoped sidecar retains the
@@ -138,9 +141,29 @@ Before the world matrix, only WGEO vertices marked as effects add one of 16 wave
 by `((x + y) / 8) & 0xf`. The wave reconstructs `ShaderParamsUpdateRipple`'s signed seed, per-frame
 advance, positive-period wrap and absolute-value publication; Upstream/Ripper Roo/Up the Creek use
 speed 10 and period 127, Tawna bonus rooms one/two use speed 4 and period 127, and the default is
-speed 1 and period 23. The builder owns pair-scoped mutable wave state and advances it only for an
-unpaused, nonempty ripple-world submission. Pause and hidden/empty display gaps therefore freeze
-the wave independently of texture `draw_count`.
+speed 1 and period 23. The builder owns pair-scoped mutable wave state. It advances only for an
+unpaused submission containing visible ripple-world polygons. Pause or a world-hidden/empty
+submission freezes it independently of texture `draw_count`; a later draw-skip presentation gate
+still performs the source transform and advances the wave.
+
+The remaining world modes share a process-lifetime `RetailLevelShaderState`. The browser advances
+it after the native pause gate but before `CamUpdate`, snapshots its clear/effect channels and
+Dark2 parameters for that frame, then re-reads the post-camera zone flags for rendering. This
+preserves a transition frame where the old zone updates the globals and the new zone consumes
+them. Dispatch priority is `Dark2`, combined Dark, Fog, Ripple, Lightning, then Plain. Lightning
+selects clear/effect channels by each WGEO effect bit; combined Dark applies Lightning before its
+fog pass; Dark2 uses projected depth, camera-space world translation, live doctor-or-Crash
+illumination, and ambient/distance ramps. Renderer `far_color1` scratch is a separate
+process-lifetime value because Dark2 intentionally retains the target written by an earlier
+plain/fog/ripple/lightning/dark dispatch. Mount previews use disposable builder/scratch state;
+actual hidden and visible frames both perform the transform so presentation skips cannot create or
+erase shader/ripple steps.
+
+Native RNG-B is owned with that process state but reconciled at every browser host boundary that
+can allocate audio. Source order is therefore explicit: pause/spawn handlers, pre-camera shader and
+optional thunder voice, GOOL audio, `LEVEL_END`, `PbakChoose`, and destination import all observe
+one zero-initialized 32-bit stream. A thunder cue carries only checked ADIO EID/pitch/delay/volume
+values; the audio crate resolves local PCM and creates an ownerless delayed-key voice.
 
 `GlStage` can transactionally update an installed retail scene. It validates command texture
 references, compares immutable decoded-texture allocation identities, prepares all new/replacement
@@ -152,10 +175,11 @@ the last successfully installed snapshot. Three-dimensional vertex object models
 animation transforms, screen-aligned sprites/fragments, text/font quads and 2D CVTX objects are
 reflected in that snapshot. World visibility retains the global-nine mask sampled before GOOL,
 while every object carries the potentially different live mask, animation, transform, process,
-text-argument/font and effective-color state consumed at its post-update display boundary. A child
-that writes through an authored parent link therefore cannot retroactively alter its parent's
-already-rendered state. Ordered zone teardown affects post-GOOL snapshots; mid-frame paging-driven
-texture replacement remains incomplete. The final title pass
+text-argument/font, effective-color and texture-slot state consumed at its post-update display
+boundary. A child that writes through an authored parent link or later teardown therefore cannot
+retroactively alter or retract its parent's already-rendered state. Same-slot `A → B → A` paging
+keeps decoded A regions frozen, decodes uncached regions from the currently recorded mapping, and
+reuses A's frozen internal generation when that EID returns to its exact slot. The final title pass
 applies the native 16-band nonlinear black-overlay alpha after the source counter step. A healthy
 authored arena owns the 4:3 canvas. Until one is available, the browser shows only loading/error
 diagnostics and keeps state/warning text in the external monitor panel; it does not substitute a
@@ -164,7 +188,8 @@ synthetic title, menu or gameplay scene.
 ## Simulation and GOOL
 
 The hosted presentation path records the 30 Hz order `card/pad → pending level transition → spawn
-→ camera → GOOL → combined world/object scene → presentation` plus draw-skip and draw-count
+→ camera → frame-start texture snapshot → GOOL plus ordered display-record capture → combined
+world/object scene → presentation` plus draw-skip and draw-count
 timing. Title frames insert the authoritative `TitleUpdate → TitleLoadState → GLUpdate` boundary
 after GOOL; the high-level `GameFlow` value only mirrors the screen loaded there. `RetailCameraRuntime`
 owns the live path handle, signed-8.8 progress and persistent follow offsets/zoom/speed. Its follow
@@ -176,6 +201,15 @@ shape without host pointers. A separate 3,592-halfword process-lifetime registry
 encountered `(level, object)` tags. Misc-ten selectors four/five maintain its zero-terminated,
 one-as-hole representation and fall through to the corresponding active-table bit update; a new
 pair clears the active table and derives bit eight only from tags for that destination level.
+
+Pointer-valued GOOL globals retain their exact 32-bit tagged words, but native pool-storage
+lifetime is modeled separately from compact VM identity. The runtime records each physical arena
+slot, its last initialized translation, and the write epoch of the global that captured it. A
+freed Dark2 `doctor` reference therefore continues reading that slot's initialized storage; it
+retargets only when the physical LIFO pool reuses the slot, even if the lowest-free VM handle was
+reused earlier for another object. A later global assignment of the same tagged word is
+distinguished by its write epoch and binds the current object. No stale Rust reference is kept or
+dereferenced.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and
@@ -193,8 +227,11 @@ operand-selected animation changes use explicit frame/draw counters. Host effect
 `0x84` synchronously refresh the persistent local animation bound before the interpreter proceeds;
 `0x83` honors the status-B `0x18` gate plus its range/force condition, while `0x84` is unconditional.
 Checked tagged storage and global-code references replace pointer-producing opcodes `0x26` and
-`0x18`. Paging opcode `0x8b` cases one through six use checked page/entry residency and reference
-metadata without pretending that the browser has retail asynchronous paging. GOOL opcode `0x1a`
+`0x18`. Paging opcode `0x8b` cases one/six open, case two closes, and case three probes through a
+typed synchronous host request before the interpreter continues; cases four/five inspect VM-local
+availability/resolution. Unavailable opens roll back their optimistic reference and resolution,
+successful resident replacements re-arm the evicted page, and inconsistent EID/page responses are
+rejected. This models source ordering without claiming retail asynchronous I/O timing. GOOL opcode `0x1a`
 reads the complete five-word pad history. State rebind executes captured once code before the state
 stamp and the target transition block after it, synchronously preserving nested calls, returns and
 host effects. The complete `0x85` selector family covers path orientation, perspective, velocity
@@ -281,13 +318,23 @@ The non-advancing timing peek prevents the Crash hook from consuming a frame twi
 traversal fails after the synchronous caption event, its captured effect slice is recovered exactly
 once because no completed `RuntimeFrame` exists to carry it.
 
+Selection itself mirrors `PbakChoose`: trailing-`B` type-19 names are counted from the NSD page
+table, one RNG-B draw chooses `pb` + index + destination-level character + `B`, and count zero does
+not advance. The seed mutation enters `RetailSessionCarry` before destination construction;
+`PbakStart` later seeds only gameplay RNG-A. The browser's absolute shader clock continues through
+asynchronous pair validation just as native `GetTicksElapsed` continues through synchronous
+`NSKill`/`NSInit`, but authored pause excludes its full interval. An armed recording suppresses
+scene replacement and retains the prior loading/scene framebuffer until Crash starts playback.
+
 `RetailRuntime` is the typed bridge between the arena and VM. It maps generational arena handles to
 VM handles, scans displayed neighbor zones for group-three entities, binds initial GOOL programs
 from NSD/NSF entries, executes the mutation-aware spawn tree, and synchronously binds runtime
 children (including bounded `0x91` reclaim selection). A state-change halt is resolved through the
 stream host; rebind, once and transition code complete at that same host boundary, and normal code
-continues in the same native update. Event services, interrupts and audio calls use the same typed
-synchronous request boundary. The browser creates this runtime
+continues in the same native update. Paging, event services, interrupts and audio calls use the
+same typed synchronous request boundary. The browser's paging host validates requested EID/page
+identity against its Pager, returns any resident eviction to the VM, and leaves an unavailable open
+unapplied. The browser creates this runtime
 when a pair is mounted and runs it at 30 Hz in title, gameplay, bonus, boss, level-complete, intro
 and ending flow states. The host initializes the characterized ZDAT
 zone/path transform, rotation/mode flags, scale, colors and scalar process defaults without placing
@@ -320,6 +367,12 @@ The different-level `LEVEL_END` path carries scalar state into a freshly mounted
 same-level `LoadState` issued from inside `LEVEL_END` remains a checked resumable-host boundary:
 continuing the interrupted handler needs a nested restart continuation that is not yet represented.
 A legally local scan of all 44 retail pairs found zero authored occurrences of that nested case.
+All five bonus spawn zones carry the source save-restricted flag. A normal session mount retains
+the parent-level snapshot for authored `-2` return. A fresh direct boot has no native parent
+snapshot, so only that advertised host entry path arms a one-shot same-level restart snapshot for
+death recovery; session-carried bonus entry never enables the fallback. Completing a directly
+booted bonus with that synthetic snapshot still needs an explicit host return policy and is not
+claimed as a complete bonus round trip.
 
 ## Audio
 

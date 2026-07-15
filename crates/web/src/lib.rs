@@ -23,6 +23,8 @@ mod dom;
 mod pbak_runtime;
 #[cfg(any(target_arch = "wasm32", test))]
 pub mod renderer_backend;
+#[cfg(any(target_arch = "wasm32", test))]
+mod retail_clock;
 pub mod retail_scene;
 #[cfg(target_arch = "wasm32")]
 mod storage;

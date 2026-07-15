@@ -75,6 +75,25 @@ pub struct TextureSlotAssignment {
     pub changed: bool,
 }
 
+/// Resolution change produced by one source-compatible page open.
+///
+/// Ordinary pages resolve without replacing a texture slot. A texture open
+/// reports the previous resident binding only when native would re-arm that
+/// page's PTE before overwriting the slot; retained Free/Stale identities were
+/// already nonresident and therefore are not evictions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PagerOpenOutcome {
+    pub page: PageIndex,
+    pub evicted: Option<TextureSlotBinding>,
+}
+
+/// Shared page-reference change produced by one native-idempotent close.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PagerCloseOutcome {
+    pub page: PageIndex,
+    pub decremented: bool,
+}
+
 /// Source page-state values, represented without pointer tagging.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -269,15 +288,20 @@ impl Pager {
     /// Opens either an ordinary entry or a named texture page through the
     /// same EID namespace used by native `NSOpen`.
     pub fn open_eid(&mut self, eid: Eid) -> Result<(), PagingError> {
+        self.open_eid_with_outcome(eid).map(|_| ())
+    }
+
+    /// Opens one EID and reports the exact page-resolution change.
+    pub fn open_eid_with_outcome(&mut self, eid: Eid) -> Result<PagerOpenOutcome, PagingError> {
         if let Some(entry) = self.eids.get(&eid).copied() {
-            return self.open_entry(entry);
+            return self.open_entry_with_outcome(entry);
         }
         let page = self
             .page_eids
             .get(&eid)
             .copied()
             .ok_or(PagingError::UnknownEid(eid))?;
-        self.open_page(page)
+        self.open_page_with_outcome(page)
     }
 
     /// Closes a previously opened entry or named texture page EID.
@@ -293,6 +317,46 @@ impl Pager {
         self.close_page(page)
     }
 
+    /// Source-compatible `NSClose(ref, 1)` with native's zero-count
+    /// idempotence.
+    ///
+    /// Strict lifecycle preflight may keep using [`Self::close_eid`] to expose
+    /// an unbalanced owned plan. Authored GOOL and the ordered lifecycle
+    /// commit after TERM handlers use this operation because retail leaves an
+    /// already-zero reference at zero.
+    pub fn close_eid_retail(&mut self, eid: Eid) -> Result<(), PagingError> {
+        self.close_eid_retail_with_outcome(eid).map(|_| ())
+    }
+
+    /// Closes one EID with native page-level semantics and reports whether
+    /// the shared physical-page reference count changed.
+    pub fn close_eid_retail_with_outcome(
+        &mut self,
+        eid: Eid,
+    ) -> Result<PagerCloseOutcome, PagingError> {
+        if let Some(entry) = self.eids.get(&eid).copied() {
+            let references = self
+                .entries
+                .get_mut(&entry)
+                .ok_or(PagingError::UnknownEntry(entry))?;
+            if *references != 0 {
+                *references -= 1;
+            }
+            // Native tracks only the containing page's ref_count. Closing EID
+            // A can therefore consume a reference originally opened through
+            // EID B on that same page. Per-entry counts are retained only as
+            // advisory Rust ownership diagnostics and converge as their own
+            // closes arrive.
+            return self.close_page_retail_with_outcome(entry.page());
+        }
+        let page = self
+            .page_eids
+            .get(&eid)
+            .copied()
+            .ok_or(PagingError::UnknownEid(eid))?;
+        self.close_page_retail_with_outcome(page)
+    }
+
     #[must_use]
     pub fn page(&self, page: PageIndex) -> Option<&PageRecord> {
         self.pages.get(&page)
@@ -301,6 +365,12 @@ impl Pager {
     #[must_use]
     pub fn active_load_list(&self) -> &LoadList {
         &self.active
+    }
+
+    /// Number of validated pages in the mounted NSF pager catalog.
+    #[must_use]
+    pub fn page_count(&self) -> usize {
+        self.pages.len()
     }
 
     #[must_use]
@@ -325,6 +395,27 @@ impl Pager {
         self.entries.values().copied().map(u64::from).sum()
     }
 
+    /// Current shared physical-page reference counts for host/VM seeding.
+    pub fn page_reference_counts(&self) -> impl Iterator<Item = (PageIndex, u32)> + '_ {
+        self.pages
+            .values()
+            .map(|record| (record.index, record.references))
+    }
+
+    /// Pages whose NSD entry offsets are currently resolved by this pager.
+    ///
+    /// Ordinary translated pages remain resolved in the browser's mounted
+    /// NSF. Texture pages are resolved only while their copied slot is live;
+    /// stale/free retained identities are deliberately excluded.
+    pub fn resolved_pages(&self) -> impl Iterator<Item = PageIndex> + '_ {
+        self.pages.values().filter_map(|record| {
+            let is_texture = self.texture_page_eids.contains_key(&record.index);
+            ((!is_texture && record.state == PageState::Translated)
+                || (is_texture && record.state == PageState::Resident))
+                .then_some(record.index)
+        })
+    }
+
     pub fn set_page_inaccessible(&mut self, page: PageIndex) -> Result<(), PagingError> {
         let record = self
             .pages
@@ -338,6 +429,15 @@ impl Pager {
     }
 
     pub fn open_page(&mut self, page: PageIndex) -> Result<(), PagingError> {
+        self.open_page_with_outcome(page).map(|_| ())
+    }
+
+    /// Opens one page and reports a resident texture binding displaced by the
+    /// same native allocation operation.
+    pub fn open_page_with_outcome(
+        &mut self,
+        page: PageIndex,
+    ) -> Result<PagerOpenOutcome, PagingError> {
         let state = self
             .pages
             .get(&page)
@@ -349,9 +449,13 @@ impl Pager {
         // A type-one physical page is copied into a texture slot as part of
         // the same synchronous native `NSPageOpen` operation. Ordinary pages
         // have no reverse texture-EID binding and skip this branch.
-        if self.texture_page_eids.contains_key(&page) {
-            self.materialize_texture_page(page)?;
-        }
+        let evicted = if self.texture_page_eids.contains_key(&page) {
+            self.materialize_texture_page(page)?
+                .replaced
+                .filter(|binding| binding.state == TextureSlotState::Resident)
+        } else {
+            None
+        };
         let record = self
             .pages
             .get_mut(&page)
@@ -360,7 +464,7 @@ impl Pager {
         if record.state == PageState::Raw {
             record.state = PageState::Translated;
         }
-        Ok(())
+        Ok(PagerOpenOutcome { page, evicted })
     }
 
     pub fn close_page(&mut self, page: PageIndex) -> Result<(), PagingError> {
@@ -375,7 +479,48 @@ impl Pager {
         Ok(())
     }
 
+    /// Source-compatible page close used by `NSZoneUnload`.
+    ///
+    /// Native `NSPageDecRef` returns immediately when the count is already
+    /// zero. This matters when a synchronous RESPAWN or TERM handler has
+    /// closed a reference that the following lifecycle unload also names.
+    pub fn close_page_retail(&mut self, page: PageIndex) -> Result<(), PagingError> {
+        self.close_page_retail_with_outcome(page).map(|_| ())
+    }
+
+    /// Native-idempotent page close with an explicit reference-count delta.
+    pub fn close_page_retail_with_outcome(
+        &mut self,
+        page: PageIndex,
+    ) -> Result<PagerCloseOutcome, PagingError> {
+        if self
+            .pages
+            .get(&page)
+            .ok_or(PagingError::UnknownPage(page))?
+            .references
+            == 0
+        {
+            return Ok(PagerCloseOutcome {
+                page,
+                decremented: false,
+            });
+        }
+        self.close_page(page)?;
+        Ok(PagerCloseOutcome {
+            page,
+            decremented: true,
+        })
+    }
+
     pub fn open_entry(&mut self, entry: EntryHandle) -> Result<(), PagingError> {
+        self.open_entry_with_outcome(entry).map(|_| ())
+    }
+
+    /// Opens one entry and reports the containing page's resolution change.
+    pub fn open_entry_with_outcome(
+        &mut self,
+        entry: EntryHandle,
+    ) -> Result<PagerOpenOutcome, PagingError> {
         let page = entry.page();
         let record = self
             .pages
@@ -384,13 +529,13 @@ impl Pager {
         if !record.entries.contains(&entry) {
             return Err(PagingError::UnknownEntry(entry));
         }
-        self.open_page(page)?;
+        let outcome = self.open_page_with_outcome(page)?;
         let references = self
             .entries
             .get_mut(&entry)
             .ok_or(PagingError::UnknownEntry(entry))?;
         *references = references.saturating_add(1);
-        Ok(())
+        Ok(outcome)
     }
 
     pub fn close_entry(&mut self, entry: EntryHandle) -> Result<(), PagingError> {
@@ -617,6 +762,11 @@ impl Pager {
             .get_mut(slot)
             .ok_or(PagingError::InvalidTextureSlot(slot))?;
         *state = TextureSlotState::Free;
+        if let Some(page) = self.texture_slots[slot]
+            && let Some(record) = self.pages.get_mut(&page)
+        {
+            record.state = PageState::Translated;
+        }
         Ok(())
     }
 
@@ -969,5 +1119,122 @@ mod tests {
             pager.bind_page_eid(eid, page),
             Err(PagingError::DuplicateEid(eid))
         );
+    }
+
+    #[test]
+    fn open_outcome_reports_only_a_displaced_resident_texture_page() {
+        let mut pager = Pager::new();
+        let eids = (0..=8)
+            .map(|index| register_texture(&mut pager, index))
+            .collect::<Vec<_>>();
+        pager.set_current_texture_load_eids(eids.iter().take(8).copied());
+        for eid in eids.iter().take(8).copied() {
+            assert_eq!(pager.open_eid_with_outcome(eid).unwrap().evicted, None);
+        }
+        pager.set_current_texture_load_eids(eids.iter().skip(1).copied());
+
+        let replacement = pager.open_eid_with_outcome(eids[8]).unwrap();
+
+        assert_eq!(replacement.page, PageIndex::new(8));
+        let evicted = replacement.evicted.unwrap();
+        assert_eq!(evicted.page, PageIndex::new(0));
+        assert_eq!(evicted.eid, eids[0]);
+        assert_eq!(evicted.state, TextureSlotState::Resident);
+        assert!(!pager.resolved_pages().any(|page| page == evicted.page));
+        assert!(pager.resolved_pages().any(|page| page == replacement.page));
+    }
+
+    #[test]
+    fn free_and_stale_texture_identities_are_not_reported_as_new_evictions() {
+        for retained_state in [TextureSlotState::Free, TextureSlotState::Stale] {
+            let mut pager = Pager::new();
+            let first = register_texture(&mut pager, 0);
+            let second = register_texture(&mut pager, 1);
+            pager.set_current_texture_load_eids([second]);
+            let opened = pager.open_eid_with_outcome(first).unwrap();
+            let slot = pager.texture_frame_snapshot().find_eid(first).unwrap().0;
+            match retained_state {
+                TextureSlotState::Free => pager.free_texture_slot(slot).unwrap(),
+                TextureSlotState::Stale => pager.mark_texture_slot_stale(slot).unwrap(),
+                TextureSlotState::Resident => unreachable!(),
+            }
+
+            let replacement = pager.open_eid_with_outcome(second).unwrap();
+
+            assert_eq!(replacement.evicted, None, "{retained_state:?}");
+            assert!(!pager.resolved_pages().any(|page| page == opened.page));
+            assert!(pager.resolved_pages().any(|page| page == replacement.page));
+        }
+    }
+
+    #[test]
+    fn gool_close_is_idempotent_without_weakening_strict_lifecycle_close() {
+        let mut pager = Pager::new();
+        let page = PageIndex::new(2);
+        let handle = entry(2, 0);
+        let eid = Eid::from_name("WillG").unwrap();
+        pager.register_page(page, [handle]).unwrap();
+        pager.bind_eid(eid, handle).unwrap();
+
+        pager.close_eid_retail(eid).unwrap();
+        assert_eq!(pager.entry_references(handle), Some(0));
+        assert_eq!(pager.page(page).unwrap().references, 0);
+        assert_eq!(
+            pager.close_eid(eid),
+            Err(PagingError::ReferenceUnderflow(page))
+        );
+
+        pager.open_eid(eid).unwrap();
+        pager.close_eid_retail(eid).unwrap();
+        pager.close_eid_retail(eid).unwrap();
+        assert_eq!(pager.entry_references(handle), Some(0));
+        assert_eq!(pager.page(page).unwrap().references, 0);
+
+        pager.close_page_retail(page).unwrap();
+        assert_eq!(pager.page(page).unwrap().references, 0);
+        assert_eq!(
+            pager.close_page(page),
+            Err(PagingError::ReferenceUnderflow(page))
+        );
+    }
+
+    #[test]
+    fn retail_close_decrements_the_shared_page_even_when_that_eid_was_not_opened() {
+        let mut pager = Pager::new();
+        let page = PageIndex::new(3);
+        let entry_a = entry(3, 0);
+        let entry_b = entry(3, 1);
+        let eid_a = Eid::from_name("WillG").unwrap();
+        let eid_b = Eid::from_name("WiI1V").unwrap();
+        pager.register_page(page, [entry_a, entry_b]).unwrap();
+        pager.bind_eid(eid_a, entry_a).unwrap();
+        pager.bind_eid(eid_b, entry_b).unwrap();
+
+        pager.open_eid(eid_b).unwrap();
+        assert_eq!(pager.entry_references(entry_a), Some(0));
+        assert_eq!(pager.entry_references(entry_b), Some(1));
+        assert_eq!(pager.page(page).unwrap().references, 1);
+
+        assert_eq!(
+            pager.close_eid_retail_with_outcome(eid_a).unwrap(),
+            PagerCloseOutcome {
+                page,
+                decremented: true,
+            }
+        );
+        assert_eq!(pager.entry_references(entry_a), Some(0));
+        assert_eq!(pager.entry_references(entry_b), Some(1));
+        assert_eq!(pager.page(page).unwrap().references, 0);
+
+        assert_eq!(
+            pager.close_eid_retail_with_outcome(eid_b).unwrap(),
+            PagerCloseOutcome {
+                page,
+                decremented: false,
+            }
+        );
+        pager.close_eid_retail(eid_b).unwrap();
+        assert_eq!(pager.entry_references(entry_b), Some(0));
+        assert_eq!(pager.page(page).unwrap().references, 0);
     }
 }

@@ -28,6 +28,9 @@ An external `git archive` copy produced these results:
 - Title/menu states include main `5`, options `6`, publisher `8`, game over `12`, password/load
   `13/14`, and map `15`; initial publisher flow begins at `10`.
 - A bonus return target uses the signed transition sentinel `-2`.
+- Every bonus spawn zone is save-restricted. A normal bonus entry carries its parent snapshot;
+  only a fresh direct boot seeds a one-shot same-level death/restart snapshot. Direct-boot bonus
+  completion still needs an explicit host destination and is not treated as a certified round trip.
 - Audio is 44.1 kHz, 24 logical voices, with music on voice zero.
 - The virtual card has 15 slots and an exact 128-byte little-endian payload. Its checksum starts at
   `0x12345678`, adds each byte with the checksum field zero, then rotates left three bits. Rescan
@@ -113,6 +116,10 @@ An external `git archive` copy produced these results:
   pair-backed cache and active 304-word spawn table is rebuilt for the destination. Bonus return
   substitutes the saved zone/path/progress during destination initialization and protects the one
   pre-restart Crash spawn exactly as native `next_lid = -2` does.
+- Native raw pointers into the static object pool are represented by validated tagged global words
+  plus physical arena-slot storage identity. A retained Dark2 doctor pointer observes initialized
+  tombstone data until that physical slot is reused; compact VM-handle reuse in a different slot
+  does not retarget it. Global write epochs distinguish reassignment of an identical 32-bit tag.
 - `LevelSaveState` and `LevelRestart` use an owned fixed-layout snapshot containing only fields the
   source actually copies. The browser preflights pager/lifecycle/camera work before irreversible
   RESPAWN/TERM delivery, then publishes restored spawn words, player transform, counters and box
@@ -141,8 +148,10 @@ An external `git archive` copy produced these results:
   ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
   PCM/sequencer data, with source-timed fades and typed GOOL track toggles. The browser has no
   procedural sine fallback. Effects remain data rather than unchecked host pointers; exact SPU
-  synthesis, complete collision response, dynamic rendering effects and full progression are not
-  implied.
+  reverb/modulation, every collision edge, pixel-level rendering equivalence and full progression
+  are not implied. World Lightning, combined Dark and Dark2 state/rendering are now connected with
+  their process-lifetime shader scratch, shared RNG-B ordering, thunder ADIO handshake and hidden-
+  frame transform behavior.
 - The mount-time `LevelInitMisc(1)` transaction creates source-mapped root-four controllers for
   levels `0x05`, `0x14`, `0x16`, `0x17`, `0x22`, and `0x2e`. Ripper Roo's 39/4 controller publishes
   a checked tagged `ambiance_obj` reference in global 8. Same-level `LevelInitMisc(0)` does not

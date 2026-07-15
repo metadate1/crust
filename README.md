@@ -59,7 +59,10 @@ stamp, then the target transition block runs after it, including nested calls an
 normal updates continue into newly bound state code in that same native update. Initial/call frames
 share the bounded
 process word array at `init_sp`, state links apply target-state guards, and checked failures
-quarantine only the affected object. Checked aligned code/storage/entry tags, paging operations,
+quarantine only the affected object. GOOL `0x8b` open cases one/six, close case two, and probe case
+three cross a typed synchronous pager boundary; cases four/five remain VM-local. An unavailable
+open rolls back its optimistic VM reference, a resident replacement re-arms the displaced page,
+and mismatched EID/page acknowledgements are rejected. Checked aligned code/storage/entry tags,
 five-word pad history, camera-relative movement, gravity, rotation, every source selector in the
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
@@ -82,8 +85,11 @@ The WebGL stage transactionally replaces the camera/path scene while reusing sha
 immutable texture allocations. Parsed item-five animation descriptors now resolve pair-scoped
 TGEO plus 3D SVTX/CVTX frames, type-two sprites, type-five fragments and type-four text through its
 header-length-bounded type-three font resources, including the extended controller-icon records
-that retail pointer-indexes beyond its 63-slot C declaration. Post-GOOL object snapshots drive
-their fixed-point projection, lighting/color modulation, ordering and the same resident TPAG cache as the world;
+that retail pointer-indexes beyond its 63-slot C declaration. Each object's post-update,
+pre-child display boundary appends an owned ordered record, so later teardown or reparenting cannot
+retract already displayed state. A frame-start pager snapshot supplies world/filter membership,
+while each record replays its live `(EID, generation, page)` texture map before fixed-point
+projection, lighting/color modulation, and ordering through the shared resident TPAG cache;
 the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragment half-size math
 uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
 GTE validity gate. The legal `pb0cB` trace therefore carries the authored `FruiC` scale through raw
@@ -96,8 +102,20 @@ only the persistent local bound at their source call site.
 WGEO zones with graphics flag `0x100` now apply the source ripple transform to effect-marked world
 vertices before the ordinary world matrix. The independent 16-cell signed wave uses the native
 seed, advance, wrap, absolute-value conversion, and level-specific speed/period table. Pair-scoped
-wave state advances only for an unpaused, nonempty ripple-world submission, so pause and
-hidden/empty display gaps freeze it without coupling it to TPAG texture animation.
+wave state advances only for an unpaused submission containing visible ripple-world polygons.
+Pause or a world-hidden/empty submission freezes it independently of texture animation; a later
+draw-skip presentation gate still performs the source transform and advances the wave.
+World graphics now also execute the complete source-priority `Dark2 > Dark > Fog > Ripple >
+Lightning > Plain` dispatch. The process-lifetime `ShaderParamsUpdate` state covers every fixed,
+random, ruins, boss and thunder sequence; combined Dark applies lightning before its non-backdrop-
+exempt fog pass, and Dark2 follows the live doctor/Crash illumination point plus torch distance and
+ambient ramps. Native `far_color1` scratch persists across stream mounts, including Dark2's
+intentional reuse, and hidden draw-skip frames still transform worlds before presentation. The
+doctor global retains physical pool-slot identity and initialized tombstone storage, so compact VM
+handle reuse in another slot cannot accidentally retarget it; later physical slot reuse can. The
+separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and audio
+voice stealing. Accepted lightning cues decode one of the local `lt1rA`–`lt3rA` ADIO entries and
+create an ownerless delayed-key voice without copying sample bytes into the repository.
 Static solid geometry follows native `cur_zone` as the camera crosses zones instead of remaining
 bound to Crash's spawn zone; a detached object zone remains typed and supplies only its source
 rectangle/graphics/water fallback, never extra geometry candidates. A previously recorded strict
@@ -124,16 +142,20 @@ The previously recorded strict 360-frame Hog Wild idle characterization delivere
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
 The current native schedule includes one deterministic authored level-completion loop; this is not
 a full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
-operations, dynamic rendering effects and later
-same-level restart edge cases remain incomplete. Source-ordered zone lifetime/paging,
-synchronous save/restart, event and audio calls, display-mask latching and local ADIO SFX are now
-connected. Zone graphics now select local
+operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
+CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
+save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.
+Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
 fades, the native all-bus master fade and GOOL-controlled alternate tracks. Sampled VAB voices
 apply the two retail ADSR register words through an exact fixed-point 44.1 kHz attack, decay,
 sustain, and release generator before mixing. Authored `next_lid`
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
-fresh destination runtime, and restore bonus returns from the saved zone/path/progress. WebAudio
+fresh destination runtime, and restore bonus returns from the saved zone/path/progress.
+Normal bonus entry retains that parent snapshot. Fresh direct bonus boot alone seeds a one-shot
+same-level restart snapshot because all five bonus spawn zones are save-restricted; directly booted
+bonus completion still lacks a distinct host return destination and is not claimed as a complete
+round trip. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
 fallback has been removed. The native 3,592-halfword encountered-object registry is retained
 separately from each mount's fresh 304-word
@@ -167,7 +189,11 @@ Bounds-checked type-19 PBAK parsing and browser playback restore the recorded ca
 snapshot, spawn table, RNG, timing, bounds and full 32-bit pad words. All nine local recordings
 (10,966 Crash pad boundaries) pass complete live runtime/render traces, including same-level death
 restart handling, display-mask camera suppression, zone TERM/lifecycle commits, and camera save
-handshakes. The checked caption controller now survives
+handshakes. `PbakChoose` counts NSD type-19 names, consumes the shared RNG-B stream even for one
+recording, generates the retail `pb0?B` EID, and suppresses drawing while armed; its nine legal
+choices end at the characterized seed `0xaf5aad71`. Recorded absolute ticks are published from the
+new current frame after Crash's pad boundary, while the start and terminal frames retain their
+source wall-clock/state gates. The checked caption controller now survives
 the demo restart beneath logical root one; a nonzero island-camera target dispatches its checked
 event `0xE00`, while a zero target releases physical input without inventing a title transition.
 Playback advances at Crash's actual root-six traversal boundary: root-one caption work runs first,

@@ -3,7 +3,8 @@
 This file records observed checks for the initial private rewrite delivery on 2026-07-12, the
 stream, title, GOOL, entity, SLST, camera, cached-scene and hosted-runtime slices on 2026-07-13,
 the title-overlay, PBAK, object-shader and current-zone collision slices on 2026-07-14, and the
-later ADSR, world-ripple, process-animation and initial-return lifecycle slices on 2026-07-15. It
+later ADSR, world-ripple/dynamic-world, shared-RNG, process-animation and initial-return lifecycle
+slices on 2026-07-15. It
 does not turn subsystem tests into a claim of retail gameplay parity.
 
 ## Reference characterization
@@ -522,7 +523,8 @@ The focused checks below were also completed:
   flag `0x100`; with the camera held constant, one unpaused submission moved visible effect-marked
   WGEO geometry while ordinary visible geometry stayed fixed, repeated paused submissions stayed
   fixed, and a hidden-world gap consumed no wave advance. No fresh fog or lightning parity claim
-  follows from this ripple check; the separate current fog evidence is recorded below.
+  follows from this ripple check alone; the separate fog and dynamic-world evidence is recorded
+  below.
 - The parsed-retail unit fixture executes raw RETURN word `0x82894000` through its initial frame and
   reports `InvalidInitialReturn`; the synthetic `VmObject::new` compatibility case still reports
   `Halted`. The legally local Ending regression then ran the browser-ordered spawn/camera/GOOL loop
@@ -586,49 +588,102 @@ Wasm was regenerated and is what the normal server serves. Because the local-onl
 deleted, the visible in-memory tab was not remounted after that narrow correction; its observed
 positive-speed N. Sanity route is unaffected by the signed edge case.
 
-Additional checks for the current world-rendering and paging change set were completed against
+Additional checks for the current source-ordered paging/display change set were completed against
 legally local data:
 
-- A fresh goal-directed N. Sanity Beach run reached the authored `Transition(0x2d)` at frame 1,906.
-  It recorded 41 camera-path changes, 18 zone transitions, 65 successful spawns and 29,338 GOOL
-  executions with zero execution errors. The trace also crossed paging, solid-query, event,
-  child-spawn, state-change, SFX, audio-control and save-state effects. This is deterministic
-  simulation characterization, not a browser level-completion claim.
-- The opt-in fog-start sweep found two retail starts whose source-priority world shader mode is Fog
-  and counted 544 projected WGEO vertices whose output RGB differed from the authored source color.
-  Focused renderer tests separately cover flag priority, strict depth cutoff, backdrop exemption
-  and clamped fixed-point blending. Lightning, combined dark and Dark2 dynamic state remain
-  incomplete.
-- The texture-slot pager tests cover all eight usable slots (native physical slots 8–15),
-  source-order free/stale/unprotected replacement, null-zone fallback, current-zone EID
-  protection, resident idempotence, freed/stale generation renewal, immutable frame snapshots and
-  atomic exhaustion failure. Initial mount, hard restart and zone transition now publish the
-  destination load-list protection before opening its pages. GOOL paging effects and per-object
-  frame-snapshot replay are not yet synchronously coupled to the renderer.
-- A focused web regression injects `InvalidRootIndex(8)` into render-object snapshot creation and
-  verifies that the error is returned instead of being replaced with an empty object list. The
-  browser scene path propagates that failure into its existing runtime-error/pause handling, so a
-  rejected object snapshot cannot silently present a world-only frame. This fault was unit-tested;
-  it was not injected into a live browser session.
+- GOOL `0x8b` open/close/probe now crosses a typed synchronous host boundary. Focused tests cover
+  unavailable-open rollback, resident eviction reconciliation, invalid eviction/page responses,
+  case-five live-resolution reads, externally seeded page state, native-idempotent close behavior,
+  and two EIDs sharing one page. Pager tests cover all eight usable slots (native physical slots
+  8–15), source-order free/stale/unprotected replacement, destination protection, and atomic
+  exhaustion. Initial mount, hard restart, and normal transition mirror every actual Pager delta
+  back into the VM.
+- The legally local 360-frame N. Sanity idle golden recorded exactly 24 paging requests from object
+  six: 12 opens and 12 closes, no probes, at frames 2, 3, 30, 46, 83, 120, 145, and 194. Every EID
+  finished with a zero open/close delta and the run remained clean. Its asset-only `NsfProgramHost`
+  acknowledgement does not substitute for an end-to-end browser Pager test.
+- Runtime traversal publishes owned display records immediately after each object update and before
+  its children. Focused tests verify that later teardown or reparenting cannot retract the record
+  and that a failed frame does not replace the last successful publication. Renderer tests cover
+  frame-start world/filter membership plus per-object live Pager replay, including same-slot
+  `A → B → A`: cached A regions survive, uncached regions follow the current mapping, and returning
+  A reuses its frozen generation.
+- Normal and hard-restart transitions were audited for old-protection TERM handling, idempotent
+  closes, VM/Pager reference reconciliation, and no-core title/special-stream seeding. Normal
+  transitions install destination protection before close/open work; hard restart retains old
+  protection through RESPAWN, TERM, and closes, then switches before its first restored open.
+  Candidate state is preflighted before publication; this is not a whole-transition rollback
+  because authored TERM mutations are intentionally irreversible.
+- The opt-in fog-start sweep remains green for the two retail Fog starts and 544 projected WGEO
+  vertices whose output RGB differs from authored source color. The later dynamic-world closeout
+  below covers Lightning, combined Dark and Dark2 separately.
 
-The supplied 632,083,536-byte raw BIN was also mounted in the visible in-app browser through an
-ephemeral same-origin loopback helper that dispatched the ordinary local-file input event. The
-importer reported 88 streams, all 44 level pairs and 219 MiB of selected stream extents. A direct
-N. Sanity Beach boot ran at 30.00 Hz with synthesized audio and visibly rendered its retail world,
-Crash and crate geometry; held touch input changed the live pose and camera. Pause/resume and
-mute/unmute changed telemetry and returned to `RUNNING` and `SYNTH ACTIVE`. The expanded
-engineering log reported seven initial entity bindings, 23 first-frame object executions and zero
-GOOL errors; browser console and network traces were not independently captured in this pass. The
-helper and game bytes were not added to the repository. This pass confirms local import and live
-authored-scene presentation, not a completed browser level, transition sequence or full retail
-playthrough.
+### Dynamic-world and shared-RNG closeout (2026-07-15)
 
-For this change set, 803 locked default tests and the complete 64-test legally local opt-in sweep
-passed. Warnings-denied native Clippy, the optimized workspace build, warnings-denied Wasm Clippy
-and the optimized Wasm build also passed. The generated Wasm is 1,277,626 bytes with SHA-256
-`bfc01bbe44850c6ba85daa0ffc8fa81ce700abc1ed6a976359d0500b86d72a2c`; the generated loader is
+- A read-only source audit fixed the exact pre-camera order, mode priority, all 84 fixed-sequence
+  words, six lightning patterns, random reductions, ruins/boss cases, two-stamp `6145` thunder
+  cooldown, Dark2 doctor/Crash selection, ambient/distance ramps, and renderer `far_color1` BSS
+  writes. Bandicoot remained unmodified.
+- The legally local 44-pair reachable-zone census found 362 Lightning, 115 combined Dark and 80
+  Dark2 zones. All 557 are reachable from their validated retail graph roots; the aggregate FNV-1a
+  fingerprint is `0xa771e6a007ead119` (mode fingerprints `0x08e7ab506b45d34d`,
+  `0x79a4940a24031991`, and `0xb3d6ec0ec99bd149`).
+- The local spawn-scene integration exercised 9 Lightning, 3 combined-Dark and 2 Dark2 starts. It
+  projected 15,168 / 4,218 / 3,951 WGEO vertices and observed 5,208 / 1,447 / 423 colors differ
+  from the authored unshaded values. Fixed-point evaluator tests separately cover channel
+  selection, fog order/cutoffs and Dark2 target/illumination math.
+- Focused simulation tests cover the full fixed table and wrap, seed-zero random sequences, Brio and
+  Storm pattern/cooldown/sentinel behavior, doctor-over-Crash illumination, Dark2 ramps, partial
+  reinitialization and cross-mount BSS/RNG retention. A read-only lifecycle audit established that
+  native keeps the doctor's static-pool pointer and initialized transform after kill. Regression
+  coverage now writes the doctor global, frees multiple objects, and reuses the lowest VM handle in
+  a different physical slot before the shader's first read; the write-time pool-slot capture still
+  preserves the doctor's value. Reuse of the doctor's LIFO pool slot retargets it, and a later write
+  of the same tagged word binds the new object. Renderer
+  tests cover empty/world-hidden SLST scratch writes and Dark2 retention. Audio tests cover
+  ownerless delayed-key thunder creation and template reset.
+- The strict direction/button survey ran every one of the 43 selectable pairs for 360 browser-
+  ordered simulation frames with clean-runtime enforcement. Lights Out separately retained its
+  non-null doctor global across the authored pool reclamation and completed 360 active frames with
+  no checked issue. The five direct bonus boots (`0x24`, `0x25`, `0x26`, `0x33`, `0x34`) each
+  captured a same-level restart snapshot; the three routes that died within the window restarted
+  cleanly. Parent-carried bonus return remains separately protected, while synthetic direct-boot
+  completion is documented as an unresolved host-policy gap.
+- The N. Sanity browser-order render contract resolved `WillC → WiI1V → WillG`, retained 381 model
+  vertices and 732 authored TGEO triangles, submitted 322 Crash triangles on boot frame two, and
+  matched command fingerprint `0xc19351b9ca5b0c36`. This proves authored command construction and
+  material mapping, not pixel equivalence or a human-controlled browser playthrough.
+- Native RNG-B is now one source-ordered stream across shader updates, thunder/GOOL voice
+  allocation, `LEVEL_END`, PBAK choice and destination import. The legally local PBAK sweep counts
+  type-19 entries from NSD metadata, covers all nine recordings and 10,966 frame boundaries, and
+  ends its nine one-entry choices at seed `0xaf5aad71`. Synthetic tests cover count-one's first two
+  seeds (`0x00003039`, `0xd3dc167e`), a count-nine choice, source EID construction and a checked
+  out-of-alphabet level instead of native out-of-bounds behavior.
+- Recorded PBAK absolute time now follows the newly current frame after Crash's pad boundary;
+  initial, completion and physical-interruption frames retain their source state gates. The
+  pause-adjusted shader clock includes asynchronous mount validation time and wraps as a 32-bit
+  word. Disposable mount previews no longer advance ripple or renderer scratch, while actual
+  hidden draw-skip frames transform the real camera/visibility state before presentation.
+
+The supplied 632,083,536-byte raw BIN was mounted in a fresh visible in-app-browser tab through an
+ephemeral loopback-only helper that dispatched the ordinary local-input event. The importer
+reported 88 streams, all 44 level pairs, and 219 MiB of selected stream extents. Title `0x19`
+started at its authored Universal Interactive Studios publisher screen and remained `RUNNING` at
+30.00 Hz with `SYNTH ACTIVE` and card `0/15`; the clean tab recorded no console entry. The one-shot
+helper closed immediately after its read, and rebuilding the distribution removed its bootstrap
+and CSP changes while the retained tab kept its local in-memory `File` and continued running. The
+served repository contains no helper route or game byte. A live mid-frame eviction/transition,
+keyboard, physical gamepad, touch, fullscreen, or persistence reload was not exercised in this
+pass. No game data entered Git, browser persistence, or the repository tree.
+
+For this change set, 832 locked default tests and the complete 70-test legally local opt-in sweep
+passed with zero failures. The separate clean-policy active-input survey covered all 43 selectable
+pairs for 360 frames. Formatting, warnings-denied native and Wasm Clippy, the optimized native
+workspace build, optimized Wasm build, and web distribution build also passed. The generated Wasm
+is 1,322,664 bytes with SHA-256
+`235f8a9bad1b16275c26aa0be315b4b43af12696cb32ddc820b943f44434c24c`; the generated loader is
 46,236 bytes with SHA-256
-`8ed2a96cf8c5cb549b33f6595ead2d350cf2d2e9e62680e660aa66a268cd9f01`.
+`a26ab5a1a47530af0d7ca7326da07e3dcdfb30c8dcd9dafd56523d93813f5abe`.
 
 ## Reproducible commands
 
@@ -651,6 +706,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_n_sanity_completion_title_vertical_flow_preserves_session_carry \
@@ -685,6 +743,12 @@ cargo test -p crust-web --lib --locked \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --lib --locked \
   every_local_fog_start_shades_projected_world_colors -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-formats --test local_scene_formats --locked \
+  dynamic_world_shader_zones_match_the_reachable_retail_corpus -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-web --lib --locked \
+  every_local_dynamic_shader_start_reaches_projected_world_colors -- --ignored --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-web --test local_great_hall_dynamic_font --locked -- \
   --ignored --nocapture

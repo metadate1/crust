@@ -1,4 +1,4 @@
-//! Bounded decoded-texture cache with frame-stable page generations.
+//! Bounded decoded-texture cache with frame-stable page-slot membership.
 
 use core::fmt;
 use std::collections::HashMap;
@@ -154,8 +154,9 @@ impl TextureCache {
 
     /// Install a decompressed 64 KiB page into one of eight live slots.
     ///
-    /// A new generation is assigned even when an EID returns to its former
-    /// slot, preventing stale decoded pixels from a previous level visit.
+    /// An EID returning to the exact slot frozen for the current frame reuses
+    /// that generation, matching the native cache's EID-based identity. Other
+    /// installs receive a new generation.
     ///
     /// # Errors
     ///
@@ -175,11 +176,20 @@ impl TextureCache {
                 actual: bytes.len(),
             }));
         }
-        let generation = self.next_generation;
-        self.next_generation = self
-            .next_generation
-            .checked_add(1)
-            .ok_or(CacheError::GenerationExhausted)?;
+        let frozen_generation = self.frame_pages[slot]
+            .as_ref()
+            .filter(|page| page.page_id == page_id)
+            .map(|page| page.generation);
+        let generation = if let Some(generation) = frozen_generation {
+            generation
+        } else {
+            let generation = self.next_generation;
+            self.next_generation = self
+                .next_generation
+                .checked_add(1)
+                .ok_or(CacheError::GenerationExhausted)?;
+            generation
+        };
         self.live_pages[slot] = Some(PageSlot {
             page_id,
             generation,
@@ -208,6 +218,9 @@ impl TextureCache {
             let live_generation = self.live_pages[slot].as_ref().map(|page| page.generation);
             let frame_generation = self.frame_pages[slot].as_ref().map(|page| page.generation);
             if live_generation == frame_generation {
+                // A same-EID return retains cache identity, but the new frame
+                // should still hold the currently mounted page bytes.
+                self.frame_pages[slot].clone_from(&self.live_pages[slot]);
                 continue;
             }
             increment(&mut self.frame.page_changes);
@@ -233,23 +246,39 @@ impl TextureCache {
     ///
     /// # Errors
     ///
-    /// Returns an error when the requested page is absent or changed during
-    /// the frame, its region/CLUT is invalid, or the decoded image cannot fit
-    /// within the configured cache limits.
+    /// Returns an error when the requested page is absent or no longer
+    /// occupies its frame-start slot, its region/CLUT is invalid, or the
+    /// decoded image cannot fit within the configured cache limits.
     pub fn load(&mut self, request: TextureRequest) -> Result<CachedTexture, CacheError> {
         increment(&mut self.frame.requests);
         increment(&mut self.total.requests);
         self.use_clock = self.use_clock.saturating_add(1);
 
         let frame_slot = find_page(&self.frame_pages, request.page_id);
-        if let Some((slot, frame_page)) =
-            frame_slot.and_then(|slot| self.frame_pages[slot].as_ref().map(|page| (slot, page)))
-        {
-            let key = CacheKey {
+        let frame_key = frame_slot.and_then(|slot| {
+            self.frame_pages[slot].as_ref().map(|page| CacheKey {
                 slot: u8::try_from(slot).unwrap_or_default(),
-                generation: frame_page.generation,
+                generation: page.generation,
                 request,
-            };
+            })
+        });
+        let live_slot = find_page(&self.live_pages, request.page_id);
+        let live_key = live_slot.and_then(|slot| {
+            if frame_slot == Some(slot) {
+                self.live_pages[slot].as_ref().map(|page| CacheKey {
+                    slot: u8::try_from(slot).unwrap_or_default(),
+                    generation: page.generation,
+                    request,
+                })
+            } else {
+                None
+            }
+        });
+        // Prefer the frame generation so commands decoded before a mid-frame
+        // replacement retain their exact pixels. If that region was not yet
+        // cached, the live generation is eligible only when the EID has
+        // returned to the same slot captured at frame start.
+        for key in [frame_key, live_key].into_iter().flatten() {
             if let Some(entry) = self.entries.get_mut(&key) {
                 entry.last_used = self.use_clock;
                 increment(&mut self.frame.hits);
@@ -266,35 +295,26 @@ impl TextureCache {
 
         increment(&mut self.frame.misses);
         increment(&mut self.total.misses);
-        let Some(live_slot) = find_page(&self.live_pages, request.page_id) else {
+        let Some(live_slot) = live_slot else {
             self.record_missing_page();
             return Err(CacheError::MissingPage(request.page_id));
         };
-        let Some(live_generation) = self.live_pages[live_slot]
-            .as_ref()
-            .map(|page| page.generation)
-        else {
-            self.record_generation_miss();
-            return Err(CacheError::GenerationChanged {
-                page_id: request.page_id,
-            });
-        };
-        let Some(frame_page) = self.frame_pages[live_slot].clone() else {
-            self.record_generation_miss();
-            return Err(CacheError::GenerationChanged {
-                page_id: request.page_id,
-            });
-        };
-        if frame_slot != Some(live_slot) || frame_page.generation != live_generation {
+        if frame_slot != Some(live_slot) {
             self.record_generation_miss();
             return Err(CacheError::GenerationChanged {
                 page_id: request.page_id,
             });
         }
+        let Some(live_page) = self.live_pages[live_slot].clone() else {
+            self.record_generation_miss();
+            return Err(CacheError::GenerationChanged {
+                page_id: request.page_id,
+            });
+        };
 
         let palette = request.clut.map(Palette::Page);
         let decoded = crate::texture::decode_region(
-            &frame_page.bytes,
+            &live_page.bytes,
             request.color_mode,
             request.blend_mode,
             request.region,
@@ -334,7 +354,7 @@ impl TextureCache {
         let content_uv = content_uv(request.region, &pixels);
         let key = CacheKey {
             slot: u8::try_from(live_slot).unwrap_or_default(),
-            generation: frame_page.generation,
+            generation: live_page.generation,
             request,
         };
         self.resident_bytes = self.resident_bytes.saturating_add(byte_len);
@@ -353,7 +373,7 @@ impl TextureCache {
         Ok(CachedTexture {
             handle,
             page_id: request.page_id,
-            page_generation: frame_page.generation,
+            page_generation: live_page.generation,
             pixels,
             content_uv,
         })
@@ -562,6 +582,83 @@ mod tests {
     }
 
     #[test]
+    fn returning_eid_in_frozen_slot_decodes_uncached_region_from_live_generation() {
+        let mut cache = TextureCache::default();
+        let frame_generation = cache.install_page(0, 0x101, direct_page(0xffff)).unwrap();
+        cache.begin_frame();
+        let cached_old_region = cache.load(request(0x101, 0)).unwrap();
+
+        cache.install_page(0, 0x103, direct_page(0x83e0)).unwrap();
+        let returned_generation = cache.install_page(0, 0x101, direct_page(0x001f)).unwrap();
+        assert_eq!(returned_generation, frame_generation);
+
+        let retained_old_region = cache.load(request(0x101, 0)).unwrap();
+        assert_eq!(retained_old_region.handle, cached_old_region.handle);
+        assert_eq!(retained_old_region.page_generation, frame_generation);
+
+        let decoded_returned_region = cache.load(request(0x101, 4)).unwrap();
+        assert_eq!(decoded_returned_region.page_generation, returned_generation);
+        assert_eq!(
+            decoded_returned_region.pixels.pixel(1, 1),
+            Some(crate::texture::Rgba8 {
+                r: 255,
+                g: 0,
+                b: 0,
+                a: 255,
+            })
+        );
+        assert_eq!(
+            cache.load(request(0x101, 4)).unwrap().handle,
+            decoded_returned_region.handle
+        );
+
+        let metrics = cache.metrics();
+        assert_eq!(metrics.frame.generation_misses, 0);
+        assert_eq!(metrics.frame.hits, 2);
+        assert_eq!(metrics.frame.misses, 2);
+        assert_eq!(metrics.resident_entries, 2);
+
+        let total_page_changes = metrics.total.page_changes;
+        let total_invalidations = metrics.total.generation_invalidations;
+        cache.begin_frame();
+        assert_eq!(
+            cache.load(request(0x101, 0)).unwrap().handle,
+            cached_old_region.handle
+        );
+        assert_eq!(
+            cache.load(request(0x101, 4)).unwrap().handle,
+            decoded_returned_region.handle
+        );
+        let metrics = cache.metrics();
+        assert_eq!(metrics.frame.page_changes, 0);
+        assert_eq!(metrics.frame.generation_invalidations, 0);
+        assert_eq!(metrics.total.page_changes, total_page_changes);
+        assert_eq!(metrics.total.generation_invalidations, total_invalidations);
+        assert_eq!(metrics.resident_entries, 2);
+    }
+
+    #[test]
+    fn moving_eid_out_of_its_frozen_slot_rejects_uncached_region() {
+        let mut cache = TextureCache::default();
+        cache.install_page(0, 0x101, direct_page(0xffff)).unwrap();
+        cache.begin_frame();
+        let cached_old_region = cache.load(request(0x101, 0)).unwrap();
+
+        cache.remove_page(0).unwrap();
+        cache.install_page(1, 0x101, direct_page(0x001f)).unwrap();
+
+        assert_eq!(
+            cache.load(request(0x101, 0)).unwrap().handle,
+            cached_old_region.handle
+        );
+        assert!(matches!(
+            cache.load(request(0x101, 4)),
+            Err(CacheError::GenerationChanged { page_id: 0x101 })
+        ));
+        assert_eq!(cache.metrics().frame.generation_misses, 1);
+    }
+
+    #[test]
     fn newly_installed_mid_frame_page_reports_generation_miss() {
         let mut cache = TextureCache::default();
         cache.begin_frame();
@@ -574,7 +671,7 @@ mod tests {
     }
 
     #[test]
-    fn returning_eid_gets_a_fresh_generation() {
+    fn returning_eid_after_intervening_frame_gets_a_fresh_generation() {
         let mut cache = TextureCache::default();
         let first_generation = cache.install_page(0, 0x101, direct_page(0xffff)).unwrap();
         cache.begin_frame();

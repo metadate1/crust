@@ -29,15 +29,20 @@ use crust_renderer::sprite::{
 };
 use crust_renderer::text::{RetailTextProjection, project_retail_text};
 use crust_renderer::texture::{DecodedTexture, Rgba8};
+use crust_renderer::world::wrapped_lightning_color;
 use crust_renderer::{
-    GoolObjectLighting, ObjectDarkShaderInput, ObjectProjectionParameters,
-    ObjectProjectionTransform, ProjectedObjectPolygon, WorldShaderMode, apply_fog,
-    apply_object_zone_shader, fog_cutoff, project_object_model,
+    Dark2Parameters, GoolObjectLighting, LightningChannel, ObjectDarkShaderInput,
+    ObjectProjectionParameters, ObjectProjectionTransform, ProjectedObjectPolygon, WorldShaderMode,
+    apply_dark, apply_dark2, apply_fog, apply_lightning, apply_object_zone_shader, fog_cutoff,
+    project_object_model,
 };
 use crust_sim::Angle12;
 use crust_sim::camera::RetailCameraPose;
 use crust_sim::gool::{AnimationSource, ProcessAnimationKind, ProcessTextAnimation};
-use crust_sim::retail_runtime::{RetailRenderObject, RuntimeObjectHandle};
+use crust_sim::paging::TextureFrameSnapshot;
+use crust_sim::retail_runtime::{
+    RetailRenderObject, RetailWorldShaderSnapshot, RuntimeObjectHandle,
+};
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const SLST_ENTRY_TYPE: u32 = 4;
@@ -100,6 +105,21 @@ pub struct RetailScene {
     pub path_point_count: u16,
     pub path_point_index: u16,
     pub draw_count: u32,
+}
+
+/// Process-lifetime software-renderer scratch retained independently from a
+/// mounted pair. Native Dark2 deliberately reuses the last target installed by
+/// plain/fog/ripple or Lightning/Dark world dispatch.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailWorldShaderRenderState {
+    far_color1: [u8; 3],
+}
+
+impl RetailWorldShaderRenderState {
+    #[must_use]
+    pub const fn far_color1(self) -> [u8; 3] {
+        self.far_color1
+    }
 }
 
 /// Exact validated world/camera state selected by the retail level runtime.
@@ -257,6 +277,7 @@ pub struct RetailSceneBuilder {
     object_model_lru: VecDeque<(Eid, u16)>,
     texture_cache: TextureCache,
     texture_pages: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    texture_page_generations: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
     ripple: Option<RetailRippleState>,
     diagnostics: RetailSceneCacheDiagnostics,
 }
@@ -269,6 +290,7 @@ impl Default for RetailSceneBuilder {
             object_model_lru: VecDeque::new(),
             texture_cache: TextureCache::default(),
             texture_pages: [None; RETAIL_TEXTURE_PAGE_SLOTS],
+            texture_page_generations: [None; RETAIL_TEXTURE_PAGE_SLOTS],
             ripple: None,
             diagnostics: RetailSceneCacheDiagnostics::default(),
         }
@@ -332,6 +354,60 @@ impl RetailSceneBuilder {
         )
     }
 
+    /// Builds an integral spawn-path point while mirroring the mounted
+    /// pager's exact slots instead of allocating texture pages from demand.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the spawn location is invalid, a mirrored pager
+    /// slot disagrees with the mounted NSF, or any referenced scene resource
+    /// is malformed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_path_point_with_texture_frame(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        path_point_index: usize,
+        draw_count: u32,
+        texture_frame_snapshot: TextureFrameSnapshot,
+        world_shader_snapshot: RetailWorldShaderSnapshot,
+        world_shader_render_state: &mut RetailWorldShaderRenderState,
+    ) -> Result<RetailScene, RetailSceneError> {
+        let ldat = nsd
+            .ldat()
+            .ok_or_else(|| scene_error("index-only NSD has no LDAT scene"))?;
+        let path_index = u32::try_from(ldat.spawn_path_index)
+            .map_err(|_| scene_error("LDAT spawn path index is negative"))?;
+        let path_point_index = i32::try_from(path_point_index)
+            .map_err(|_| scene_error("active path point index does not fit signed progress"))?;
+        let path_progress = path_point_index
+            .checked_mul(0x100)
+            .ok_or_else(|| scene_error("active path point progress overflows signed 8.8 space"))?;
+        self.build_at_progress_with_runtime_snapshots(
+            nsd,
+            nsf,
+            nsf_bytes,
+            RetailSceneProgressLocation {
+                zone: ldat.spawn_zone,
+                path_index,
+                path_progress,
+                frame_stamp: draw_count,
+                draw_count,
+            },
+            true,
+            &[],
+            None,
+            RETAIL_INITIAL_DISPLAY_FLAGS,
+            ldat.field_of_view,
+            None,
+            None,
+            texture_frame_snapshot,
+            world_shader_snapshot,
+            world_shader_render_state,
+        )
+    }
+
     /// Builds an integral arbitrary zone/path camera state.
     ///
     /// # Errors
@@ -385,6 +461,9 @@ impl RetailSceneBuilder {
             &[],
             None,
             RETAIL_INITIAL_DISPLAY_FLAGS,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -458,6 +537,9 @@ impl RetailSceneBuilder {
             objects,
             main_object,
             world_display_mask,
+            None,
+            None,
+            None,
             None,
             None,
             None,
@@ -543,6 +625,55 @@ impl RetailSceneBuilder {
             Some(field_of_view),
             map_path_animation,
             camera_pose,
+            None,
+            None,
+            None,
+        )
+    }
+
+    /// Builds the browser runtime's source-ordered frame from the one
+    /// `TexturesBeginFrame` slot snapshot plus per-object live slot snapshots.
+    /// The latter reproduce mid-frame GOOL replacement misses without making
+    /// a newly opened page visible before the following frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime snapshot names an invalid object,
+    /// camera, texture slot, or malformed scene resource.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_progress_with_runtime_snapshots(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        advance_world_ripple: bool,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+        world_display_mask: u32,
+        field_of_view: u32,
+        map_path_animation: Option<RetailMapPathAnimation>,
+        camera_pose: Option<RetailSceneCameraPose>,
+        texture_frame_snapshot: TextureFrameSnapshot,
+        world_shader_snapshot: RetailWorldShaderSnapshot,
+        world_shader_render_state: &mut RetailWorldShaderRenderState,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(
+            self,
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            advance_world_ripple,
+            objects,
+            main_object,
+            world_display_mask,
+            Some(field_of_view),
+            map_path_animation,
+            camera_pose,
+            Some(texture_frame_snapshot),
+            Some(world_shader_snapshot),
+            Some(world_shader_render_state),
         )
     }
 }
@@ -620,6 +751,28 @@ pub fn build_retail_scene_at_progress(
     RetailSceneBuilder::new().build_at_progress(nsd, nsf, nsf_bytes, location)
 }
 
+fn update_world_shader_render_state(
+    state: &mut RetailWorldShaderRenderState,
+    mode: WorldShaderMode,
+    shader: RetailWorldShaderSnapshot,
+    zone_far_color: [u8; 3],
+    dispatch_active: bool,
+    has_visible_polygons: bool,
+) {
+    if !dispatch_active || (mode != WorldShaderMode::Fog && !has_visible_polygons) {
+        return;
+    }
+    match mode {
+        WorldShaderMode::Plain | WorldShaderMode::Fog | WorldShaderMode::Ripple => {
+            state.far_color1 = zone_far_color;
+        }
+        WorldShaderMode::Lightning | WorldShaderMode::Dark => {
+            state.far_color1 = wrapped_lightning_color(shader.clear_color);
+        }
+        WorldShaderMode::Dark2 => {}
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_retail_scene_cached(
     builder: &mut RetailSceneBuilder,
@@ -634,6 +787,9 @@ fn build_retail_scene_cached(
     field_of_view_override: Option<u32>,
     map_path_animation: Option<RetailMapPathAnimation>,
     camera_pose: Option<RetailSceneCameraPose>,
+    texture_frame_snapshot: Option<TextureFrameSnapshot>,
+    world_shader_snapshot: Option<RetailWorldShaderSnapshot>,
+    world_shader_render_state: Option<&mut RetailWorldShaderRenderState>,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -666,6 +822,7 @@ fn build_retail_scene_cached(
         builder.active_graph = Some(graph);
         builder.texture_cache = TextureCache::default();
         builder.texture_pages = [None; RETAIL_TEXTURE_PAGE_SLOTS];
+        builder.texture_page_generations = [None; RETAIL_TEXTURE_PAGE_SLOTS];
         builder.diagnostics.graph_builds = builder.diagnostics.graph_builds.saturating_add(1);
     }
 
@@ -734,6 +891,20 @@ fn build_retail_scene_cached(
     let projection_distance =
         projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
     let world_shader_mode = WorldShaderMode::from_flags(graph.zone_header.graphics.flags);
+    let world_shader_snapshot = world_shader_snapshot
+        .unwrap_or_else(|| RetailWorldShaderSnapshot::initialized_for_level(nsd.level()));
+    let mut local_world_shader_render_state = RetailWorldShaderRenderState::default();
+    let world_shader_render_state =
+        world_shader_render_state.unwrap_or(&mut local_world_shader_render_state);
+    let world_dispatch_active = world_display_mask & 1 != 0 && !graph.worlds.is_empty();
+    update_world_shader_render_state(
+        world_shader_render_state,
+        world_shader_mode,
+        world_shader_snapshot,
+        graph.zone_header.graphics.far_color,
+        world_dispatch_active,
+        !visible_polygons.is_empty(),
+    );
     let ripple_wave = if world_shader_mode == WorldShaderMode::Ripple {
         if builder
             .ripple
@@ -803,7 +974,16 @@ fn build_retail_scene_cached(
     for quad in &prepared_objects.quads {
         page_ids.insert(quad.texture_page.raw());
     }
-    let resident_texture_pages = resident_texture_pages(nsd, nsf, &graph.zone_header)?;
+    let resident_texture_pages = texture_frame_snapshot.map_or_else(
+        || resident_texture_pages(nsd, nsf, &graph.zone_header),
+        |snapshot| {
+            Ok(snapshot
+                .slots()
+                .iter()
+                .filter_map(|binding| binding.map(|binding| binding.eid.raw()))
+                .collect())
+        },
+    )?;
     page_ids.retain(|page| resident_texture_pages.contains(page));
     if page_ids.len() > RETAIL_TEXTURE_PAGE_SLOTS {
         return Err(scene_error(format!(
@@ -812,14 +992,27 @@ fn build_retail_scene_cached(
         )));
     }
 
-    install_missing_texture_pages(
-        &mut builder.texture_cache,
-        &mut builder.texture_pages,
-        &mut builder.diagnostics,
-        nsf,
-        nsf_bytes,
-        &page_ids,
-    )?;
+    if let Some(snapshot) = texture_frame_snapshot {
+        install_texture_frame_snapshot(
+            &mut builder.texture_cache,
+            &mut builder.texture_pages,
+            &mut builder.texture_page_generations,
+            &mut builder.diagnostics,
+            nsf,
+            nsf_bytes,
+            snapshot,
+        )?;
+    } else {
+        install_missing_texture_pages(
+            &mut builder.texture_cache,
+            &mut builder.texture_pages,
+            &mut builder.texture_page_generations,
+            &mut builder.diagnostics,
+            nsf,
+            nsf_bytes,
+            &page_ids,
+        )?;
+    }
     builder.texture_cache.begin_frame();
 
     let world_translations = graph
@@ -841,7 +1034,10 @@ fn build_retail_scene_cached(
             }
         })
         .collect::<Vec<_>>();
-    let world_fog_cutoffs = if world_shader_mode == WorldShaderMode::Fog {
+    let world_fog_cutoffs = if matches!(
+        world_shader_mode,
+        WorldShaderMode::Fog | WorldShaderMode::Dark
+    ) {
         graph
             .worlds
             .iter()
@@ -852,7 +1048,7 @@ fn build_retail_scene_cached(
                     0,
                     graph.zone_header.graphics.unknown_b_to_e[0],
                     world.header.is_backdrop,
-                    true,
+                    world_shader_mode == WorldShaderMode::Fog,
                 )
                 .map_err(|error| scene_error(format!("WGEO fog parameters: {error}")))
             })
@@ -908,17 +1104,53 @@ fn build_retail_scene_cached(
                 saturated_vertices = saturated_vertices.saturating_add(1);
             }
             screens[vertex_index] = projected.screen;
-            let color = if world_shader_mode == WorldShaderMode::Fog {
-                apply_fog(
+            let clear_channel = LightningChannel {
+                color: world_shader_snapshot.clear_color,
+                t: world_shader_snapshot.clear_t,
+            };
+            let effect_channel = LightningChannel {
+                color: world_shader_snapshot.effect_color,
+                t: world_shader_snapshot.effect_t,
+            };
+            let color = match world_shader_mode {
+                WorldShaderMode::Plain | WorldShaderMode::Ripple => vertex.color,
+                WorldShaderMode::Fog => apply_fog(
                     vertex.color,
                     projected.screen.z,
                     world_fog_cutoffs[world_index],
                     graph.zone_header.graphics.unknown_b_to_e[0],
                     graph.zone_header.graphics.far_color,
                 )
-                .map_err(|error| scene_error(format!("WGEO fog shader: {error}")))?
-            } else {
-                vertex.color
+                .map_err(|error| scene_error(format!("WGEO fog shader: {error}")))?,
+                WorldShaderMode::Lightning => {
+                    apply_lightning(vertex.color, vertex.effect, clear_channel, effect_channel)
+                        .map_err(|error| scene_error(format!("WGEO lightning shader: {error}")))?
+                }
+                WorldShaderMode::Dark => apply_dark(
+                    vertex.color,
+                    vertex.effect,
+                    projected.screen.z,
+                    world_fog_cutoffs[world_index],
+                    graph.zone_header.graphics.unknown_b_to_e[0],
+                    clear_channel,
+                    effect_channel,
+                )
+                .map_err(|error| scene_error(format!("WGEO dark shader: {error}")))?,
+                WorldShaderMode::Dark2 => apply_dark2(
+                    vertex.color,
+                    vertex.effect,
+                    projected.screen,
+                    world_translations[world_index],
+                    Dark2Parameters {
+                        illumination: world_shader_snapshot.dark2_illumination,
+                        shift_add: world_shader_snapshot.dark2_shift_add,
+                        shift_sub: world_shader_snapshot.dark2_shift_sub,
+                        ambient_effect_clear: world_shader_snapshot.dark2_ambient_clear,
+                        ambient_effect_set: world_shader_snapshot.dark2_ambient_effect,
+                        target: world_shader_render_state.far_color1,
+                    },
+                )
+                .map_err(|error| scene_error(format!("WGEO Dark2 shader: {error}")))?,
             };
             colors[vertex_index] = Rgba8 {
                 r: color[0],
@@ -1016,62 +1248,160 @@ fn build_retail_scene_cached(
     let submitted_polygons = world_commands.len();
     let mut object_commands = Vec::new();
     let mut skipped_object_textured_polygons = 0_usize;
-    for object in &prepared_objects.objects {
-        for (emission_index, polygon) in object.polygons.iter().enumerate() {
-            let primitive = match polygon.material {
-                ObjectMaterial::Color(color) => {
-                    PrimitiveCommand::ColoredTriangle(ColoredTriangle {
-                        vertices: polygon.vertices.map(|vertex| ColoredVertex {
-                            position: vertex.position,
-                            color: vertex.color,
-                        }),
-                        blend: blend_mode(color.semi_transparency()),
-                        style: PrimitiveStyle::Fill,
-                    })
-                }
-                ObjectMaterial::Texture {
-                    color,
-                    texture_page,
-                    region,
-                } => {
-                    if !resident_texture_pages.contains(&texture_page.raw()) {
-                        skipped_object_textured_polygons =
-                            skipped_object_textured_polygons.saturating_add(1);
-                        continue;
+    let mut submitted_object_polygons = 0_usize;
+    let mut submitted_object_quads = 0_usize;
+    for (render_index, render_object) in render_objects.iter().enumerate() {
+        if let Some(frame_snapshot) = texture_frame_snapshot {
+            install_texture_frame_snapshot(
+                &mut builder.texture_cache,
+                &mut builder.texture_pages,
+                &mut builder.texture_page_generations,
+                &mut builder.diagnostics,
+                nsf,
+                nsf_bytes,
+                render_object
+                    .texture_frame_snapshot
+                    .unwrap_or(frame_snapshot),
+            )?;
+        }
+        for object in prepared_objects
+            .objects
+            .iter()
+            .filter(|object| object.render_index == render_index)
+        {
+            for (emission_index, polygon) in object.polygons.iter().enumerate() {
+                let primitive = match polygon.material {
+                    ObjectMaterial::Color(color) => {
+                        PrimitiveCommand::ColoredTriangle(ColoredTriangle {
+                            vertices: polygon.vertices.map(|vertex| ColoredVertex {
+                                position: vertex.position,
+                                color: vertex.color,
+                            }),
+                            blend: blend_mode(color.semi_transparency()),
+                            style: PrimitiveStyle::Fill,
+                        })
                     }
-                    let reference = RetailTextureReference::new(
-                        TpagReference::new(texture_page),
-                        TextureInfo2 { color, region },
-                    );
-                    let Ok(layout) = reference.layout() else {
-                        skipped_object_textured_polygons =
-                            skipped_object_textured_polygons.saturating_add(1);
-                        continue;
-                    };
-                    let Ok(cached) = builder.texture_cache.load(layout.request) else {
-                        skipped_object_textured_polygons =
-                            skipped_object_textured_polygons.saturating_add(1);
-                        continue;
-                    };
-                    let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
-                        *handle
-                    } else {
-                        let next = u64::try_from(texture_handles.len())
-                            .ok()
-                            .and_then(|value| value.checked_add(1))
-                            .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
-                        let handle = TextureHandle::new(next);
-                        texture_handles.insert(layout.request, handle);
-                        handle
-                    };
-                    textures
-                        .entry(output_handle)
-                        .or_insert_with(|| Arc::clone(&cached.pixels));
-                    let uvs = layout.coordinates.cache_uvs(cached.content_uv);
-                    PrimitiveCommand::TexturedTriangle(TexturedTriangle {
+                    ObjectMaterial::Texture {
+                        color,
+                        texture_page,
+                        region,
+                    } => {
+                        if !resident_texture_pages.contains(&texture_page.raw()) {
+                            skipped_object_textured_polygons =
+                                skipped_object_textured_polygons.saturating_add(1);
+                            continue;
+                        }
+                        let reference = RetailTextureReference::new(
+                            TpagReference::new(texture_page),
+                            TextureInfo2 { color, region },
+                        );
+                        let Ok(layout) = reference.layout() else {
+                            skipped_object_textured_polygons =
+                                skipped_object_textured_polygons.saturating_add(1);
+                            continue;
+                        };
+                        let Ok(cached) = builder.texture_cache.load(layout.request) else {
+                            skipped_object_textured_polygons =
+                                skipped_object_textured_polygons.saturating_add(1);
+                            continue;
+                        };
+                        let output_handle =
+                            if let Some(handle) = texture_handles.get(&layout.request) {
+                                *handle
+                            } else {
+                                let next = u64::try_from(texture_handles.len())
+                                    .ok()
+                                    .and_then(|value| value.checked_add(1))
+                                    .ok_or_else(|| {
+                                        scene_error("retail texture handle count overflows")
+                                    })?;
+                                let handle = TextureHandle::new(next);
+                                texture_handles.insert(layout.request, handle);
+                                handle
+                            };
+                        textures
+                            .entry(output_handle)
+                            .or_insert_with(|| Arc::clone(&cached.pixels));
+                        let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+                        PrimitiveCommand::TexturedTriangle(TexturedTriangle {
+                            vertices: std::array::from_fn(|index| TexturedVertex {
+                                position: polygon.vertices[index].position,
+                                color: polygon.vertices[index].color,
+                                uv: Uv {
+                                    u: uvs[index][0],
+                                    v: uvs[index][1],
+                                },
+                            }),
+                            texture: output_handle,
+                            blend: layout.request.blend_mode,
+                        })
+                    }
+                };
+                object_commands.push((
+                    object.render_index,
+                    emission_index,
+                    RetailSceneCommand {
+                        depth: polygon.ordering_depth,
+                        source: CommandSource::Object {
+                            handle: object.handle,
+                            part: polygon.source_part,
+                        },
+                        primitive,
+                    },
+                ));
+                submitted_object_polygons = submitted_object_polygons.saturating_add(1);
+            }
+        }
+        for quad in prepared_objects
+            .quads
+            .iter()
+            .filter(|quad| quad.render_index == render_index)
+        {
+            if !resident_texture_pages.contains(&quad.texture_page.raw()) {
+                skipped_object_textured_polygons =
+                    skipped_object_textured_polygons.saturating_add(1);
+                continue;
+            }
+            let reference =
+                RetailTextureReference::new(TpagReference::new(quad.texture_page), quad.texture);
+            let Ok(layout) = reference.layout() else {
+                skipped_object_textured_polygons =
+                    skipped_object_textured_polygons.saturating_add(1);
+                continue;
+            };
+            let Ok(cached) = builder.texture_cache.load(layout.request) else {
+                skipped_object_textured_polygons =
+                    skipped_object_textured_polygons.saturating_add(1);
+                continue;
+            };
+            let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
+                *handle
+            } else {
+                let next = u64::try_from(texture_handles.len())
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
+                let handle = TextureHandle::new(next);
+                texture_handles.insert(layout.request, handle);
+                handle
+            };
+            textures
+                .entry(output_handle)
+                .or_insert_with(|| Arc::clone(&cached.pixels));
+            let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+            object_commands.push((
+                quad.render_index,
+                usize::from(quad.part),
+                RetailSceneCommand {
+                    depth: quad.projected.ordering_depth,
+                    source: CommandSource::Object {
+                        handle: quad.handle,
+                        part: quad.part,
+                    },
+                    primitive: PrimitiveCommand::TexturedQuad(TexturedQuad {
                         vertices: std::array::from_fn(|index| TexturedVertex {
-                            position: polygon.vertices[index].position,
-                            color: polygon.vertices[index].color,
+                            position: quad.projected.vertices[index],
+                            color: quad.colors[index],
                             uv: Uv {
                                 u: uvs[index][0],
                                 v: uvs[index][1],
@@ -1079,79 +1409,11 @@ fn build_retail_scene_cached(
                         }),
                         texture: output_handle,
                         blend: layout.request.blend_mode,
-                    })
-                }
-            };
-            object_commands.push((
-                object.render_index,
-                emission_index,
-                RetailSceneCommand {
-                    depth: polygon.ordering_depth,
-                    source: CommandSource::Object {
-                        handle: object.handle,
-                        part: polygon.source_part,
-                    },
-                    primitive,
+                    }),
                 },
             ));
+            submitted_object_quads = submitted_object_quads.saturating_add(1);
         }
-    }
-    let submitted_object_polygons = object_commands.len();
-    let mut submitted_object_quads = 0_usize;
-    for quad in &prepared_objects.quads {
-        if !resident_texture_pages.contains(&quad.texture_page.raw()) {
-            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
-            continue;
-        }
-        let reference =
-            RetailTextureReference::new(TpagReference::new(quad.texture_page), quad.texture);
-        let Ok(layout) = reference.layout() else {
-            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
-            continue;
-        };
-        let Ok(cached) = builder.texture_cache.load(layout.request) else {
-            skipped_object_textured_polygons = skipped_object_textured_polygons.saturating_add(1);
-            continue;
-        };
-        let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
-            *handle
-        } else {
-            let next = u64::try_from(texture_handles.len())
-                .ok()
-                .and_then(|value| value.checked_add(1))
-                .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
-            let handle = TextureHandle::new(next);
-            texture_handles.insert(layout.request, handle);
-            handle
-        };
-        textures
-            .entry(output_handle)
-            .or_insert_with(|| Arc::clone(&cached.pixels));
-        let uvs = layout.coordinates.cache_uvs(cached.content_uv);
-        object_commands.push((
-            quad.render_index,
-            usize::from(quad.part),
-            RetailSceneCommand {
-                depth: quad.projected.ordering_depth,
-                source: CommandSource::Object {
-                    handle: quad.handle,
-                    part: quad.part,
-                },
-                primitive: PrimitiveCommand::TexturedQuad(TexturedQuad {
-                    vertices: std::array::from_fn(|index| TexturedVertex {
-                        position: quad.projected.vertices[index],
-                        color: quad.colors[index],
-                        uv: Uv {
-                            u: uvs[index][0],
-                            v: uvs[index][1],
-                        },
-                    }),
-                    texture: output_handle,
-                    blend: layout.request.blend_mode,
-                }),
-            },
-        ));
-        submitted_object_quads = submitted_object_quads.saturating_add(1);
     }
     // Source object primitives are head-inserted after all world primitives.
     // The Rust ordering table is FIFO inside a depth bucket, so reverse the
@@ -2164,6 +2426,7 @@ fn polygon_with_map_path_mask(
 fn install_missing_texture_pages(
     texture_cache: &mut TextureCache,
     texture_pages: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    texture_page_generations: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
     diagnostics: &mut RetailSceneCacheDiagnostics,
     nsf: &Nsf,
     nsf_bytes: &[u8],
@@ -2189,6 +2452,54 @@ fn install_missing_texture_pages(
             .install_page(slot, raw_eid, page.bytes().to_vec())
             .map_err(|error| scene_error(format!("install spawn TPAG: {error}")))?;
         texture_pages[slot] = Some(raw_eid);
+        texture_page_generations[slot] = None;
+        diagnostics.texture_page_installs = diagnostics.texture_page_installs.saturating_add(1);
+    }
+    Ok(())
+}
+
+fn install_texture_frame_snapshot(
+    texture_cache: &mut TextureCache,
+    texture_pages: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    texture_page_generations: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
+    diagnostics: &mut RetailSceneCacheDiagnostics,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    snapshot: TextureFrameSnapshot,
+) -> Result<(), RetailSceneError> {
+    for slot in 0..RETAIL_TEXTURE_PAGE_SLOTS {
+        let desired = snapshot.slot(slot);
+        let desired_identity = desired.map(|binding| (binding.eid.raw(), binding.generation));
+        let installed_identity = texture_pages[slot].zip(texture_page_generations[slot]);
+        if installed_identity == desired_identity {
+            continue;
+        }
+
+        let Some(binding) = desired else {
+            texture_cache
+                .remove_page(slot)
+                .map_err(|error| scene_error(format!("remove retail TPAG slot {slot}: {error}")))?;
+            texture_pages[slot] = None;
+            texture_page_generations[slot] = None;
+            continue;
+        };
+        let reference = TpagReference::new(binding.eid);
+        let page = resolve_texture_page(nsf, nsf_bytes, reference).map_err(|error| {
+            scene_error(format!("resolve retail TPAG {}: {error}", binding.eid))
+        })?;
+        if page.page_index != binding.page {
+            return Err(scene_error(format!(
+                "retail TPAG {} snapshot names page {}, but mounted bytes resolve page {}",
+                binding.eid,
+                binding.page.get(),
+                page.page_index.get(),
+            )));
+        }
+        texture_cache
+            .install_page(slot, binding.eid.raw(), page.bytes().to_vec())
+            .map_err(|error| scene_error(format!("install retail TPAG slot {slot}: {error}")))?;
+        texture_pages[slot] = Some(binding.eid.raw());
+        texture_page_generations[slot] = Some(binding.generation);
         diagnostics.texture_page_installs = diagnostics.texture_page_installs.saturating_add(1);
     }
     Ok(())
@@ -2700,6 +3011,74 @@ mod tests {
             world_camera_matrix(0, 0, 0).values,
             [[0x1000, 0, 0], [0, -0x0a00, 0], [0, 0, -0x1000]]
         );
+    }
+
+    #[test]
+    fn world_shader_scratch_matches_dispatch_writes_empty_lists_and_dark2_retention() {
+        let mut state = RetailWorldShaderRenderState::default();
+        let mut shader = RetailWorldShaderSnapshot::initialized_for_level(LevelId::N_SANITY_BEACH);
+        shader.clear_color = [1, 2, 3];
+
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Plain,
+            shader,
+            [9, 8, 7],
+            true,
+            true,
+        );
+        assert_eq!(state.far_color1(), [9, 8, 7]);
+
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Dark2,
+            shader,
+            [6, 5, 4],
+            true,
+            true,
+        );
+        assert_eq!(state.far_color1(), [9, 8, 7]);
+
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Lightning,
+            shader,
+            [0; 3],
+            true,
+            true,
+        );
+        assert_eq!(state.far_color1(), [16, 32, 48]);
+
+        // Every wrapper except pure Fog returns before touching scratch when
+        // the selected SLST contains no polygons.
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Ripple,
+            shader,
+            [4, 5, 6],
+            true,
+            false,
+        );
+        assert_eq!(state.far_color1(), [16, 32, 48]);
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Fog,
+            shader,
+            [4, 5, 6],
+            true,
+            false,
+        );
+        assert_eq!(state.far_color1(), [4, 5, 6]);
+
+        update_world_shader_render_state(
+            &mut state,
+            WorldShaderMode::Fog,
+            shader,
+            [1, 1, 1],
+            false,
+            true,
+        );
+        assert_eq!(state.far_color1(), [4, 5, 6]);
     }
 
     #[test]
@@ -3892,6 +4271,96 @@ mod tests {
 
     #[test]
     #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn every_local_dynamic_shader_start_reaches_projected_world_colors() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        // Lightning, combined Dark, Dark2.
+        let mut level_counts = [0_usize; 3];
+        let mut vertex_counts = [0_usize; 3];
+        let mut changed_counts = [0_usize; 3];
+
+        for known in KNOWN_LEVELS.iter().filter(|known| known.bootable) {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = std::fs::read(&nsd_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+            let nsf_bytes = std::fs::read(&nsf_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let ldat = nsd.ldat().expect("bootable retail level has LDAT");
+            let path_index = u32::try_from(ldat.spawn_path_index)
+                .expect("retail spawn path index is non-negative");
+            let graph = parse_scene_graph(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneCacheKey {
+                    zone: ldat.spawn_zone,
+                    path_index,
+                },
+                0,
+                false,
+            )
+            .unwrap_or_else(|error| panic!("{} spawn graph: {error}", known.name));
+            let mode_index = match WorldShaderMode::from_flags(graph.zone_header.graphics.flags) {
+                WorldShaderMode::Lightning => 0,
+                WorldShaderMode::Dark => 1,
+                WorldShaderMode::Dark2 => 2,
+                _ => continue,
+            };
+            level_counts[mode_index] = level_counts[mode_index].saturating_add(1);
+            let scene = build_retail_scene(&nsd, &nsf, &nsf_bytes)
+                .unwrap_or_else(|error| panic!("{} dynamic scene: {error}", known.name));
+            for command in &scene.commands {
+                let CommandSource::World { polygon, .. } = command.source else {
+                    continue;
+                };
+                let polygon = PolygonId::from_raw(
+                    u16::try_from(polygon).expect("world provenance polygon fits its wire word"),
+                );
+                let geometry = &graph.worlds[usize::from(polygon.world_index)];
+                let polygon = geometry.polygons[usize::from(polygon.polygon_index)];
+                let output = match &command.primitive {
+                    PrimitiveCommand::ColoredTriangle(triangle) => {
+                        triangle.vertices.map(|vertex| vertex.color)
+                    }
+                    PrimitiveCommand::TexturedTriangle(triangle) => {
+                        triangle.vertices.map(|vertex| vertex.color)
+                    }
+                    _ => panic!("world geometry must produce triangles"),
+                };
+                for (index, color) in output.into_iter().enumerate() {
+                    vertex_counts[mode_index] = vertex_counts[mode_index].saturating_add(1);
+                    let source =
+                        geometry.vertices[usize::from(polygon.vertex_indices[index])].color;
+                    if [color.r, color.g, color.b] != source {
+                        changed_counts[mode_index] = changed_counts[mode_index].saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        for index in 0..3 {
+            assert!(level_counts[index] > 0, "dynamic mode {index} has no start");
+            assert!(
+                vertex_counts[index] > 0,
+                "dynamic mode {index} has no vertices"
+            );
+            assert!(
+                changed_counts[index] > 0,
+                "dynamic mode {index} never changed projected color"
+            );
+        }
+        eprintln!(
+            "dynamic starts={level_counts:?}, vertices={vertex_counts:?}, changed={changed_counts:?}"
+        );
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
     fn n_sanity_gool_objects_project_through_the_pair_scoped_scene() {
         const RETAIL_GLOBAL_WORDS: usize = 256;
         const RETAIL_INSTRUCTION_BUDGET: usize = 67;
@@ -4035,6 +4504,430 @@ mod tests {
         assert!(peak.submitted_object_polygons > 0);
         assert!(builder.object_models.len() <= RETAIL_OBJECT_MODEL_CACHE_FRAMES);
         assert_eq!(builder.object_models.len(), builder.object_model_lru.len());
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn n_sanity_browser_order_submits_the_authored_crash_model() {
+        const RETAIL_GLOBAL_WORDS: usize = 256;
+        const RETAIL_INSTRUCTION_BUDGET: usize = 67;
+        const MAXIMUM_BOOT_FRAMES: u32 = 60;
+
+        fn mix_fingerprint(fingerprint: &mut u64, bytes: &[u8]) {
+            for byte in bytes {
+                *fingerprint ^= u64::from(*byte);
+                *fingerprint = fingerprint.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let level = LevelId::N_SANITY_BEACH;
+        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+        let nsd_bytes = std::fs::read(&nsd_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+        let nsf_bytes = std::fs::read(&nsf_path)
+            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+        let ldat = nsd.ldat().expect("N. Sanity Beach has LDAT");
+        let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+
+        // Reproduce the browser mount catalog and initial activation marker,
+        // rather than constructing an isolated Crash object or a synthetic
+        // renderer fixture.
+        let mut owned_zones = BTreeMap::new();
+        let mut lifecycle_zones = Vec::new();
+        for node in graph.zones() {
+            let entry =
+                typed_entry(&nsf, &nsd, node.eid, ZDAT_ENTRY_TYPE, "reachable ZDAT").unwrap();
+            let header = ZoneHeader::parse(
+                entry_item(entry, &nsf_bytes, 0, "reachable ZDAT header").unwrap(),
+            )
+            .unwrap();
+            let entities = (0..header.entity_count)
+                .map(|entity_index| {
+                    let item_index =
+                        usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+                    ZoneEntity::parse(
+                        entry_item(entry, &nsf_bytes, item_index, "reachable ZDAT entity").unwrap(),
+                    )
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+            owned_zones.insert(node.eid, entities);
+            lifecycle_zones.push(ZoneLifecycleZone::new(
+                node.eid,
+                header.display_flags,
+                header.neighbors.iter().copied(),
+                OrderedZoneLoadList::from(&header.load_list),
+            ));
+        }
+        let mut lifecycle = ZoneLifecycle::new(lifecycle_zones).unwrap();
+        lifecycle
+            .transition_with_marker(camera.location().path.zone, true)
+            .unwrap();
+
+        // Mirror the browser's initial pager registration/open order so the
+        // scene sees the real eight-slot TPAG snapshot for this mounted pair.
+        let mut pager = crust_sim::paging::Pager::new();
+        for page in &nsf.pages {
+            let entry_handles = match page {
+                NsfPage::Texture(_) => Vec::new(),
+                NsfPage::Entries(page) => page
+                    .entries
+                    .iter()
+                    .map(|entry| entry.handle)
+                    .collect::<Vec<_>>(),
+            };
+            pager.register_page(page.index(), entry_handles).unwrap();
+            if let NsfPage::Entries(page) = page {
+                for entry in &page.entries {
+                    pager.bind_eid(entry.eid, entry.handle).unwrap();
+                }
+            }
+        }
+        for pte in &nsd.page_table {
+            let page_index = pte.page_index();
+            if matches!(
+                nsf.pages.get(usize::try_from(page_index.get()).unwrap()),
+                Some(NsfPage::Texture(_))
+            ) {
+                pager.bind_page_eid(pte.eid, page_index).unwrap();
+            }
+        }
+        let initial_zone = lifecycle.current_zone().unwrap();
+        let load_list = lifecycle.zone(initial_zone).unwrap().load_list();
+        pager.set_current_texture_load_eids(load_list.entries().iter().copied());
+        for eid in load_list.entries() {
+            pager.open_eid(*eid).unwrap();
+        }
+        for page in load_list.pages() {
+            pager.open_page(*page).unwrap();
+        }
+
+        let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, level);
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: camera.location(),
+            graphics_flags: graph
+                .zone(camera.location().path.zone)
+                .unwrap()
+                .graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: lifecycle.active_neighbor_zones(),
+        });
+        runtime
+            .seed_platform_paging_state(
+                u32::try_from(pager.page_count()).unwrap(),
+                pager.resolved_pages(),
+                pager.page_reference_counts(),
+            )
+            .unwrap();
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        runtime
+            .create_retail_core_objects(camera.location().path.zone, &mut host)
+            .unwrap();
+        runtime
+            .create_retail_level_misc_object(camera.location().path.zone, &mut host)
+            .unwrap();
+
+        let mut builder = RetailSceneBuilder::new();
+        let mut shader_render_state = RetailWorldShaderRenderState::default();
+        let mut authored_submission = None;
+        for boot_frame in 1..=MAXIMUM_BOOT_FRAMES {
+            runtime.set_frame_timing(34, 34);
+            runtime
+                .set_pad_snapshot(0, RetailPadSnapshot::default())
+                .unwrap();
+
+            let neighbors = lifecycle
+                .next_frame_spawn_scan()
+                .into_iter()
+                .map(|candidate| NeighborZone {
+                    eid: candidate.zone,
+                    display_flags: candidate.display_flags,
+                    entities: owned_zones[&candidate.zone].as_slice(),
+                })
+                .collect::<Vec<_>>();
+            let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+            assert!(
+                attempts.iter().all(|attempt| {
+                    attempt.result.is_ok()
+                        || matches!(
+                            attempt.result,
+                            Err(crust_sim::retail_runtime::RuntimeError::Spawn(
+                                crust_sim::object_arena::SpawnError::SpawnBlocked { .. }
+                                    | crust_sim::object_arena::SpawnError::MainObjectAlreadyActive
+                            ))
+                        )
+                }),
+                "browser-order frame {boot_frame} reached an unexpected spawn failure: {attempts:?}"
+            );
+
+            let world_display_mask = runtime.current_display_mask();
+            let draw_count = runtime.draw_count();
+            let frame_stamp = runtime.next_frame_stamp();
+            runtime.advance_level_shader().unwrap();
+            let location_before = camera.location();
+            let camera_mode = graph.path(location_before.path).unwrap().camera_mode;
+            let main_before = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena));
+            let camera_step = if matches!(camera_mode, 5 | 6)
+                && runtime.current_display_mask() & (0x2 | 0x1_0000) == 0x2
+                && let Some(main) = main_before
+            {
+                let player = runtime.machine().object(main.vm()).unwrap();
+                let signed = |index| player.register(index).unwrap().cast_signed();
+                camera
+                    .update_follow(
+                        &graph,
+                        RetailCameraFollowInput {
+                            player_translation: Vec3 {
+                                x: signed(process_register::TRANSLATION_X),
+                                y: signed(process_register::TRANSLATION_Y),
+                                z: signed(process_register::TRANSLATION_Z),
+                            },
+                            player_cam_zoom: signed(process_register::CAMERA_ZOOM),
+                            held_buttons: 0,
+                            level_id: i32::try_from(level.get()).unwrap(),
+                            frames_elapsed: runtime.machine().frames_elapsed(),
+                            gem_stamp: 0,
+                        },
+                    )
+                    .unwrap()
+            } else {
+                camera.update(&graph, RetailCameraInput::default()).unwrap()
+            };
+            apply_pbak_camera_effects(
+                level,
+                &graph,
+                &mut lifecycle,
+                &mut runtime,
+                &mut host,
+                &camera_step,
+            )
+            .unwrap();
+            refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, camera_step.after)
+                .unwrap();
+            let pose = camera.pose(&graph).unwrap();
+            runtime.set_frame_context(camera_step.game_state, camera.rotation_xz(&graph).unwrap());
+            runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+                pose.translation,
+                pose.rotation_yxz,
+                projection_distance(ldat.field_of_view).unwrap(),
+            ));
+            let world_shader_snapshot = runtime.world_shader_snapshot();
+            let texture_frame_snapshot = pager.texture_frame_snapshot();
+            let frame = runtime
+                .run_frame(&mut host, RETAIL_INSTRUCTION_BUDGET)
+                .unwrap();
+            assert!(
+                frame
+                    .executions
+                    .iter()
+                    .all(|execution| execution.result.is_ok()),
+                "browser-order frame {boot_frame} reached a checked GOOL failure: {frame:?}"
+            );
+
+            let main = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena))
+                .expect("N. Sanity browser mount must create its main Crash object");
+            let objects = runtime.render_objects().unwrap();
+            let crash = objects
+                .iter()
+                .find(|object| object.object == main)
+                .expect("the live main object must be present in the render snapshot");
+            let program = crash
+                .program
+                .expect("Crash retains its GOOL program identity");
+            assert_eq!(program.global_eid().name().as_deref(), Some("WillC"));
+            let Some(source) = crash.animation_source.as_ref() else {
+                continue;
+            };
+            let AnimationSource::ItemFive(reference) = source else {
+                panic!("Crash idle must use its WillC item-five descriptor: {source:?}");
+            };
+            assert_eq!(crash.animation_reference, Some(*reference));
+            let global =
+                typed_entry(&nsf, &nsd, program.global_eid(), 11, "Crash GOOL program").unwrap();
+            let animations = entry_item(global, &nsf_bytes, 5, "Crash GOOL animations").unwrap();
+            let descriptor = parse_gool_animation_descriptor(
+                animations,
+                usize::try_from(reference.offset()).unwrap(),
+            )
+            .unwrap();
+            let GoolAnimationDescriptor::Vertex(vertex) = descriptor else {
+                panic!("Crash idle descriptor must be a vertex animation: {descriptor:?}");
+            };
+            assert_eq!(vertex.model_eid.name().as_deref(), Some("WiI1V"));
+            let model_frame = u16::try_from(crash.animation_frame >> 8).unwrap();
+            assert!(model_frame < u16::from(vertex.header.length));
+            let model =
+                load_object_model_frame(&nsd, &nsf, &nsf_bytes, vertex.model_eid, model_frame)
+                    .unwrap();
+            assert_eq!(model.frame.vertex_count(), 381);
+            assert_eq!(model.frame.header.vertex_count, 381);
+            assert_eq!(
+                model.frame.header.geometry_eid.name().as_deref(),
+                Some("WillG")
+            );
+            assert_eq!(model.geometry.header.polygon_count, 732);
+            assert_eq!(model.geometry.polygons.len(), 732);
+
+            let scene = builder
+                .build_at_progress_with_runtime_snapshots(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    RetailSceneProgressLocation {
+                        zone: camera_step.after.path.zone,
+                        path_index: camera_step.after.path.index,
+                        path_progress: camera_step.after.progress.raw(),
+                        frame_stamp,
+                        draw_count,
+                    },
+                    true,
+                    &objects,
+                    Some(main),
+                    world_display_mask,
+                    ldat.field_of_view,
+                    None,
+                    None,
+                    texture_frame_snapshot,
+                    world_shader_snapshot,
+                    &mut shader_render_state,
+                )
+                .unwrap_or_else(|error| panic!("browser-order frame {boot_frame}: {error}"));
+            let commands = scene
+                .commands
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command.source,
+                        CommandSource::Object { handle, .. }
+                            if handle == u32::from(main.vm().get())
+                    )
+                })
+                .collect::<Vec<_>>();
+            if commands.is_empty() {
+                continue;
+            }
+
+            let mut source_parts = BTreeSet::new();
+            let mut command_fingerprint = 0xcbf2_9ce4_8422_2325_u64;
+            for command in &commands {
+                let CommandSource::Object { part, .. } = command.source else {
+                    unreachable!();
+                };
+                assert!(
+                    source_parts.insert(part),
+                    "Crash polygon {part} was submitted twice"
+                );
+                mix_fingerprint(&mut command_fingerprint, &command.depth.to_le_bytes());
+                mix_fingerprint(&mut command_fingerprint, &part.to_le_bytes());
+                let polygon = model.geometry.polygons[usize::from(part)];
+                match (
+                    model.geometry.material_for_polygon(polygon).unwrap(),
+                    &command.primitive,
+                ) {
+                    (ObjectMaterial::Color(_), PrimitiveCommand::ColoredTriangle(triangle)) => {
+                        mix_fingerprint(&mut command_fingerprint, &[0, triangle.blend as u8]);
+                        mix_fingerprint(
+                            &mut command_fingerprint,
+                            &[u8::from(triangle.style == PrimitiveStyle::Wireframe)],
+                        );
+                        for vertex in triangle.vertices {
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.x.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.y.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.z.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.color.to_legacy_u32().to_le_bytes(),
+                            );
+                        }
+                    }
+                    (
+                        ObjectMaterial::Texture { .. },
+                        PrimitiveCommand::TexturedTriangle(triangle),
+                    ) => {
+                        mix_fingerprint(&mut command_fingerprint, &[1, triangle.blend as u8]);
+                        mix_fingerprint(
+                            &mut command_fingerprint,
+                            &triangle.texture.get().to_le_bytes(),
+                        );
+                        for vertex in triangle.vertices {
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.x.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.y.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.position.z.to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.color.to_legacy_u32().to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.uv.u.to_bits().to_le_bytes(),
+                            );
+                            mix_fingerprint(
+                                &mut command_fingerprint,
+                                &vertex.uv.v.to_bits().to_le_bytes(),
+                            );
+                        }
+                    }
+                    (material, primitive) => {
+                        panic!("Crash polygon {part} material {material:?} emitted {primitive:?}")
+                    }
+                }
+            }
+            assert!(scene.stats.submitted_object_polygons >= commands.len());
+            authored_submission = Some((
+                boot_frame,
+                model_frame,
+                commands.len(),
+                source_parts,
+                command_fingerprint,
+            ));
+            break;
+        }
+
+        let (boot_frame, model_frame, command_count, source_parts, command_fingerprint) =
+            authored_submission
+                .expect("the bounded browser-order boot must submit authored Crash geometry");
+        eprintln!(
+            "N. Sanity browser-order Crash frame {boot_frame}: model frame {model_frame}, {command_count}/732 authored TGEO triangles, command fingerprint {command_fingerprint:#018x}"
+        );
+        assert_eq!((boot_frame, model_frame, command_count), (2, 0, 322));
+        assert_eq!(command_fingerprint, 0xc193_51b9_ca5b_0c36);
+        assert_eq!(command_count, source_parts.len());
+        assert!(source_parts.iter().all(|part| usize::from(*part) < 732));
     }
 
     #[test]
@@ -4203,7 +5096,8 @@ mod tests {
             .unwrap();
         runtime.run_frame(&mut host, 67).unwrap();
 
-        let prepared = prepare_pair_pbak(&nsd, &nsf, &nsf_bytes, &graph)
+        let mut random_seed_b = 0_u32;
+        let prepared = prepare_pair_pbak(&nsd, &nsf, &nsf_bytes, &graph, &mut random_seed_b)
             .unwrap()
             .expect("selected level has one PBAK recording");
         assert_eq!(prepared.snapshot.level, level);

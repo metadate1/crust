@@ -23,7 +23,7 @@ use std::{
 };
 
 use crust_formats::{
-    binary::Eid,
+    binary::{Eid, PageIndex},
     disc::{DiscImage, SectorLayout},
     stream::{
         KNOWN_LEVELS, LevelId, Nsd, Nsf, RetailPathId, RetailZoneGraph, StreamKind, StreamName,
@@ -36,20 +36,23 @@ use crust_sim::{
         RetailCameraPose, RetailCameraRuntime, RetailDeathCameraInput, RetailDeathCameraState,
     },
     gool::{
-        CodeAddress, CodeSegment, GoolProgramIdentity, RetailPadSnapshot,
-        RetailTransformVectorsCamera, VmEffect, process_register,
+        CodeAddress, CodeSegment, CollisionObjectReference, GoolProgramIdentity,
+        ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
+        RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect, process_register,
     },
     object_arena::{NeighborZone, SpawnError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
-        NsfProgramError, NsfProgramHost, RetailLevelStateContext, RetailRestartOutcome,
-        RetailRuntime, RetailSessionCarry, RuntimeError, RuntimeObjectHandle, ZoneTerminationMode,
+        NsfProgramError, NsfProgramHost, ProgramHost, RetailLevelStateContext,
+        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RuntimeError, RuntimeObjectHandle,
+        ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
 
 const GLOBAL_WORDS: usize = 256;
+const DOCTOR_OBJECT_GLOBAL: usize = 16;
 const BOX_COUNT_GLOBAL: usize = 62;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
@@ -768,6 +771,15 @@ struct OwnedZone {
     entities: Vec<ZoneEntity>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PagingTraceEntry {
+    frame: u32,
+    object: VmObjectHandle,
+    operation: PagingHostOperation,
+    eid: Eid,
+    page: PageIndex,
+}
+
 #[derive(Debug)]
 struct LevelSurvey {
     level: LevelId,
@@ -789,6 +801,7 @@ struct LevelSurvey {
     faulted_objects: usize,
     effect_counts: BTreeMap<&'static str, u64>,
     first_effect_samples: BTreeMap<&'static str, String>,
+    paging_trace: Vec<PagingTraceEntry>,
     issue_counts: BTreeMap<&'static str, u64>,
     first_issue: Option<String>,
     fault_contexts: BTreeSet<String>,
@@ -836,6 +849,7 @@ impl LevelSurvey {
             faulted_objects: 0,
             effect_counts: BTreeMap::new(),
             first_effect_samples: BTreeMap::new(),
+            paging_trace: Vec::new(),
             issue_counts: BTreeMap::new(),
             first_issue: None,
             fault_contexts: BTreeSet::new(),
@@ -949,12 +963,28 @@ impl LevelSurvey {
         self.last_death_camera_pose = Some((frame, pose));
     }
 
-    fn record_effect(&mut self, effect: &VmEffect) {
+    fn record_effect(&mut self, frame: u32, effect: &VmEffect) {
         let kind = effect_kind(effect);
         *self.effect_counts.entry(kind).or_default() += 1;
         self.first_effect_samples
             .entry(kind)
             .or_insert_with(|| format!("{effect:?}"));
+        if let VmEffect::Paging {
+            object,
+            operation,
+            eid,
+            page,
+            ..
+        } = effect
+        {
+            self.paging_trace.push(PagingTraceEntry {
+                frame,
+                object: *object,
+                operation: *operation,
+                eid: *eid,
+                page: *page,
+            });
+        }
     }
 
     fn summary(&self) -> String {
@@ -1759,7 +1789,7 @@ fn survey_pair_with_runtime(
             }
         }
         for effect in &report.effects {
-            survey.record_effect(effect);
+            survey.record_effect(frame, effect);
             if let VmEffect::Transition(next_lid) = effect {
                 survey.next_lid.get_or_insert((frame, *next_lid));
             }
@@ -2033,6 +2063,222 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
             dirty.join("\n")
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_active_input_keeps_dark2_alive_across_doctor_pool_reclaim() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x28);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Lights Out");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Lights Out's local stream pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::DirectionAndButtonSweep,
+        DEFAULT_SURVEY_FRAMES,
+    )
+    .expect("Lights Out must continue past the frame-240 Dark2 shader boundary");
+
+    assert_eq!(survey.frames, DEFAULT_SURVEY_FRAMES);
+    assert_eq!(
+        survey.restarts,
+        1,
+        "the characterized input must exercise the doctor teardown path: {}",
+        survey.summary()
+    );
+    let doctor_word = runtime
+        .global_word(DOCTOR_OBJECT_GLOBAL)
+        .expect("the retail global table contains doctor");
+    let doctor = CollisionObjectReference::from_word(doctor_word)
+        .expect("Lights Out retains the authored non-null doctor pool pointer");
+    assert_eq!(
+        runtime.object_for_vm(doctor.object()),
+        None,
+        "the doctor identity must be reclaimed at the characterized boundary"
+    );
+    assert!(
+        runtime
+            .machine()
+            .retired_retail_translation(doctor.object())
+            .is_some(),
+        "the static native pool slot must retain its last initialized translation"
+    );
+    assert!(
+        survey.is_clean(),
+        "the stale-but-addressable native doctor slot must not fault Dark2: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn every_direct_bonus_boot_has_a_restartable_local_snapshot() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for level in [0x24, 0x25, 0x26, 0x33, 0x34].map(LevelId::new_const) {
+        let known = KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .expect("the retail level catalog contains every bonus stream");
+        let (nsd, nsf, nsf_bytes) =
+            parse_local_pair(&root, level).expect("the local bonus pair must parse");
+        let (survey, runtime) = survey_pair_with_runtime(
+            known.name,
+            level,
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+            LevelContextSource::FreshBoot,
+            SurveyInputProfile::DirectionAndButtonSweep,
+            DEFAULT_SURVEY_FRAMES,
+        )
+        .unwrap_or_else(|error| panic!("{} direct boot failed: {error}", known.name));
+
+        assert_eq!(survey.frames, DEFAULT_SURVEY_FRAMES, "{}", known.name);
+        assert_eq!(
+            runtime.saved_level_state().map(|snapshot| snapshot.level),
+            Some(level),
+            "{} must seed a current-level snapshot only for fresh direct boot",
+            known.name
+        );
+        if matches!(level.get(), 0x26 | 0x33 | 0x34) {
+            assert!(
+                survey.restarts >= 1,
+                "{} must exercise and survive a direct-boot death restart: {}",
+                known.name,
+                survey.summary()
+            );
+        }
+        assert!(
+            survey.is_clean(),
+            "{} direct bonus boot reached a checked boundary: {}",
+            known.name,
+            survey.summary()
+        );
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_idle_paging_matches_the_legal_360_frame_trace() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::N_SANITY_BEACH;
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains N. Sanity Beach");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("N. Sanity's local stream pair must parse");
+    let survey = survey_pair(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::Idle,
+        DEFAULT_SURVEY_FRAMES,
+    )
+    .expect("N. Sanity's 360-frame idle characterization must execute");
+
+    let entry = |frame, operation, name, page| PagingTraceEntry {
+        frame,
+        object: VmObjectHandle::new(6).expect("retail paging requester handle is valid"),
+        operation,
+        eid: Eid::from_name(name).expect("characterized paging EID is valid"),
+        page: PageIndex::new(page),
+    };
+    let expected = [
+        entry(2, PagingHostOperation::Open, "WiI1V", 63),
+        entry(2, PagingHostOperation::Open, "WillG", 16),
+        entry(3, PagingHostOperation::Open, "WiI2V", 69),
+        entry(3, PagingHostOperation::Open, "WillG", 16),
+        entry(30, PagingHostOperation::Close, "WiI1V", 63),
+        entry(30, PagingHostOperation::Close, "WillG", 16),
+        entry(30, PagingHostOperation::Open, "WiI3V", 75),
+        entry(30, PagingHostOperation::Open, "WillG", 16),
+        entry(46, PagingHostOperation::Close, "WiI2V", 69),
+        entry(46, PagingHostOperation::Close, "WillG", 16),
+        entry(46, PagingHostOperation::Open, "WiI4V", 65),
+        entry(46, PagingHostOperation::Open, "WillG", 16),
+        entry(83, PagingHostOperation::Close, "WiI3V", 75),
+        entry(83, PagingHostOperation::Close, "WillG", 16),
+        entry(83, PagingHostOperation::Open, "WiI5V", 66),
+        entry(83, PagingHostOperation::Open, "WillG", 16),
+        entry(120, PagingHostOperation::Close, "WiI4V", 65),
+        entry(120, PagingHostOperation::Close, "WillG", 16),
+        entry(120, PagingHostOperation::Open, "WiI6V", 70),
+        entry(120, PagingHostOperation::Open, "WillG", 16),
+        entry(145, PagingHostOperation::Close, "WiI5V", 66),
+        entry(145, PagingHostOperation::Close, "WillG", 16),
+        entry(194, PagingHostOperation::Close, "WiI6V", 70),
+        entry(194, PagingHostOperation::Close, "WillG", 16),
+    ];
+    assert_eq!(survey.frames, DEFAULT_SURVEY_FRAMES);
+    assert_eq!(survey.paging_trace, expected);
+
+    let mut opens = 0_u32;
+    let mut closes = 0_u32;
+    let mut probes = 0_u32;
+    let mut per_eid_delta = BTreeMap::<Eid, i32>::new();
+    for request in &survey.paging_trace {
+        match request.operation {
+            PagingHostOperation::Open => {
+                opens += 1;
+                *per_eid_delta.entry(request.eid).or_default() += 1;
+            }
+            PagingHostOperation::Close => {
+                closes += 1;
+                *per_eid_delta.entry(request.eid).or_default() -= 1;
+            }
+            PagingHostOperation::Probe => probes += 1,
+        }
+    }
+    assert_eq!((opens, closes, probes), (12, 12, 0));
+    assert!(
+        per_eid_delta.values().all(|delta| *delta == 0),
+        "every characterized paging EID must finish with a zero open/close delta: {per_eid_delta:?}"
+    );
+
+    // This asset-only host intentionally uses ProgramHost's deterministic
+    // acknowledgement. Browser tests separately characterize slot exhaustion.
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    for request in expected {
+        let response = host
+            .handle_paging_request(PagingHostRequest {
+                object: request.object,
+                operation: request.operation,
+                reference: request.page.tagged(),
+                eid: request.eid,
+                page: request.page,
+                was_resolved: false,
+            })
+            .expect("the asset-only paging host is infallible");
+        assert_eq!(response, PagingHostResponse::Applied { evicted: None });
+    }
+    assert!(
+        survey.is_clean(),
+        "paging characterization reached a checked runtime boundary: {}",
+        survey.summary()
+    );
 }
 
 #[test]

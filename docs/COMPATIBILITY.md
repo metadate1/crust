@@ -24,8 +24,20 @@ gameplay path.
   state but continue rebuilding and presenting world/object snapshots while draw count stays fixed.
   Graphics-flag `0x100` worlds apply the source's pre-transform ripple only to effect-marked WGEO
   vertices. Its 16-cell wave uses the native seed/advance/wrap/absolute-value rules and the exact
-  level-specific rates. Pair-scoped state advances only for unpaused, nonempty ripple-world
-  submissions, so pause and hidden/empty display gaps freeze it independently of texture animation.
+  level-specific rates. Pair-scoped state advances only for an unpaused submission containing
+  visible ripple-world polygons. Pause or a world-hidden/empty submission freezes it independently
+  of texture animation; a later draw-skip presentation gate still performs the source transform
+  and advances the wave.
+  Lightning, combined Dark and Dark2 are also live. Their level-specific tables, random targets,
+  ruins colors, two-stamp thunder cooldown, doctor/Crash illumination choice and torch ramps are
+  updated before camera work, then frozen into the current world submission. The zero-initialized
+  process RNG-B is reconciled across shaders, PBAK selection and audio allocation. World dispatch
+  retains native `far_color1` scratch across mounts; Dark2 intentionally consumes the preceding
+  target, and hidden presentation frames still perform the real transform/state update. Dark2's
+  non-null `doctor` global is resolved as a retained physical pool-slot reference: its final
+  initialized translation survives reclamation, compact VM reuse in another slot cannot retarget
+  it, and physical LIFO slot reuse can. A per-global write epoch distinguishes a later assignment
+  that encodes the same 32-bit tagged VM word.
 - Source-derived camera modes 0/1/3, tapped auto-camera skipping and path/zone crossing drive the
   live scene. Modes 5/6 consume the hosted main object's transform, camera zoom, held input and
   prior frame stamp through checked `CamFollow` projection, neighbor selection and smoothing. The
@@ -52,9 +64,13 @@ gameplay path.
   Initial and global-call frames share the bounded process/register array at the parsed `init_sp`,
   and state links consult the validated target descriptor flags. Rebind runs captured once and
   target transition blocks synchronously, including nested calls/returns and hosted spawns. Checked
-  aligned code/storage/entry references,
-  paging cases one through six, every `0x85` transform-vector selector and every `0x8e` solid/color
-  selector are active, including their source-defined no-op cases. `SZON` performs the exact reverse
+  aligned code/storage/entry references, every `0x85` transform-vector selector and every `0x8e`
+  solid/color selector are active, including their source-defined no-op cases. Paging cases one/six
+  open, case two closes, and case three probes through a typed synchronous browser Pager request;
+  cases four/five remain local queries. Open exhaustion rolls back the VM's optimistic reference,
+  resident replacement reports and re-arms the evicted page, native-idempotent closes preserve
+  shared-page counts, probes do not mutate the Pager, and EID/page mismatches fail checked. `SZON`
+  performs the exact reverse
   current-header neighbor scan with inclusive wrapped Q24.8 rectangles and updates the linked
   object's zone only on a match. Normal, once, transition, event-service and interrupt code all
   complete typed audio calls synchronously before the following instruction. Execution,
@@ -100,10 +116,13 @@ gameplay path.
   copies. A graph-scoped sidecar preserves the last masks through fade-out, while the parsed user
   stream remains immutable.
 - Camera `LevelUpdate` effects drive a source-ordered zone lifecycle. Departed active zones receive
-  TERM in postorder, migrated objects survive, released subtrees clear typed VM/link/audio state,
-  old load lists close before new lists open, newly adjacent zones activate, and their objects scan
-  on the following cooperative frame. Display and animation masks latch with retail's one-frame
-  timing.
+  TERM in postorder under the old texture protection, migrated objects survive, and released
+  subtrees clear typed VM/link/audio state. On a normal transition, destination protection is
+  installed before old-list closes and new-list opens. A hard restart instead keeps old protection
+  through RESPAWN, TERM, and old-list closes, then switches immediately before the first restored
+  open. Each Pager delta is mirrored into the VM, newly adjacent zones activate, and their objects
+  scan on the following cooperative frame. Display and animation masks latch with retail's
+  one-frame timing.
 - Misc 12/7 synchronously visits the current header's forward neighbor list without filtering or
   deduplication. Each neighbor uses the live eight-root postorder TERM traversal, including immunity,
   migration, non-title Crash survival and persistent typed `ObjectZoneContext` target/sentinel
@@ -186,6 +205,12 @@ gameplay path.
   native null lifecycle zone; a child spawned by the PBAK caption uses the current camera ZDAT only
   for host environment/color initialization, matching the source `cur_zone` fallback without
   probing the `EID_NONE` sentinel.
+  `PbakChoose` counts trailing-`B` type-19 names in the NSD table, advances shared RNG-B for every
+  nonempty choice (including count one), constructs the source `pb`/index/level/`B` identifier and
+  retains that seed through the destination mount. The recorded absolute clock follows the newly
+  current frame after `PadUpdatePbak`; asynchronous mount time remains part of the ordinary native
+  clock, while authored pause is excluded. Armed playback preserves the prior loading/scene
+  framebuffer until Crash starts it.
 - Live SFX/music volume and mono options applied independently. Mounted type-12 ADIO item-zero
   samples are decoded and cached locally, controlled by GOOL's 24-voice protocol and mixed into
   WebAudio. ZDAT MIDI references resolve mounted type-13 MIDI and type-14 INST entries; decoded VAB
@@ -225,16 +250,18 @@ gameplay path.
   Initial Crash saves, checkpoint
   captures, in-stream restarts and cross-pair session carry are connected. Camera zone
   crossings now execute the ordered lifecycle, dynamic pager references, TERM/migration teardown
-  and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch is synchronous;
-  checked paging metadata is synchronous and does not claim retail asynchronous I/O timing.
+  and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch and GOOL paging
+  open/close/probe requests are synchronously coupled to the browser Pager and VM reference state;
+  this does not claim retail asynchronous I/O timing.
   Unsupported execution
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
   The previously recorded legally local 300-frame N. Sanity trace crossed the former ShadC
   executable 29/state-one animation-bound boundary using validated frame bounds instead of the
   source branch's uninitialized C locals. The current Crash-stamp pre/post-physics schedule and
   same-stamp collision tail pass the legally local corpus suite. All `0x85` and `0x8e` selectors
-  have checked source-defined behavior; broader object behavior, collision response, dynamic
-  lighting and full level progression remain incomplete. LEA-created process animation descriptors
+  have checked source-defined behavior; broader object behavior, collision response, pixel-level
+  rendering equivalence and full level progression remain incomplete. LEA-created process
+  animation descriptors
   of all five defined types are now parsed: vertex, sprite, text, and fragment descriptors use the
   ordinary checked bound/render paths, while font selections remain resource-only no-draw objects.
   Only same-object internal and register aliases have representable lifetimes. External-state,
@@ -264,20 +291,25 @@ gameplay path.
   hosted-main-object follow cameras drive subsequent path/zone scene commands. GOOL 3D
   SVTX/CVTX object models and current animation transforms are coupled to the same scene and texture
   manifest. Type-two sprites, type-five fragments, type-four text/font glyphs and status-B 2D CVTX
-  are coupled to the same ordered command/texture path. The pager now models the eight usable
-  native texture slots (physical slots 8–15), source-order free/stale/unprotected replacement,
+  are coupled to the same ordered command/texture path. The pager models the eight usable native
+  texture slots (physical slots 8–15), source-order free/stale/unprotected replacement,
   current-zone load-list protection and immutable generation snapshots; initial mount, restart and
-  zone transition install destination protection before opening pages. GOOL paging effects and
-  per-object generation snapshots are not yet synchronously replayed by the renderer, so
-  mid-frame paging-driven texture changes remain incomplete. Post-update object snapshots do honor
-  dynamic teardown and the current display mask.
+  zone transition install destination protection before opening pages. GOOL paging effects execute
+  synchronously against that Pager. The world and filter use one exact frame-start slot snapshot,
+  while every post-update/pre-child object display record replays its live
+  `(EID, generation, page)` map before command generation. Cached pre-eviction regions survive a
+  same-slot `A → B → A` sequence, uncached regions decode from the live mapping, and returning A
+  reuses its frozen internal generation. Dynamic teardown cannot retract an earlier display record.
   Twenty-two starts use fog/ripple/lightning/dark variants. Source-order flag dispatch now selects
   Dark2, combined fog/lightning, fog, ripple, lightning or plain transforms without allowing a
   lower-priority ripple bit to displace a fog/dark world. The source ripple displacement is live
   for selected ripple worlds, including its effect-vertex selection and submission-driven wave
   state. Fog uses the projected-depth cutoff, backdrop exemption, ZDAT far color and clamped
-  fixed-point color interpolation. Lightning, combined dark and Dark2 dynamic color state remain
-  incomplete. Object
+  fixed-point color interpolation. Lightning uses effect-bit channel selection and the complete
+  per-level fixed/random sequence state. Combined Dark applies that result before fog without the
+  pure-Fog backdrop exemption. Dark2 uses projected screen depth, camera-space world translation,
+  persistent renderer target color and the live doctor/Crash illumination plus ambient/distance
+  ramps. Object
   shader modes two and three and their source far-object
   rejection are live, as is the object-only `0x1000` fixed-camera substitution. Mode four is wired
   at the native display boundary with source-order player/pause selection and `dark_dist`; a legal
@@ -290,11 +322,12 @@ gameplay path.
   animation rather than type-four font text. Its five pieces render as
   `PAUSED / PUSH SELECT FOR MAP`, at the retail far ordering depth, with the authored 15-frame
   visible/15-frame hidden blink. This is covered by a legally local scene regression and an
-  on-cycle WebGL browser capture. Geometry command construction still consumes the complete arena
-  after GOOL, while the source interleaves each object's simulation and drawing during preorder
-  traversal; animation/frame, transform, render process flags, text font/arguments, effective
-  colors, live display mask and VM side effects are now captured at the native per-object boundary.
-  A later child link write cannot mutate an already-rendered parent snapshot. World geometry
+  on-cycle WebGL browser capture. Geometry command construction remains deferred until after GOOL,
+  but it consumes the ordered owned display-record list captured during preorder traversal rather
+  than re-reading the complete final arena. Animation/frame, transform, render process flags, text
+  font/arguments, effective colors, live display mask, VM side effects, and Pager slot state are
+  captured at the native per-object boundary. A later child link write, teardown, or reparent cannot
+  mutate or retract an already-rendered parent record. World geometry
   separately retains the pre-GOOL display mask, so an authored global-nine write during traversal
   cannot retroactively hide the world or be replaced by the end-of-frame next-mask latch. The
   current builder avoids reparsing an unchanged active graph,
@@ -335,6 +368,12 @@ gameplay path.
   source does. Both outgoing level-end broadcasts are
   clean. This deterministic first completion loop does not establish a browser playthrough or full
   retail parity.
+  All 43 selectable starts also completed a strict 360-frame direction/button sweep with no checked
+  runtime issue. The five directly bootable bonus streams receive a one-shot same-level snapshot
+  only when a fresh host boot encounters their source save-restricted spawn zone, making direct-
+  boot death/restart deterministic. Normal parent-to-bonus session mounts retain the parent
+  snapshot exactly. Authored `-2` completion after a synthetic direct boot still lacks a distinct
+  host return destination, so this is not evidence of a complete bonus round trip.
   Broader collision and later Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain
   open. A legally local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
   credits children, reaches at least 64 authored credits-child spawns, reuses arena generations,
@@ -384,8 +423,9 @@ arena/spawn tree and frame bounds, signed packed vertices, retail TPAG/CLUT/UV r
 object fixed-point projection/lighting/culling, presentation order, scheduling, paging, GOOL execution,
 collision, camera, title transitions, bonus returns, demo frames, card operations,
 storage envelopes, input, texture formats/cache/projection/blends, process-local animation payloads,
-world-ripple timing, invalid-initial-return reclamation, ADPCM, fixed-point ADSR, sample mixing and
-software synthesis. Property tests exercise parser/state-machine invariants where arbitrary input
+world-ripple timing, complete world Lightning/Dark/Dark2 state and fixed-point evaluation,
+shared-RNG/PBAK timing, invalid-initial-return reclamation, ADPCM, fixed-point ADSR, sample mixing
+and software synthesis. Property tests exercise parser/state-machine invariants where arbitrary input
 is useful.
 
 Browser checks and the exact exercised flows are recorded in [VERIFICATION.md](VERIFICATION.md).

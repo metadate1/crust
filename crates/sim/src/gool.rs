@@ -1999,7 +1999,14 @@ const fn sign_extend(value: u32, bits: u32) -> i32 {
     ((value << (32 - bits)) as i32) >> (32 - bits)
 }
 
-fn retail_random(maximum: u32, seed: &mut u32) -> u32 {
+/// Advances either native 32-bit retail random stream and reduces the result
+/// with the engine's exact signed-folding algorithm.
+///
+/// The explicit seed lets browser-owned subsystems preserve source ordering
+/// for process-global RNG-B without coupling their otherwise independent
+/// audio, PBAK, and lighting state. A zero maximum returns zero without
+/// advancing the stream, matching `_rand`.
+pub fn retail_random(maximum: u32, seed: &mut u32) -> u32 {
     if maximum == 0 {
         return 0;
     }
@@ -2166,8 +2173,11 @@ pub enum VmEffect {
     },
     Paging {
         object: ObjectHandle,
-        open: bool,
+        operation: PagingHostOperation,
         reference: u32,
+        eid: Eid,
+        page: PageIndex,
+        was_resolved: bool,
     },
     SpawnChildren {
         parent: ObjectHandle,
@@ -2472,6 +2482,47 @@ pub enum AudioHostResponse {
     ControlApplied,
 }
 
+/// Exact native operation performed by GOOL opcode `0x8b`.
+///
+/// `Probe` is source case three's `NSClose(ref, 0)`: it observes whether the
+/// reference is resolved but must not decrement the page reference count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PagingHostOperation {
+    Open,
+    Close,
+    Probe,
+}
+
+/// Pointer-free paging request exposed at the opcode's synchronous host
+/// boundary. The logical `reference` remains useful to deterministic VM
+/// traces, while `eid` and `page` let a platform pager operate without
+/// decoding a machine-private tagged handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PagingHostRequest {
+    pub object: ObjectHandle,
+    pub operation: PagingHostOperation,
+    pub reference: u32,
+    pub eid: Eid,
+    pub page: PageIndex,
+    /// Resolution state immediately before this opcode. A platform allocation
+    /// failure uses it to roll back the VM's optimistic logical handle.
+    pub was_resolved: bool,
+}
+
+/// Platform result for a synchronous GOOL paging request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PagingHostResponse {
+    Applied {
+        /// Resident texture page whose PTE was re-armed while the requested
+        /// page replaced its physical slot. Only an `Open` may evict, and the
+        /// displaced page must be distinct from the newly resolved page.
+        evicted: Option<PageIndex>,
+    },
+    /// Native `NSOpen` returned null because no physical/texture slot could be
+    /// materialized. This is an authored branch result, not a VM fault.
+    Unavailable,
+}
+
 /// Exact signed arguments passed by retail misc primary fifteen.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CardHostRequest {
@@ -2507,6 +2558,7 @@ pub enum VmError {
     InvalidInitialStackPointer(u32),
     InvalidPadPort(usize),
     InvalidSpawnId(u16),
+    InvalidRetailPoolSlot(u8),
     EntityPathTooLong(usize),
     EntityPathProgressOutOfBounds {
         progress: i32,
@@ -2559,6 +2611,8 @@ pub enum VmError {
     AudioHostRequestPending(ObjectHandle),
     MissingAudioHostRequest,
     MismatchedAudioHostResponse,
+    MismatchedPagingHostResponse,
+    InvalidPlatformPagingPage(PageIndex),
     UnsupportedReferenceOperand(u16),
     AnimationDataUnbound,
     InvalidStateProgramCounter {
@@ -3948,7 +4002,32 @@ pub struct Machine {
     /// reuse the same compact VM handle, so bare map membership cannot prove
     /// that the interpreter's original object still exists.
     object_incarnations: [u64; MAX_OBJECTS],
+    /// Physical native pool slot currently paired with each compact VM
+    /// handle. The runtime installs this after binding a VM object and clears
+    /// it on removal. Pointer-valued global writes snapshot this storage
+    /// identity before either allocator can reuse its independent handle.
+    retail_pool_slots_by_object: [Option<u8>; MAX_OBJECTS],
+    /// Last translation retained in each native object-pool slot after its
+    /// logical object is killed. Retail globals are raw pointers into a
+    /// statically allocated pool; the Dark2 level shader can therefore read a
+    /// killed doctor's final translation until that slot is reused. Keeping
+    /// only this bounded, initialized field models that defined storage
+    /// lifetime without exposing a stale Rust object or pointer.
+    retired_retail_translations: [Option<[i32; 3]>; MAX_OBJECTS],
+    /// Last initialized translation retained by each physical native object
+    /// pool slot. Compact VM handles and arena slots have different reuse
+    /// orders, so pointer-valued retail globals must resolve through this
+    /// storage identity rather than assuming both handles keep matching.
+    retired_retail_pool_translations: [Option<[i32; 3]>; MAX_OBJECTS],
     globals: Vec<u32>,
+    /// Physical pool slot captured when a checked global write receives a
+    /// live tagged object reference. Unchanged dangling words retain this
+    /// metadata across compact VM reuse just as native raw pointers retain
+    /// their static-pool address.
+    retail_pool_slots_by_global: Vec<Option<u8>>,
+    /// Monotonic write epochs distinguish a retained pointer from a later
+    /// assignment that happens to encode the same compact tagged reference.
+    global_write_epochs: Vec<u64>,
     effects: Vec<VmEffect>,
     pending_send_events: Vec<PendingSendEvent>,
     next_send_event_id: u64,
@@ -4009,7 +4088,12 @@ impl Machine {
         Self {
             objects: BTreeMap::new(),
             object_incarnations: [0; MAX_OBJECTS],
+            retail_pool_slots_by_object: [None; MAX_OBJECTS],
+            retired_retail_translations: [None; MAX_OBJECTS],
+            retired_retail_pool_translations: [None; MAX_OBJECTS],
             globals: vec![0; global_words],
+            retail_pool_slots_by_global: vec![None; global_words],
+            global_write_epochs: vec![0; global_words],
             effects: Vec::new(),
             pending_send_events: Vec::with_capacity(MAX_CALL_DEPTH),
             next_send_event_id: 1,
@@ -4283,14 +4367,60 @@ impl Machine {
 
     /// Writes one checked logical GOOL global word.
     pub fn set_global_word(&mut self, index: usize, value: u32) -> Result<(), VmError> {
-        *self
+        let previous = self
             .globals
-            .get_mut(index)
-            .ok_or(VmError::InvalidRegister(index))? = value;
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidRegister(index))?;
+        self.global_write_epochs
+            .get(index)
+            .ok_or(VmError::InvalidRegister(index))?;
+        self.retail_pool_slots_by_global
+            .get(index)
+            .ok_or(VmError::InvalidRegister(index))?;
+        let referenced_pool_slot =
+            CollisionObjectReference::from_word(value).and_then(|reference| {
+                self.retail_pool_slots_by_object
+                    .get(usize::from(reference.object().get()))
+                    .copied()
+                    .flatten()
+            });
+
+        self.globals[index] = value;
+        let epoch = &mut self.global_write_epochs[index];
+        *epoch = epoch.wrapping_add(1);
+        let retained_pool_slot = &mut self.retail_pool_slots_by_global[index];
+        if value == 0 {
+            *retained_pool_slot = None;
+        } else if let Some(pool_slot) = referenced_pool_slot {
+            *retained_pool_slot = Some(pool_slot);
+        } else if value != previous {
+            // Copying the same dangling native pointer retains its storage
+            // identity. A distinct unresolved word cannot inherit the prior
+            // pool slot merely because both values are malformed or stale.
+            *retained_pool_slot = None;
+        }
         if matches!(index, 69 | 102 | 103 | 104) {
             self.checkpoint_globals_changed_since_context = true;
         }
         Ok(())
+    }
+
+    /// Returns the number of checked writes observed for one global word.
+    pub(crate) fn global_word_write_epoch(&self, index: usize) -> Result<u64, VmError> {
+        self.global_write_epochs
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidRegister(index))
+    }
+
+    /// Returns the physical pool-storage identity captured by the latest
+    /// checked tagged-reference write to one global word.
+    pub(crate) fn retail_global_pool_slot(&self, index: usize) -> Result<Option<u8>, VmError> {
+        self.retail_pool_slots_by_global
+            .get(index)
+            .copied()
+            .ok_or(VmError::InvalidRegister(index))
     }
 
     /// Captures the exact persistent scalar globals serialized by the retail
@@ -5519,6 +5649,39 @@ impl Machine {
             .ok_or(VmError::UnknownObject(handle))
     }
 
+    /// Associates a live compact VM object with its validated physical
+    /// native pool slot before authored code can publish an object pointer.
+    pub(crate) fn bind_retail_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        pool_slot: u8,
+    ) -> Result<(), VmError> {
+        if usize::from(pool_slot) >= MAX_OBJECTS {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+        }
+        self.object(handle)?;
+        self.retail_pool_slots_by_object[usize::from(handle.get())] = Some(pool_slot);
+        Ok(())
+    }
+
+    /// Returns the last initialized translation stored in a now-free native
+    /// object-pool slot. Live-object lookup must always take precedence: pool
+    /// reuse makes the same native pointer refer to the replacement object.
+    #[must_use]
+    pub fn retired_retail_translation(&self, handle: ObjectHandle) -> Option<[i32; 3]> {
+        self.retired_retail_translations[usize::from(handle.get())]
+    }
+
+    /// Returns initialized storage retained by one physical native pool slot.
+    /// A live arena occupant must take precedence over this tombstone.
+    #[must_use]
+    pub(crate) fn retired_retail_pool_translation(&self, pool_slot: u8) -> Option<[i32; 3]> {
+        self.retired_retail_pool_translations
+            .get(usize::from(pool_slot))
+            .copied()
+            .flatten()
+    }
+
     /// Removes one checked VM object and nulls every inbound process link.
     /// Active synchronous event/interrupt frames cannot be removed midway;
     /// this keeps their stack-scoped argument tokens and return addresses from
@@ -5533,7 +5696,29 @@ impl Machine {
         }) {
             return Err(VmError::ActiveEventInvocation(handle));
         }
-        self.remove_object_unchecked(handle)
+        self.remove_object_unchecked(handle, None)
+    }
+
+    /// Removes a checked VM object while retaining its initialized transform
+    /// in the matching physical native pool slot.
+    pub(crate) fn remove_object_from_retail_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        pool_slot: u8,
+    ) -> Result<VmObject, VmError> {
+        if usize::from(pool_slot) >= MAX_OBJECTS {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+        }
+        let object = self.object(handle)?;
+        if object.call_stack.iter().any(|frame| {
+            matches!(
+                frame.behavior,
+                ReturnBehavior::EventService { .. } | ReturnBehavior::Interrupt { .. }
+            )
+        }) {
+            return Err(VmError::ActiveEventInvocation(handle));
+        }
+        self.remove_object_unchecked(handle, Some(pool_slot))
     }
 
     /// Removes an object during a synchronous host effect, including when that
@@ -5548,14 +5733,40 @@ impl Machine {
         handle: ObjectHandle,
     ) -> Result<VmObject, VmError> {
         self.object(handle)?;
-        self.remove_object_unchecked(handle)
+        self.remove_object_unchecked(handle, None)
     }
 
-    fn remove_object_unchecked(&mut self, handle: ObjectHandle) -> Result<VmObject, VmError> {
+    /// Host-termination form that also preserves physical pool-slot storage.
+    pub(crate) fn remove_object_for_host_termination_from_retail_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        pool_slot: u8,
+    ) -> Result<VmObject, VmError> {
+        if usize::from(pool_slot) >= MAX_OBJECTS {
+            return Err(VmError::InvalidRetailPoolSlot(pool_slot));
+        }
+        self.object(handle)?;
+        self.remove_object_unchecked(handle, Some(pool_slot))
+    }
+
+    fn remove_object_unchecked(
+        &mut self,
+        handle: ObjectHandle,
+        retail_pool_slot: Option<u8>,
+    ) -> Result<VmObject, VmError> {
         let removed = self
             .objects
             .remove(&handle)
             .ok_or(VmError::UnknownObject(handle))?;
+        let retired_translation = removed
+            .retail_transform()
+            .ok()
+            .map(|transform| transform.translation);
+        self.retired_retail_translations[usize::from(handle.get())] = retired_translation;
+        if let Some(pool_slot) = retail_pool_slot {
+            self.retired_retail_pool_translations[usize::from(pool_slot)] = retired_translation;
+        }
+        self.retail_pool_slots_by_object[usize::from(handle.get())] = None;
         self.advance_object_incarnation(handle);
         // A request currently inside its host callback must survive until the
         // runner observes the incarnation change and abandons it. An
@@ -5948,6 +6159,7 @@ impl Machine {
                             | VmEffect::SaveState(_)
                             | VmEffect::LoadState(_)
                             | VmEffect::ResetLevelGlobals { .. }
+                            | VmEffect::Paging { .. }
                     ) {
                         return Err(VmError::MissingHostEffect);
                     }
@@ -6911,6 +7123,132 @@ impl Machine {
         Ok(())
     }
 
+    /// Reconciles the VM's optimistic, pointer-free paging bookkeeping with
+    /// the platform allocator result before the next GOOL instruction runs.
+    pub fn complete_paging_host_request(
+        &mut self,
+        request: PagingHostRequest,
+        response: PagingHostResponse,
+    ) -> Result<(), VmError> {
+        match response {
+            PagingHostResponse::Applied { evicted } => {
+                if let Some(evicted) = evicted {
+                    if request.operation != PagingHostOperation::Open
+                        || evicted == request.page
+                        || !self.paging_loaded_pages.contains(&evicted)
+                    {
+                        return Err(VmError::MismatchedPagingHostResponse);
+                    }
+                    self.paging_resolved_pages.remove(&evicted);
+                }
+                if request.operation == PagingHostOperation::Open {
+                    // The VM resolves an entry optimistically before yielding
+                    // to the host. Reassert it after removing the displaced
+                    // page so a successful open can never invalidate itself.
+                    self.paging_resolved_pages.insert(request.page);
+                }
+                Ok(())
+            }
+            PagingHostResponse::Unavailable => {
+                if request.operation != PagingHostOperation::Open {
+                    return Err(VmError::MismatchedPagingHostResponse);
+                }
+                let references = self
+                    .paging_page_references
+                    .get_mut(&request.page)
+                    .ok_or(VmError::MismatchedPagingHostResponse)?;
+                *references = references
+                    .checked_sub(1)
+                    .ok_or(VmError::MismatchedPagingHostResponse)?;
+                if !request.was_resolved {
+                    self.paging_resolved_pages.remove(&request.page);
+                }
+                self.object_mut(request.object)?
+                    .set_register(process_register::MISC_VALUE, 0)
+            }
+        }
+    }
+
+    /// Seeds browser-owned load-list references after the mounted program
+    /// graph has registered the NSF's page metadata.
+    ///
+    /// Program/global pages already marked resolved remain so; the supplied
+    /// page counts replace the otherwise-empty platform reference view at the
+    /// pre-frame mount boundary.
+    pub fn seed_platform_paging_state(
+        &mut self,
+        page_count: u32,
+        resolved_pages: impl IntoIterator<Item = PageIndex>,
+        page_references: impl IntoIterator<Item = (PageIndex, u32)>,
+    ) -> Result<(), VmError> {
+        self.paging_page_capacity = self.paging_page_capacity.max(page_count);
+        for index in 0..page_count {
+            let page = PageIndex::new(index);
+            self.paging_baseline_pages.insert(page);
+            self.paging_loaded_pages.insert(page);
+        }
+        let resolved_pages = resolved_pages.into_iter().collect::<BTreeSet<_>>();
+        let page_references = page_references.into_iter().collect::<BTreeMap<_, _>>();
+        for page in resolved_pages
+            .iter()
+            .copied()
+            .chain(page_references.keys().copied())
+        {
+            if page.get() >= page_count {
+                return Err(VmError::InvalidPlatformPagingPage(page));
+            }
+        }
+        self.paging_resolved_pages.extend(resolved_pages);
+        self.paging_page_references = page_references
+            .into_iter()
+            .filter(|(_, references)| *references != 0)
+            .collect();
+        Ok(())
+    }
+
+    /// Applies one browser lifecycle page open outside a GOOL instruction.
+    pub fn apply_platform_paging_open(
+        &mut self,
+        page: PageIndex,
+        evicted: Option<PageIndex>,
+    ) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page) {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        if let Some(evicted) = evicted
+            && (evicted == page || !self.paging_loaded_pages.contains(&evicted))
+        {
+            return Err(VmError::InvalidPlatformPagingPage(evicted));
+        }
+        if let Some(evicted) = evicted {
+            self.paging_resolved_pages.remove(&evicted);
+        }
+        self.paging_resolved_pages.insert(page);
+        let references = self.paging_page_references.entry(page).or_default();
+        *references = references
+            .checked_add(1)
+            .ok_or(VmError::MismatchedPagingHostResponse)?;
+        Ok(())
+    }
+
+    /// Applies one browser lifecycle page close outside a GOOL instruction.
+    pub fn apply_platform_paging_close(
+        &mut self,
+        page: PageIndex,
+        decremented: bool,
+    ) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page) {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        if decremented {
+            let references = self.paging_page_references.entry(page).or_default();
+            *references = references
+                .checked_sub(1)
+                .ok_or(VmError::MismatchedPagingHostResponse)?;
+        }
+        Ok(())
+    }
+
     /// Completes misc primary fifteen before interpretation advances.
     ///
     /// `CardControl` returns a signed C `int` directly into process register
@@ -7288,6 +7626,7 @@ impl Machine {
                             | VmEffect::SaveState(_)
                             | VmEffect::LoadState(_)
                             | VmEffect::ResetLevelGlobals { .. }
+                            | VmEffect::Paging { .. }
                     ) {
                         return Err(VmError::MissingHostEffect);
                     }
@@ -8080,7 +8419,9 @@ impl Machine {
                 }
             }
             0x8b => {
-                self.paging_operation(handle, a, b)?;
+                if self.paging_operation(handle, a, b)? {
+                    return Ok(Some(HaltReason::HostEffect));
+                }
             }
             0x8c => {
                 // Native code dereferences A before translating B, then
@@ -8717,7 +9058,7 @@ impl Machine {
         handle: ObjectHandle,
         operation_operand: Operand,
         argument_operand: Operand,
-    ) -> Result<(), VmError> {
+    ) -> Result<bool, VmError> {
         let operation = self.read_operand(handle, operation_operand)?;
         // `GoolOpPaging` retains the address produced by GOP translation. It
         // does not first dereference B like an ordinary scalar opcode.
@@ -8726,6 +9067,8 @@ impl Machine {
             1 | 6 => {
                 let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
                 let (entry, page) = self.resolve_entry_argument(reference)?;
+                let (eid, _) = self.entry_reference_identity(entry)?;
+                let was_resolved = self.paging_resolved_pages.contains(&page);
                 self.paging_loaded_pages.insert(page);
                 self.paging_resolved_pages.insert(page);
                 let count = self.paging_page_references.entry(page).or_default();
@@ -8737,29 +9080,44 @@ impl Machine {
                     .set_register(process_register::MISC_VALUE, entry.to_word())?;
                 self.emit(VmEffect::Paging {
                     object: handle,
-                    open: true,
+                    operation: PagingHostOperation::Open,
                     reference: entry.to_word(),
+                    eid,
+                    page,
+                    was_resolved,
                 })?;
+                return Ok(true);
             }
             2 => {
                 let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
                 let (entry, page) = self.resolve_entry_argument(reference)?;
+                let (eid, _) = self.entry_reference_identity(entry)?;
+                let was_resolved = self.paging_resolved_pages.contains(&page);
                 let result = self.close_paging_page(page, true);
                 self.object_mut(handle)?
                     .set_register(process_register::MISC_VALUE, result)?;
                 self.emit(VmEffect::Paging {
                     object: handle,
-                    open: false,
+                    operation: PagingHostOperation::Close,
                     reference: entry.to_word(),
+                    eid,
+                    page,
+                    was_resolved,
                 })?;
+                return Ok(true);
             }
             3 => {
                 let reference = argument.ok_or(VmError::InvalidPagingOperation(operation))?;
                 let (entry, page) = self.resolve_entry_argument(reference)?;
+                let (eid, _) = self.entry_reference_identity(entry)?;
+                let was_resolved = self.paging_resolved_pages.contains(&page);
                 self.emit(VmEffect::Paging {
                     object: handle,
-                    open: false,
+                    operation: PagingHostOperation::Probe,
                     reference: entry.to_word(),
+                    eid,
+                    page,
+                    was_resolved,
                 })?;
                 // `NSClose(ref, 0)` is a query: resolved PC PTEs return
                 // literal one; unresolved pages return zero. It does not
@@ -8768,6 +9126,7 @@ impl Machine {
                 self.push(handle, result)?;
                 // Retail case three deliberately falls through to case four.
                 self.push(handle, self.available_page_count())?;
+                return Ok(true);
             }
             4 => self.push(handle, self.available_page_count())?,
             5 => {
@@ -8786,7 +9145,8 @@ impl Machine {
                     let entry_word = self.read_storage_reference(storage)?;
                     let (page, resolved) =
                         if let Some(entry) = EntryReference::from_word(entry_word) {
-                            (self.entry_reference_page(entry)?, true)
+                            let page = self.entry_reference_page(entry)?;
+                            (page, self.paging_resolved_pages.contains(&page))
                         } else {
                             if StorageReference::from_word(entry_word).is_some() {
                                 return Err(VmError::InvalidStorageReference(entry_word));
@@ -8813,7 +9173,7 @@ impl Machine {
             }
             _ => return Err(VmError::InvalidPagingOperation(operation)),
         }
-        Ok(())
+        Ok(false)
     }
 
     fn close_paging_page(&mut self, page: PageIndex, decrement: bool) -> u32 {
@@ -9866,9 +10226,17 @@ impl Machine {
     }
 
     fn entry_reference_page(&self, reference: EntryReference) -> Result<PageIndex, VmError> {
+        self.entry_reference_identity(reference)
+            .map(|(_, page)| page)
+    }
+
+    fn entry_reference_identity(
+        &self,
+        reference: EntryReference,
+    ) -> Result<(Eid, PageIndex), VmError> {
         self.paging_entry_references
             .get(reference.slot as usize)
-            .map(|(_, page)| *page)
+            .copied()
             .ok_or(VmError::InvalidEntryReference(reference.to_word()))
     }
 
@@ -16362,6 +16730,264 @@ mod tests {
     }
 
     #[test]
+    fn paging_host_unavailable_rolls_back_before_the_following_instruction() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x8b, 1, 0),
+                Instruction::encode(0x8b, 4, 0),
+            ],
+        )
+        .unwrap();
+        object.internal[0] = eid.raw();
+        object.internal[1] = 1;
+        object.internal[4] = 4;
+        object.page_count = 4;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = vec![(eid, PageIndex::new(2))];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let mut requests = Vec::new();
+
+        let execution = machine
+            .run_with_host_requests(h, 2, |machine, request| {
+                let VmHostRequest::Effect(VmEffect::Paging {
+                    object,
+                    operation,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                }) = request
+                else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                let request = PagingHostRequest {
+                    object,
+                    operation,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                };
+                requests.push(request);
+                machine.complete_paging_host_request(request, PagingHostResponse::Unavailable)
+            })
+            .unwrap();
+
+        assert_eq!(execution.reason, HaltReason::BudgetExhausted);
+        assert_eq!(execution.steps, 2);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].operation, PagingHostOperation::Open);
+        assert_eq!(requests[0].eid, eid);
+        assert_eq!(requests[0].page, PageIndex::new(2));
+        assert!(!requests[0].was_resolved);
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0)
+        );
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 0);
+        assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(2)));
+        assert_eq!(
+            machine.object(h).unwrap().stack(),
+            &[4],
+            "case four must observe the rolled-back count in the next instruction"
+        );
+    }
+
+    #[test]
+    fn paging_host_open_eviction_rearms_the_displaced_entry_before_case_five() {
+        let h = handle(0);
+        let eid_a = Eid::from_raw(0x7500_2055);
+        let eid_b = Eid::from_raw(0x7500_2073);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                // Resolve B and retain its logical entry token.
+                Instruction::encode(0x8b, 1, 0),
+                // Resolving A replaces B's platform texture slot.
+                Instruction::encode(0x8b, 1, 2),
+                // Count the retained B token after that replacement.
+                Instruction::encode(0x8b, 5, 8),
+            ],
+        )
+        .unwrap();
+        object.internal[0] = eid_b.raw();
+        object.internal[1] = 1;
+        object.internal[2] = eid_a.raw();
+        object.internal[5] = 5;
+        object.internal[8] = 1;
+        object.page_count = 4;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = vec![(eid_a, PageIndex::new(2)), (eid_b, PageIndex::new(3))];
+        let retained_b = StorageReference::checked(h, StorageRegion::Internal, 7).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let mut request_count = 0;
+
+        let execution = machine
+            .run_with_host_requests(h, 3, |machine, request| {
+                let VmHostRequest::Effect(VmEffect::Paging {
+                    object,
+                    operation,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                }) = request
+                else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                let request = PagingHostRequest {
+                    object,
+                    operation,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                };
+                let response = match request_count {
+                    0 => {
+                        assert_eq!(request.eid, eid_b);
+                        assert_eq!(request.page, PageIndex::new(3));
+                        let entry_b = machine.object(h)?.register(process_register::MISC_VALUE)?;
+                        machine.object_mut(h)?.internal[7] = entry_b;
+                        machine.push(h, retained_b.to_word())?;
+                        PagingHostResponse::Applied { evicted: None }
+                    }
+                    1 => {
+                        assert_eq!(request.eid, eid_a);
+                        assert_eq!(request.page, PageIndex::new(2));
+                        PagingHostResponse::Applied {
+                            evicted: Some(PageIndex::new(3)),
+                        }
+                    }
+                    _ => return Err(VmError::MismatchedPagingHostResponse),
+                };
+                request_count += 1;
+                machine.complete_paging_host_request(request, response)
+            })
+            .unwrap();
+
+        assert_eq!(execution.reason, HaltReason::BudgetExhausted);
+        assert_eq!(execution.steps, 3);
+        assert_eq!(request_count, 2);
+        assert!(machine.paging_resolved_pages.contains(&PageIndex::new(2)));
+        assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(3)));
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 1);
+        assert_eq!(machine.paging_page_references[&PageIndex::new(3)], 1);
+        assert_eq!(
+            machine.object(h).unwrap().stack(),
+            &[0],
+            "case five must consult live resolution even for a tagged entry token"
+        );
+    }
+
+    #[test]
+    fn paging_host_rejects_non_open_self_and_unknown_evictions() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let mut object = VmObject::new(h, vec![control_flow(3, 0, 0, 0, 0)]).unwrap();
+        object.page_count = 4;
+        object.entry_pages = vec![(eid, PageIndex::new(2))];
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        let mut request = PagingHostRequest {
+            object: h,
+            operation: PagingHostOperation::Close,
+            reference: 0,
+            eid,
+            page: PageIndex::new(2),
+            was_resolved: false,
+        };
+
+        assert_eq!(
+            machine.complete_paging_host_request(
+                request,
+                PagingHostResponse::Applied {
+                    evicted: Some(PageIndex::new(3)),
+                },
+            ),
+            Err(VmError::MismatchedPagingHostResponse)
+        );
+
+        request.operation = PagingHostOperation::Open;
+        machine.paging_resolved_pages.insert(request.page);
+        assert_eq!(
+            machine.complete_paging_host_request(
+                request,
+                PagingHostResponse::Applied {
+                    evicted: Some(request.page),
+                },
+            ),
+            Err(VmError::MismatchedPagingHostResponse)
+        );
+        assert!(machine.paging_resolved_pages.contains(&request.page));
+
+        assert_eq!(
+            machine.complete_paging_host_request(
+                request,
+                PagingHostResponse::Applied {
+                    evicted: Some(PageIndex::new(9)),
+                },
+            ),
+            Err(VmError::MismatchedPagingHostResponse)
+        );
+        assert!(machine.paging_resolved_pages.contains(&request.page));
+    }
+
+    #[test]
+    fn platform_lifecycle_seed_open_and_close_share_vm_reference_state() {
+        let h = handle(0);
+        let eid_a = Eid::from_raw(0x7500_2055);
+        let eid_b = Eid::from_raw(0x7500_2073);
+        let mut object = VmObject::new(
+            h,
+            vec![
+                Instruction::encode(0x8b, 4, 0),
+                Instruction::encode(0x8b, 4, 0),
+            ],
+        )
+        .unwrap();
+        object.internal[4] = 4;
+        object.page_count = 4;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = vec![(eid_a, PageIndex::new(2)), (eid_b, PageIndex::new(3))];
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(
+                4,
+                [PageIndex::new(2)],
+                [(PageIndex::new(2), 1), (PageIndex::new(3), 0)],
+            )
+            .unwrap();
+        machine.insert_object(object).unwrap();
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[3]);
+
+        machine
+            .apply_platform_paging_open(PageIndex::new(3), Some(PageIndex::new(2)))
+            .unwrap();
+        assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(2)));
+        assert!(machine.paging_resolved_pages.contains(&PageIndex::new(3)));
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 1);
+        assert_eq!(machine.paging_page_references[&PageIndex::new(3)], 1);
+
+        machine
+            .apply_platform_paging_close(PageIndex::new(2), true)
+            .unwrap();
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.object(h).unwrap().stack(), &[3, 3]);
+        assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 0);
+        assert_eq!(machine.paging_page_references[&PageIndex::new(3)], 1);
+    }
+
+    #[test]
     fn paging_rejects_a_self_referential_storage_cell_instead_of_following_it() {
         let h = handle(0);
         let mut object = VmObject::new(h, vec![Instruction::encode(0x8b, 1, 0)]).unwrap();
@@ -16480,6 +17106,56 @@ mod tests {
             machine.remove_object(target),
             Err(VmError::UnknownObject(target))
         );
+    }
+
+    #[test]
+    fn retail_pool_slot_removal_rejects_invalid_storage_identity_transactionally() {
+        let object = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(object, vec![0]).unwrap())
+            .unwrap();
+
+        assert_eq!(
+            machine.bind_retail_pool_slot(object, u8::MAX),
+            Err(VmError::InvalidRetailPoolSlot(u8::MAX))
+        );
+        assert_eq!(
+            machine.remove_object_from_retail_pool_slot(object, u8::MAX),
+            Err(VmError::InvalidRetailPoolSlot(u8::MAX))
+        );
+        assert_eq!(machine.object(object).unwrap().handle(), object);
+    }
+
+    #[test]
+    fn tagged_global_captures_physical_pool_slot_when_written_not_when_read() {
+        let object = handle(0);
+        let tagged = CollisionObjectReference::new(object).to_word();
+        let mut machine = Machine::new(1);
+        machine
+            .insert_object(VmObject::new(object, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(object, 7).unwrap();
+        machine.set_global_word(0, tagged).unwrap();
+        assert_eq!(machine.retail_global_pool_slot(0), Ok(Some(7)));
+
+        machine
+            .remove_object_from_retail_pool_slot(object, 7)
+            .unwrap();
+        machine
+            .insert_object(VmObject::new(object, vec![0]).unwrap())
+            .unwrap();
+        machine.bind_retail_pool_slot(object, 8).unwrap();
+        assert_eq!(
+            machine.retail_global_pool_slot(0),
+            Ok(Some(7)),
+            "compact-handle reuse must not mutate an unchanged native pointer"
+        );
+
+        machine.set_global_word(0, tagged).unwrap();
+        assert_eq!(machine.retail_global_pool_slot(0), Ok(Some(8)));
+        machine.set_global_word(0, 0).unwrap();
+        assert_eq!(machine.retail_global_pool_slot(0), Ok(None));
     }
 
     #[test]

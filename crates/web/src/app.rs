@@ -17,7 +17,7 @@ use crust_audio::output::{OutputOptions, RetailMasterFade};
 use crust_audio::retail::{RetailAudioEngine, RetailAudioError};
 use crust_audio::retail_music::RetailMusic;
 use crust_audio::retail_player::RetailMusicChange;
-use crust_formats::binary::{Eid, FormatError};
+use crust_formats::binary::{Eid, FormatError, PageIndex};
 use crust_formats::stream::{
     KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, ObjectVertexKind, RetailPathId,
     RetailZoneGraph, ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry,
@@ -46,21 +46,23 @@ use crust_sim::gool::{
     AudioHostRequest, AudioHostResponse, CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest,
     GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL, KEY_COUNT_GLOBAL,
     LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL, MUSIC_VOLUME_GLOBAL,
-    ModelVertexSource, NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment,
-    RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject,
-    VmStateProgram, process_register,
+    ModelVertexSource, NEXT_DISPLAY_GLOBAL, PagingHostOperation, PagingHostRequest,
+    PagingHostResponse, RetailPadSnapshot, RetailSolidEnvironment, RetailTransformVectorsCamera,
+    SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject, VmStateProgram, process_register,
 };
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
-use crust_sim::paging::Pager;
+use crust_sim::paging::{
+    Pager, PagerCloseOutcome, PagerOpenOutcome, PagingError, TextureFrameSnapshot,
+};
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ModelVertexBinding, NsfProgramError, NsfProgramHost,
     ProgramBinding, ProgramHost, RetailCoreObjects, RetailDemoFinishOutcome,
     RetailLevelStateContext, RetailPauseUpdate, RetailRestartOutcome, RetailRuntime,
-    RetailSaveStateOutcome, RetailSessionCarry, RetailTitleAction, RetailTraversalBoundary,
-    RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError, RuntimeFrame, RuntimeObjectHandle,
-    StateProgramBinding, ZoneTerminationMode,
+    RetailSaveStateOutcome, RetailSessionCarry, RetailThunderCue, RetailTitleAction,
+    RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError,
+    RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
 };
 use crust_sim::scheduler::{FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
@@ -84,8 +86,10 @@ use crate::dom::{Dom, window};
 use crate::pbak_runtime::{
     PbakFrameTiming, RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak,
 };
+use crate::retail_clock::advance_retail_shader_clock;
 use crate::retail_scene::{
     RetailMapPathAnimation, RetailSceneBuilder, RetailSceneProgressLocation,
+    RetailWorldShaderRenderState,
 };
 use crate::storage::StorageState;
 use crate::title_runtime::{
@@ -405,6 +409,11 @@ enum BrowserProgramError {
     Program(NsfProgramError),
     Audio(RetailAudioError),
     AudioAsset(String),
+    Paging(PagingError),
+    PagingPageMismatch {
+        requested: PageIndex,
+        resolved: PageIndex,
+    },
 }
 
 impl std::fmt::Display for BrowserProgramError {
@@ -413,6 +422,16 @@ impl std::fmt::Display for BrowserProgramError {
             Self::Program(error) => write!(formatter, "stream program host: {error:?}"),
             Self::Audio(error) => write!(formatter, "retail audio engine: {error}"),
             Self::AudioAsset(error) => formatter.write_str(error),
+            Self::Paging(error) => write!(formatter, "retail pager: {error:?}"),
+            Self::PagingPageMismatch {
+                requested,
+                resolved,
+            } => write!(
+                formatter,
+                "retail pager resolved page {}, but GOOL requested page {}",
+                resolved.get(),
+                requested.get(),
+            ),
         }
     }
 }
@@ -428,6 +447,7 @@ struct BrowserProgramHost<'assets, 'runtime> {
     nsf: &'assets Nsf,
     nsf_bytes: &'assets [u8],
     audio: &'runtime mut RetailAudioEngine,
+    pager: &'runtime mut Pager,
     card: &'runtime mut VirtualCard,
     storage: &'runtime mut Option<StorageState>,
     environmentless_mdat: Option<Eid>,
@@ -439,6 +459,7 @@ impl<'assets, 'runtime> BrowserProgramHost<'assets, 'runtime> {
         nsf: &'assets Nsf,
         nsf_bytes: &'assets [u8],
         audio: &'runtime mut RetailAudioEngine,
+        pager: &'runtime mut Pager,
         card: &'runtime mut VirtualCard,
         storage: &'runtime mut Option<StorageState>,
     ) -> Self {
@@ -448,22 +469,25 @@ impl<'assets, 'runtime> BrowserProgramHost<'assets, 'runtime> {
             nsf,
             nsf_bytes,
             audio,
+            pager,
             card,
             storage,
             environmentless_mdat: None,
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn for_title_mdat(
         metadata: &'assets Nsd,
         nsf: &'assets Nsf,
         nsf_bytes: &'assets [u8],
         audio: &'runtime mut RetailAudioEngine,
+        pager: &'runtime mut Pager,
         card: &'runtime mut VirtualCard,
         storage: &'runtime mut Option<StorageState>,
         mdat: Eid,
     ) -> Self {
-        let mut host = Self::new(metadata, nsf, nsf_bytes, audio, card, storage);
+        let mut host = Self::new(metadata, nsf, nsf_bytes, audio, pager, card, storage);
         host.environmentless_mdat = Some(mdat);
         host
     }
@@ -601,6 +625,50 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
             .map_err(BrowserProgramError::Audio)
     }
 
+    fn handle_paging_request(
+        &mut self,
+        request: PagingHostRequest,
+    ) -> Result<PagingHostResponse, Self::Error> {
+        match request.operation {
+            PagingHostOperation::Open => match self.pager.open_eid_with_outcome(request.eid) {
+                Ok(outcome) => {
+                    if outcome.page != request.page {
+                        return Err(BrowserProgramError::PagingPageMismatch {
+                            requested: request.page,
+                            resolved: outcome.page,
+                        });
+                    }
+                    Ok(PagingHostResponse::Applied {
+                        evicted: outcome.evicted.map(|binding| binding.page),
+                    })
+                }
+                Err(PagingError::NoFreeTextureSlot(_)) => Ok(PagingHostResponse::Unavailable),
+                Err(error) => Err(BrowserProgramError::Paging(error)),
+            },
+            PagingHostOperation::Close => {
+                let outcome = self
+                    .pager
+                    .close_eid_retail_with_outcome(request.eid)
+                    .map_err(BrowserProgramError::Paging)?;
+                if outcome.page != request.page {
+                    return Err(BrowserProgramError::PagingPageMismatch {
+                        requested: request.page,
+                        resolved: outcome.page,
+                    });
+                }
+                Ok(PagingHostResponse::Applied { evicted: None })
+            }
+            // `NSClose(ref, 0)` only observes the already-resolved reference.
+            // The VM owns its exact return value and deliberate case-four
+            // fallthrough; the platform pager must remain unchanged.
+            PagingHostOperation::Probe => Ok(PagingHostResponse::Applied { evicted: None }),
+        }
+    }
+
+    fn texture_frame_snapshot(&self) -> Option<TextureFrameSnapshot> {
+        Some(self.pager.texture_frame_snapshot())
+    }
+
     fn free_object_audio(&mut self, object: RuntimeObjectHandle) -> bool {
         self.audio.free_owner(object.vm());
         true
@@ -663,6 +731,12 @@ enum PreparedRetailMusic {
     Music(Eid, Box<RetailMusic>),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PbakArmedPresentation {
+    PreviousScene,
+    LoadingImage,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RetailPairMount {
     target: FormatLevelId,
@@ -675,6 +749,8 @@ struct Runtime {
     flow: GameFlow,
     scheduler: FrameScheduler,
     previous_step_us: Option<u64>,
+    previous_shader_wall_ticks: Option<u32>,
+    retail_shader_ticks_elapsed: u32,
     pad: PlatformPadState,
     stage: GlStage,
     retail_frame: RetailFrameState,
@@ -687,11 +763,13 @@ struct Runtime {
     retail_runtime_error: Option<String>,
     retail_runtime_warning: Option<String>,
     retail_scene_builder: RetailSceneBuilder,
+    retail_world_shader_render_state: RetailWorldShaderRenderState,
     retail_zone_graph: RetailZoneGraph,
     retail_camera: RetailCameraRuntime,
     retail_death_camera: RetailDeathCameraState,
     retail_camera_pose_override: Option<RetailCameraPose>,
     show_loading_image: bool,
+    pbak_armed_presentation: Option<PbakArmedPresentation>,
     level_assets: ValidatedPair,
     retail_audio: RetailAudioEngine,
     retail_master_fade: RetailMasterFade,
@@ -811,15 +889,19 @@ impl Runtime {
             ),
             false,
         );
-        let mut retail_scene_builder = RetailSceneBuilder::new();
+        let retail_scene_builder = RetailSceneBuilder::new();
+        let retail_world_shader_render_state = RetailWorldShaderRenderState::default();
         install_retail_scene_for_pair(
             &pair,
-            &mut retail_scene_builder,
             &mut stage,
             dom,
             after_loading_image,
+            true,
             0,
             retail_point_count,
+            retail_zone_pager.texture_frame_snapshot(),
+            crust_sim::retail_runtime::RetailWorldShaderSnapshot::initialized_for_level(pair.level),
+            retail_world_shader_render_state,
         )?;
         let retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image(retail_point_count, 0)
@@ -877,11 +959,26 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
+            .map_err(|_| JsValue::from_str("initial retail pager page count exceeds u32"))?;
+        retail_objects
+            .seed_platform_paging_state(
+                retail_pager_page_count,
+                retail_zone_pager.resolved_pages(),
+                retail_zone_pager.page_reference_counts(),
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not seed initial retail page resolutions: {error:?}"
+                ))
+            })?;
         let title_seen = pair.level == FormatLevelId::TITLE;
         let mut runtime = Self {
             flow,
             scheduler: FrameScheduler::new(),
             previous_step_us: None,
+            previous_shader_wall_ticks: None,
+            retail_shader_ticks_elapsed: 0,
             pad: PlatformPadState::default(),
             stage,
             retail_frame,
@@ -894,11 +991,13 @@ impl Runtime {
             retail_runtime_error: None,
             retail_runtime_warning: None,
             retail_scene_builder,
+            retail_world_shader_render_state,
             retail_zone_graph,
             retail_camera,
             retail_death_camera: RetailDeathCameraState::default(),
             retail_camera_pose_override: None,
             show_loading_image: after_loading_image,
+            pbak_armed_presentation: None,
             level_assets: pair,
             retail_audio,
             retail_master_fade: RetailMasterFade::new(),
@@ -948,7 +1047,7 @@ impl Runtime {
     }
 
     fn install_level_assets(&mut self, pair: ValidatedPair, dom: &Dom) -> Result<(), JsValue> {
-        let mount = self
+        let mut mount = self
             .loading_mount
             .clone()
             .ok_or_else(|| JsValue::from_str("validated stream pair has no pending transition"))?;
@@ -973,18 +1072,29 @@ impl Runtime {
         let title_attract_mount = mount.core_transition
             && mount_game_state == 0x600
             && pair.level != FormatLevelId::TITLE;
-        let prepared_pbak = title_attract_mount
-            .then(|| {
-                prepare_pair_pbak(&pair.nsd, &pair.nsf, &pair.nsf_bytes, &retail_zone_graph)
-                    .map_err(|error| {
-                        JsValue::from_str(&format!(
-                            "could not prepare retail PBAK for {}: {error}",
-                            pair.level
-                        ))
-                    })
-            })
-            .transpose()?
-            .flatten();
+        let prepared_pbak = if title_attract_mount {
+            let mut random_seed_b = mount.carry.random_seed_b();
+            let prepared = prepare_pair_pbak(
+                &pair.nsd,
+                &pair.nsf,
+                &pair.nsf_bytes,
+                &retail_zone_graph,
+                &mut random_seed_b,
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not prepare retail PBAK for {}: {error}",
+                    pair.level
+                ))
+            })?;
+            // `PbakChoose` precedes destination LevelUpdate and shader
+            // initialization, and consumes randb even when exactly one
+            // recording exists.
+            mount.carry.set_random_seed_b(random_seed_b);
+            prepared
+        } else {
+            None
+        };
         let retail_camera = if mount.bonus_return {
             let snapshot = mount.carry.saved_level_state.as_ref().ok_or_else(|| {
                 JsValue::from_str("bonus return has no carried retail level snapshot")
@@ -1118,6 +1228,19 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
+            .map_err(|_| JsValue::from_str("destination retail pager page count exceeds u32"))?;
+        retail_objects
+            .seed_platform_paging_state(
+                retail_pager_page_count,
+                retail_zone_pager.resolved_pages(),
+                retail_zone_pager.page_reference_counts(),
+            )
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not seed destination retail page resolutions: {error:?}"
+                ))
+            })?;
         let destination_authoritative_save = retail_objects.card_save_data().map_err(|error| {
             JsValue::from_str(&format!(
                 "could not snapshot destination retail save globals: {error:?}"
@@ -1136,15 +1259,20 @@ impl Runtime {
         }
         // A validated pair transition gets a fresh owner so parsed graph data,
         // TPAG mappings, and decoded pixels cannot cross the mount boundary.
-        let mut retail_scene_builder = RetailSceneBuilder::new();
+        let retail_scene_builder = RetailSceneBuilder::new();
+        let retail_world_shader_render_state = self.retail_world_shader_render_state;
+        let preserve_framebuffer_for_pbak = prepared_pbak.is_some();
         install_retail_scene_for_pair(
             &pair,
-            &mut retail_scene_builder,
             &mut self.stage,
             dom,
             after_loading_image,
+            !preserve_framebuffer_for_pbak,
             retail_objects.draw_count(),
             retail_point_count,
+            retail_zone_pager.texture_frame_snapshot(),
+            retail_objects.world_shader_snapshot(),
+            retail_world_shader_render_state,
         )?;
         let retail_frame = if after_loading_image {
             RetailFrameState::after_loading_image_with_draw_count(
@@ -1172,6 +1300,7 @@ impl Runtime {
         self.show_loading_image = after_loading_image;
         self.level_assets = pair;
         self.retail_scene_builder = retail_scene_builder;
+        self.retail_world_shader_render_state = retail_world_shader_render_state;
         self.retail_zone_graph = retail_zone_graph;
         self.retail_camera = retail_camera;
         self.retail_camera_pose_override = None;
@@ -1181,12 +1310,21 @@ impl Runtime {
         self.retail_zone_lifecycle = retail_zone_lifecycle;
         self.retail_zone_pager = retail_zone_pager;
         self.retail_pbak = prepared_pbak.map(RetailPbakPlayback::new);
+        self.pbak_armed_presentation = self.retail_pbak.as_ref().map(|_| {
+            if after_loading_image {
+                PbakArmedPresentation::LoadingImage
+            } else {
+                PbakArmedPresentation::PreviousScene
+            }
+        });
         self.configure_retail_title_authority(first_title_boot)?;
         self.retail_tick_state = RetailTickState::NeedsSpawn;
         self.retail_metrics = RetailRuntimeMetrics::default();
         self.retail_runtime_error = None;
         self.retail_runtime_warning = None;
         self.retail_audio = RetailAudioEngine::default();
+        self.retail_audio
+            .set_random_seed(self.retail_objects.random_seed_b());
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         self.last_title_state = None;
@@ -1270,6 +1408,11 @@ impl Runtime {
             && self.loading_mount.as_ref().map(|mount| mount.target) != Some(level)
             && self.pending_mount.as_ref().map(|mount| mount.target) != Some(level)
         {
+            // Audio and ShaderParamsUpdate share native's process-global
+            // `seed_b`; publish any voice-allocation draws before exporting
+            // the pointer-free session carry.
+            self.retail_objects
+                .set_random_seed_b(self.retail_audio.random_seed());
             self.pending_mount = Some(RetailPairMount {
                 target: level,
                 carry: self.retail_objects.export_session_carry(),
@@ -1441,6 +1584,7 @@ impl Runtime {
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
                 &mut self.retail_audio,
+                &mut self.retail_zone_pager,
                 &mut self.card,
                 &mut self.storage,
             );
@@ -1518,7 +1662,21 @@ impl Runtime {
 
     fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
         let now_us = (timestamp_ms.max(0.0) * 1_000.0).round() as u64;
-        if !self.assets_stalled() && self.scheduler.sample(now_us) == FrameDecision::Step {
+        let shader_wall_ticks = (timestamp_ms.max(0.0) / 0.963_765).trunc() as u32;
+        let assets_stalled = self.assets_stalled();
+        // Native GetTicksElapsed continues through synchronous NSKill/NSInit.
+        // Browser validation is asynchronous, so sample its wall-clock gap on
+        // every callback even while the cooperative scheduler is frozen.
+        // Authored pause remains the sole ordinary wall-time exclusion.
+        let shader_clock_was_paused =
+            !assets_stalled && self.retail_objects.retail_pause_state().paused();
+        advance_retail_shader_clock(
+            &mut self.retail_shader_ticks_elapsed,
+            &mut self.previous_shader_wall_ticks,
+            shader_wall_ticks,
+            shader_clock_was_paused,
+        );
+        if !assets_stalled && self.scheduler.sample(now_us) == FrameDecision::Step {
             let wall_ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
                 i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
             });
@@ -1553,6 +1711,7 @@ impl Runtime {
                             &self.level_assets.nsf,
                             &self.level_assets.nsf_bytes,
                             &mut self.retail_audio,
+                            &mut self.retail_zone_pager,
                             &mut self.card,
                             &mut self.storage,
                             mdat,
@@ -1563,6 +1722,7 @@ impl Runtime {
                             &self.level_assets.nsf,
                             &self.level_assets.nsf_bytes,
                             &mut self.retail_audio,
+                            &mut self.retail_zone_pager,
                             &mut self.card,
                             &mut self.storage,
                         )
@@ -1613,6 +1773,18 @@ impl Runtime {
             // armed recording before that gate would incorrectly publish a
             // nonzero PBAK state one boundary too early.
             self.start_armed_retail_pbak(dom)?;
+            // Pause/caption/restart handlers above can allocate voices. Native
+            // exposes those draws to the same RNG-B word used by lighting and
+            // by a following cross-stream transition.
+            self.retail_objects
+                .set_random_seed_b(self.retail_audio.random_seed());
+            if let Some(recorded_ticks) = self
+                .retail_pbak
+                .as_ref()
+                .and_then(RetailPbakPlayback::pre_shader_ticks_elapsed)
+            {
+                self.retail_shader_ticks_elapsed = recorded_ticks;
+            }
             let pbak_boundary = self
                 .retail_pbak
                 .as_ref()
@@ -1673,6 +1845,12 @@ impl Runtime {
                     self.retail_runtime_error = Some(message);
                     self.retail_tick_state = RetailTickState::Paused;
                 }
+                // Spawn/once handlers execute through BrowserProgramHost and
+                // can allocate voices before the pre-camera shader boundary.
+                // Preserve those source-ordered RNG-B draws even when a later
+                // descriptor reports a checked failure.
+                self.retail_objects
+                    .set_random_seed_b(self.retail_audio.random_seed());
             }
 
             if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
@@ -1694,12 +1872,38 @@ impl Runtime {
                 };
                 let frame_draw_count = self.retail_objects.draw_count();
                 let frame_stamp = self.retail_objects.next_frame_stamp();
-                if !native_paused && let Err(error) = self.retail_objects.advance_level_shader() {
-                    let message = format!("retail level shader update failed: {error:?}");
-                    dom.log(&message, true);
-                    self.retail_runtime_error = Some(message);
-                    self.retail_tick_state = RetailTickState::Paused;
+                if !native_paused {
+                    match self
+                        .retail_objects
+                        .advance_level_shader_at(self.retail_shader_ticks_elapsed)
+                    {
+                        Ok(cue) => {
+                            // ShaderParamsUpdate may have consumed `randb`;
+                            // publish its exact resulting word to audio before
+                            // the optional thunder voice allocation.
+                            self.retail_audio
+                                .set_random_seed(self.retail_objects.random_seed_b());
+                            if let Some(cue) = cue
+                                && let Err(error) = self.play_retail_thunder(cue)
+                            {
+                                let message = format!(
+                                    "retail thunder audio was skipped after shader update: {error}"
+                                );
+                                dom.log(&message, true);
+                                self.retail_runtime_warning = Some(message);
+                            }
+                            self.retail_objects
+                                .set_random_seed_b(self.retail_audio.random_seed());
+                        }
+                        Err(error) => {
+                            let message = format!("retail level shader update failed: {error:?}");
+                            dom.log(&message, true);
+                            self.retail_runtime_error = Some(message);
+                            self.retail_tick_state = RetailTickState::Paused;
+                        }
+                    }
                 }
+                let world_shader_snapshot = self.retail_objects.world_shader_snapshot();
                 let camera_location = if self.retail_runtime_error.is_none() {
                     if native_paused {
                         Some(self.retail_camera.location())
@@ -1725,10 +1929,16 @@ impl Runtime {
                 // it cannot retroactively change the worlds already submitted
                 // with this one.
                 let camera_pose_override = self.retail_camera_pose_override;
+                let texture_frame_snapshot = self.retail_zone_pager.texture_frame_snapshot();
                 if self.retail_runtime_error.is_none()
                     && self.retail_tick_state == RetailTickState::Running
                 {
                     self.tick_retail_runtime(dom, pbak_boundary, physical_held, demo_override);
+                    // GOOL audio commands run through the external browser
+                    // host; reconcile their voice-allocation draws before
+                    // any carry can be captured on the following frame.
+                    self.retail_objects
+                        .set_random_seed_b(self.retail_audio.random_seed());
                 }
                 if let Some(camera_location) = camera_location {
                     let count_draws =
@@ -1736,9 +1946,12 @@ impl Runtime {
                     let trace = self.retail_frame.tick_with_draw_count_enabled(count_draws);
                     self.show_loading_image =
                         matches!(trace.presented(), PresentedFrame::LoadingImage);
-                    if matches!(trace.presented(), PresentedFrame::Gameplay { .. })
-                        && is_retail_runtime_state(self.flow.state())
-                    {
+                    // World transforms precede GL's later draw-skip gate.
+                    // Rebuild hidden frames too so ripple and persistent
+                    // world-shader scratch advance from the actual camera,
+                    // visibility, and display mask rather than a speculative
+                    // first-presented snapshot.
+                    if is_retail_runtime_state(self.flow.state()) {
                         scene_location = Some((
                             camera_location,
                             frame_draw_count,
@@ -1747,6 +1960,8 @@ impl Runtime {
                             world_display_mask,
                             map_path_animation,
                             camera_pose_override,
+                            texture_frame_snapshot,
+                            world_shader_snapshot,
                         ));
                     }
                 }
@@ -1758,6 +1973,8 @@ impl Runtime {
                     world_display_mask,
                     map_path_animation,
                     camera_pose_override,
+                    texture_frame_snapshot,
+                    world_shader_snapshot,
                 )) = scene_location
                     && let Err(error) = self.update_retail_scene(
                         camera_location,
@@ -1767,6 +1984,8 @@ impl Runtime {
                         world_display_mask,
                         map_path_animation,
                         camera_pose_override,
+                        texture_frame_snapshot,
+                        world_shader_snapshot,
                     )
                 {
                     let message = format!("retail scene update failed: {}", js_message(&error));
@@ -1819,6 +2038,15 @@ impl Runtime {
         let show_title_objects = self
             .title_screen_profile()
             .is_some_and(|profile| profile.screen_type == RetailTitleScreenType::ImageAndObjects);
+        // PbakChoose arms native `ns.draw_skip_counter = -1`; PbakPlay clears
+        // it only after Crash exists. Geometry still executes while armed,
+        // but GLShouldRenderFrame suppresses submission indefinitely.
+        let pbak_draw_suppressed = self
+            .retail_pbak
+            .as_ref()
+            .is_some_and(RetailPbakPlayback::is_armed);
+        let pbak_holds_loading_image =
+            self.pbak_armed_presentation == Some(PbakArmedPresentation::LoadingImage);
         let title_overlay_alpha = self
             .retail_objects
             .retail_title_presentation()
@@ -1837,8 +2065,11 @@ impl Runtime {
             // Type-three title screens composite animated GOOL objects over
             // their MDAT image. Type-zero screens suppress even a scene still
             // resident from the preceding state before the next 30 Hz step.
-            show_retail_scene: !assets_stalled && (!show_title_image || show_title_objects),
-            show_loading_image: !assets_stalled && self.show_loading_image,
+            show_retail_scene: !assets_stalled
+                && (!pbak_draw_suppressed || !pbak_holds_loading_image)
+                && (!show_title_image || show_title_objects),
+            show_loading_image: !assets_stalled
+                && (self.show_loading_image || (pbak_draw_suppressed && pbak_holds_loading_image)),
             title_overlay_alpha,
         })?;
         self.last_gl_error = self.stage.error();
@@ -1874,6 +2105,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                     mdat,
@@ -1884,6 +2116,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                 )
@@ -1975,6 +2208,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                     mdat,
@@ -1985,6 +2219,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                 )
@@ -2360,6 +2595,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                     mdat,
@@ -2370,14 +2606,25 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                 )
             };
             self.retail_objects
                 .finish_level_transition(&mut host, requested_lid)
-        }
-        .map_err(|error| JsValue::from_str(&format!("retail LEVEL_END phase failed: {error:?}")))?;
+        };
+        // LEVEL_END handlers can allocate voices. Native carries their shared
+        // RNG-B result through NSKill/NSInit even though the Rust audio owner
+        // itself is replaced for the destination pair.
+        self.retail_objects
+            .set_random_seed_b(self.retail_audio.random_seed());
+        let mut report = report.map_err(|error| {
+            JsValue::from_str(&format!("retail LEVEL_END phase failed: {error:?}"))
+        })?;
+        report
+            .carry
+            .set_random_seed_b(self.retail_audio.random_seed());
         self.retail_objects
             .reset_retail_pause_for_screen_load()
             .map_err(|error| {
@@ -2499,6 +2746,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                 );
@@ -2518,15 +2766,16 @@ impl Runtime {
             .retail_zone_lifecycle
             .plan_hard_restart(snapshot.location.path.zone, activation_marker)
             .map_err(|error| format!("could not plan hard restart: {error}"))?;
-        let mut pager_preview = self.retail_zone_pager.clone();
+        let mut pager_validation = self.retail_zone_pager.clone();
         let restored_load_list = self
             .retail_zone_lifecycle
             .zone(snapshot.location.path.zone)
             .ok_or_else(|| "restored texture zone is absent from the lifecycle".to_owned())?
             .load_list();
-        pager_preview.set_current_texture_load_eids(restored_load_list.entries().iter().copied());
+        pager_validation
+            .set_current_texture_load_eids(restored_load_list.entries().iter().copied());
         for action in plan.actions().iter().copied() {
-            apply_retail_zone_paging_action(&mut pager_preview, action)?;
+            apply_retail_zone_paging_action(&mut pager_validation, action)?;
         }
         let mut lifecycle_preview = self.retail_zone_lifecycle.clone();
         lifecycle_preview
@@ -2559,12 +2808,18 @@ impl Runtime {
         )
         .ok_or_else(|| "restored camera path is empty".to_owned())?;
 
+        // RESPAWN and TERM execute while native still exposes the old current
+        // zone to texture replacement. Lifecycle close/open actions follow
+        // those handlers and switch to destination protection at the same
+        // source boundary where LevelUpdate assigns cur_zone.
+        let mut pager_commit = self.retail_zone_pager.clone();
         let outcome = {
             let mut host = BrowserProgramHost::new(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
                 &mut self.retail_audio,
+                &mut pager_commit,
                 &mut self.card,
                 &mut self.storage,
             );
@@ -2579,6 +2834,50 @@ impl Runtime {
                 return Ok(());
             }
         };
+
+        let mut destination_selected = false;
+        let mut unavailable_opens = 0_usize;
+        for action in plan.actions().iter().copied() {
+            if !matches!(
+                action,
+                ZoneTransitionAction::CloseEntry(_)
+                    | ZoneTransitionAction::ClosePage(_)
+                    | ZoneTransitionAction::OpenEntry(_)
+                    | ZoneTransitionAction::OpenPage(_)
+            ) {
+                continue;
+            }
+            let is_open = matches!(
+                action,
+                ZoneTransitionAction::OpenEntry(_) | ZoneTransitionAction::OpenPage(_)
+            );
+            if is_open && !destination_selected {
+                pager_commit
+                    .set_current_texture_load_eids(restored_load_list.entries().iter().copied());
+                destination_selected = true;
+            }
+            match apply_retail_zone_paging_action(&mut pager_commit, action)? {
+                RetailZonePagingOutcome::Open(outcome) => self
+                    .retail_objects
+                    .apply_platform_paging_open(
+                        outcome.page,
+                        outcome.evicted.map(|binding| binding.page),
+                    )
+                    .map_err(|error| {
+                        format!("could not publish hard-restart page resolution: {error:?}")
+                    })?,
+                RetailZonePagingOutcome::Close(outcome) => self
+                    .retail_objects
+                    .apply_platform_paging_close(outcome.page, outcome.decremented)
+                    .map_err(|error| {
+                        format!("could not publish hard-restart page close: {error:?}")
+                    })?,
+                RetailZonePagingOutcome::OpenUnavailable => {
+                    unavailable_opens = unavailable_opens.saturating_add(1);
+                }
+                RetailZonePagingOutcome::None => {}
+            }
+        }
 
         for (_, zone_report) in &report.zone_reports {
             for cleanup in &zone_report.cleanup_actions {
@@ -2598,7 +2897,7 @@ impl Runtime {
                 report.level_update_flags
             ));
         }
-        self.retail_zone_pager = pager_preview;
+        self.retail_zone_pager = pager_commit;
         self.retail_zone_lifecycle = lifecycle_preview;
         self.retail_camera = camera_preview;
         self.retail_camera_pose_override = None;
@@ -2616,7 +2915,7 @@ impl Runtime {
         )?;
         dom.log(
             &format!(
-                "Hard restart restored {}:{} progress {:#x}; {} objects terminated, {respawn_failures} RESPAWN and {termination_failures} TERM handler failures.",
+                "Hard restart restored {}:{} progress {:#x}; {} objects terminated, {respawn_failures} RESPAWN and {termination_failures} TERM handler failures, {unavailable_opens} ignored native load-list opens.",
                 report.snapshot.location.path.zone,
                 report.snapshot.location.path.index,
                 report.snapshot.location.progress.raw(),
@@ -2642,6 +2941,8 @@ impl Runtime {
         world_display_mask: u32,
         map_path_animation: Option<RetailMapPathAnimation>,
         camera_pose_override: Option<RetailCameraPose>,
+        texture_frame_snapshot: TextureFrameSnapshot,
+        world_shader_snapshot: crust_sim::retail_runtime::RetailWorldShaderSnapshot,
     ) -> Result<(), JsValue> {
         let path_progress = location.progress.raw();
         let render_title_objects = !self
@@ -2663,7 +2964,7 @@ impl Runtime {
             .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
-            .build_at_progress_with_objects_and_world_display_mask_and_fov_and_camera(
+            .build_at_progress_with_runtime_snapshots(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -2681,13 +2982,22 @@ impl Runtime {
                 field_of_view,
                 map_path_animation,
                 camera_pose_override.map(Into::into),
+                texture_frame_snapshot,
+                world_shader_snapshot,
+                &mut self.retail_world_shader_render_state,
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
                     "retail scene update at progress {path_progress:#x}: {error}"
                 ))
             })?;
-        self.stage.update_retail_scene(scene)?;
+        if !self
+            .retail_pbak
+            .as_ref()
+            .is_some_and(RetailPbakPlayback::is_armed)
+        {
+            self.stage.update_retail_scene(scene)?;
+        }
         Ok(())
     }
 
@@ -2913,25 +3223,34 @@ impl Runtime {
 
         // Validate every fallible page/entry operation before the first TERM
         // event can irreversibly mutate the live object forest.
-        let mut pager_preview = self.retail_zone_pager.clone();
+        let mut pager_validation = self.retail_zone_pager.clone();
         let destination_load_list = self
             .retail_zone_lifecycle
             .zone(next_zone)
             .ok_or_else(|| "destination texture zone is absent from the lifecycle".to_owned())?
             .load_list();
-        pager_preview
+        pager_validation
             .set_current_texture_load_eids(destination_load_list.entries().iter().copied());
         for action in plan.actions().iter().copied() {
-            apply_retail_zone_paging_action(&mut pager_preview, action)?;
+            apply_retail_zone_paging_action(&mut pager_validation, action)?;
         }
         let mut lifecycle_preview = self.retail_zone_lifecycle.clone();
         lifecycle_preview
             .commit_transition(&plan)
             .map_err(|error| format!("could not preflight retail zone transition: {error}"))?;
 
+        // Replay the checked plan against a separate commit candidate. TERM
+        // handlers share this pager while native still exposes the old
+        // current zone; the first lifecycle paging action then installs the
+        // destination protection set before any destination open can allocate
+        // a texture slot.
+        let mut pager_commit = self.retail_zone_pager.clone();
+
         let previous_zone = plan.previous_zone();
         let mut terminated = 0_usize;
         let mut cleanup_actions = 0_usize;
+        let mut destination_selected = false;
+        let mut unavailable_opens = 0_usize;
         let mut event_failures = Vec::new();
         for action in plan.actions().iter().copied() {
             match action {
@@ -2942,6 +3261,7 @@ impl Runtime {
                             &self.level_assets.nsf,
                             &self.level_assets.nsf_bytes,
                             &mut self.retail_audio,
+                            &mut pager_commit,
                             &mut self.card,
                             &mut self.storage,
                         );
@@ -2973,14 +3293,42 @@ impl Runtime {
                 ZoneTransitionAction::CloseEntry(_)
                 | ZoneTransitionAction::ClosePage(_)
                 | ZoneTransitionAction::OpenEntry(_)
-                | ZoneTransitionAction::OpenPage(_) => {}
+                | ZoneTransitionAction::OpenPage(_) => {
+                    if !destination_selected {
+                        pager_commit.set_current_texture_load_eids(
+                            destination_load_list.entries().iter().copied(),
+                        );
+                        destination_selected = true;
+                    }
+                    match apply_retail_zone_paging_action(&mut pager_commit, action)? {
+                        RetailZonePagingOutcome::Open(outcome) => self
+                            .retail_objects
+                            .apply_platform_paging_open(
+                                outcome.page,
+                                outcome.evicted.map(|binding| binding.page),
+                            )
+                            .map_err(|error| {
+                                format!(
+                                    "could not publish zone-transition page resolution: {error:?}"
+                                )
+                            })?,
+                        RetailZonePagingOutcome::Close(outcome) => self
+                            .retail_objects
+                            .apply_platform_paging_close(outcome.page, outcome.decremented)
+                            .map_err(|error| {
+                                format!("could not publish zone-transition page close: {error:?}")
+                            })?,
+                        RetailZonePagingOutcome::OpenUnavailable => {
+                            unavailable_opens = unavailable_opens.saturating_add(1);
+                        }
+                        RetailZonePagingOutcome::None => {}
+                    }
+                }
             }
         }
-        // Object handlers cannot reach either preview. Publish both checked
-        // results only after the last irreversible TERM delivery succeeds, so
-        // paging has no fallible second pass that could leave a half-committed
-        // lifecycle behind.
-        self.retail_zone_pager = pager_preview;
+        // Publish the candidate only after the final TERM delivery and checked
+        // lifecycle action succeeds. Until here, the live pager is untouched.
+        self.retail_zone_pager = pager_commit;
         self.retail_zone_lifecycle = lifecycle_preview;
         self.apply_prepared_retail_music(prepared_music, false, next_zone, dom)?;
 
@@ -2996,7 +3344,7 @@ impl Runtime {
             .saturating_add(event_failures.len() as u64);
         dom.log(
             &format!(
-                "Retail LevelUpdate moved {:?} -> {next_zone}; terminated {terminated} objects, applied {cleanup_actions} audio-owner cleanups and activated {} next-frame spawn zones.",
+                "Retail LevelUpdate moved {:?} -> {next_zone}; terminated {terminated} objects, applied {cleanup_actions} audio-owner cleanups, ignored {unavailable_opens} native load-list opens and activated {} next-frame spawn zones.",
                 previous_zone,
                 plan.next_frame_spawn_scan().len(),
             ),
@@ -3197,6 +3545,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                     mdat,
@@ -3207,6 +3556,7 @@ impl Runtime {
                     &self.level_assets.nsf,
                     &self.level_assets.nsf_bytes,
                     &mut self.retail_audio,
+                    &mut self.retail_zone_pager,
                     &mut self.card,
                     &mut self.storage,
                 )
@@ -3289,6 +3639,7 @@ impl Runtime {
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
                 &mut self.retail_audio,
+                &mut self.retail_zone_pager,
                 &mut self.card,
                 &mut self.storage,
                 binding.source,
@@ -3638,6 +3989,24 @@ impl Runtime {
                 false,
             );
         }
+        Ok(())
+    }
+
+    fn play_retail_thunder(&mut self, cue: RetailThunderCue) -> Result<(), String> {
+        let mut host = BrowserProgramHost::new(
+            &self.level_assets.nsd,
+            &self.level_assets.nsf,
+            &self.level_assets.nsf_bytes,
+            &mut self.retail_audio,
+            &mut self.retail_zone_pager,
+            &mut self.card,
+            &mut self.storage,
+        );
+        host.ensure_audio_sample(cue.adio)
+            .map_err(|error| error.to_string())?;
+        host.audio
+            .create_unowned_delayed_voice(cue.adio, cue.amplitude, cue.pitch, cue.trigger)
+            .map_err(|error| error.to_string())?;
         Ok(())
     }
 
@@ -4744,31 +5113,49 @@ fn build_retail_zone_pager(
     Ok(pager)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RetailZonePagingOutcome {
+    None,
+    Open(PagerOpenOutcome),
+    Close(PagerCloseOutcome),
+    OpenUnavailable,
+}
+
 fn apply_retail_zone_paging_action(
     pager: &mut Pager,
     action: ZoneTransitionAction,
-) -> Result<(), String> {
+) -> Result<RetailZonePagingOutcome, String> {
     match action {
         ZoneTransitionAction::CloseEntry(eid) => pager
-            .close_eid(eid)
+            .close_eid_retail_with_outcome(eid)
+            .map(RetailZonePagingOutcome::Close)
             .map_err(|error| format!("could not close retail transition EID {eid}: {error:?}")),
-        ZoneTransitionAction::ClosePage(page) => pager.close_page(page).map_err(|error| {
-            format!(
-                "could not close retail transition page {}: {error:?}",
-                page.get()
-            )
-        }),
-        ZoneTransitionAction::OpenEntry(eid) => pager
-            .open_eid(eid)
-            .map_err(|error| format!("could not open retail transition EID {eid}: {error:?}")),
-        ZoneTransitionAction::OpenPage(page) => pager.open_page(page).map_err(|error| {
-            format!(
+        ZoneTransitionAction::ClosePage(page) => pager
+            .close_page_retail_with_outcome(page)
+            .map(RetailZonePagingOutcome::Close)
+            .map_err(|error| {
+                format!(
+                    "could not close retail transition page {}: {error:?}",
+                    page.get()
+                )
+            }),
+        ZoneTransitionAction::OpenEntry(eid) => match pager.open_eid_with_outcome(eid) {
+            Ok(outcome) => Ok(RetailZonePagingOutcome::Open(outcome)),
+            Err(PagingError::NoFreeTextureSlot(_)) => Ok(RetailZonePagingOutcome::OpenUnavailable),
+            Err(error) => Err(format!(
+                "could not open retail transition EID {eid}: {error:?}"
+            )),
+        },
+        ZoneTransitionAction::OpenPage(page) => match pager.open_page_with_outcome(page) {
+            Ok(outcome) => Ok(RetailZonePagingOutcome::Open(outcome)),
+            Err(PagingError::NoFreeTextureSlot(_)) => Ok(RetailZonePagingOutcome::OpenUnavailable),
+            Err(error) => Err(format!(
                 "could not open retail transition page {}: {error:?}",
                 page.get()
-            )
-        }),
+            )),
+        },
         ZoneTransitionAction::TerminateZoneObjects(_)
-        | ZoneTransitionAction::SetDisplayFlags { .. } => Ok(()),
+        | ZoneTransitionAction::SetDisplayFlags { .. } => Ok(RetailZonePagingOutcome::None),
     }
 }
 
@@ -4903,27 +5290,39 @@ fn log_retail_level_misc_object(dom: &Dom, created: Option<RuntimeObjectHandle>)
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn install_retail_scene_for_pair(
     pair: &ValidatedPair,
-    builder: &mut RetailSceneBuilder,
     stage: &mut GlStage,
     dom: &Dom,
     after_loading_image: bool,
+    install_preview: bool,
     initial_draw_count: u32,
     point_count: NonZeroU16,
+    texture_frame_snapshot: TextureFrameSnapshot,
+    world_shader_snapshot: crust_sim::retail_runtime::RetailWorldShaderSnapshot,
+    world_shader_render_state: RetailWorldShaderRenderState,
 ) -> Result<NonZeroU16, JsValue> {
     let draw_count = initial_draw_count.wrapping_add(u32::from(after_loading_image));
     // Title and external-transition dummy zones legally have one-point paths.
     // The gameplay loading contract asks for point one/two, so clamp only that
     // presentation selection to the validated final point.
     let path_point = crate::initial_presented_path_point(point_count, after_loading_image);
-    let scene = builder
-        .build_at_path_point(
+    // This build is a fallible mount preview only. The source performs world
+    // transforms on actual hidden and presented frames; retaining preview
+    // ripple/scratch state would add a phantom step and use the wrong camera.
+    let mut preview_builder = RetailSceneBuilder::new();
+    let mut preview_shader_render_state = world_shader_render_state;
+    let scene = preview_builder
+        .build_at_path_point_with_texture_frame(
             &pair.nsd,
             &pair.nsf,
             &pair.nsf_bytes,
             path_point,
             draw_count,
+            texture_frame_snapshot,
+            world_shader_snapshot,
+            &mut preview_shader_render_state,
         )
         .map_err(|error| {
             JsValue::from_str(&format!(
@@ -4933,7 +5332,9 @@ fn install_retail_scene_for_pair(
         })?;
     let stats = scene.stats;
     debug_assert_eq!(scene.path_point_count, point_count.get());
-    stage.install_retail_scene(scene)?;
+    if install_preview {
+        stage.install_retail_scene(scene)?;
+    }
     if stats.worlds == 0 {
         dom.log(
             "Mounted the retail zero-world transition/title spawn zone.",

@@ -122,7 +122,9 @@ impl SurveyInputProfile {
     const fn stops_at_transition(self) -> bool {
         matches!(
             self,
-            Self::DirectionAndButtonSweepToTransition | Self::ForwardWithActions
+            Self::DirectionAndButtonSweepToTransition
+                | Self::ForwardWithActions
+                | Self::JunglePhaseRobust
         )
     }
 }
@@ -133,6 +135,7 @@ impl SurveyInputProfile {
 struct JungleRouteController {
     stage: u8,
     active: Option<RouteAction>,
+    active_uses_forward: bool,
     action_tick: u8,
 }
 
@@ -146,7 +149,11 @@ impl JungleRouteController {
                 self.action_tick = 0;
                 self.stage = self.stage.saturating_add(1);
             }
-            return PAD_UP | held;
+            return if self.active_uses_forward {
+                PAD_UP | held
+            } else {
+                held
+            };
         }
 
         let zone_0b = Eid::from_name("0b_cZ").expect("fixed Jungle route EID is valid");
@@ -162,6 +169,19 @@ impl JungleRouteController {
         let zone_0r = Eid::from_name("0r_cZ").expect("fixed Jungle route EID is valid");
         let zone_0s = Eid::from_name("0s_cZ").expect("fixed Jungle route EID is valid");
         let zone_0u = Eid::from_name("0u_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0w = Eid::from_name("0w_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0x = Eid::from_name("0x_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0y = Eid::from_name("0y_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0a_upper = Eid::from_name("0A_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0b_upper = Eid::from_name("0B_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0c_upper = Eid::from_name("0C_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0f_upper = Eid::from_name("0F_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0g_upper = Eid::from_name("0G_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0i_upper = Eid::from_name("0I_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0j_upper = Eid::from_name("0J_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0k_upper = Eid::from_name("0K_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0m_upper = Eid::from_name("0M_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0o_upper = Eid::from_name("0O_cZ").expect("fixed Jungle route EID is valid");
         let grounded = player.is_some_and(|player| player.status_a & 1 != 0);
         let progress = camera.progress.raw();
         let triggered = grounded
@@ -180,13 +200,90 @@ impl JungleRouteController {
                 11 => camera.path.zone == zone_0r && camera.path.index == 0 && progress >= 18_000,
                 12 => camera.path.zone == zone_0s && camera.path.index == 0 && progress >= 18_000,
                 13 => camera.path.zone == zone_0u && camera.path.index == 0 && progress >= 12_000,
+                14 => camera.path.zone == zone_0u && camera.path.index == 1 && progress >= 5_000,
+                15 => camera.path.zone == zone_0u && camera.path.index == 1 && progress >= 18_500,
+                16 => camera.path.zone == zone_0w && camera.path.index == 0 && progress >= 8_000,
+                17 => camera.path.zone == zone_0x && camera.path.index == 0 && progress >= 4_000,
+                18 => camera.path.zone == zone_0x && camera.path.index == 1 && progress >= 7_000,
+                19 => camera.path.zone == zone_0x && camera.path.index == 1 && progress >= 18_000,
+                20 => camera.path.zone == zone_0y && camera.path.index == 0 && progress >= 8_000,
+                21 => {
+                    camera.path.zone == zone_0a_upper && camera.path.index == 0 && progress >= 6_000
+                }
+                22 => {
+                    camera.path.zone == zone_0b_upper
+                        && camera.path.index == 0
+                        && progress >= 15_500
+                }
+                23 => {
+                    camera.path.zone == zone_0c_upper && camera.path.index == 0 && progress >= 5_000
+                }
+                24 => {
+                    camera.path.zone == zone_0c_upper && camera.path.index == 1 && progress >= 1_500
+                }
+                25 => {
+                    camera.path.zone == zone_0c_upper && camera.path.index == 1 && progress >= 3_800
+                }
+                26 => {
+                    camera.path.zone == zone_0c_upper
+                        && camera.path.index == 1
+                        && progress >= 16_000
+                }
+                27 => {
+                    camera.path.zone == zone_0f_upper && camera.path.index == 0 && progress >= 5_000
+                }
+                28 => {
+                    camera.path.zone == zone_0g_upper
+                        && camera.path.index == 0
+                        && progress >= 16_000
+                }
+                29 => {
+                    camera.path.zone == zone_0g_upper && camera.path.index == 1 && progress >= 7_500
+                }
+                30 | 31 => {
+                    camera.path.zone == zone_0i_upper && camera.path.index == 1 && progress >= 2_500
+                }
+                32 | 33 => {
+                    (camera.path.zone == zone_0i_upper
+                        && camera.path.index == 1
+                        && progress >= 5_000)
+                        || (camera.path.zone == zone_0j_upper
+                            && camera.path.index == 0
+                            && progress >= 2_000)
+                }
+                34 | 35 => {
+                    camera.path.zone == zone_0j_upper
+                        && camera.path.index == 0
+                        && progress >= 16_000
+                }
+                36 => {
+                    camera.path.zone == zone_0k_upper && camera.path.index == 0 && progress >= 500
+                }
+                37 => {
+                    camera.path.zone == zone_0k_upper && camera.path.index == 1 && progress >= 500
+                }
+                38 => {
+                    camera.path.zone == zone_0k_upper
+                        && camera.path.index == 1
+                        && progress >= 12_000
+                }
+                39 => camera.path.zone == zone_0m_upper && camera.path.index == 1,
+                40 => {
+                    camera.path.zone == zone_0o_upper && camera.path.index == 0 && progress >= 1_000
+                }
+                41 => {
+                    camera.path.zone == zone_0o_upper
+                        && camera.path.index == 0
+                        && progress >= 10_000
+                }
                 _ => false,
             };
         if !triggered {
             return PAD_UP;
         }
+        self.active_uses_forward = !(self.stage == 32 && camera.path.zone == zone_0j_upper);
         self.active = Some(match self.stage {
-            3 | 5 | 7 => RouteAction {
+            3 | 5 | 7 | 21 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 1,
                 ..RouteAction::default()
@@ -201,6 +298,67 @@ impl JungleRouteController {
             11 | 12 => RouteAction {
                 button: PAD_CROSS,
                 button_frames: 32,
+                ..RouteAction::default()
+            },
+            14 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            24 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                ..RouteAction::default()
+            },
+            32 if camera.path.zone == zone_0j_upper => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                ..RouteAction::default()
+            },
+            28 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 32,
+                button: PAD_CROSS,
+                button_frames: 32,
+                ..RouteAction::default()
+            },
+            30 => RouteAction {
+                direction_frames: 48,
+                ..RouteAction::default()
+            },
+            31 => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 32,
+                button: PAD_CROSS,
+                button_frames: 32,
+                ..RouteAction::default()
+            },
+            33 if camera.path.zone == zone_0j_upper => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 32,
+                button: PAD_CROSS,
+                button_frames: 32,
+                ..RouteAction::default()
+            },
+            34 => RouteAction {
+                direction_frames: 1,
+                ..RouteAction::default()
+            },
+            37 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 4,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            39 => RouteAction {
+                button: PAD_SQUARE,
+                button_frames: 32,
+                ..RouteAction::default()
+            },
+            41 => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
                 ..RouteAction::default()
             },
             _ => RouteAction {
@@ -821,6 +979,7 @@ impl SurveyInputController {
             jungle: JungleRouteController {
                 stage: 0,
                 active: None,
+                active_uses_forward: false,
                 action_tick: 0,
             },
         }
@@ -4048,7 +4207,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_carry() {
+fn authored_first_completion_jungle_end_warp_vertical_flow_preserves_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -4361,23 +4520,29 @@ fn authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_c
         jungle_runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::JunglePhaseRobust,
-        1_500,
+        3_000,
     )
     .expect("Jungle Rollers authentic-phase route must execute");
-    assert_eq!(jungle_survey.frames, 1_500);
-    assert_eq!(jungle_survey.zone_transitions, 16);
+    assert_eq!(jungle_survey.frames, 2_546);
+    assert_eq!(jungle_survey.zone_transitions, 30);
     assert_eq!(jungle_survey.restarts, 0);
     assert!(jungle_survey.restart_frames.is_empty());
     assert_eq!(jungle_survey.death_camera_frames, 0);
     assert!(jungle_survey.first_below_zero.is_none());
     assert!(jungle_survey.first_terminal_fall.is_none());
-    assert!(jungle_survey.terminal.is_none());
-    assert!(jungle_survey.next_lid.is_none());
+    assert_eq!(
+        jungle_survey.terminal.as_deref(),
+        Some("frame 2546 requested level transition to 0x2d")
+    );
+    assert_eq!(
+        jungle_survey.next_lid,
+        Some((2_546, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+    );
     assert_eq!(jungle_survey.faulted_objects, 0);
     assert_eq!(jungle_survey.execution_errors, 0);
     assert!(
         jungle_survey.is_clean(),
-        "Jungle Rollers checkpoint route reached a checked runtime boundary: {}",
+        "Jungle Rollers completion route reached a checked runtime boundary: {}",
         jungle_survey.summary()
     );
     assert_eq!(
@@ -4396,11 +4561,26 @@ fn authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_c
             (534, 0x300),
             (1_025, 0x400),
             (1_117, 0x500),
+            (1_149, 0x600),
+            (1_150, 0x700),
+            (1_153, 0x800),
+            (1_154, 0x900),
+            (1_155, 0xa00),
+            (1_168, 0xb00),
+            (1_344, 0xc00),
+            (1_502, 0xd00),
+            (1_503, 0xe00),
+            (1_504, 0xf00),
+            (1_872, 0x1000),
         ]
     );
     assert_eq!(jungle_survey.saved_box_count_samples, [(1_117, 0x400)]);
     assert_eq!(
         jungle_survey.effect_counts.get("save-state").copied(),
+        Some(1)
+    );
+    assert_eq!(
+        jungle_survey.effect_counts.get("transition").copied(),
         Some(1)
     );
     for expected in [(531, 16, 3), (654, 25, 3), (1_117, 46, 9)] {
@@ -4419,24 +4599,24 @@ fn authored_first_completion_jungle_checkpoint_vertical_flow_preserves_session_c
         }),
         [-563_968, 2_236_928, 15_717_376]
     );
-    assert_eq!(jungle_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x500));
+    assert_eq!(jungle_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x1000));
     let jungle_final_camera = jungle_survey
         .final_camera
         .expect("Jungle Rollers route retains a camera location");
     assert_eq!(
         jungle_final_camera.path,
         RetailPathId {
-            zone: Eid::from_name("0u_cZ").expect("fixed Jungle post-checkpoint route EID is valid"),
-            index: 1,
+            zone: Eid::from_name("0O_cZ").expect("fixed Jungle end-warp route EID is valid"),
+            index: 0,
         }
     );
-    assert_eq!(jungle_final_camera.progress.raw(), 5_344);
+    assert_eq!(jungle_final_camera.progress.raw(), 17_836);
     assert_eq!(
         jungle_survey.final_player_translation,
-        Some([-594_176, 2_227_190, 15_197_440])
+        Some([2_193_152, 7_732_277, -2_147_072])
     );
-    assert_eq!(jungle_runtime.machine().random_seed(), 0x15aa_cd14);
-    assert_eq!(jungle_runtime.draw_count(), 4_177);
+    assert_eq!(jungle_runtime.machine().random_seed(), 0x742c_4322);
+    assert_eq!(jungle_runtime.draw_count(), 5_223);
 }
 
 #[test]

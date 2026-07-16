@@ -8,8 +8,8 @@
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
 //! A separate vertical-flow test retains the authored session carry across
 //! N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, their
-//! Level Complete screens, the Title map, and the initial Papu Papu mount
-//! without writing any game data.
+//! Level Complete screens, the Title map, Papu Papu's authored win, and the
+//! following Rolling Stones mount without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -110,6 +110,7 @@ enum SurveyInputProfile {
     BouldersCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
+    PapuPapuCompletionRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -134,6 +135,7 @@ impl SurveyInputProfile {
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
+            Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
         }
     }
 
@@ -149,7 +151,126 @@ impl SurveyInputProfile {
                 | Self::BouldersCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
+                | Self::PapuPapuCompletionRoute
         )
+    }
+}
+
+/// Ordinary-pad route for the carried Papu Papu phase.
+///
+/// Crash attacks through the arena center, then uses `ChefC`'s authored hurt
+/// state to retreat beyond the rotating staff. The state-one recovery is held
+/// on the outer ring before the next center approach; no VM event or object
+/// state is injected by this controller.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PapuPapuCompletionRouteController {
+    started: bool,
+    action_tick: u16,
+    previous_boss_state: Option<u16>,
+    retreat_held: u32,
+    post_hit_wait: u8,
+}
+
+impl PapuPapuCompletionRouteController {
+    const ATTACK_JUMP_CADENCE: u16 = 30;
+    const ATTACK_JUMP_HOLD: u16 = 16;
+    const CENTER_THRESHOLD: i32 = 24_000;
+    const LANDING_HEIGHT: i32 = 30_000;
+    const OUTER_JUMP_CADENCE: u16 = 18;
+    const OUTER_JUMP_HOLD: u16 = 16;
+    const POST_HIT_WAIT: u8 = 60;
+
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        boss_state: Option<u16>,
+    ) -> u32 {
+        let arena = Eid::from_name("bc_aZ").expect("fixed Papu Papu arena EID is valid");
+        let Some(player) = player else {
+            return 0;
+        };
+        if !self.started {
+            if camera.path.zone != arena
+                || camera.path.index != 1
+                || player.state != 1
+                || boss_state != Some(1)
+            {
+                return 0;
+            }
+            self.started = true;
+        }
+
+        if boss_state == Some(2) {
+            if self.previous_boss_state != Some(2) {
+                self.action_tick = 0;
+                self.retreat_held = 0;
+            }
+            self.previous_boss_state = Some(2);
+            if self.retreat_held == 0 && player.translation[1] <= Self::LANDING_HEIGHT {
+                self.retreat_held = Self::outward_direction(player.translation);
+                self.action_tick = 0;
+            }
+            if self.retreat_held == 0 {
+                return 0;
+            }
+            return self.outward_jump();
+        }
+
+        if boss_state != Some(1) {
+            self.previous_boss_state = boss_state;
+            return 0;
+        }
+        if self.previous_boss_state == Some(2) {
+            self.action_tick = 0;
+            self.post_hit_wait = Self::POST_HIT_WAIT;
+        }
+        self.previous_boss_state = Some(1);
+
+        if self.post_hit_wait > 0 {
+            self.post_hit_wait -= 1;
+            return self.outward_jump();
+        }
+
+        let mut held = 0;
+        if player.translation[0] > Self::CENTER_THRESHOLD {
+            held |= PAD_LEFT;
+        } else if player.translation[0] < -Self::CENTER_THRESHOLD {
+            held |= PAD_RIGHT;
+        }
+        if player.translation[2] > Self::CENTER_THRESHOLD {
+            held |= PAD_UP;
+        } else if player.translation[2] < -Self::CENTER_THRESHOLD {
+            held |= PAD_DOWN;
+        }
+        if self.action_tick % Self::ATTACK_JUMP_CADENCE < Self::ATTACK_JUMP_HOLD {
+            held |= PAD_CROSS;
+        }
+        self.action_tick = self.action_tick.saturating_add(1);
+        held
+    }
+
+    fn outward_jump(&mut self) -> u32 {
+        let mut held = self.retreat_held;
+        if self.action_tick % Self::OUTER_JUMP_CADENCE < Self::OUTER_JUMP_HOLD {
+            held |= PAD_CROSS;
+        }
+        self.action_tick = self.action_tick.saturating_add(1);
+        held
+    }
+
+    const fn outward_direction(translation: [i32; 3]) -> u32 {
+        if translation[0].unsigned_abs() >= translation[2].unsigned_abs() {
+            if translation[0] < 0 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            }
+        } else if translation[2] < 0 {
+            PAD_UP
+        } else {
+            PAD_DOWN
+        }
     }
 }
 
@@ -4070,6 +4191,7 @@ struct SurveyInputController {
     boulders: BouldersCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
+    papu_papu: PapuPapuCompletionRouteController,
 }
 
 impl SurveyInputController {
@@ -4120,6 +4242,13 @@ impl SurveyInputController {
                 checkpoint_route_started: false,
                 checkpoint_tick: 0,
             },
+            papu_papu: PapuPapuCompletionRouteController {
+                started: false,
+                action_tick: 0,
+                previous_boss_state: None,
+                retreat_held: 0,
+                post_hit_wait: 0,
+            },
         }
     }
 
@@ -4131,6 +4260,7 @@ impl SurveyInputController {
         checkpoint_id: i32,
         local_pbak_held: Option<u32>,
         upstream_platforms: &UpstreamPlatformTraces,
+        papu_boss_state: Option<u16>,
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
@@ -4167,6 +4297,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::RollingStonesCheckpoint => {
                 self.rolling_stones.held(camera, player, checkpoint_id)
+            }
+            SurveyInputProfile::PapuPapuCompletionRoute => {
+                self.papu_papu.held(camera, player, papu_boss_state)
             }
         }
     }
@@ -4216,6 +4349,14 @@ struct PagingTraceEntry {
     operation: PagingHostOperation,
     eid: Eid,
     page: PageIndex,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectSendProgramSample {
+    frame: u32,
+    event: u32,
+    sender: Option<Eid>,
+    recipient: Option<Eid>,
 }
 
 #[derive(Debug)]
@@ -4270,6 +4411,8 @@ struct LevelSurvey {
     observed_program_states: BTreeSet<(Eid, u16)>,
     observed_player_states: BTreeSet<u16>,
     early_direct_send_samples: Vec<(u32, u32)>,
+    entity_state_samples: Vec<(u32, u16, u16)>,
+    direct_send_program_samples: Vec<DirectSendProgramSample>,
     next_lid: Option<(u32, i32)>,
 }
 
@@ -4326,6 +4469,8 @@ impl LevelSurvey {
             observed_program_states: BTreeSet::new(),
             observed_player_states: BTreeSet::new(),
             early_direct_send_samples: Vec::new(),
+            entity_state_samples: Vec::new(),
+            direct_send_program_samples: Vec::new(),
             next_lid: None,
         }
     }
@@ -4444,7 +4589,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} direct-program-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -4487,6 +4632,8 @@ impl LevelSurvey {
             self.saved_box_count_samples,
             self.spawn_flag_samples,
             self.early_direct_send_samples,
+            self.entity_state_samples,
+            self.direct_send_program_samples,
             self.effect_counts,
             self.first_effect_samples,
             self.issue_counts,
@@ -5113,6 +5260,33 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
     }))
 }
 
+fn spawned_entity_state(runtime: &RetailRuntime, id: u16) -> Result<Option<u16>, String> {
+    for arena_handle in runtime
+        .arena()
+        .postorder_snapshot()
+        .map_err(|error| format!("entity-state forest: {error:?}"))?
+    {
+        let Some(spawned) = runtime.arena().get(arena_handle) else {
+            continue;
+        };
+        if spawned
+            .entity_descriptor()
+            .is_none_or(|descriptor| descriptor.id != id)
+        {
+            continue;
+        }
+        let Some(object) = runtime.object_for_arena(arena_handle) else {
+            continue;
+        };
+        let vm = runtime
+            .machine()
+            .object(object.vm())
+            .map_err(|error| format!("entity-state VM: {error:?}"))?;
+        return Ok(Some(vm.state()));
+    }
+    Ok(None)
+}
+
 fn upstream_platform_traces(runtime: &RetailRuntime) -> Result<UpstreamPlatformTraces, String> {
     let mut traces = UpstreamPlatformTraces::default();
     for arena in runtime
@@ -5632,6 +5806,7 @@ fn survey_pair_with_runtime(
     let mut last_interaction_globals = None;
     let mut previous_box_count = None;
     let mut previous_checkpoint = None;
+    let mut previous_papu_boss_state = None;
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);
@@ -5648,6 +5823,18 @@ fn survey_pair_with_runtime(
             } else {
                 UpstreamPlatformTraces::default()
             };
+        let papu_boss_state =
+            if matches!(input_profile, SurveyInputProfile::PapuPapuCompletionRoute) {
+                spawned_entity_state(&runtime, 8)?
+            } else {
+                None
+            };
+        if previous_papu_boss_state != papu_boss_state {
+            if let Some(state) = papu_boss_state {
+                survey.entity_state_samples.push((frame, 8, state));
+            }
+            previous_papu_boss_state = papu_boss_state;
+        }
         let held = input_controller.held(
             frame,
             camera.location(),
@@ -5658,6 +5845,7 @@ fn survey_pair_with_runtime(
                 .and_then(|frames| frames.get(usize::try_from(frame - 1).ok()?))
                 .copied(),
             &upstream_platforms,
+            papu_boss_state,
         );
         let tapped = held & !held_previous;
         runtime
@@ -5765,6 +5953,28 @@ fn survey_pair_with_runtime(
         }
         for effect in &report.effects {
             survey.record_effect(frame, effect);
+            if matches!(input_profile, SurveyInputProfile::PapuPapuCompletionRoute)
+                && survey.direct_send_program_samples.len() < 128
+                && let VmEffect::SendEvent(request) = effect
+                && let SendEventTarget::Direct { recipient } = request.target
+            {
+                let program = |object| {
+                    runtime
+                        .machine()
+                        .object(object)
+                        .ok()
+                        .and_then(crust_sim::gool::VmObject::program_identity)
+                        .map(GoolProgramIdentity::global_eid)
+                };
+                survey
+                    .direct_send_program_samples
+                    .push(DirectSendProgramSample {
+                        frame,
+                        event: request.event,
+                        sender: program(request.sender),
+                        recipient: program(recipient),
+                    });
+            }
             if frame <= 360
                 && survey.early_direct_send_samples.len() < 128
                 && let VmEffect::SendEvent(request) = effect
@@ -7676,7 +7886,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_five_levels_reach_papu_papu_with_session_carry() {
+fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -10096,73 +10306,522 @@ fn authored_first_five_levels_reach_papu_papu_with_session_carry() {
 
         let (papu_papu_nsd, papu_papu_nsf, papu_papu_nsf_bytes) =
             parse_local_pair(&root, papu_papu).expect("Papu Papu pair must parse");
-        let papu_papu_runtime =
-            RetailRuntime::new_from_session(GLOBAL_WORDS, papu_papu, papu_papu_carry)
-                .expect("Papu Papu must import the fifth-completion map carry");
-        let (papu_papu_survey, papu_papu_runtime) = survey_pair_with_runtime(
-            known_name(papu_papu),
-            papu_papu,
-            &papu_papu_nsd,
-            &papu_papu_nsf,
-            &papu_papu_nsf_bytes,
-            papu_papu_runtime,
-            LevelContextSource::SessionGlobals,
-            SurveyInputProfile::Idle,
-            120,
-        )
-        .expect("Papu Papu's carried initial window must execute");
-        assert_eq!(papu_papu_survey.frames, 120);
-        assert!(papu_papu_survey.terminal.is_none());
-        assert_eq!(papu_papu_survey.final_live_objects, 17);
-        assert_eq!(papu_papu_survey.max_live_objects, 21);
-        assert_eq!(papu_papu_survey.successful_spawns, 6);
-        assert_eq!(papu_papu_survey.spawn_attempts, 840);
-        assert_eq!(papu_papu_survey.expected_spawn_rejections, 834);
-        assert_eq!(papu_papu_survey.unexpected_spawn_errors, 0);
-        assert_eq!(papu_papu_survey.executions, 2_097);
-        assert_eq!(papu_papu_survey.zone_transitions, 0);
-        assert_eq!(papu_papu_survey.camera_ranges.len(), 1);
-        assert_eq!(papu_papu_survey.camera_path_changes, 0);
-        assert_eq!(papu_papu_survey.restarts, 0);
-        assert!(papu_papu_survey.restart_frames.is_empty());
-        assert_eq!(papu_papu_survey.death_camera_frames, 0);
-        assert!(papu_papu_survey.first_below_zero.is_none());
-        assert!(papu_papu_survey.first_terminal_fall.is_none());
-        assert!(papu_papu_survey.next_lid.is_none());
-        assert_eq!(papu_papu_survey.faulted_objects, 0);
-        assert_eq!(papu_papu_survey.execution_errors, 0);
-        assert!(papu_papu_survey.issue_counts.is_empty());
-        let papu_papu_initial_camera = papu_papu_survey
-            .initial_camera
-            .expect("Papu Papu begins on its authored camera path");
-        let papu_papu_final_camera = papu_papu_survey
-            .final_camera
-            .expect("Papu Papu retains its authored camera path");
-        assert_eq!(
-            papu_papu_initial_camera.path,
-            RetailPathId {
-                zone: Eid::from_name("bc_aZ").expect("fixed Papu Papu arena EID is valid"),
-                index: 0,
+        let papu_title_carry = {
+            let papu_papu_completion_runtime =
+                RetailRuntime::new_from_session(GLOBAL_WORDS, papu_papu, papu_papu_carry)
+                    .expect("Papu Papu's completion route must import the carried Map phase");
+            let (papu_papu_completion_survey, mut papu_papu_completion_runtime) =
+                survey_pair_with_runtime(
+                    known_name(papu_papu),
+                    papu_papu,
+                    &papu_papu_nsd,
+                    &papu_papu_nsf,
+                    &papu_papu_nsf_bytes,
+                    papu_papu_completion_runtime,
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::PapuPapuCompletionRoute,
+                    900,
+                )
+                .expect("Papu Papu's carried ordinary-pad completion route must execute");
+            assert_eq!(papu_papu_completion_survey.frames, 812);
+            assert_eq!(
+                papu_papu_completion_survey.terminal.as_deref(),
+                Some("frame 812 requested level transition to 0x19")
+            );
+            assert_eq!(papu_papu_completion_survey.final_live_objects, 33);
+            assert_eq!(papu_papu_completion_survey.max_live_objects, 52);
+            assert_eq!(papu_papu_completion_survey.successful_spawns, 6);
+            assert_eq!(papu_papu_completion_survey.spawn_attempts, 5_684);
+            assert_eq!(papu_papu_completion_survey.expected_spawn_rejections, 5_678);
+            assert_eq!(papu_papu_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(papu_papu_completion_survey.executions, 16_377);
+            assert_eq!(papu_papu_completion_survey.zone_transitions, 0);
+            assert_eq!(papu_papu_completion_survey.camera_ranges.len(), 3);
+            assert_eq!(papu_papu_completion_survey.camera_path_changes, 2);
+            assert_eq!(papu_papu_completion_survey.last_camera_path_change, 199);
+            assert_eq!(papu_papu_completion_survey.restarts, 0);
+            assert!(papu_papu_completion_survey.restart_frames.is_empty());
+            assert_eq!(papu_papu_completion_survey.save_handshakes, 2);
+            assert_eq!(papu_papu_completion_survey.death_camera_frames, 0);
+            let (first_ground_rounding_frame, first_ground_rounding) =
+                papu_papu_completion_survey.first_below_zero.expect(
+                    "Papu Papu's first bounce must retain the observed eight-unit ground rounding",
+                );
+            assert_eq!(first_ground_rounding_frame, 314);
+            assert_eq!(first_ground_rounding.translation[1], -8);
+            assert_eq!(first_ground_rounding.state, 11);
+            assert!(papu_papu_completion_survey.first_terminal_fall.is_none());
+            assert_eq!(papu_papu_completion_survey.faulted_objects, 0);
+            assert_eq!(papu_papu_completion_survey.execution_errors, 0);
+            assert!(papu_papu_completion_survey.issue_counts.is_empty());
+            assert_eq!(
+                papu_papu_completion_survey.next_lid,
+                Some((812, i32::try_from(LevelId::TITLE.get()).unwrap()))
+            );
+            assert_eq!(
+                papu_papu_completion_survey
+                    .effect_counts
+                    .get("transition")
+                    .copied(),
+                Some(1)
+            );
+            assert_eq!(
+                papu_papu_completion_survey
+                    .effect_counts
+                    .get("send-event")
+                    .copied(),
+                Some(41)
+            );
+            assert!(
+                !papu_papu_completion_survey
+                    .effect_counts
+                    .contains_key("load-state")
+            );
+            let papu_arena = Eid::from_name("bc_aZ").expect("fixed Papu Papu arena EID is valid");
+            let papu_completion_initial_camera = papu_papu_completion_survey
+                .initial_camera
+                .expect("Papu Papu's completion route begins on a camera path");
+            assert_eq!(
+                papu_completion_initial_camera.path,
+                RetailPathId {
+                    zone: papu_arena,
+                    index: 0,
+                }
+            );
+            assert_eq!(papu_completion_initial_camera.progress.raw(), 0x0100);
+            let papu_completion_final_camera = papu_papu_completion_survey
+                .final_camera
+                .expect("Papu Papu's completion route retains a camera path");
+            assert_eq!(
+                papu_completion_final_camera.path,
+                RetailPathId {
+                    zone: papu_arena,
+                    index: 1,
+                }
+            );
+            assert_eq!(papu_completion_final_camera.progress.raw(), 0);
+            assert_eq!(
+                papu_papu_completion_survey.initial_player_translation,
+                Some([177_152, 0, -139_264])
+            );
+            assert_eq!(
+                papu_papu_completion_survey.final_player_translation,
+                Some([-99_328, 250_851, 10_240])
+            );
+            assert_eq!(
+                papu_papu_completion_survey.player_minimum,
+                Some([-422_912, -8, -139_264])
+            );
+            assert_eq!(
+                papu_papu_completion_survey.player_maximum,
+                Some([420_864, 519_129, 10_240])
+            );
+            assert_eq!(papu_papu_completion_survey.last_player_movement, 733);
+            let boss_hit_frames = papu_papu_completion_survey
+                .entity_state_samples
+                .iter()
+                .filter_map(|(frame, id, state)| (*id == 8 && *state == 2).then_some(*frame))
+                .collect::<Vec<_>>();
+            assert_eq!(boss_hit_frames, [303, 485, 667]);
+            let boss_recovery_frames = papu_papu_completion_survey
+                .entity_state_samples
+                .iter()
+                .filter_map(|(frame, id, state)| {
+                    (*id == 8 && *state == 1 && *frame > 300).then_some(*frame)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(boss_recovery_frames, [382, 564]);
+            assert_eq!(
+                papu_papu_completion_survey.entity_state_samples,
+                [
+                    (2, 8, 0),
+                    (265, 8, 1),
+                    (303, 8, 2),
+                    (382, 8, 1),
+                    (485, 8, 2),
+                    (564, 8, 1),
+                    (667, 8, 2),
+                    (668, 8, 3),
+                ]
+            );
+            let chef = Eid::from_name("ChefC").expect("fixed Papu Papu boss EID is valid");
+            let crash = Eid::from_name("WillC").expect("fixed Crash EID is valid");
+            let crash_hit_sends = papu_papu_completion_survey
+                .direct_send_program_samples
+                .iter()
+                .filter_map(|sample| {
+                    (sample.event == 0
+                        && sample.sender == Some(crash)
+                        && sample.recipient == Some(chef))
+                    .then_some(sample.frame)
+                })
+                .collect::<Vec<_>>();
+            let boss_contact_sends = papu_papu_completion_survey
+                .direct_send_program_samples
+                .iter()
+                .filter_map(|sample| {
+                    (sample.event == 0x300
+                        && sample.sender == Some(chef)
+                        && sample.recipient == Some(crash))
+                    .then_some(sample.frame)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(boss_contact_sends, [278, 302, 484, 666]);
+            let damage_collision_frames = boss_contact_sends
+                .iter()
+                .copied()
+                .filter(|frame| crash_hit_sends.contains(frame))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                damage_collision_frames,
+                [302, 484, 666],
+                "each damage collision must pair ChefC contact with Crash's direct event zero"
+            );
+            assert!(
+                papu_papu_completion_survey
+                    .observed_program_states
+                    .contains(&(chef, 2))
+            );
+            assert!(
+                papu_papu_completion_survey
+                    .observed_program_states
+                    .contains(&(chef, 3))
+            );
+            assert!(
+                papu_papu_completion_survey
+                    .observed_player_states
+                    .contains(&14)
+            );
+            assert!(
+                papu_papu_completion_survey
+                    .observed_player_states
+                    .contains(&32)
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| papu_papu_completion_runtime.global_word(index).unwrap()),
+                [
+                    0x300,
+                    TitleScreen::Map.raw(),
+                    TitleScreen::Map.raw(),
+                    6,
+                    1,
+                    7,
+                    0,
+                ]
+            );
+            assert_eq!(
+                papu_papu_completion_runtime.machine().random_seed(),
+                0xf3ab_9165
+            );
+            assert_eq!(papu_papu_completion_runtime.draw_count(), 4_265);
+            assert!(
+                papu_papu_completion_survey.is_clean(),
+                "Papu Papu's carried completion route must remain clean: {}",
+                papu_papu_completion_survey.summary()
+            );
+
+            let carry = {
+                let mut host =
+                    NsfProgramHost::new(&papu_papu_nsd, &papu_papu_nsf, &papu_papu_nsf_bytes);
+                let report = papu_papu_completion_runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(LevelId::TITLE.get()).unwrap(),
+                    )
+                    .expect("Papu Papu LEVEL_END must export the authored Map carry");
+                assert!(
+                    report.event_failures.is_empty(),
+                    "Papu Papu LEVEL_END handlers must complete cleanly: {:?}",
+                    report.event_failures
+                );
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, report.requested_lid);
+                assert_eq!(report.resolved.level, LevelId::TITLE);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                report.carry
+            };
+            assert_eq!(carry.random_seed, 0xf3ab_9165);
+            assert_eq!(carry.draw_count, 4_265);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| carry.globals[index]),
+                [
+                    0x300,
+                    TitleScreen::Map.raw(),
+                    TitleScreen::Map.raw(),
+                    6,
+                    1,
+                    7,
+                    0,
+                ]
+            );
+            carry
+        };
+
+        // A noncapturing local helper keeps the large Map runtime out of this
+        // already-long characterization test's parent stack frame.
+        #[allow(clippy::items_after_statements)]
+        fn post_papu_map_to_rolling_stones(
+            title_nsd: &Nsd,
+            title_nsf: &Nsf,
+            title_nsf_bytes: &[u8],
+            papu_title_carry: RetailSessionCarry,
+        ) -> RetailSessionCarry {
+            let rolling_stones = LevelId::new_const(0x15);
+            let rolling_stones_lid = i32::try_from(rolling_stones.get()).unwrap();
+            {
+                let mut post_papu_map = AuthoredTitleMapHarness::from_session(
+                    title_nsd,
+                    title_nsf,
+                    title_nsf_bytes,
+                    papu_title_carry,
+                );
+                post_papu_map.wait_until_ready(64);
+                assert_eq!(post_papu_map.frame, 10);
+                let ready_location = post_papu_map.camera.location();
+                assert_eq!(
+                    ready_location.path,
+                    RetailPathId {
+                        zone: Eid::from_name("1e_pZ")
+                            .expect("fixed post-Papu map-zone EID is valid"),
+                        index: 0,
+                    }
+                );
+                assert_eq!(ready_location.progress.raw(), 0x1500);
+
+                while post_papu_map.frame < 52 {
+                    post_papu_map.step(0);
+                }
+                let current_node = post_papu_map.camera.location();
+                assert_eq!(
+                    current_node.path,
+                    RetailPathId {
+                        zone: Eid::from_name("1d_pZ").expect("fixed sixth map-zone EID is valid"),
+                        index: 0,
+                    }
+                );
+                assert_eq!(current_node.progress.raw(), 0x0400);
+                post_papu_map.tap(PAD_UP);
+                assert_eq!(post_papu_map.frame, 54);
+
+                while post_papu_map.frame < 65 {
+                    post_papu_map.step(0);
+                }
+                let next_node = post_papu_map.camera.location();
+                assert_eq!(
+                    next_node.path,
+                    RetailPathId {
+                        zone: Eid::from_name("1d_pZ").expect("fixed seventh map-zone EID is valid"),
+                        index: 1,
+                    }
+                );
+                assert_eq!(next_node.progress.raw(), 0x0300);
+                post_papu_map.step(PAD_CROSS);
+                assert_eq!(post_papu_map.frame, 66);
+                assert_eq!(
+                    post_papu_map.transitions,
+                    [(66, rolling_stones_lid)],
+                    "the state-gated Map route must select Rolling Stones"
+                );
+                assert_eq!(post_papu_map.runtime.faulted_object_count(), 0);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| post_papu_map.runtime.global_word(index).unwrap()),
+                    [
+                        0,
+                        TitleScreen::Map.raw(),
+                        TitleScreen::Map.raw(),
+                        7,
+                        1,
+                        7,
+                        1,
+                    ]
+                );
+                assert_eq!(post_papu_map.runtime.machine().random_seed(), 0xf3ab_9165);
+                assert_eq!(post_papu_map.runtime.draw_count(), 4_331);
+
+                let mut host = NsfProgramHost::new(title_nsd, title_nsf, title_nsf_bytes);
+                let report = post_papu_map
+                    .runtime
+                    .finish_level_transition(&mut host, rolling_stones_lid)
+                    .expect("post-Papu Map must export the Rolling Stones carry");
+                assert!(
+                    report.event_failures.is_empty(),
+                    "post-Papu Map LEVEL_END handlers must complete cleanly: {:?}",
+                    report.event_failures
+                );
+                assert_eq!(report.requested_lid, rolling_stones_lid);
+                assert_eq!(report.next_lid_after_event, report.requested_lid);
+                assert_eq!(report.resolved.level, rolling_stones);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xf3ab_9165);
+                assert_eq!(report.carry.draw_count, 4_331);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [
+                        0,
+                        TitleScreen::Map.raw(),
+                        TitleScreen::Map.raw(),
+                        7,
+                        1,
+                        7,
+                        1,
+                    ]
+                );
+                report.carry
             }
+        }
+        let rolling_stones_carry = post_papu_map_to_rolling_stones(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            papu_title_carry,
         );
-        assert_eq!(papu_papu_initial_camera.progress.raw(), 0x0100);
-        assert_eq!(papu_papu_final_camera.path, papu_papu_initial_camera.path);
-        assert_eq!(papu_papu_final_camera.progress.raw(), 0x7800);
-        assert_eq!(
-            papu_papu_survey.initial_player_translation,
-            Some([177_152, 0, -139_264])
-        );
-        assert_eq!(
-            papu_papu_survey.final_player_translation,
-            Some([177_152, 23_998, -139_264])
-        );
-        assert_eq!(papu_papu_runtime.machine().random_seed(), 0xdf8a_5cc9);
-        assert_eq!(papu_papu_runtime.draw_count(), 3_573);
-        assert!(
-            papu_papu_survey.is_clean(),
-            "Papu Papu's carried initial window must remain clean: {}",
-            papu_papu_survey.summary()
-        );
+
+        // This second call frame similarly bounds the mounted gameplay runtime.
+        #[allow(clippy::items_after_statements)]
+        fn assert_carried_rolling_stones_mount(
+            root: &Path,
+            rolling_stones_carry: RetailSessionCarry,
+        ) {
+            let rolling_stones = LevelId::new_const(0x15);
+            let known_name = |level| {
+                KNOWN_LEVELS
+                    .iter()
+                    .find(|known| known.id == level)
+                    .map(|known| known.name)
+                    .expect("Rolling Stones is present in the retail catalog")
+            };
+            let (rolling_stones_nsd, rolling_stones_nsf, rolling_stones_nsf_bytes) =
+                parse_local_pair(root, rolling_stones).expect("Rolling Stones pair must parse");
+            let rolling_stones_runtime =
+                RetailRuntime::new_from_session(GLOBAL_WORDS, rolling_stones, rolling_stones_carry)
+                    .expect("Rolling Stones must import the post-Papu Map carry");
+            let (rolling_stones_survey, rolling_stones_runtime) = survey_pair_with_runtime(
+                known_name(rolling_stones),
+                rolling_stones,
+                &rolling_stones_nsd,
+                &rolling_stones_nsf,
+                &rolling_stones_nsf_bytes,
+                rolling_stones_runtime,
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::Idle,
+                120,
+            )
+            .expect("Rolling Stones' carried initial window must execute");
+            assert_eq!(rolling_stones_survey.frames, 120);
+            assert!(rolling_stones_survey.terminal.is_none());
+            assert_eq!(rolling_stones_survey.final_live_objects, 28);
+            assert_eq!(rolling_stones_survey.max_live_objects, 32);
+            assert_eq!(rolling_stones_survey.successful_spawns, 19);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 2_280);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 2_261);
+            assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
+            assert_eq!(rolling_stones_survey.executions, 3_476);
+            assert_eq!(rolling_stones_survey.zone_transitions, 0);
+            assert_eq!(rolling_stones_survey.camera_ranges.len(), 1);
+            assert_eq!(rolling_stones_survey.camera_path_changes, 0);
+            assert_eq!(rolling_stones_survey.restarts, 0);
+            assert!(rolling_stones_survey.restart_frames.is_empty());
+            assert_eq!(rolling_stones_survey.death_camera_frames, 0);
+            assert!(rolling_stones_survey.first_below_zero.is_none());
+            assert!(rolling_stones_survey.first_terminal_fall.is_none());
+            assert!(rolling_stones_survey.next_lid.is_none());
+            assert_eq!(rolling_stones_survey.faulted_objects, 0);
+            assert_eq!(rolling_stones_survey.execution_errors, 0);
+            assert!(rolling_stones_survey.issue_counts.is_empty());
+            let rolling_initial_camera = rolling_stones_survey
+                .initial_camera
+                .expect("Rolling Stones begins on its authored camera path");
+            let rolling_final_camera = rolling_stones_survey
+                .final_camera
+                .expect("Rolling Stones retains its authored camera path");
+            let rolling_spawn_zone =
+                Eid::from_name("0a_lZ").expect("fixed Rolling Stones spawn-zone EID is valid");
+            assert_eq!(
+                rolling_initial_camera.path,
+                RetailPathId {
+                    zone: rolling_spawn_zone,
+                    index: 0,
+                }
+            );
+            assert_eq!(rolling_initial_camera.progress.raw(), 0x0100);
+            assert_eq!(rolling_final_camera.path, rolling_initial_camera.path);
+            assert_eq!(rolling_final_camera.progress.raw(), 0x1900);
+            assert_eq!(
+                rolling_stones_survey.initial_player_translation,
+                Some([2_252_544, 1_023_744, 31_794_432])
+            );
+            assert_eq!(
+                rolling_stones_survey.final_player_translation,
+                Some([2_252_544, 969_366, 31_794_432])
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| rolling_stones_runtime.global_word(index).unwrap()),
+                [
+                    0x100,
+                    TitleScreen::Map.raw(),
+                    TitleScreen::Map.raw(),
+                    7,
+                    1,
+                    7,
+                    0,
+                ]
+            );
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x2c84_92d5);
+            assert_eq!(rolling_stones_runtime.draw_count(), 4_451);
+            assert!(
+                rolling_stones_survey.is_clean(),
+                "Rolling Stones' carried initial window must remain clean: {}",
+                rolling_stones_survey.summary()
+            );
+        }
+        assert_carried_rolling_stones_mount(&root, rolling_stones_carry);
         eprintln!(
             concat!(
                 "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",
@@ -10177,7 +10836,10 @@ fn authored_first_five_levels_reach_papu_papu_with_session_carry() {
                 "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
-                "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}",
+                "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
+                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4265); Map -> Rolling ",
+                "Stones at frame 66 (draw 4331); Rolling Stones carried idle mount: 120 clean ",
+                "frames (draw 4451)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

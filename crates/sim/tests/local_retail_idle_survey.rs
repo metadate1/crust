@@ -2138,6 +2138,14 @@ struct MovingPlatformTrace {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct UpstreamPlatformTraces {
+    orbital: Option<MovingPlatformTrace>,
+    first_zero_k: Option<MovingPlatformTrace>,
+    second_zero_k: Option<MovingPlatformTrace>,
+    zero_l: Option<MovingPlatformTrace>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum UpstreamRecoveryStage {
     #[default]
     SettleAtSpawn,
@@ -2145,21 +2153,34 @@ enum UpstreamRecoveryStage {
     BoardLeaf,
     RideLeaf,
     TransferFromLeaf,
-    StableInZeroJ,
+    WaitInZeroJ,
+    CrossZeroKLeaves,
+    JumpToSecondZeroKLeaf,
+    WaitOnSecondZeroKLeaf,
+    JumpToZeroLTerrain,
+    WaitOnZeroLTerrain,
+    JumpToZeroLLeaf,
+    WaitOnZeroLLeaf,
+    JumpToZeroLRock,
+    WaitOnZeroLRock,
+    SteerIntoZeroM,
+    StableInZeroM,
 }
 
 /// Recovers from applying Upstream's mid-level PBAK input to the normal
-/// post-Map spawn, then follows camera paths and the live moving leaf into 0j.
+/// post-Map spawn, then follows camera paths and live moving platforms into
+/// 0m.
 ///
-/// Every Cross interval is bounded by an explicit release window. The two
-/// moving-leaf actions are gated on Crash's landed state and the live `RivOC`
-/// entity rather than replaying a second absolute pad trace.
+/// Every Cross interval is bounded by an explicit release window. Platform
+/// transfers are gated on Crash's landed state and live `RivOC` entities
+/// rather than replaying a second absolute pad trace.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UpstreamRecoveryRouteController {
     stage: UpstreamRecoveryStage,
     settle_frames: u8,
     opening_tick: u16,
     action_tick: u8,
+    wait_tick: u8,
     leaf_reached_far_side: bool,
     leaf_completed_cycle: bool,
 }
@@ -2169,6 +2190,10 @@ impl UpstreamRecoveryRouteController {
     const OPENING_ACTION_COUNT: u16 = 6;
     const OPENING_ACTION_CADENCE: u16 = 28;
     const LEAF_BANK_MINIMUM_TICK: u16 = 176;
+    const ZERO_J_SETTLE_FRAMES: u8 = 22;
+    const PLATFORM_LANDING_FRAMES: u8 = 22;
+    const ZERO_L_LEAF_SETTLE_FRAMES: u8 = 28;
+    const ZERO_L_ROCK_SETTLE_FRAMES: u8 = 20;
 
     const SHORT_JUMP: RouteAction = RouteAction {
         direction: PAD_UP,
@@ -2191,12 +2216,33 @@ impl UpstreamRecoveryRouteController {
         button_start: 10,
         button_frames: 15,
     };
+    const ZERO_J_TO_ZERO_K: RouteAction = RouteAction {
+        direction: PAD_UP,
+        direction_frames: 58,
+        button: PAD_CROSS,
+        button_start: 26,
+        button_frames: 16,
+    };
+    const PLATFORM_JUMP: RouteAction = RouteAction {
+        direction: PAD_UP,
+        direction_frames: 20,
+        button: PAD_CROSS,
+        button_start: 6,
+        button_frames: 16,
+    };
+    const ZERO_L_ROCK_JUMP: RouteAction = RouteAction {
+        direction: PAD_UP,
+        direction_frames: 28,
+        button: PAD_CROSS,
+        button_start: 10,
+        button_frames: 16,
+    };
 
     fn held(
         &mut self,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
-        leaf: Option<MovingPlatformTrace>,
+        platforms: UpstreamPlatformTraces,
     ) -> u32 {
         match self.stage {
             UpstreamRecoveryStage::SettleAtSpawn => {
@@ -2213,7 +2259,7 @@ impl UpstreamRecoveryRouteController {
             }
             UpstreamRecoveryStage::CrossOpening => {
                 if self.opening_tick >= Self::LEAF_BANK_MINIMUM_TICK
-                    && Self::leaf_bank_is_ready(camera, player, leaf)
+                    && Self::leaf_bank_is_ready(camera, player, platforms.orbital)
                 {
                     self.stage = UpstreamRecoveryStage::BoardLeaf;
                     self.action_tick = 0;
@@ -2223,6 +2269,7 @@ impl UpstreamRecoveryRouteController {
             }
             UpstreamRecoveryStage::BoardLeaf => self.advance_boarding_action(),
             UpstreamRecoveryStage::RideLeaf => {
+                let leaf = platforms.orbital;
                 if leaf.is_some_and(|leaf| leaf.state == 9 && leaf.translation[2] <= 21_220_000) {
                     self.leaf_reached_far_side = true;
                 }
@@ -2239,7 +2286,89 @@ impl UpstreamRecoveryRouteController {
                 0
             }
             UpstreamRecoveryStage::TransferFromLeaf => self.advance_transfer_action(),
-            UpstreamRecoveryStage::StableInZeroJ => 0,
+            UpstreamRecoveryStage::WaitInZeroJ => {
+                if self.wait_tick < Self::ZERO_J_SETTLE_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                if Self::zero_j_bank_is_ready(camera, player, platforms.first_zero_k) {
+                    return self.start_action(
+                        UpstreamRecoveryStage::CrossZeroKLeaves,
+                        Self::ZERO_J_TO_ZERO_K,
+                    );
+                }
+                0
+            }
+            UpstreamRecoveryStage::CrossZeroKLeaves => self.advance_action(
+                Self::ZERO_J_TO_ZERO_K,
+                UpstreamRecoveryStage::JumpToSecondZeroKLeaf,
+            ),
+            UpstreamRecoveryStage::JumpToSecondZeroKLeaf => self.advance_action(
+                Self::PLATFORM_JUMP,
+                UpstreamRecoveryStage::WaitOnSecondZeroKLeaf,
+            ),
+            UpstreamRecoveryStage::WaitOnSecondZeroKLeaf => {
+                if self.wait_tick < Self::PLATFORM_LANDING_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                if Self::second_zero_k_leaf_is_ready(camera, player, platforms.second_zero_k) {
+                    return self.start_action(
+                        UpstreamRecoveryStage::JumpToZeroLTerrain,
+                        Self::PLATFORM_JUMP,
+                    );
+                }
+                0
+            }
+            UpstreamRecoveryStage::JumpToZeroLTerrain => self.advance_action(
+                Self::PLATFORM_JUMP,
+                UpstreamRecoveryStage::WaitOnZeroLTerrain,
+            ),
+            UpstreamRecoveryStage::WaitOnZeroLTerrain => {
+                if self.wait_tick < Self::PLATFORM_LANDING_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                if Self::zero_l_terrain_is_ready(camera, player) {
+                    return self
+                        .start_action(UpstreamRecoveryStage::JumpToZeroLLeaf, Self::PLATFORM_JUMP);
+                }
+                0
+            }
+            UpstreamRecoveryStage::JumpToZeroLLeaf => {
+                self.advance_action(Self::PLATFORM_JUMP, UpstreamRecoveryStage::WaitOnZeroLLeaf)
+            }
+            UpstreamRecoveryStage::WaitOnZeroLLeaf => {
+                if self.wait_tick < Self::ZERO_L_LEAF_SETTLE_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                if Self::zero_l_leaf_is_ready(camera, player, platforms.zero_l) {
+                    return self.start_action(
+                        UpstreamRecoveryStage::JumpToZeroLRock,
+                        Self::ZERO_L_ROCK_JUMP,
+                    );
+                }
+                0
+            }
+            UpstreamRecoveryStage::JumpToZeroLRock => self.advance_action(
+                Self::ZERO_L_ROCK_JUMP,
+                UpstreamRecoveryStage::WaitOnZeroLRock,
+            ),
+            UpstreamRecoveryStage::WaitOnZeroLRock => {
+                if self.wait_tick < Self::ZERO_L_ROCK_SETTLE_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                if Self::zero_l_rock_is_ready(camera, player) {
+                    self.stage = UpstreamRecoveryStage::SteerIntoZeroM;
+                    self.action_tick = 0;
+                    return self.advance_zero_m_action();
+                }
+                0
+            }
+            UpstreamRecoveryStage::SteerIntoZeroM => self.advance_zero_m_action(),
+            UpstreamRecoveryStage::StableInZeroM => 0,
         }
     }
 
@@ -2269,7 +2398,46 @@ impl UpstreamRecoveryRouteController {
         let held = Self::LEAF_TRANSFER.held(self.action_tick);
         self.action_tick = self.action_tick.saturating_add(1);
         if self.action_tick >= Self::LEAF_TRANSFER.total_frames() {
-            self.stage = UpstreamRecoveryStage::StableInZeroJ;
+            self.stage = UpstreamRecoveryStage::WaitInZeroJ;
+            self.action_tick = 0;
+            self.wait_tick = 0;
+        }
+        held
+    }
+
+    fn start_action(&mut self, stage: UpstreamRecoveryStage, action: RouteAction) -> u32 {
+        self.stage = stage;
+        self.action_tick = 1;
+        self.wait_tick = 0;
+        action.held(0)
+    }
+
+    fn advance_action(&mut self, action: RouteAction, next: UpstreamRecoveryStage) -> u32 {
+        let held = action.held(self.action_tick);
+        self.action_tick = self.action_tick.saturating_add(1);
+        if self.action_tick >= action.total_frames() {
+            self.stage = next;
+            self.action_tick = 0;
+            self.wait_tick = 0;
+        }
+        held
+    }
+
+    fn advance_zero_m_action(&mut self) -> u32 {
+        let tick = self.action_tick;
+        let mut held = 0;
+        if tick < 20 {
+            held |= PAD_UP;
+        }
+        if tick < 10 {
+            held |= PAD_LEFT;
+        }
+        if (8..24).contains(&tick) {
+            held |= PAD_CROSS;
+        }
+        self.action_tick = self.action_tick.saturating_add(1);
+        if self.action_tick >= 24 {
+            self.stage = UpstreamRecoveryStage::StableInZeroM;
             self.action_tick = 0;
         }
         held
@@ -2330,6 +2498,81 @@ impl UpstreamRecoveryRouteController {
             && player.translation[2].abs_diff(leaf.translation[2]) <= 4_096
     }
 
+    fn zero_j_bank_is_ready(
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        first_leaf: Option<MovingPlatformTrace>,
+    ) -> bool {
+        let zone = Eid::from_name("0j_fZ").expect("fixed Upstream 0j camera EID is valid");
+        camera.path.zone == zone
+            && camera.path.index == 0
+            && camera.progress.raw() >= 12_000
+            && player.is_some_and(|player| {
+                player.state == 1 && (20_650_000..=20_720_000).contains(&player.translation[2])
+            })
+            && first_leaf.is_some_and(|leaf| {
+                leaf.state == 11
+                    && leaf.translation[0].abs_diff(2_252_800) <= 4_096
+                    && leaf.translation[2].abs_diff(19_660_544) <= 4_096
+            })
+    }
+
+    fn second_zero_k_leaf_is_ready(
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        second_leaf: Option<MovingPlatformTrace>,
+    ) -> bool {
+        let zone = Eid::from_name("0k_fZ").expect("fixed Upstream 0k camera EID is valid");
+        let (Some(player), Some(leaf)) = (player, second_leaf) else {
+            return false;
+        };
+        camera.path.zone == zone
+            && camera.path.index == 1
+            && camera.progress.raw() >= 8_500
+            && player.state == 1
+            && leaf.state == 12
+            && player.translation[0].abs_diff(leaf.translation[0]) <= 16_000
+            && player.translation[2].abs_diff(leaf.translation[2]) <= 24_000
+    }
+
+    fn zero_l_terrain_is_ready(camera: RetailCameraLocation, player: Option<PlayerTrace>) -> bool {
+        let zone = Eid::from_name("0l_fZ").expect("fixed Upstream 0l camera EID is valid");
+        camera.path.zone == zone
+            && camera.path.index == 0
+            && camera.progress.raw() >= 2_400
+            && player.is_some_and(|player| {
+                player.state == 1 && (18_680_000..=18_730_000).contains(&player.translation[2])
+            })
+    }
+
+    fn zero_l_leaf_is_ready(
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        zero_l_leaf: Option<MovingPlatformTrace>,
+    ) -> bool {
+        let zone = Eid::from_name("0l_fZ").expect("fixed Upstream 0l camera EID is valid");
+        let (Some(player), Some(leaf)) = (player, zero_l_leaf) else {
+            return false;
+        };
+        camera.path.zone == zone
+            && camera.path.index == 0
+            && camera.progress.raw() >= 14_500
+            && player.state == 1
+            && leaf.state == 12
+            && player.translation[0].abs_diff(leaf.translation[0]) <= 130_000
+            && player.translation[2].abs_diff(leaf.translation[2]) <= 120_000
+    }
+
+    fn zero_l_rock_is_ready(camera: RetailCameraLocation, player: Option<PlayerTrace>) -> bool {
+        let zone = Eid::from_name("0l_fZ").expect("fixed Upstream 0l camera EID is valid");
+        camera.path.zone == zone
+            && camera.path.index == 1
+            && camera.progress.raw() >= 12_000
+            && player.is_some_and(|player| {
+                player.state == 1 && (17_620_000..=17_700_000).contains(&player.translation[2])
+            })
+    }
+
     const fn player_is_landed(player: PlayerTrace) -> bool {
         matches!(player.state, 1 | 10 | 13)
     }
@@ -2382,6 +2625,7 @@ impl SurveyInputController {
                 settle_frames: 0,
                 opening_tick: 0,
                 action_tick: 0,
+                wait_tick: 0,
                 leaf_reached_far_side: false,
                 leaf_completed_cycle: false,
             },
@@ -2395,7 +2639,7 @@ impl SurveyInputController {
         player: Option<PlayerTrace>,
         checkpoint_id: i32,
         local_pbak_held: Option<u32>,
-        upstream_leaf: Option<MovingPlatformTrace>,
+        upstream_platforms: UpstreamPlatformTraces,
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
@@ -2426,7 +2670,7 @@ impl SurveyInputController {
                     local_pbak_held
                         .expect("the legally local Upstream PBAK prefix covers its authored frames")
                 } else {
-                    self.upstream.held(camera, player, upstream_leaf)
+                    self.upstream.held(camera, player, upstream_platforms)
                 }
             }
         }
@@ -3371,8 +3615,8 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
     }))
 }
 
-fn upstream_leaf_trace(runtime: &RetailRuntime) -> Result<Option<MovingPlatformTrace>, String> {
-    let mut trace = None;
+fn upstream_platform_traces(runtime: &RetailRuntime) -> Result<UpstreamPlatformTraces, String> {
+    let mut traces = UpstreamPlatformTraces::default();
     for arena in runtime
         .arena()
         .postorder_snapshot()
@@ -3381,38 +3625,52 @@ fn upstream_leaf_trace(runtime: &RetailRuntime) -> Result<Option<MovingPlatformT
         let spawned = runtime
             .arena()
             .get(arena)
-            .ok_or_else(|| "Upstream object disappeared during leaf trace".to_owned())?;
+            .ok_or_else(|| "Upstream object disappeared during platform trace".to_owned())?;
         let Some(descriptor) = spawned.entity_descriptor() else {
             continue;
         };
-        if descriptor.id != 23 || descriptor.executable != 28 || descriptor.subtype != 2 {
-            continue;
-        }
-        if trace.is_some() {
-            return Err("Upstream has more than one live RivOC entity 23".to_owned());
-        }
+        let slot = match (descriptor.id, descriptor.executable, descriptor.subtype) {
+            (23, 28, 2) => 0,
+            (47, 28, 1) => 1,
+            (46, 28, 1) => 2,
+            (54, 28, 1) => 3,
+            _ => continue,
+        };
         let object = runtime
             .object_for_arena(arena)
-            .ok_or_else(|| "Upstream leaf has no VM binding".to_owned())?;
+            .ok_or_else(|| "Upstream platform has no VM binding".to_owned())?;
         let vm = runtime
             .machine()
             .object(object.vm())
-            .map_err(|error| format!("Upstream leaf VM object: {error:?}"))?;
+            .map_err(|error| format!("Upstream platform VM object: {error:?}"))?;
         let register = |index| {
             vm.register(index)
                 .map(u32::cast_signed)
-                .map_err(|error| format!("Upstream leaf register {index}: {error:?}"))
+                .map_err(|error| format!("Upstream platform register {index}: {error:?}"))
         };
-        trace = Some(MovingPlatformTrace {
+        let trace = MovingPlatformTrace {
             translation: [
                 register(process_register::TRANSLATION_X)?,
                 register(process_register::TRANSLATION_Y)?,
                 register(process_register::TRANSLATION_Z)?,
             ],
             state: vm.state(),
-        });
+        };
+        let target = match slot {
+            0 => &mut traces.orbital,
+            1 => &mut traces.first_zero_k,
+            2 => &mut traces.second_zero_k,
+            3 => &mut traces.zero_l,
+            _ => unreachable!("all Upstream platform slots are matched"),
+        };
+        if target.replace(trace).is_some() {
+            return Err(format!(
+                "Upstream has more than one live RivOC entity {}",
+                descriptor.id
+            ));
+        }
     }
-    Ok(trace)
+    Ok(traces)
 }
 
 fn update_camera(
@@ -3856,13 +4114,14 @@ fn survey_pair_with_runtime(
             .map(u32::cast_signed)
             .map_err(|error| format!("checkpoint input global: {error:?}"))?;
         let player_before_frame = player_trace(&runtime)?;
-        let upstream_leaf = if matches!(input_profile, SurveyInputProfile::UpstreamCarriedRecovery)
-            && frame > UPSTREAM_PBAK_FRAMES
-        {
-            upstream_leaf_trace(&runtime)?
-        } else {
-            None
-        };
+        let upstream_platforms =
+            if matches!(input_profile, SurveyInputProfile::UpstreamCarriedRecovery)
+                && frame > UPSTREAM_PBAK_FRAMES
+            {
+                upstream_platform_traces(&runtime)?
+            } else {
+                UpstreamPlatformTraces::default()
+            };
         let held = input_controller.held(
             frame,
             camera.location(),
@@ -3872,7 +4131,7 @@ fn survey_pair_with_runtime(
                 .as_deref()
                 .and_then(|frames| frames.get(usize::try_from(frame - 1).ok()?))
                 .copied(),
-            upstream_leaf,
+            upstream_platforms,
         );
         let tapped = held & !held_previous;
         runtime
@@ -7791,24 +8050,24 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
             upstream_runtime,
             LevelContextSource::SessionGlobals,
             SurveyInputProfile::UpstreamCarriedRecovery,
-            1_650,
+            1_800,
         )
         .expect("Upstream must recover from the carried-spawn PBAK phase mismatch");
-        assert_eq!(upstream_survey.frames, 1_650);
+        assert_eq!(upstream_survey.frames, 1_800);
         assert!(upstream_survey.terminal.is_none());
-        assert_eq!(upstream_survey.final_live_objects, 22);
+        assert_eq!(upstream_survey.final_live_objects, 35);
         assert_eq!(upstream_survey.max_live_objects, 97);
-        assert_eq!(upstream_survey.successful_spawns, 72);
-        assert_eq!(upstream_survey.spawn_attempts, 22_256);
-        assert_eq!(upstream_survey.expected_spawn_rejections, 22_184);
+        assert_eq!(upstream_survey.successful_spawns, 83);
+        assert_eq!(upstream_survey.spawn_attempts, 23_870);
+        assert_eq!(upstream_survey.expected_spawn_rejections, 23_787);
         assert_eq!(upstream_survey.unexpected_spawn_errors, 0);
-        assert_eq!(upstream_survey.executions, 54_634);
-        assert_eq!(upstream_survey.zone_transitions, 7);
-        assert_eq!(upstream_survey.camera_ranges.len(), 7);
-        assert_eq!(upstream_survey.camera_path_changes, 12);
-        assert_eq!(upstream_survey.last_camera_path_change, 1_476);
-        assert_eq!(upstream_survey.last_camera_progress_change, 1_502);
-        assert_eq!(upstream_survey.last_player_movement, 1_501);
+        assert_eq!(upstream_survey.executions, 64_916);
+        assert_eq!(upstream_survey.zone_transitions, 10);
+        assert_eq!(upstream_survey.camera_ranges.len(), 12);
+        assert_eq!(upstream_survey.camera_path_changes, 17);
+        assert_eq!(upstream_survey.last_camera_path_change, 1_769);
+        assert_eq!(upstream_survey.last_camera_progress_change, 1_793);
+        assert_eq!(upstream_survey.last_player_movement, 1_792);
         assert_eq!(upstream_survey.restarts, 3);
         assert_eq!(upstream_survey.restart_frames, [104, 231, 816]);
         assert_eq!(
@@ -7848,18 +8107,18 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
         assert_eq!(
             upstream_final_camera.path,
             RetailPathId {
-                zone: Eid::from_name("0j_fZ").expect("fixed Upstream landing-zone EID is valid"),
+                zone: Eid::from_name("0m_fZ").expect("fixed Upstream landing-zone EID is valid"),
                 index: 0,
             }
         );
-        assert_eq!(upstream_final_camera.progress.raw(), 12_288);
+        assert_eq!(upstream_final_camera.progress.raw(), 10_137);
         assert_eq!(
             upstream_survey.final_player_translation,
-            Some([2_259_268, 1_715_198, 20_679_924])
+            Some([2_126_148, 1_731_036, 17_181_940])
         );
         assert_eq!(
             upstream_survey.player_minimum,
-            Some([2_126_920, 1_580_414, 20_679_924])
+            Some([2_126_148, 1_580_414, 17_181_940])
         );
         assert_eq!(
             upstream_survey.player_maximum,
@@ -7870,8 +8129,8 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
             Ok(u32::MAX)
         );
         assert_eq!(upstream_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0));
-        assert_eq!(upstream_runtime.machine().random_seed(), 0xf6af_c21c);
-        assert_eq!(upstream_runtime.draw_count(), 834);
+        assert_eq!(upstream_runtime.machine().random_seed(), 0x8dd5_01c1);
+        assert_eq!(upstream_runtime.draw_count(), 984);
         assert!(
             upstream_survey.is_clean(),
             "Upstream carried-spawn recovery must remain clean: {}",
@@ -7891,7 +8150,7 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
                 "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
-                "restarts, stable 0j, RNG {:#010x}, draw {}",
+                "restarts, stable 0m, RNG {:#010x}, draw {}",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

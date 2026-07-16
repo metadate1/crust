@@ -110,6 +110,7 @@ enum SurveyInputProfile {
     BouldersCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
+    HogWildCompletionRoute,
     PapuPapuCompletionRoute,
 }
 
@@ -135,6 +136,7 @@ impl SurveyInputProfile {
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
+            Self::HogWildCompletionRoute => "hog-wild-completion-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
         }
     }
@@ -151,6 +153,7 @@ impl SurveyInputProfile {
                 | Self::BouldersCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
+                | Self::HogWildCompletionRoute
                 | Self::PapuPapuCompletionRoute
         )
     }
@@ -584,6 +587,172 @@ impl RouteAction {
             0
         };
         direction | button
+    }
+}
+
+/// Ordinary 30 Hz pad route through Hog Wild's authored rider course.
+///
+/// Each action is armed by the preceding camera-bank, progress, rider-state,
+/// and checkpoint state. The controller never writes VM state or game globals.
+/// These exact golden gates are intentionally fail-closed: a missed stage
+/// leaves the pad neutral, while the completion test pins every resulting pad
+/// edge and the final transition, so a route deadlock cannot pass silently.
+/// In particular, the two late Cross presses are separate button edges: the
+/// first clears `VilOC` entity 44, then fourteen neutral samples re-arm Cross
+/// before the second jump clears `1K_hZ`'s authored `0x700` surface stack.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HogWildCompletionRouteController {
+    stage: u8,
+    active: Option<RouteAction>,
+    action_tick: u8,
+}
+
+impl HogWildCompletionRouteController {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        checkpoint_id: i32,
+    ) -> u32 {
+        if let Some(action) = self.active {
+            let held = action.held(self.action_tick);
+            self.action_tick = self.action_tick.saturating_add(1);
+            if self.action_tick >= action.total_frames() {
+                self.active = None;
+                self.action_tick = 0;
+                self.stage = self.stage.saturating_add(1);
+            }
+            return held;
+        }
+
+        let Some(player) = player else {
+            return 0;
+        };
+        let checkpoint_13 = 13 << 8;
+        let checkpoint_30 = 30 << 8;
+        let at = |zone: &str, path_index: u32, progress: i32, state: u16| {
+            camera.path.zone == Eid::from_name(zone).expect("fixed Hog Wild route EID is valid")
+                && camera.path.index == path_index
+                && camera.progress.raw() == progress
+                && player.state == state
+        };
+
+        let action = match self.stage {
+            0 if checkpoint_id == -1 && at("0b_hZ", 0, 12_288, 37) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            1 if checkpoint_id == -1 && at("0d_hZ", 0, 4_600, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            2 if checkpoint_id == -1 && at("0f_hZ", 0, 7_198, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            3 if checkpoint_id == -1 && at("0o_hZ", 0, 13_249, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            4 if checkpoint_id == -1 && at("0q_hZ", 0, 3_312, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            5 if checkpoint_id == -1 && at("0r_hZ", 0, 12_235, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 40,
+                ..RouteAction::default()
+            },
+            6 if checkpoint_id == -1 && at("0t_hZ", 0, 11_955, 36) => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 30,
+                button: PAD_CROSS,
+                button_frames: 30,
+                ..RouteAction::default()
+            },
+            7 if checkpoint_id == checkpoint_13 && at("0B_hZ", 0, 1_791, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 8,
+                ..RouteAction::default()
+            },
+            8 if checkpoint_id == checkpoint_13 && at("0F_hZ", 0, 3_328, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 25,
+                ..RouteAction::default()
+            },
+            9 if checkpoint_id == checkpoint_13 && at("0G_hZ", 0, 8_490, 36) => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 25,
+                ..RouteAction::default()
+            },
+            10 if checkpoint_id == checkpoint_13 && at("0J_hZ", 0, 5_376, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 21,
+                button: PAD_CROSS,
+                button_frames: 21,
+                ..RouteAction::default()
+            },
+            11 if checkpoint_id == checkpoint_13 && at("1d_hZ", 0, 9_149, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 21,
+                ..RouteAction::default()
+            },
+            12 if checkpoint_id == checkpoint_13 && at("1f_hZ", 0, 3_325, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 21,
+                button: PAD_CROSS,
+                button_frames: 21,
+                ..RouteAction::default()
+            },
+            13 if checkpoint_id == checkpoint_30 && at("1u_hZ", 1, 7_640, 36) => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 20,
+                ..RouteAction::default()
+            },
+            14 if checkpoint_id == checkpoint_30 && at("1w_hZ", 0, 7_895, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 31,
+                button: PAD_CROSS,
+                button_frames: 31,
+                ..RouteAction::default()
+            },
+            15 if checkpoint_id == checkpoint_30 && at("1y_hZ", 0, 10_496, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 21,
+                button: PAD_CROSS,
+                button_frames: 21,
+                ..RouteAction::default()
+            },
+            16 if checkpoint_id == checkpoint_30 && at("1B_hZ", 0, 167, 36) => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 41,
+                ..RouteAction::default()
+            },
+            17 if checkpoint_id == checkpoint_30 && at("1F_hZ", 0, 4_351, 36) => RouteAction {
+                direction: PAD_RIGHT,
+                direction_frames: 41,
+                ..RouteAction::default()
+            },
+            18 if checkpoint_id == checkpoint_30 && at("1I_hZ", 0, 10_758, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 11,
+                ..RouteAction::default()
+            },
+            19 if checkpoint_id == checkpoint_30 && at("1J_hZ", 0, 8_448, 36) => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            _ => return 0,
+        };
+
+        self.active = Some(action);
+        self.held(camera, Some(player), checkpoint_id)
     }
 }
 
@@ -4219,6 +4388,7 @@ struct SurveyInputController {
     boulders: BouldersCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
+    hog_wild: HogWildCompletionRouteController,
     papu_papu: PapuPapuCompletionRouteController,
 }
 
@@ -4270,6 +4440,11 @@ impl SurveyInputController {
                 checkpoint_route_started: false,
                 checkpoint_tick: 0,
                 checkpoint_lateral_corrected: false,
+            },
+            hog_wild: HogWildCompletionRouteController {
+                stage: 0,
+                active: None,
+                action_tick: 0,
             },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
@@ -4326,6 +4501,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::RollingStonesCheckpoint => {
                 self.rolling_stones.held(camera, player, checkpoint_id)
+            }
+            SurveyInputProfile::HogWildCompletionRoute => {
+                self.hog_wild.held(camera, player, checkpoint_id)
             }
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, papu_boss_state)
@@ -4433,6 +4611,8 @@ struct LevelSurvey {
     first_below_zero: Option<(u32, PlayerTrace)>,
     first_terminal_fall: Option<(u32, PlayerTrace)>,
     progression_samples: Vec<String>,
+    pad_change_samples: Vec<(u32, u32)>,
+    player_0x700_samples: Vec<(u32, [i32; 3])>,
     box_count_samples: Vec<(u32, i32)>,
     checkpoint_samples: Vec<(u32, i32, [i32; 3])>,
     saved_box_count_samples: Vec<(u32, i32)>,
@@ -4491,6 +4671,8 @@ impl LevelSurvey {
             first_below_zero: None,
             first_terminal_fall: None,
             progression_samples: Vec::new(),
+            pad_change_samples: Vec::new(),
+            player_0x700_samples: Vec::new(),
             box_count_samples: Vec::new(),
             checkpoint_samples: Vec::new(),
             saved_box_count_samples: Vec::new(),
@@ -4536,6 +4718,13 @@ impl LevelSurvey {
 
         if let Some(player) = player {
             self.observed_player_states.insert(player.state);
+            if matches!(
+                self.input_profile,
+                SurveyInputProfile::HogWildCompletionRoute
+            ) && player.event == 0x700
+            {
+                self.player_0x700_samples.push((frame, player.translation));
+            }
             if player.translation[1] < 0 {
                 self.first_below_zero.get_or_insert((frame, player));
             }
@@ -4618,7 +4807,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} direct-program-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} pads={:?} player-0x700={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} direct-program-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -4656,6 +4845,8 @@ impl LevelSurvey {
             self.first_below_zero,
             self.first_terminal_fall,
             self.progression_samples,
+            self.pad_change_samples,
+            self.player_0x700_samples,
             self.box_count_samples,
             self.checkpoint_samples,
             self.saved_box_count_samples,
@@ -5876,6 +6067,14 @@ fn survey_pair_with_runtime(
             &upstream_platforms,
             papu_boss_state,
         );
+        if matches!(input_profile, SurveyInputProfile::HogWildCompletionRoute)
+            && survey
+                .pad_change_samples
+                .last()
+                .is_none_or(|(_, previous)| *previous != held)
+        {
+            survey.pad_change_samples.push((frame, held));
+        }
         let tapped = held & !held_previous;
         runtime
             .set_pad_snapshot(
@@ -6349,6 +6548,310 @@ fn rolling_stones_direct_boot_reaches_zero_f_bank() {
     assert!(
         survey.is_clean(),
         "Rolling Stones 0F-bank route reached a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn hog_wild_direct_boot_reaches_level_complete() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x11);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Hog Wild");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Hog Wild pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::HogWildCompletionRoute,
+        2_100,
+    )
+    .expect("Hog Wild's ordinary-pad completion route must execute");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 1_950);
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 1950 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.next_lid, Some((1_950, 0x2d)));
+    assert_eq!(survey.final_live_objects, 17);
+    assert_eq!(survey.max_live_objects, 18);
+    assert_eq!(survey.successful_spawns, 39);
+    assert_eq!(survey.spawn_attempts, 5_857);
+    assert_eq!(survey.expected_spawn_rejections, 5_818);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 24_311);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 57);
+    assert_eq!(survey.camera_ranges.len(), 67);
+    assert_eq!(survey.camera_path_changes, 66);
+    assert_eq!(survey.last_camera_path_change, 1_813);
+    assert_eq!(survey.last_camera_progress_change, 1_836);
+    assert_eq!(survey.last_player_movement, 1_946);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.save_handshakes, 1);
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_death_camera_pose.is_none());
+    assert!(survey.last_death_camera_pose.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty());
+
+    let final_camera = survey
+        .final_camera
+        .expect("Hog Wild's completion route retains its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("1M_hZ").expect("fixed Hog Wild end-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 10_239);
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([2_200_832, 1_024_000, 31_948_544])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([5_395_712, 13_171_420, -31_800_992])
+    );
+    assert_eq!(survey.player_minimum, Some([357_632, 995_933, -31_800_992]));
+    assert_eq!(
+        survey.player_maximum,
+        Some([5_395_712, 13_171_420, 31_948_544])
+    );
+
+    assert_eq!(
+        survey.pad_change_samples,
+        [
+            (1, 0),
+            (153, PAD_CROSS),
+            (161, 0),
+            (195, PAD_CROSS),
+            (203, 0),
+            (260, PAD_CROSS),
+            (268, 0),
+            (400, PAD_CROSS),
+            (408, 0),
+            (435, PAD_CROSS),
+            (443, 0),
+            (475, PAD_RIGHT),
+            (515, 0),
+            (530, PAD_LEFT | PAD_CROSS),
+            (560, 0),
+            (705, PAD_CROSS),
+            (713, 0),
+            (810, PAD_RIGHT),
+            (835, 0),
+            (840, PAD_LEFT),
+            (865, 0),
+            (910, PAD_RIGHT | PAD_CROSS),
+            (931, 0),
+            (1_020, PAD_CROSS),
+            (1_041, 0),
+            (1_090, PAD_RIGHT | PAD_CROSS),
+            (1_111, 0),
+            (1_410, PAD_LEFT),
+            (1_430, PAD_RIGHT | PAD_CROSS),
+            (1_461, 0),
+            (1_490, PAD_RIGHT | PAD_CROSS),
+            (1_511, 0),
+            (1_540, PAD_LEFT),
+            (1_581, 0),
+            (1_650, PAD_RIGHT),
+            (1_691, 0),
+            (1_730, PAD_CROSS),
+            (1_741, 0),
+            (1_755, PAD_CROSS),
+            (1_771, 0),
+        ]
+    );
+    assert!(
+        survey.player_0x700_samples.is_empty(),
+        "the route must avoid every authored 0x700 surface boundary"
+    );
+    assert!(
+        !survey.observed_player_states.contains(&39),
+        "the route must never enter Crash's authored fatal-surface state"
+    );
+    assert!(
+        !survey.effect_counts.contains_key("load-state"),
+        "completion must not pass through a checkpoint restart"
+    );
+
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (657, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
+            (1_143, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
+        ]
+    );
+    assert_eq!(
+        survey.saved_box_count_samples,
+        [(657, 0x100), (1_143, 0x300)]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (530, 0x100),
+            (657, 0x200),
+            (1_082, 0x300),
+            (1_143, 0x400),
+            (1_340, 0x500),
+            (1_588, 0x600),
+            (1_724, 0x700),
+        ]
+    );
+    assert_eq!(
+        survey.spawn_flag_samples,
+        [
+            (530, 16, 3),
+            (530, 16, 3),
+            (531, 0, 2),
+            (531, 16, 11),
+            (657, 13, 9),
+            (1_082, 28, 3),
+            (1_082, 28, 3),
+            (1_083, 0, 2),
+            (1_143, 30, 9),
+            (1_340, 22, 3),
+            (1_340, 22, 3),
+            (1_341, 0, 2),
+            (1_341, 22, 11),
+            (1_588, 41, 3),
+            (1_588, 41, 3),
+            (1_589, 0, 2),
+            (1_724, 9, 3),
+            (1_724, 9, 3),
+            (1_725, 0, 2),
+        ]
+    );
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&56));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&38));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(runtime.machine().random_seed(), 0xc344_8148);
+    assert_eq!(runtime.draw_count(), 1_950);
+    assert!(
+        survey.is_clean(),
+        "Hog Wild completion must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn hog_wild_idle_restarts_on_the_authored_surface_cadence() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x11);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Hog Wild");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Hog Wild pair must parse");
+    let survey = survey_pair(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::Idle,
+        360,
+    )
+    .expect("Hog Wild's idle restart cadence must execute");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 360);
+    assert!(survey.terminal.is_none());
+    assert_eq!(survey.final_live_objects, 10);
+    assert_eq!(survey.max_live_objects, 10);
+    assert_eq!(survey.successful_spawns, 1);
+    assert_eq!(survey.spawn_attempts, 360);
+    assert_eq!(survey.expected_spawn_rejections, 359);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 3_585);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 5);
+    assert_eq!(survey.restarts, 2);
+    assert_eq!(survey.restart_frames, [178, 355]);
+    assert_eq!(survey.save_handshakes, 1);
+    assert_eq!(survey.camera_ranges.len(), 3);
+    assert_eq!(survey.camera_path_changes, 6);
+    assert_eq!(survey.last_camera_path_change, 356);
+    assert_eq!(survey.last_camera_progress_change, 356);
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty());
+    assert_eq!(survey.effect_counts.get("load-state"), Some(&2));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&2));
+    assert!(!survey.effect_counts.contains_key("transition"));
+    assert_eq!(survey.box_count_samples, [(1, 0)]);
+    assert_eq!(survey.checkpoint_samples, [(1, -1, [0, 0, 0])]);
+    assert!(survey.saved_box_count_samples.is_empty());
+    let final_camera = survey
+        .final_camera
+        .expect("Hog Wild's idle survey retains its restarted camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0a_hZ").expect("fixed Hog Wild spawn-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 0);
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([2_200_832, 1_024_000, 31_948_544])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_200_832, 1_013_038, 31_948_544])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([2_019_824, 214_978, 29_588_264])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([2_303_232, 1_163_250, 31_948_544])
+    );
+    assert_eq!(survey.last_player_movement, 358);
+    assert!(
+        survey.is_clean(),
+        "Hog Wild's idle cadence must remain clean: {}",
         survey.summary()
     );
 }

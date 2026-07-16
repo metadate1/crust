@@ -7115,7 +7115,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         let completion_route_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
                 .expect("Boulders completion route must import the map carry");
-        let (completion_route_survey, completion_route_runtime) = survey_pair_with_runtime(
+        let (completion_route_survey, mut completion_route_runtime) = survey_pair_with_runtime(
             known_name(boulders),
             boulders,
             &boulders_nsd,
@@ -7225,6 +7225,325 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             completion_route_survey.is_clean(),
             "Boulders completion route must remain clean: {}",
             completion_route_survey.summary()
+        );
+
+        let boulders_completion_carry: RetailSessionCarry = {
+            let mut host = NsfProgramHost::new(&boulders_nsd, &boulders_nsf, &boulders_nsf_bytes);
+            let report = completion_route_runtime
+                .finish_level_transition(
+                    &mut host,
+                    i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+                )
+                .expect("Boulders LEVEL_END must export a Level Complete carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "Boulders LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(boulders_completion_carry.random_seed, 0x5def_7434);
+        assert_eq!(boulders_completion_carry.draw_count, 11_084);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| boulders_completion_carry.globals[index]),
+            [
+                0x500,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                4,
+                1,
+                5,
+                0,
+            ]
+        );
+
+        let boulders_completion_runtime = RetailRuntime::new_from_session(
+            GLOBAL_WORDS,
+            LevelId::LEVEL_COMPLETE,
+            boulders_completion_carry,
+        )
+        .expect("Level Complete must import Boulders' session carry");
+        let (boulders_completion_survey, mut boulders_completion_runtime) =
+            survey_pair_with_runtime(
+                known_name(LevelId::LEVEL_COMPLETE),
+                LevelId::LEVEL_COMPLETE,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                boulders_completion_runtime,
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                COMPLETION_FRAMES,
+            )
+            .expect("Boulders' Level Complete runtime must execute");
+        assert_eq!(boulders_completion_survey.frames, 105);
+        assert_eq!(boulders_completion_survey.successful_spawns, 2);
+        assert_eq!(boulders_completion_survey.spawn_attempts, 210);
+        assert_eq!(boulders_completion_survey.expected_spawn_rejections, 208);
+        assert_eq!(boulders_completion_survey.unexpected_spawn_errors, 0);
+        assert_eq!(boulders_completion_survey.executions, 435);
+        assert_eq!(boulders_completion_survey.restarts, 0);
+        assert!(boulders_completion_survey.restart_frames.is_empty());
+        assert_eq!(boulders_completion_survey.death_camera_frames, 0);
+        assert!(boulders_completion_survey.first_below_zero.is_none());
+        assert!(boulders_completion_survey.first_terminal_fall.is_none());
+        assert_eq!(boulders_completion_survey.faulted_objects, 0);
+        assert_eq!(boulders_completion_survey.execution_errors, 0);
+        assert_eq!(
+            boulders_completion_survey.next_lid,
+            Some((105, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        );
+        assert_eq!(
+            boulders_completion_survey.terminal.as_deref(),
+            Some("frame 105 requested level transition to 0x19")
+        );
+        assert_eq!(
+            boulders_completion_survey
+                .effect_counts
+                .get("transition")
+                .copied(),
+            Some(1)
+        );
+        assert!(boulders_completion_survey.issue_counts.is_empty());
+        assert!(
+            boulders_completion_survey.is_clean(),
+            "Boulders' Level Complete screen must remain clean: {}",
+            boulders_completion_survey.summary()
+        );
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| boulders_completion_runtime.global_word(index).unwrap()),
+            [
+                0x300,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                4,
+                1,
+                5,
+                0,
+            ]
+        );
+        assert_eq!(
+            boulders_completion_runtime.machine().random_seed(),
+            0x031a_a015
+        );
+        assert_eq!(boulders_completion_runtime.draw_count(), 11_189);
+
+        let post_boulders_title_carry: RetailSessionCarry = {
+            let mut host =
+                NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+            let report = boulders_completion_runtime
+                .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+                .expect("fourth Level Complete LEVEL_END must export a Title carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "fourth Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(
+                report.requested_lid,
+                i32::try_from(LevelId::TITLE.get()).unwrap()
+            );
+            assert_eq!(report.next_lid_after_event, report.requested_lid);
+            assert_eq!(report.resolved.level, LevelId::TITLE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(post_boulders_title_carry.random_seed, 0x031a_a015);
+        assert_eq!(post_boulders_title_carry.draw_count, 11_189);
+
+        let mut post_boulders_map = AuthoredTitleMapHarness::from_session(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            post_boulders_title_carry,
+        );
+        post_boulders_map.wait_until_ready(64);
+        assert_eq!(post_boulders_map.frame, 10);
+        for _ in 0..120 {
+            post_boulders_map.step(0);
+        }
+        post_boulders_map.tap(PAD_UP);
+        for _ in 0..120 {
+            post_boulders_map.step(0);
+        }
+        post_boulders_map.step(PAD_CROSS);
+        let upstream = LevelId::new_const(0x0f);
+        let upstream_lid = i32::try_from(upstream.get()).unwrap();
+        assert_eq!(post_boulders_map.frame, 253);
+        assert_eq!(post_boulders_map.transitions, [(253, upstream_lid)]);
+        assert_eq!(
+            post_boulders_map.camera.location().path,
+            RetailPathId {
+                zone: Eid::from_name("1c_pZ").expect("fixed fifth map-zone EID is valid"),
+                index: 1,
+            }
+        );
+        assert_eq!(post_boulders_map.camera.location().progress.raw(), 2_304);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| post_boulders_map.runtime.global_word(index).unwrap()),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                5,
+                1,
+                5,
+                1,
+            ]
+        );
+        assert_eq!(
+            post_boulders_map.runtime.machine().random_seed(),
+            0xae2d_d893
+        );
+        assert_eq!(post_boulders_map.runtime.draw_count(), 11_442);
+
+        let upstream_carry: RetailSessionCarry = {
+            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+            let report = post_boulders_map
+                .runtime
+                .finish_level_transition(&mut host, upstream_lid)
+                .expect("post-Boulders Map must export the Upstream carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "post-Boulders Map LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, upstream_lid);
+            assert_eq!(report.next_lid_after_event, upstream_lid);
+            assert_eq!(report.resolved.level, upstream);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(upstream_carry.random_seed, 0xae2d_d893);
+        assert_eq!(upstream_carry.draw_count, 11_442);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| upstream_carry.globals[index]),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                5,
+                1,
+                5,
+                1,
+            ]
+        );
+
+        let (upstream_nsd, upstream_nsf, upstream_nsf_bytes) =
+            parse_local_pair(&root, upstream).expect("Upstream pair must parse");
+        let upstream_pbak_entry = upstream_nsf
+            .entries()
+            .find(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
+            .expect("legally local Upstream pair must contain its authored PBAK");
+        assert_eq!(
+            upstream_pbak_entry.eid,
+            Eid::from_name("pb0fB").expect("fixed Upstream PBAK EID is valid")
+        );
+        let upstream_pbak = load_pbak_entry(upstream_pbak_entry, &upstream_nsf_bytes)
+            .expect("legally local Upstream PBAK must parse");
+        assert_eq!(upstream_pbak.frames.len(), 934);
+        assert_eq!(upstream_pbak.ticks_per_frame, 34);
+
+        let upstream_runtime =
+            RetailRuntime::new_from_session(GLOBAL_WORDS, upstream, upstream_carry)
+                .expect("Upstream must import the fourth-completion map carry");
+        let (upstream_survey, upstream_runtime) = survey_pair_with_runtime(
+            known_name(upstream),
+            upstream,
+            &upstream_nsd,
+            &upstream_nsf,
+            &upstream_nsf_bytes,
+            upstream_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::LocalPbakPrefix,
+            934,
+        )
+        .expect("Upstream must execute every legally local authored pad frame");
+        assert_eq!(upstream_survey.frames, 934);
+        assert!(upstream_survey.terminal.is_none());
+        assert_eq!(upstream_survey.successful_spawns, 52);
+        assert_eq!(upstream_survey.spawn_attempts, 11_840);
+        assert_eq!(upstream_survey.expected_spawn_rejections, 11_788);
+        assert_eq!(upstream_survey.unexpected_spawn_errors, 0);
+        assert_eq!(upstream_survey.executions, 30_551);
+        assert_eq!(upstream_survey.zone_transitions, 3);
+        assert_eq!(upstream_survey.camera_ranges.len(), 2);
+        assert_eq!(upstream_survey.camera_path_changes, 6);
+        assert_eq!(upstream_survey.restarts, 3);
+        assert_eq!(upstream_survey.restart_frames, [104, 231, 816]);
+        assert_eq!(
+            upstream_survey.effect_counts.get("load-state").copied(),
+            Some(3)
+        );
+        assert!(!upstream_survey.effect_counts.contains_key("transition"));
+        assert_eq!(upstream_survey.death_camera_frames, 0);
+        assert!(upstream_survey.first_below_zero.is_none());
+        assert!(upstream_survey.first_terminal_fall.is_none());
+        assert!(upstream_survey.next_lid.is_none());
+        assert_eq!(upstream_survey.faulted_objects, 0);
+        assert_eq!(upstream_survey.execution_errors, 0);
+        assert!(upstream_survey.issue_counts.is_empty());
+        let upstream_initial_camera = upstream_survey
+            .initial_camera
+            .expect("Upstream authored PBAK begins on a camera path");
+        let upstream_final_camera = upstream_survey
+            .final_camera
+            .expect("Upstream authored PBAK retains a camera path");
+        assert_eq!(upstream_initial_camera.path.index, 0);
+        assert_eq!(upstream_initial_camera.progress.raw(), 256);
+        assert_eq!(upstream_final_camera.path, upstream_initial_camera.path);
+        assert_eq!(upstream_final_camera.progress.raw(), 7_059);
+        assert_eq!(
+            upstream_survey.final_player_translation,
+            Some([2_150_400, 1_747_085, 25_025_792])
+        );
+        assert_eq!(upstream_runtime.machine().random_seed(), 0x7810_9dff);
+        assert_eq!(upstream_runtime.draw_count(), 118);
+        assert!(
+            upstream_survey.is_clean(),
+            "Upstream's complete authored PBAK must remain clean: {}",
+            upstream_survey.summary()
         );
         eprintln!(
             "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored PBAK: 990 frames, 0Q_eZ:0@0 -> 0I_eZ:1@3840, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}; completion route: {} frames -> Level Complete, 48 paths/53 changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}",

@@ -38,14 +38,15 @@ use crust_sim::{
         RetailCameraOutcome, RetailCameraPose, RetailCameraRuntime, RetailDeathCameraInput,
         RetailDeathCameraState, RetailIslandCameraInput,
     },
-    card::{SaveData, VirtualCard},
+    card::{CardPayload, SaveData, VirtualCard},
     flow::{TitlePhase, TitleScreen},
     gool::{
         CURRENT_MAP_LEVEL_GLOBAL, CodeAddress, CodeSegment, CollisionObjectReference,
-        GAME_STATE_GLOBAL, GoolProgramIdentity, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL,
-        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, PagingHostOperation,
-        PagingHostRequest, PagingHostResponse, RetailPadSnapshot, RetailTransformVectorsCamera,
-        SAVED_TITLE_STATE_GLOBAL, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, process_register,
+        GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, GoolProgramIdentity, ITEM_POOL_1_GLOBAL,
+        ITEM_POOL_2_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, NEXT_DISPLAY_GLOBAL,
+        ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
+        RetailPadSnapshot, RetailTransformVectorsCamera, SAVED_TITLE_STATE_GLOBAL, SendEventTarget,
+        TITLE_STATE_GLOBAL, VmEffect, process_register,
     },
     object_arena::{NeighborZone, SpawnError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
@@ -102,6 +103,7 @@ enum SurveyInputProfile {
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
     GreatGateExactCarry,
+    GreatGateYellowGemExactCarry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,6 +122,7 @@ impl SurveyInputProfile {
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
             Self::GreatGateExactCarry => "great-gate-exact-carry",
+            Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
         }
     }
 
@@ -130,6 +133,7 @@ impl SurveyInputProfile {
                 | Self::ForwardWithActions
                 | Self::JunglePhaseRobust
                 | Self::GreatGateExactCarry
+                | Self::GreatGateYellowGemExactCarry
         )
     }
 }
@@ -974,6 +978,7 @@ impl NSanityRouteController {
 /// checkpoint, rotating logs, later gaps, and final warp.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct GreatGateRouteController {
+    yellow_gem_route: bool,
     opening_stage: u8,
     opening_ready_frames: u8,
     stage: u8,
@@ -1013,6 +1018,8 @@ impl GreatGateRouteController {
         let a8 = Eid::from_name("a8_iZ").expect("fixed Great Gate route EID is valid");
         let a9 = Eid::from_name("a9_iZ").expect("fixed Great Gate route EID is valid");
         let b0 = Eid::from_name("b0_iZ").expect("fixed Great Gate route EID is valid");
+        let c6 = Eid::from_name("c6_iZ").expect("fixed Great Gate route EID is valid");
+        let c7 = Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid");
         let grounded = player.status_a & 1 != 0;
         let progress = camera.progress.raw();
 
@@ -1145,6 +1152,10 @@ impl GreatGateRouteController {
                 camera.path.zone == b0 && camera.path.index == 1 && player.state == 13 && grounded
             }
             40 => camera.path.zone == b0 && camera.path.index == 1 && grounded,
+            107 if self.yellow_gem_route => true,
+            108 if self.yellow_gem_route => camera.path.zone == c6 && grounded,
+            109 if self.yellow_gem_route => camera.path.zone == c7 && grounded,
+            110 if self.yellow_gem_route => camera.path.zone == c7 && grounded,
             _ => false,
         };
         if !triggered {
@@ -1712,8 +1723,40 @@ impl GreatGateRouteController {
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            // The held direction ends at normal WarpC entity 33; its authored
-            // state owns Crash until it emits the Level Complete transition.
+            // The Yellow Gem's retail entitlement makes GemsC subtype five
+            // solid. Release Cross before jumping onto c6's upper platform.
+            106 if self.yellow_gem_route => RouteAction {
+                direction_frames: 8,
+                ..RouteAction::default()
+            },
+            107 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 10,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            108 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            109 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 16,
+                button: PAD_CROSS,
+                button_frames: 16,
+                ..RouteAction::default()
+            },
+            110 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 48,
+                ..RouteAction::default()
+            },
+            // Without the Yellow Gem, the held direction ends at normal WarpC
+            // entity 33; its authored state owns Crash through Level Complete.
             106 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 250,
@@ -1751,6 +1794,10 @@ impl SurveyInputController {
                 action_tick: 0,
             },
             great_gate: GreatGateRouteController {
+                yellow_gem_route: matches!(
+                    profile,
+                    SurveyInputProfile::GreatGateYellowGemExactCarry
+                ),
                 opening_stage: 0,
                 opening_ready_frames: 0,
                 stage: 0,
@@ -1781,7 +1828,10 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::JunglePhaseRobust => self.jungle.held(camera, player),
-            SurveyInputProfile::GreatGateExactCarry => self.great_gate.held(camera, player),
+            SurveyInputProfile::GreatGateExactCarry
+            | SurveyInputProfile::GreatGateYellowGemExactCarry => {
+                self.great_gate.held(camera, player)
+            }
         }
     }
 }
@@ -3314,10 +3364,15 @@ fn survey_pair_with_runtime(
         if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
             && matches!(
                 input_profile,
-                SurveyInputProfile::ForwardWithActions | SurveyInputProfile::GreatGateExactCarry
+                SurveyInputProfile::ForwardWithActions
+                    | SurveyInputProfile::GreatGateExactCarry
+                    | SurveyInputProfile::GreatGateYellowGemExactCarry
             )
-            && (input_profile == SurveyInputProfile::GreatGateExactCarry
-                || frame >= 300
+            && (matches!(
+                input_profile,
+                SurveyInputProfile::GreatGateExactCarry
+                    | SurveyInputProfile::GreatGateYellowGemExactCarry
+            ) || frame >= 300
                 || frame <= 120)
         {
             eprintln!(
@@ -6185,4 +6240,157 @@ fn raw_bin_extraction_matches_every_local_pair_and_bootable_graph() {
         disc_path.display(),
         extracted_bytes
     );
+}
+
+#[test]
+#[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
+fn great_gate_yellow_gem_card_route_reaches_c8() {
+    const YELLOW_GEM_BIT: u32 = 1 << 29;
+    const ROUTE_FRAMES: u32 = 2_385;
+
+    let disc_path = PathBuf::from(
+        std::env::var_os("C1_DISC_IMAGE")
+            .expect("C1_DISC_IMAGE must name a legally local NTSC-U raw BIN"),
+    );
+    let disc_bytes = std::fs::read(&disc_path)
+        .unwrap_or_else(|error| panic!("{}: {error}", disc_path.display()));
+    let disc = DiscImage::open(&disc_bytes)
+        .unwrap_or_else(|error| panic!("{}: {error}", disc_path.display()));
+    assert_eq!(disc.layout(), SectorLayout::RawMode2_2352);
+    let streams = disc.discover_streams().expect("disc streams must parse");
+    streams.validate_complete_retail().unwrap();
+
+    let level = LevelId::new_const(0x12);
+    let nsd_bytes = disc
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsd))
+                .expect("Great Gate NSD is present"),
+        )
+        .expect("Great Gate NSD is readable");
+    let nsf_bytes = disc
+        .read_stream(
+            streams
+                .get(StreamName::new(level, StreamKind::Nsf))
+                .expect("Great Gate NSF is present"),
+        )
+        .expect("Great Gate NSF is readable");
+    let nsd = parse_nsd(&nsd_bytes, level).expect("Great Gate NSD must parse");
+    let nsf = parse_nsf(&nsf_bytes, &nsd).expect("Great Gate NSF must parse");
+
+    let save = SaveData {
+        level_count: 1,
+        initial_lives: 4 << 8,
+        sfx_volume: 255,
+        music_volume: 255,
+        item_pool_1: YELLOW_GEM_BIT,
+        gem_count: 1,
+        ..SaveData::default()
+    };
+    let payload = CardPayload::encode(save);
+    assert!(payload.is_valid());
+    assert_eq!(&payload.as_bytes()[28..32], &YELLOW_GEM_BIT.to_le_bytes());
+    let loaded = payload.decode().expect("retail card payload must decode");
+    assert_eq!(loaded, save);
+
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    title_runtime
+        .restore_card_save_data(loaded)
+        .expect("Yellow Gem progression must restore through the card path");
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 3),
+        (LEVELS_UNLOCKED_GLOBAL, 3),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("pre-Great-Gate map global must exist");
+    }
+    assert_eq!(
+        [
+            LEVEL_COUNT_GLOBAL,
+            ITEM_POOL_1_GLOBAL,
+            ITEM_POOL_2_GLOBAL,
+            GEM_COUNT_GLOBAL,
+        ]
+        .map(|index| title_runtime.global_word(index).unwrap()),
+        [1, YELLOW_GEM_BIT, 0, 1]
+    );
+
+    // This is the exact post-Jungle Title Map phase characterized by the
+    // vertical-flow test. Only the legally local card entitlement differs.
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = 0x4a04_f4bf;
+    carry.draw_count = 5_782;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Great Gate must import the card-backed map carry");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "The Great Gate Yellow Gem route",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::GreatGateYellowGemExactCarry,
+        ROUTE_FRAMES,
+    )
+    .expect("Great Gate Yellow Gem route must reach c8");
+
+    let c8_path = RetailPathId {
+        zone: Eid::from_name("c8_iZ").expect("fixed Great Gate route EID is valid"),
+        index: 0,
+    };
+    let c8_range = survey
+        .camera_ranges
+        .get(&c8_path)
+        .expect("Yellow Gem platforms must route the camera into c8");
+    assert_eq!(
+        *c8_range,
+        CameraProgressRange {
+            first_frame: 2_382,
+            last_frame: ROUTE_FRAMES,
+            minimum: 171,
+            maximum: 1_625,
+        }
+    );
+    let final_camera = survey
+        .final_camera
+        .expect("Yellow Gem route must retain its c8 camera");
+    assert_eq!(final_camera.path, c8_path);
+    assert_eq!(final_camera.progress.raw(), 1_625);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_316_032, -8_385_266, 83_712])
+    );
+    assert_eq!(survey.frames, ROUTE_FRAMES);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert!(survey.terminal.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert!(
+        survey.observed_program_states.contains(&(
+            Eid::from_name("GemsC").expect("fixed gem-platform EID is valid"),
+            2,
+        )),
+        "card-backed Yellow Gem must activate subtype-five GemsC platforms"
+    );
+    assert!(
+        !survey.observed_program_states.contains(&(
+            Eid::from_name("WillC").expect("fixed player EID is valid"),
+            32,
+        )),
+        "the alternate route must avoid normal WarpC"
+    );
+    assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(YELLOW_GEM_BIT));
+    assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(0));
+    assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(1));
 }

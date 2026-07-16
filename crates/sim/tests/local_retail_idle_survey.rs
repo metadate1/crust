@@ -50,7 +50,7 @@ use crust_sim::{
         RetailPadSnapshot, RetailTransformVectorsCamera, SAVED_TITLE_STATE_GLOBAL, SendEventTarget,
         TITLE_STATE_GLOBAL, VmEffect, process_register,
     },
-    object_arena::{NeighborZone, SpawnError},
+    object_arena::{NeighborZone, ObjectOrigin, SpawnError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
     retail_frame::RetailFrameState,
     retail_runtime::{
@@ -118,6 +118,7 @@ enum SurveyInputProfile {
     NativeFortressA7Route,
     NativeFortressExtendedRoute,
     PapuPapuCompletionRoute,
+    KoalaKongCompletionRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,6 +149,7 @@ impl SurveyInputProfile {
             Self::NativeFortressA7Route => "native-fortress-a7-route",
             Self::NativeFortressExtendedRoute => "native-fortress-extended-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
+            Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
         }
     }
 
@@ -169,7 +171,74 @@ impl SurveyInputProfile {
                 | Self::NativeFortressA7Route
                 | Self::NativeFortressExtendedRoute
                 | Self::PapuPapuCompletionRoute
+                | Self::KoalaKongCompletionRoute
         )
+    }
+}
+
+/// Ordinary-pad controller for Koala Kong's authored returnable boulders.
+///
+/// `KonOC` executable 30/subtype 2 state 2 is the thrown rock approaching
+/// Crash; `BoxsC` executable 34/subtype 16 is the separate timed crate hazard.
+/// The controller holds a hazard-free lane, then presses Square only while the
+/// live thrown rock is inside its authored contact window. Boss events, health,
+/// object coordinates, and level-transition state remain entirely retail-driven.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct KoalaKongCompletionRouteController;
+
+impl KoalaKongCompletionRouteController {
+    const SAFE_X: i32 = 400_000;
+    const SAFE_X_TOLERANCE: i32 = 24_000;
+    const SPIN_ALIGN_RANGE: i32 = 400_000;
+    const SPIN_DEPTH_RANGE: i32 = 500_000;
+
+    fn held(
+        _camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let konoc = Eid::from_name("KonOC").expect("fixed Koala Kong controller EID is valid");
+        let target = objects
+            .iter()
+            .filter(|object| {
+                object.program == konoc
+                    && object.state == 2
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 30,
+                            subtype: 2
+                        }
+                    )
+            })
+            .min_by_key(|object| {
+                player.translation[0].abs_diff(object.translation[0])
+                    + player.translation[2].abs_diff(object.translation[2])
+            });
+        let Some(target) = target else {
+            return Self::safe_lane_held(player.translation[0]);
+        };
+
+        let delta_x = target.translation[0].wrapping_sub(player.translation[0]);
+        let delta_z = target.translation[2].wrapping_sub(player.translation[2]);
+        if delta_x.abs() <= Self::SPIN_ALIGN_RANGE && delta_z.abs() <= Self::SPIN_DEPTH_RANGE {
+            PAD_SQUARE
+        } else {
+            Self::safe_lane_held(player.translation[0])
+        }
+    }
+
+    const fn safe_lane_held(player_x: i32) -> u32 {
+        if player_x < Self::SAFE_X - Self::SAFE_X_TOLERANCE {
+            PAD_RIGHT
+        } else if player_x > Self::SAFE_X + Self::SAFE_X_TOLERANCE {
+            PAD_LEFT
+        } else {
+            0
+        }
     }
 }
 
@@ -5497,6 +5566,7 @@ impl SurveyInputController {
         local_pbak_held: Option<u32>,
         upstream_platforms: &UpstreamPlatformTraces,
         papu_boss_state: Option<u16>,
+        koala_objects: &[ProgramObjectTrace],
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
@@ -5546,6 +5616,9 @@ impl SurveyInputController {
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, papu_boss_state)
             }
+            SurveyInputProfile::KoalaKongCompletionRoute => {
+                KoalaKongCompletionRouteController::held(camera, player, koala_objects)
+            }
         }
     }
 }
@@ -5587,6 +5660,14 @@ struct SpawnedEntityTrace {
     state: u16,
     path_progress: i32,
     status_a: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProgramObjectTrace {
+    origin: ObjectOrigin,
+    program: Eid,
+    state: u16,
+    translation: [i32; 3],
 }
 
 #[derive(Debug)]
@@ -6553,6 +6634,50 @@ fn spawned_entity_state(runtime: &RetailRuntime, id: u16) -> Result<Option<u16>,
     Ok(None)
 }
 
+fn program_object_traces(
+    runtime: &RetailRuntime,
+    programs: &[Eid],
+) -> Result<Vec<ProgramObjectTrace>, String> {
+    let mut traces = Vec::new();
+    for arena_handle in runtime
+        .arena()
+        .postorder_snapshot()
+        .map_err(|error| format!("program trace forest: {error:?}"))?
+    {
+        let Some(spawned) = runtime.arena().get(arena_handle) else {
+            continue;
+        };
+        let Some(object) = runtime.object_for_arena(arena_handle) else {
+            continue;
+        };
+        let vm = runtime
+            .machine()
+            .object(object.vm())
+            .map_err(|error| format!("program trace VM: {error:?}"))?;
+        let Some(identity) = vm.program_identity() else {
+            continue;
+        };
+        if !programs.contains(&identity.global_eid()) {
+            continue;
+        }
+        let register = |index| {
+            vm.register(index)
+                .map_err(|error| format!("program trace register {index}: {error:?}"))
+        };
+        traces.push(ProgramObjectTrace {
+            origin: spawned.origin(),
+            program: identity.global_eid(),
+            state: vm.state(),
+            translation: [
+                register(process_register::TRANSLATION_X)?.cast_signed(),
+                register(process_register::TRANSLATION_Y)?.cast_signed(),
+                register(process_register::TRANSLATION_Z)?.cast_signed(),
+            ],
+        });
+    }
+    Ok(traces)
+}
+
 fn spawned_entity_trace(
     runtime: &RetailRuntime,
     id: u16,
@@ -7161,6 +7286,15 @@ fn survey_pair_with_runtime(
             } else {
                 None
             };
+        let koala_objects = if matches!(input_profile, SurveyInputProfile::KoalaKongCompletionRoute)
+        {
+            program_object_traces(
+                &runtime,
+                &[Eid::from_name("KonOC").expect("fixed Koala Kong boulder EID is valid")],
+            )?
+        } else {
+            Vec::new()
+        };
         if previous_papu_boss_state != papu_boss_state {
             if let Some(state) = papu_boss_state {
                 survey.entity_state_samples.push((frame, 8, state));
@@ -7178,6 +7312,7 @@ fn survey_pair_with_runtime(
                 .copied(),
             &upstream_platforms,
             papu_boss_state,
+            &koala_objects,
         );
         if matches!(input_profile, SurveyInputProfile::HogWildCompletionRoute)
             && survey
@@ -7293,8 +7428,11 @@ fn survey_pair_with_runtime(
         }
         for effect in &report.effects {
             survey.record_effect(frame, effect);
-            if matches!(input_profile, SurveyInputProfile::PapuPapuCompletionRoute)
-                && survey.direct_send_program_samples.len() < 128
+            if matches!(
+                input_profile,
+                SurveyInputProfile::PapuPapuCompletionRoute
+                    | SurveyInputProfile::KoalaKongCompletionRoute
+            ) && survey.direct_send_program_samples.len() < 128
                 && let VmEffect::SendEvent(request) = effect
                 && let SendEventTarget::Direct { recipient } = request.target
             {
@@ -7306,14 +7444,27 @@ fn survey_pair_with_runtime(
                         .and_then(crust_sim::gool::VmObject::program_identity)
                         .map(GoolProgramIdentity::global_eid)
                 };
-                survey
-                    .direct_send_program_samples
-                    .push(DirectSendProgramSample {
-                        frame,
-                        event: request.event,
-                        sender: program(request.sender),
-                        recipient: program(recipient),
-                    });
+                let sample = DirectSendProgramSample {
+                    frame,
+                    event: request.event,
+                    sender: program(request.sender),
+                    recipient: program(recipient),
+                };
+                let retain = matches!(input_profile, SurveyInputProfile::PapuPapuCompletionRoute)
+                    || (sample.event == 0x0300
+                        && sample.sender
+                            == Some(
+                                Eid::from_name("KonOC")
+                                    .expect("fixed Koala Kong controller EID is valid"),
+                            )
+                        && sample.recipient
+                            == Some(
+                                Eid::from_name("KongC")
+                                    .expect("fixed Koala Kong boss EID is valid"),
+                            ));
+                if retain {
+                    survey.direct_send_program_samples.push(sample);
+                }
             }
             if frame <= 360
                 && survey.early_direct_send_samples.len() < 128
@@ -9274,6 +9425,72 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn koala_kong_ordinary_pad_route_reaches_authored_title_transition() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x21);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Koala Kong's local stream pair must parse");
+    let survey = survey_pair(
+        "Koala Kong",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::KoalaKongCompletionRoute,
+        4_200,
+    )
+    .expect("Koala Kong's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 3_943);
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3943 requested level transition to 0x19")
+    );
+    assert_eq!(
+        survey.next_lid,
+        Some((3_943, i32::try_from(LevelId::TITLE.get()).unwrap()))
+    );
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.save_handshakes, 2);
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.spawn_flag_samples.contains(&(3_819, 10, 3)));
+
+    let returned_boulder_hit_frames = survey
+        .direct_send_program_samples
+        .iter()
+        .map(|sample| sample.frame)
+        .collect::<Vec<_>>();
+    assert_eq!(returned_boulder_hit_frames, [1_688, 2_235, 3_255, 3_819]);
+    let rock = Eid::from_name("KonOC").expect("fixed Koala Kong boulder EID is valid");
+    let boss = Eid::from_name("KongC").expect("fixed Koala Kong boss EID is valid");
+    assert!(survey.direct_send_program_samples.iter().all(|sample| {
+        sample.event == 0x0300 && sample.sender == Some(rock) && sample.recipient == Some(boss)
+    }));
+    assert!(survey.observed_program_states.contains(&(rock, 6)));
+    assert!(survey.observed_program_states.contains(&(boss, 5)));
+    assert!(survey.observed_player_states.contains(&32));
+    assert_eq!(
+        survey.final_player_translation,
+        Some([423_936, 252_456, 512_000])
+    );
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert!(
+        survey.is_clean(),
+        "Koala Kong's authored completion route must remain clean: {}",
+        survey.summary()
+    );
+}
+
 fn requested_survey_level() -> Option<LevelId> {
     let raw = std::env::var("C1_SURVEY_LEVEL").ok()?;
     let digits = raw
@@ -9303,7 +9520,11 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
         let result = read_pair(&root, known.id).and_then(|(nsd_bytes, nsf_bytes)| {
             let nsd = parse_nsd(&nsd_bytes, known.id).map_err(|error| error.to_string())?;
             let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
-            let input_profile = if std::env::var_os("C1_SURVEY_ACTIVE_INPUT").is_some() {
+            let input_profile = if known.id == LevelId::new_const(0x21)
+                && std::env::var_os("C1_SURVEY_KOALA_ROUTE").is_some()
+            {
+                SurveyInputProfile::KoalaKongCompletionRoute
+            } else if std::env::var_os("C1_SURVEY_ACTIVE_INPUT").is_some() {
                 SurveyInputProfile::DirectionAndButtonSweep
             } else {
                 SurveyInputProfile::Idle

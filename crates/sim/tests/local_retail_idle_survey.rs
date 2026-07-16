@@ -1854,7 +1854,6 @@ impl GreatGateRouteController {
                 },
                 button_start: if collect_tawna_tokens { 0 } else { 24 },
                 button_frames: if collect_tawna_tokens { 0 } else { 16 },
-                ..RouteAction::default()
             },
             103 => RouteAction {
                 direction: if self.yellow_gem_route {
@@ -1877,9 +1876,7 @@ impl GreatGateRouteController {
                 } else {
                     PAD_LEFT
                 },
-                direction_frames: if self.yellow_gem_route {
-                    18
-                } else if collect_tawna_tokens {
+                direction_frames: if self.yellow_gem_route || collect_tawna_tokens {
                     18
                 } else {
                     12
@@ -1936,7 +1933,6 @@ impl GreatGateRouteController {
                 button: PAD_CROSS,
                 button_start: 18,
                 button_frames: 16,
-                ..RouteAction::default()
             },
             _ => unreachable!("all triggered Great Gate stages are matched"),
         });

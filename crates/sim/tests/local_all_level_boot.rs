@@ -4,13 +4,17 @@
 //! broad runtime parity failures actionable instead of hiding behind the one
 //! deeply characterized N. Sanity Beach trace.
 
-use std::path::PathBuf;
+use std::{collections::BTreeSet, path::PathBuf};
 
 use crust_formats::stream::{
     KNOWN_LEVELS, RetailZoneGraph, ZoneEntity, ZoneHeader, parse_nsd, parse_nsf,
 };
+use crust_sim::camera::RetailCameraLocation;
 use crust_sim::object_arena::{NeighborZone, SpawnError};
-use crust_sim::retail_runtime::{NsfProgramError, NsfProgramHost, RetailRuntime, RuntimeError};
+use crust_sim::retail_frame::PathProgress;
+use crust_sim::retail_runtime::{
+    NsfProgramError, NsfProgramHost, RetailLevelStateContext, RetailRuntime, RuntimeError,
+};
 
 fn is_native_rejected_spawn(
     result: &Result<crust_sim::retail_runtime::RuntimeObjectHandle, RuntimeError<NsfProgramError>>,
@@ -204,6 +208,28 @@ fn every_bootable_retail_pair_crosses_its_first_runtime_frame() {
             .collect::<Vec<_>>();
         let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
         let mut runtime = RetailRuntime::new_for_level(256, known.id);
+        // Native LevelInit publishes cur_zone through LevelUpdate before the
+        // first CoreFrame; the browser installs this same mount context before
+        // creating roots, so the direct runtime harness must do so as well.
+        let mut seen_active_neighbors = BTreeSet::new();
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location: RetailCameraLocation {
+                path: graph.spawn_path(),
+                progress: PathProgress::ZERO,
+            },
+            graphics_flags: current_header.graphics.flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: neighbors
+                .iter()
+                .filter(|neighbor| {
+                    neighbor.display_flags & 1 != 0 && seen_active_neighbors.insert(neighbor.eid)
+                })
+                .map(|neighbor| neighbor.eid)
+                .collect(),
+        });
         let first = match runtime.spawn_and_run_frame(&neighbors, &mut host, 1_024) {
             Ok(first) => first,
             Err(error) => {

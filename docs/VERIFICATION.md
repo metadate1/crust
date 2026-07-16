@@ -179,8 +179,11 @@ not copy any disc or stream bytes into the repository:
   all three modes are gated into live object rendering and that graphics flag `0x1000` substitutes
   the Q24.8 bobbing/fixed-pitch camera for objects only.
 - The exact Jungle Rollers `pb0cB` integration trace runs all 1,348 recorded pad boundaries, builds
-  every non-restart scene, and checks every contained object execution. It covers `FruiC` raw
-  sprite shifts 24, 26, 28, 31, 34, 246, 271 and 297 with their low-five-bit effective values.
+  every non-restart scene, and checks every contained object execution. Frames 189–210 cover two
+  consecutive `FruiC` physical generations reusing compact VM slot 17, pin their exact
+  scale/state/animation-stamp sequence, and confirm that no such child remains on frames 211–217.
+  Separate renderer goldens cover raw sprite shifts 24, 26, 28, 31, 34, 246, 271 and 297 with their
+  low-five-bit effective values.
   Separate runtime coverage verifies that the caption's executable-four/subtype-nine child keeps a
   null lifecycle zone while using the current ZDAT for environment/colors. The direct-mount
   fixture samples a zero island-camera target at the final boundary, returns `Released`, and leaves
@@ -389,10 +392,10 @@ The final checks below were run against this change set on 2026-07-14:
   checked handler failures, and Title's intentionally empty gameplay-core frame completed with no
   effect or fault. This proved the simulation's first three-pair completion handoff, not an
   end-user browser playthrough.
-- the legal Jungle Rollers PBAK scene test passed after pinning the first source-correct `FruiC`
-  incarnation: synchronous `0x83`/`0x84` local-bound refresh moves its first shrink-four frame to
-  wall frame 190/pad boundary 191, followed by the exact raw/effective shift checkpoints through
-  frame 217.
+- after native null-zone lifetime correction, the legal Jungle Rollers PBAK scene test no longer
+  follows a reclaimed `FruiC` incarnation. It pins arena generations nine and ten across their
+  shared compact VM slot, exact authored scale/state/stamp sequence on frames 189–210, and absence
+  after frame 210. The MIPS low-five-bit shift behavior remains covered independently.
 - native pause unit tests cover the exact level/title/PBAK gate, root-seven
   executable-four/subtype-four creation, tagged global word 12, the category/type/live-process-subtype
   update allow-list, Crash-boundary hook invocation while ordinary updates are suppressed, frozen
@@ -1106,7 +1109,7 @@ is 1,322,866 bytes with SHA-256
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
-  restart, built each non-restart scene, and retained the exact transient `FruiC` shift checks.
+  restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
 - Rustfmt, native and Wasm Clippy with warnings denied, eight dependency-free Node tests, all 890
   non-ignored locked workspace tests, all 78 legally local ignored tests, the native workspace
   release, the `wasm32-unknown-unknown` web release, `npm run build`, and the distribution verifier

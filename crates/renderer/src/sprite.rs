@@ -422,7 +422,7 @@ mod tests {
     }
 
     #[test]
-    fn pbak_fruit_raw_shift_sequence_uses_the_mips_low_five_bits() {
+    fn large_raw_shift_counts_use_the_mips_low_five_bits() {
         for (raw, effective) in [
             (24_u32, 24_u8),
             (26, 26),
@@ -439,10 +439,9 @@ mod tests {
     }
 
     #[test]
-    fn authored_large_sprite_shift_wraps_like_the_retail_mips_word() {
-        // Exact live pb0cB 2D FruiC scale on recorded frame 179 at 0a_cZ:0
-        // progress 0x297. Its shift is a valid 32-bit retail word, not a fatal
-        // asset-format error.
+    fn large_sprite_shift_wraps_like_the_retail_mips_word() {
+        // A representative negative scale with raw shift 24 is a valid
+        // 32-bit retail word, not a fatal asset-format error.
         let scale = [-655_688, 1_665_544, 1_257];
         let shrink = retail_sprite_shrink(scale[0]).unwrap();
         assert_eq!(shrink, 24);
@@ -465,7 +464,7 @@ mod tests {
                 1798,
             )
             .is_none(),
-            "retail's accumulated GTE validity flag culls the saturated fruit quad"
+            "retail's accumulated GTE validity flag culls the saturated quad"
         );
     }
 

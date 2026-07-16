@@ -5156,7 +5156,7 @@ mod tests {
         playback.mark_started();
         let mut pad = RetailPadSnapshot::default();
         let mut builder = RetailSceneBuilder::new();
-        let mut observed_offender = None;
+        let mut observed_fruit_generations: [Option<RuntimeObjectHandle>; 2] = [None, None];
         let mut finish_outcome = None;
         let mut finish_island_rotation = None;
         let mut pad_boundaries = 0_usize;
@@ -5298,67 +5298,90 @@ mod tests {
                     )
                 });
 
-            let offender = (level == LevelId::new_const(0x0c))
-                .then(|| {
-                    objects.iter().find(|object| {
+            if level == LevelId::new_const(0x0c) && (189..=210).contains(&pbak_frame) {
+                const FRUIT_SCALE_SEQUENCE: [[i32; 3]; 11] = [
+                    [2_764, 3_456, 4_915],
+                    [-253, 658, 936],
+                    [-253, 658, 936],
+                    [-278, 722, 936],
+                    [-306, 792, 936],
+                    [-336, 869, 936],
+                    [-369, 953, 936],
+                    [-406, 1_046, 936],
+                    [-446, 1_148, 936],
+                    [-490, 1_260, 936],
+                    [-538, 1_383, 936],
+                ];
+                let fruit = objects
+                    .iter()
+                    .filter(|object| {
                         object.executable == 3
                             && object.subtype == 13
                             && object.program.is_some_and(|program| {
                                 program.global_eid().name().as_deref() == Some("FruiC")
                             })
-                            && object.transform.scale == [-110_121, 279_039, 936]
                     })
-                })
-                .flatten();
-            // The synchronous 0x83/0x84 local-bound refresh lets successive
-            // authored burst children reach this same scale. Pin the first
-            // matching incarnation so the later checks follow one lifecycle.
-            if observed_offender.is_none()
-                && let Some(offender) = offender
-            {
-                observed_offender = Some(offender.object);
-                assert_eq!(pbak_frame, 190);
-                assert_eq!(pad_boundaries, 191);
-                assert_eq!(camera_step.after.progress.raw(), 0x600);
+                    .collect::<Vec<_>>();
                 assert_eq!(
-                    runtime.object_for_arena(offender.object.arena()),
-                    Some(offender.object)
+                    fruit.len(),
+                    1,
+                    "{} frame {pbak_frame} authored FruiC child count",
+                    prepared.eid,
                 );
+                let fruit = fruit[0];
+                let (generation_index, sequence_index) = if pbak_frame < 200 {
+                    (0, pbak_frame - 189)
+                } else {
+                    (1, pbak_frame - 200)
+                };
+                if sequence_index == 0 {
+                    if generation_index == 1 {
+                        let prior = observed_fruit_generations[0]
+                            .expect("the preceding FruiC generation was observed");
+                        assert_eq!(fruit.object.vm(), prior.vm());
+                        assert_ne!(fruit.object.arena(), prior.arena());
+                    }
+                    observed_fruit_generations[generation_index] = Some(fruit.object);
+                }
                 assert_eq!(
-                    runtime.object_for_vm(offender.object.vm()),
-                    Some(offender.object)
-                );
-                assert_eq!(offender.animation_reference.unwrap().offset(), 0);
-                assert_eq!(retail_sprite_shrink(offender.transform.scale[0]), Ok(4));
-                let vm = runtime.machine().object(offender.object.vm()).unwrap();
-                assert_eq!(vm.state(), 12);
-                assert_eq!(vm.register(process_register::ANIMATION_STAMP).unwrap(), 191);
-            }
-            if let Some((raw_shrink, effective_shrink)) = (level == LevelId::new_const(0x0c))
-                .then_some(match pbak_frame {
-                    191 | 192 => Some((4_u32, 4_u8)),
-                    193 | 194 => Some((5, 5)),
-                    215 => Some((41, 9)),
-                    216 => Some((45, 13)),
-                    217 => Some((49, 17)),
-                    _ => None,
-                })
-                .flatten()
-            {
-                let transient = objects
-                    .iter()
-                    .find(|object| Some(object.object) == observed_offender)
-                    .expect("the authored FruiC transient remains live");
-                assert_eq!(
-                    transient.transform.scale[0].unsigned_abs() / 27_279,
-                    raw_shrink,
-                    "{} frame {pbak_frame} raw scale quotient",
+                    observed_fruit_generations[generation_index],
+                    Some(fruit.object),
+                    "{} frame {pbak_frame} must retain one physical incarnation",
                     prepared.eid,
                 );
                 assert_eq!(
-                    retail_sprite_shrink(transient.transform.scale[0]),
-                    Ok(effective_shrink),
-                    "{} frame {pbak_frame} effective five-bit shift",
+                    runtime.object_for_arena(fruit.object.arena()),
+                    Some(fruit.object)
+                );
+                assert_eq!(runtime.object_for_vm(fruit.object.vm()), Some(fruit.object));
+                assert_eq!(
+                    fruit.transform.scale, FRUIT_SCALE_SEQUENCE[sequence_index],
+                    "{} frame {pbak_frame} FruiC scale",
+                    prepared.eid,
+                );
+                assert_eq!(
+                    retail_sprite_shrink(fruit.transform.scale[0]),
+                    Ok(0),
+                    "{} frame {pbak_frame} FruiC shrink",
+                    prepared.eid,
+                );
+                let vm = runtime.machine().object(fruit.object.vm()).unwrap();
+                assert_eq!(vm.state(), if sequence_index == 0 { 8 } else { 12 });
+                assert_eq!(
+                    vm.register(process_register::ANIMATION_STAMP).unwrap(),
+                    u32::try_from(pbak_frame).unwrap() + 1,
+                );
+            }
+            if level == LevelId::new_const(0x0c) && (211..=217).contains(&pbak_frame) {
+                assert!(
+                    objects.iter().all(|object| {
+                        object.executable != 3
+                            || object.subtype != 13
+                            || !object.program.is_some_and(|program| {
+                                program.global_eid().name().as_deref() == Some("FruiC")
+                            })
+                    }),
+                    "{} frame {pbak_frame} retained a reclaimed FruiC child",
                     prepared.eid,
                 );
             }
@@ -5370,10 +5393,12 @@ mod tests {
             pad_boundaries, trace_frames,
             "the requested recorded pad boundaries must run within the bounded wall window"
         );
-        if level == LevelId::new_const(0x0c) && trace_frames >= 207 {
+        if level == LevelId::new_const(0x0c) && trace_frames >= 211 {
             assert!(
-                observed_offender.is_some(),
-                "pb0cB did not reach its authored transient shrink-4 sprite"
+                observed_fruit_generations
+                    .into_iter()
+                    .all(|handle| handle.is_some()),
+                "pb0cB did not reach both source-lifetime FruiC generations"
             );
         }
         if trace_frames == prepared.frame_count() {

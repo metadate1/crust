@@ -100,8 +100,10 @@ while each record replays its live `(EID, generation, page)` texture map before 
 projection, lighting/color modulation, and ordering through the shared resident TPAG cache;
 the status-B 2D CVTX path uses the shared retail sprite matrix. Sprite and fragment half-size math
 uses the MIPS variable-shift low five bits and explicit signed 32-bit wrapping before the checked
-GTE validity gate. The legal `pb0cB` trace therefore carries the authored `FruiC` scale through raw
-shifts 24–297 without turning a saturating/cullable sprite into a runtime failure. Eligible
+GTE validity gate; focused arithmetic goldens cover raw counts beyond 31 without turning a
+saturating/cullable sprite into a runtime failure. The legal `pb0cB` trace separately pins two
+successive `FruiC` physical generations that reuse one compact VM slot, their exact authored scale
+sequence, and reclamation after the second child. Eligible
 animation bounds follow the native Crash-stamp schedule. Same-stamp objects register their
 transformed frame bound before GOOL and physics and execute the same-stamp Crash
 collision-link/hotspot tail; objects visited before Crash register after physics when they remain

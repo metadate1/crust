@@ -177,10 +177,11 @@ gameplay path.
   clean frames.
   Type-two sprites, type-five fragments and status-B 2D CVTX use the source ZXY sprite transform.
   Their signed half-size calculation preserves the source MIPS `SLLV`/`SRAV` low-five-bit shift
-  semantics and wrapping 32-bit intermediate before checked GTE range rejection. The legal
-  Jungle Rollers playback covers the `FruiC` raw-shift sequence 24, 26, 28, 31, 34 … 297 without a
-  renderer halt; saturated results are culled at the same validity boundary rather than clamped by
-  host shift rules.
+  semantics and wrapping 32-bit intermediate before checked GTE range rejection. Focused arithmetic
+  goldens cover raw counts 24, 26, 28, 31, 34 … 297; saturated results are culled at the same
+  validity boundary rather than clamped by host shift rules. Legal Jungle Rollers playback pins
+  two consecutive `FruiC` arena generations that reuse compact VM slot 17, including their exact
+  authored scale/state/stamp sequence and prompt reclamation.
   Type-four text uses bounded `sp[-2]` argument aliases, the default or dynamic header-length-bounded
   type-three font, retail formatting/control commands, the extended controller-icon records that
   follow the C declaration's first 63 slots, per-corner color modulation and ordered glyph/backdrop

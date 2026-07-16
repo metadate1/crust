@@ -6831,6 +6831,228 @@ fn hog_wild_direct_boot_reaches_level_complete() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn hog_wild_completion_unlocks_native_fortress_through_authored_map() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = LevelId::TITLE;
+    let (title_nsd, title_nsf, title_nsf_bytes) =
+        parse_local_pair(&root, title).expect("the legally local Title pair must parse");
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, title);
+    title_runtime
+        .restore_card_save_data(SaveData {
+            level_count: 8,
+            initial_lives: 4 << 8,
+            sfx_volume: 255,
+            music_volume: 255,
+            ..SaveData::default()
+        })
+        .expect("Hog Wild map progression must restore through the card payload path");
+
+    let mut pre_hog_map = AuthoredTitleMapHarness::from_runtime(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        title_runtime,
+    );
+    pre_hog_map.wait_until_ready(64);
+    assert_eq!(pre_hog_map.frame, 10);
+    let pre_hog_location = pre_hog_map.camera.location();
+    assert_eq!(
+        pre_hog_location.path,
+        RetailPathId {
+            zone: Eid::from_name("1e_pZ").expect("fixed Hog Wild map-node EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(pre_hog_location.progress.raw(), 5_376);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| pre_hog_map.runtime.global_word(index).unwrap()),
+        [0, 15, u32::MAX, 8, 8, 8, 1]
+    );
+    for _ in 0..120 {
+        pre_hog_map.step(0);
+    }
+    pre_hog_map.step(PAD_CROSS);
+    assert_eq!(pre_hog_map.transitions, [(131, 0x11)]);
+
+    let hog_wild = LevelId::new_const(0x11);
+    let hog_carry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let report = pre_hog_map
+            .runtime
+            .finish_level_transition(&mut host, i32::try_from(hog_wild.get()).unwrap())
+            .expect("pre-Hog Title Map LEVEL_END must export a carry");
+        assert!(report.event_failures.is_empty());
+        assert_eq!(
+            report.next_lid_after_event,
+            i32::try_from(hog_wild.get()).unwrap()
+        );
+        assert_eq!(report.resolved.level, hog_wild);
+        report.carry
+    };
+    let (hog_nsd, hog_nsf, hog_nsf_bytes) =
+        parse_local_pair(&root, hog_wild).expect("the legally local Hog Wild pair must parse");
+    let (hog_survey, mut hog_runtime) = survey_pair_with_runtime(
+        "Hog Wild",
+        hog_wild,
+        &hog_nsd,
+        &hog_nsf,
+        &hog_nsf_bytes,
+        RetailRuntime::new_from_session(GLOBAL_WORDS, hog_wild, hog_carry)
+            .expect("Hog Wild must import its authored map carry"),
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::HogWildCompletionRoute,
+        2_100,
+    )
+    .expect("Hog Wild's ordinary-pad completion route must execute");
+    assert_eq!(hog_survey.frames, 1_950);
+    assert_eq!(hog_survey.next_lid, Some((1_950, 0x2d)));
+    assert_eq!(hog_survey.restarts, 0);
+    assert!(hog_survey.is_clean(), "{}", hog_survey.summary());
+
+    let completion = LevelId::LEVEL_COMPLETE;
+    let completion_carry = {
+        let mut host = NsfProgramHost::new(&hog_nsd, &hog_nsf, &hog_nsf_bytes);
+        let report = hog_runtime
+            .finish_level_transition(&mut host, i32::try_from(completion.get()).unwrap())
+            .expect("Hog Wild LEVEL_END must export its Level Complete carry");
+        assert!(report.event_failures.is_empty());
+        assert_eq!(report.requested_lid, 0x2d);
+        assert_eq!(report.next_lid_after_event, 0x2d);
+        assert_eq!(report.resolved.level, completion);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| report.carry.globals[index]),
+            [0x500, 15, 15, 8, 8, 9, 0]
+        );
+        assert_eq!(report.carry.random_seed, 0x3fa1_a51d);
+        assert_eq!(report.carry.draw_count, 2_081);
+        report.carry
+    };
+
+    let (complete_nsd, complete_nsf, complete_nsf_bytes) = parse_local_pair(&root, completion)
+        .expect("the legally local Level Complete pair must parse");
+    let (complete_survey, mut complete_runtime) = survey_pair_with_runtime(
+        "Level Complete",
+        completion,
+        &complete_nsd,
+        &complete_nsf,
+        &complete_nsf_bytes,
+        RetailRuntime::new_from_session(GLOBAL_WORDS, completion, completion_carry)
+            .expect("Level Complete must import Hog Wild's carry"),
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        600,
+    )
+    .expect("Level Complete must execute its authored return-to-map flow");
+    assert_eq!(complete_survey.frames, 273);
+    assert_eq!(complete_survey.next_lid, Some((273, 0x19)));
+    assert_eq!(complete_survey.restarts, 0);
+    assert!(complete_survey.is_clean(), "{}", complete_survey.summary());
+    assert_eq!(complete_runtime.machine().random_seed(), 0x2580_b608);
+    assert_eq!(complete_runtime.draw_count(), 2_354);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| complete_runtime.global_word(index).unwrap()),
+        [0x300, 15, 15, 8, 8, 9, 0]
+    );
+
+    let title_carry = {
+        let mut host = NsfProgramHost::new(&complete_nsd, &complete_nsf, &complete_nsf_bytes);
+        let report = complete_runtime
+            .finish_level_transition(&mut host, i32::try_from(title.get()).unwrap())
+            .expect("Level Complete LEVEL_END must export its Title Map carry");
+        assert!(report.event_failures.is_empty());
+        assert_eq!(report.resolved.level, title);
+        report.carry
+    };
+    let mut post_hog_map = AuthoredTitleMapHarness::from_session(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        title_carry,
+    );
+    post_hog_map.wait_until_ready(64);
+    assert_eq!(post_hog_map.frame, 10);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_hog_map.runtime.global_word(index).unwrap()),
+        [0, 15, 15, 8, 8, 9, 1]
+    );
+    for _ in 0..120 {
+        post_hog_map.step(0);
+    }
+    post_hog_map.tap(PAD_UP);
+    for _ in 0..120 {
+        post_hog_map.step(0);
+    }
+    post_hog_map.step(PAD_CROSS);
+
+    let native_fortress = LevelId::new_const(0x1a);
+    assert_eq!(post_hog_map.transitions, [(253, 0x1a)]);
+    assert_eq!(
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == native_fortress)
+            .map(|known| known.name),
+        Some("Native Fortress")
+    );
+    assert_eq!(post_hog_map.camera.location().progress.raw(), 6_144);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_hog_map.runtime.global_word(index).unwrap()),
+        [0, 15, 15, 9, 8, 9, 1]
+    );
+    assert_eq!(post_hog_map.runtime.machine().random_seed(), 0x3cdd_8923);
+    assert_eq!(post_hog_map.runtime.draw_count(), 2_607);
+    assert_eq!(post_hog_map.runtime.faulted_object_count(), 0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn hog_wild_idle_restarts_on_the_authored_surface_cadence() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")

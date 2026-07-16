@@ -1068,9 +1068,36 @@ is 1,322,866 bytes with SHA-256
   attempts with 28,329 source-expected rejections, 53,886 clean executions, 26 lifecycle zone
   transitions, 48 observed camera paths and 53 path changes. It ends on `0s_eZ` path one/progress
   12,799 with RNG `0x5def7434` and draw count 11,084, without a restart, death camera, below-zero or
-  terminal fall, VM error, faulted object, execution error, or checked issue. This is deterministic
-  native integration over user-supplied local data, not a browser playthrough or full-game parity
-  claim. The yellow-gem alternate branch and box-complete gem evaluation remain outside this golden.
+  terminal fall, VM error, faulted object, execution error, or checked issue. The yellow-gem
+  alternate branch and box-complete gem evaluation remain outside this golden.
+
+  Boulders' checked `LEVEL_END` exports a Level Complete carry with RNG `0x5def7434`, draw 11,084,
+  and globals `game=0x500, title=15, saved-title=15, map=4, count=1, unlocked=5, island=0`. The Level
+  Complete runtime imports that exact carry and requests Title `0x19` at frame 105. It performs two
+  successful spawns from 210 attempts with 208 source-expected rejections and 435 clean executions,
+  with no restart, death camera, below-zero or terminal fall, VM fault, execution error, or checked
+  issue. Its terminal runtime globals are
+  `game=0x300, title=15, saved-title=15, map=4, count=1, unlocked=5, island=0`, with RNG
+  `0x031aa015` and draw 11,189. The checked Level Complete `LEVEL_END` retains those values into
+  Title. The Map becomes ready at frame 10, executes 120 idle frames, taps Up, executes another 120
+  idle frames, and presses Cross. It requests Upstream `0x0f` at frame 253 on `1c_pZ` path
+  one/progress 2,304. Its exported carry has
+  `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
+  11,442.
+
+  Upstream imports that carried session and consumes every one of the 934 34-tick frames in the
+  user's legally local `pb0fB`. The test does not install the PBAK restart snapshot and commits
+  neither recording bytes nor a derived pad trace. Across the complete recording it performs 52
+  successful spawns, 11,840 attempts, 11,788 source-expected rejections, and 30,551 clean
+  executions. It observes three lifecycle zone transitions, two camera ranges, six path changes,
+  and the three authored same-level `LoadState` restarts at frames 104, 231, and 816. It emits three
+  load-state effects and no transition. The initial camera is path zero/progress 256; the final
+  camera is the same path at progress 7,059. Crash ends at `[2150400, 1747085, 25025792]`, RNG at
+  `0x78109dff`, and draw count at 118. There is no death camera, below-zero or terminal fall, VM
+  fault, execution error, unexpected spawn error, or checked issue. This is deterministic native
+  integration over user-supplied local data, not a browser playthrough or full-game parity claim.
+  Upstream's checkpoint and normal end remain open, and the full carried chain has not been
+  exercised in a browser.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1125,7 +1152,7 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_three_completions_reach_boulders_with_session_carry \
+  authored_first_four_levels_reach_upstream_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

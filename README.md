@@ -169,9 +169,9 @@ the later b7 stop came from steering `LEFT` around the live portal lane. Correct
 actions required no camera or collision runtime change. The current six-frame change instead comes
 from restoring `PlotObjWalls(flag=1)`'s ordered `GoolCollide` calls for overlapping frame bounds.
 `docs/VERIFICATION.md` records the exact invocation and boundaries.
-An opt-in legally local vertical-flow test now keeps the native process session intact across the
-whole first completion loop and its next map choice. A fresh authored Map initialized through the
-card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity emits Level Complete
+An opt-in legally local vertical-flow test now keeps the native process session intact across four
+normal-level completions and the next Map choice into Upstream. A fresh authored Map initialized
+through the card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity emits Level Complete
 `0x2d` at frame 1,900, its checked `LEVEL_END` phase exports `RetailSessionCarry`; Level Complete
 imports that carry and emits Title `0x19` at
 frame 513, and Title imports the second carry into its parsed graph, ZDAT entities, lifecycle, and
@@ -216,8 +216,27 @@ counted boxes (`0xf00`) and the normal end `WarpC`, which emits `Transition(0x2d
 That completion golden records 97 successful spawns, 53,886 clean executions, 26 lifecycle zone
 transitions, 48 observed camera paths and 53 path changes, ending at RNG `0x5def7434` and draw count
 11,084 with no restart, death camera, terminal fall, VM error, faulted object, or checked issue.
-These are deterministic native integration goldens over user-supplied local data, not a browser
-playthrough or full-game parity claim.
+Boulders' checked `LEVEL_END` exports that RNG/draw phase and globals
+`game=0x500, title=15, saved-title=15, map=4, count=1, unlocked=5, island=0` to Level Complete. Its
+screen requests Title `0x19` at frame 105 after two successful spawns, 210 attempts, 208
+source-expected rejections, and 435 clean executions, with no restart, VM fault, or execution error.
+The post-screen runtime has `game=0x300` with the other six globals unchanged, RNG `0x031aa015`, and
+draw count 11,189. After the checked Title handoff, the Map waits 10 frames, follows
+120-idle/Up/120-idle/Cross, and requests Upstream `0x0f` at frame 253 on `1c_pZ` path one/progress
+2,304. Its carry has `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG
+`0xae2dd893`, and draw count 11,442.
+
+Upstream consumes all 934 34-tick frames from the user's legally local `pb0fB` without installing
+the PBAK restart snapshot or committing recording bytes or a derived pad trace. The complete
+recording performs 52 successful spawns from 11,840 attempts with 11,788 source-expected
+rejections, 30,551 clean executions, three lifecycle zone transitions, two camera ranges and six
+path changes. Its authored same-level `LoadState` restarts occur at frames 104, 231, and 816. It
+moves the camera from path zero/progress 256 to that same path at progress 7,059 and ends with Crash
+at `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw count 118, with no death camera,
+below-zero or terminal fall, transition request, VM fault, execution error, or checked issue. These
+are deterministic native integration goldens over user-supplied local data, not a browser
+playthrough or full-game parity claim. Upstream's checkpoint and normal end remain open, as does a
+browser exercise of this complete carried chain.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -230,8 +249,9 @@ focused deterministic route, not broad checkpoint/death certification.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
-The current native schedule includes one deterministic authored level-completion loop; this is not
-a full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
+The current native schedule includes this deterministic carried sequence through four authored
+normal-level completions and the complete Upstream PBAK; this is not a full retail playthrough or a
+browser-playthrough claim. Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.

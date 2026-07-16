@@ -414,9 +414,9 @@ gameplay path.
   actions at authored static cells; a later b7 stop came from steering `LEFT` around the live portal
   lane. Correcting those route actions required no camera or collision runtime change. The current
   timing and interaction sequence additionally includes the restored flag-enabled `PlotObjWalls`
-  `GoolCollide` path for every overlapping frame bound. This
-  deterministic route now feeds a separate legally local cross-pair test that starts from a fresh
-  authored Title Map initialized through the card-payload restore path. Map requests N. Sanity
+  `GoolCollide` path for every overlapping frame bound. This deterministic route anchors the legally
+  local carried cross-pair test described below. Its first leg starts from a fresh authored Title
+  Map initialized through the card-payload restore path. Map requests N. Sanity
   Beach on frame 11. N. Sanity's checked
   `LEVEL_END` exports a session carry, Level Complete imports it and reaches authored Title
   `Transition(0x19)` on frame 513, and Title imports the second carry into its parsed graph, ZDAT
@@ -425,8 +425,8 @@ gameplay path.
   `draw_count` remains
   phase-continuous through the three imported remounts and the fourth exported carry; same-level
   and bonus-return `LevelRestart` still reset it exactly where the source does. All four outgoing
-  level-end broadcasts are clean. This deterministic first completion loop and next map handoff do
-  not establish a browser playthrough or full retail parity.
+  level-end broadcasts are clean. This first leg alone does not establish a browser playthrough or
+  full retail parity; the later paragraphs record the additional carried legs separately.
   All 43 selectable starts also completed a strict 1,800-frame direction/button sweep with no
   checked runtime issue: 77,400 browser-ordered simulation frames in aggregate. Jaws of Darkness
   separately completed the same 1,800-frame focused window after its reclaimed-creator pointer was
@@ -488,8 +488,28 @@ gameplay path.
   15 boxes (`0xf00`) before the normal `WarpC` emits `Transition(0x2d)` at frame 2,210. That golden
   records 97 successful spawns, 53,886 clean executions, 26 lifecycle zone transitions, 48 camera
   paths and 53 path changes, and ends at RNG `0x5def7434`/draw 11,084 with no restart, death camera,
-  terminal fall, VM error, faulted object, or checked issue. This is deterministic native
-  integration over user-supplied local data, not a browser execution or full-game parity claim.
+  terminal fall, VM error, faulted object, or checked issue. Boulders' checked `LEVEL_END` exports
+  globals `game=0x500, title=15, saved-title=15, map=4, count=1, unlocked=5, island=0` with that same
+  RNG/draw phase. Level Complete imports it and requests Title `0x19` at frame 105 after two
+  successful spawns, 210 attempts, 208 source-expected rejections, and 435 clean executions, with
+  no restart, VM fault, or execution error. The post-screen runtime has `game=0x300` with the other
+  six globals unchanged, RNG `0x031aa015`, and draw 11,189. The remounted Map becomes ready at frame
+  10, follows the same 120-idle/Up/120-idle/Cross schedule, and requests Upstream `0x0f` at frame 253
+  on `1c_pZ` path one/progress 2,304. Its checked carry has
+  `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
+  11,442.
+
+  Upstream consumes all 934 34-tick frames from the user's legally local `pb0fB`; no recording
+  bytes or derived pad trace enter the repository, and the runtime does not install the PBAK restart
+  snapshot. The run records 52 successful spawns from 11,840 attempts with 11,788 source-expected
+  rejections, 30,551 clean executions, three lifecycle zone transitions, two camera ranges and six
+  path changes. Its authored same-level `LoadState` restarts occur at frames 104, 231, and 816. The
+  camera starts on path zero/progress 256 and ends on that same path at progress 7,059; Crash ends at
+  `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw 118. It records no death camera,
+  below-zero or terminal fall, transition request, VM fault, execution error, or checked issue.
+  This is deterministic native integration over user-supplied local data, not browser execution or
+  full-game parity. Upstream's checkpoint and normal end remain open, as does a browser exercise of
+  the complete carried chain.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -531,9 +551,11 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- One deterministic retail-authored N. Sanity route now reaches its real end warp and requests
-  Level Complete. The Tawna bonus control path is covered at exact entry, portal, return, and
-  remount boundaries, but no uninterrupted pad-driven/browser bonus round trip has been completed.
+- Four deterministic retail-authored normal-level routes now reach their real end warps and request
+  Level Complete, and their carried chain executes the complete legally local Upstream PBAK.
+  Upstream's checkpoint and normal end remain open. The Tawna bonus control path is covered at
+  exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser
+  bonus round trip has been completed.
   No boss, complete ending, broad death/checkpoint
   sequence, long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
 

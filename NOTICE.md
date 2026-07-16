@@ -12,6 +12,34 @@ Behavioral and format references were taken from these unlicensed upstream snaps
 - local browser-port reference `c1-browser-runtime` at
   `7f05e5febd63e603f243c089c8b9918211c7b991`
 
+PS1 SPU Gaussian interpolation behavior and the fixed 512-word coefficient ROM were validated
+against the PSX-SPX hardware notes at
+<https://psx-spx.consoledev.net/soundprocessingunitspu/#4-point-gaussian-interpolation>. The
+PSX-SPX repository itself states that it has no acquired license and is not a clean-room work; this
+project therefore makes no clean-room claim for that hardware reference. The same formula and
+coefficient sequence were independently cross-checked against `howprice/hopstation` at
+`974653fe77e30493e7dc6043cccdbaa69820175c`, `psx/SPU.cpp`, which is distributed under the MIT
+License:
+
+> MIT License
+>
+> Copyright (c) 2026 howprice
+>
+> Permission is hereby granted, free of charge, to any person obtaining a copy of this software and
+> associated documentation files (the "Software"), to deal in the Software without restriction,
+> including without limitation the rights to use, copy, modify, merge, publish, distribute,
+> sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+>
+> The above copyright notice and this permission notice shall be included in all copies or
+> substantial portions of the Software.
+>
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT
+> NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+> NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+> DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
+> OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
 Those C1 repositories do not provide an express root license. No C source is included or linked
 into this runtime. This repository must remain private and must not be redistributed, hosted, or
 published as a playable build until contributor permissions and the original-game rights have

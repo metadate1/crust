@@ -242,7 +242,12 @@ impl App {
             let option: HtmlOptionElement =
                 self.dom.document.create_element("option")?.dyn_into()?;
             option.set_value(&level.get().to_string());
-            option.set_text(&format!("{level} — {name}"));
+            let label = if *level == FormatLevelId::TITLE {
+                "Full game — from the beginning".to_owned()
+            } else {
+                format!("{name} — {level}")
+            };
+            option.set_text(&label);
             self.dom.boot_level.append_child(&option)?;
         }
         if playable.is_empty() {

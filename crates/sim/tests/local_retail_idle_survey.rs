@@ -107,6 +107,7 @@ enum SurveyInputProfile {
     GreatGateTawnaBonus,
     GreatGateYellowGemExactCarry,
     LocalPbakPrefix,
+    BouldersCheckpointRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,6 +129,7 @@ impl SurveyInputProfile {
             Self::GreatGateTawnaBonus => "great-gate-tawna-bonus",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
+            Self::BouldersCheckpointRoute => "boulders-checkpoint-route",
         }
     }
 
@@ -140,6 +142,7 @@ impl SurveyInputProfile {
                 | Self::GreatGatePhaseRobust
                 | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
+                | Self::BouldersCheckpointRoute
         )
     }
 }
@@ -1941,12 +1944,141 @@ impl GreatGateRouteController {
     }
 }
 
+/// Legally-local Boulders PBAK opening followed by a deterministic route to
+/// the first retail checkpoint and its post-checkpoint geometry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BouldersCheckpointRouteController;
+
+impl BouldersCheckpointRouteController {
+    fn held(
+        &mut self,
+        frame: u32,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        local_pbak_held: Option<u32>,
+    ) -> u32 {
+        let second_hazard = Eid::from_name("0F_eZ").expect("fixed Boulders route EID is valid");
+        let third_hazard = Eid::from_name("0E_eZ").expect("fixed Boulders route EID is valid");
+        let fourth_hazard = Eid::from_name("0D_eZ").expect("fixed Boulders route EID is valid");
+        let checkpoint_hazard = Eid::from_name("0C_eZ").expect("fixed Boulders route EID is valid");
+        let post_checkpoint_hazard =
+            Eid::from_name("0B_eZ").expect("fixed Boulders route EID is valid");
+        let second_post_checkpoint_hazard =
+            Eid::from_name("0A_eZ").expect("fixed Boulders route EID is valid");
+        let third_post_checkpoint_hazard =
+            Eid::from_name("0z_eZ").expect("fixed Boulders route EID is valid");
+
+        if frame <= 895 {
+            local_pbak_held.expect("the legally local PBAK prefix is loaded before frame execution")
+        } else if frame <= 911 {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == second_hazard && camera.progress.raw() <= 7_000 {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == second_hazard
+            && camera.path.index == 0
+            && (10_500..14_000).contains(&camera.progress.raw())
+        {
+            PAD_DOWN | PAD_CROSS | PAD_SQUARE
+        } else if camera.path.zone == second_hazard && camera.progress.raw() >= 10_500 {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == second_hazard {
+            PAD_DOWN
+        } else if camera.path.zone == third_hazard
+            && camera.path.index == 0
+            && camera.progress.raw() >= 15_500
+        {
+            let mut held = PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+            if player.is_some_and(|player| player.translation[0] > 1_870_000) {
+                held |= PAD_LEFT;
+            }
+            held
+        } else if camera.path.zone == third_hazard
+            && camera.path.index == 0
+            && camera.progress.raw() >= 9_500
+        {
+            let mut held = PAD_DOWN | PAD_CROSS;
+            if player.is_some_and(|player| player.translation[0] > 1_870_000) {
+                held |= PAD_LEFT;
+            }
+            held
+        } else if camera.path.zone == third_hazard
+            && camera.path.index == 1
+            && camera.progress.raw() < 2_000
+        {
+            let mut held = PAD_DOWN | PAD_SQUARE;
+            if player.is_some_and(|player| player.translation[0] > 1_870_000) {
+                held |= PAD_LEFT;
+            }
+            held
+        } else if camera.path.zone == third_hazard
+            && camera.path.index == 1
+            && player.is_some_and(|player| player.translation[0] < 2_020_000)
+        {
+            PAD_DOWN | PAD_RIGHT | PAD_CROSS
+        } else if camera.path.zone == third_hazard
+            && ((camera.path.index == 0 && camera.progress.raw() >= 7_000)
+                || (camera.path.index == 1 && camera.progress.raw() >= 6_000))
+        {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == fourth_hazard
+            && camera.path.index == 0
+            && (4_000..14_000).contains(&camera.progress.raw())
+        {
+            let mut held = PAD_DOWN | PAD_CROSS;
+            if camera.progress.raw() >= 6_000 {
+                held |= PAD_RIGHT;
+            }
+            held
+        } else if camera.path.zone == fourth_hazard && camera.path.index == 1 {
+            let mut held = PAD_DOWN;
+            if camera.progress.raw() < 4_000
+                && player.is_some_and(|player| player.translation[0] > 2_110_000)
+            {
+                held |= PAD_LEFT;
+            } else if camera.progress.raw() >= 4_000
+                && player.is_some_and(|player| player.translation[0] < 2_210_000)
+            {
+                held |= PAD_RIGHT | PAD_SQUARE;
+            } else {
+                held |= PAD_SQUARE;
+            }
+            if (5_500..9_500).contains(&camera.progress.raw()) {
+                held |= PAD_CROSS;
+            }
+            held
+        } else if camera.path.zone == checkpoint_hazard
+            && camera.path.index == 0
+            && (11_000..14_500).contains(&camera.progress.raw())
+        {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == post_checkpoint_hazard
+            && camera.path.index == 1
+            && (9_000..19_000).contains(&camera.progress.raw())
+        {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == second_post_checkpoint_hazard
+            && ((camera.path.index == 0 && (5_000..19_000).contains(&camera.progress.raw()))
+                || (camera.path.index == 1 && (3_000..16_000).contains(&camera.progress.raw())))
+        {
+            PAD_DOWN | PAD_CROSS
+        } else if camera.path.zone == third_post_checkpoint_hazard
+            && camera.path.index == 0
+            && (2_000..15_000).contains(&camera.progress.raw())
+        {
+            PAD_DOWN | PAD_CROSS
+        } else {
+            PAD_DOWN
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurveyInputController {
     profile: SurveyInputProfile,
     n_sanity: NSanityRouteController,
     jungle: JungleRouteController,
     great_gate: GreatGateRouteController,
+    boulders: BouldersCheckpointRouteController,
 }
 
 impl SurveyInputController {
@@ -1978,6 +2110,7 @@ impl SurveyInputController {
                 action_tick: 0,
                 pickup_wait_frames: 0,
             },
+            boulders: BouldersCheckpointRouteController,
         }
     }
 
@@ -2010,6 +2143,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::LocalPbakPrefix => local_pbak_held
                 .expect("the legally local PBAK prefix is loaded before frame execution"),
+            SurveyInputProfile::BouldersCheckpointRoute => {
+                self.boulders.held(frame, camera, player, local_pbak_held)
+            }
         }
     }
 }
@@ -3367,8 +3503,13 @@ fn survey_pair_with_runtime(
     runtime
         .create_retail_level_misc_object(camera.location().path.zone, &mut host)
         .map_err(|error| format!("level-misc object creation: {error:?}"))?;
-    let local_pbak_prefix = (input_profile == SurveyInputProfile::LocalPbakPrefix)
-        .then(|| load_local_pbak_pad_prefix(nsf, nsf_bytes, survey_frames))
+    let local_pbak_frame_count = match input_profile {
+        SurveyInputProfile::LocalPbakPrefix => Some(survey_frames),
+        SurveyInputProfile::BouldersCheckpointRoute => Some(895),
+        _ => None,
+    };
+    let local_pbak_prefix = local_pbak_frame_count
+        .map(|frame_count| load_local_pbak_pad_prefix(nsf, nsf_bytes, frame_count))
         .transpose()?;
     let mut survey = LevelSurvey::new(level, name, input_profile);
     let mut input_controller = SurveyInputController::new(input_profile);
@@ -6823,7 +6964,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         assert_eq!(boulders_pbak.frames.len(), 990);
         assert_eq!(boulders_pbak.ticks_per_frame, 34);
         let boulders_runtime =
-            RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
+            RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry.clone())
                 .expect("Boulders must import the third-completion map carry");
         let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
             known_name(boulders),
@@ -6834,14 +6975,14 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             boulders_runtime,
             LevelContextSource::SessionGlobals,
             SurveyInputProfile::LocalPbakPrefix,
-            900,
+            990,
         )
         .expect("Boulders must execute the legally local authored pad prefix");
-        assert_eq!(boulders_survey.frames, 900);
+        assert_eq!(boulders_survey.frames, 990);
         assert!(boulders_survey.terminal.is_none());
         assert_eq!(boulders_survey.successful_spawns, 37);
         assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
-        assert_eq!(boulders_survey.executions, 18_990);
+        assert_eq!(boulders_survey.executions, 20_692);
         assert_eq!(boulders_survey.zone_transitions, 10);
         assert_eq!(boulders_survey.camera_ranges.len(), 16);
         assert_eq!(boulders_survey.camera_path_changes, 21);
@@ -6903,15 +7044,98 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
                 index: 1,
             }
         );
-        assert_eq!(boulders_camera.progress.raw(), 7_168);
+        assert_eq!(boulders_camera.progress.raw(), 3_840);
         assert_eq!(
             boulders_survey.final_player_translation,
-            Some([2_377_472, 7_550_502, -12_167_680])
+            Some([2_377_472, 7_550_502, -12_157_440])
         );
-        assert_eq!(boulders_runtime.machine().random_seed(), 0x0581_be15);
-        assert_eq!(boulders_runtime.draw_count(), 9_774);
+        assert_eq!(boulders_runtime.machine().random_seed(), 0xb4e7_0e26);
+        assert_eq!(boulders_runtime.draw_count(), 9_864);
+
+        let checkpoint_runtime =
+            RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
+                .expect("Boulders checkpoint route must import the map carry");
+        let (checkpoint_survey, checkpoint_runtime) = survey_pair_with_runtime(
+            known_name(boulders),
+            boulders,
+            &boulders_nsd,
+            &boulders_nsf,
+            &boulders_nsf_bytes,
+            checkpoint_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::BouldersCheckpointRoute,
+            1_600,
+        )
+        .expect("Boulders checkpoint route must execute cleanly");
+        assert_eq!(checkpoint_survey.frames, 1_600);
+        assert!(checkpoint_survey.terminal.is_none());
+        assert_eq!(checkpoint_survey.successful_spawns, 78);
+        assert_eq!(checkpoint_survey.unexpected_spawn_errors, 0);
+        assert_eq!(checkpoint_survey.executions, 37_542);
+        assert_eq!(checkpoint_survey.zone_transitions, 19);
+        assert_eq!(checkpoint_survey.camera_ranges.len(), 34);
+        assert_eq!(checkpoint_survey.camera_path_changes, 39);
+        assert_eq!(checkpoint_survey.last_camera_path_change, 1_564);
+        assert_eq!(checkpoint_survey.restarts, 0);
+        assert!(checkpoint_survey.restart_frames.is_empty());
+        assert_eq!(checkpoint_survey.save_handshakes, 0);
+        assert_eq!(checkpoint_survey.faulted_objects, 0);
+        assert_eq!(checkpoint_survey.execution_errors, 0);
+        assert!(checkpoint_survey.first_terminal_fall.is_none());
+        assert!(checkpoint_survey.next_lid.is_none());
+        assert_eq!(checkpoint_survey.effect_counts.get("save-state"), Some(&1));
+        assert_eq!(
+            checkpoint_survey.checkpoint_samples,
+            [
+                (1, -1, [15_154_944, -8_104_292, 127_744]),
+                (1_277, 15_104, [2_303_232, 6_860_544, -5_172_480]),
+            ]
+        );
+        assert_eq!(checkpoint_survey.saved_box_count_samples, [(1_277, 0x0c00)]);
+        assert_eq!(
+            checkpoint_survey.box_count_samples,
+            [
+                (1, 0),
+                (71, 0x0100),
+                (173, 0x0200),
+                (174, 0x0300),
+                (197, 0x0400),
+                (232, 0x0500),
+                (633, 0x0600),
+                (636, 0x0700),
+                (695, 0x0800),
+                (1_105, 0x0900),
+                (1_190, 0x0a00),
+                (1_275, 0x0b00),
+                (1_276, 0x0c00),
+                (1_277, 0x0d00),
+                (1_279, 0x0e00),
+            ]
+        );
+        let checkpoint_camera = checkpoint_survey
+            .final_camera
+            .expect("Boulders checkpoint route retains a camera location");
+        assert_eq!(
+            checkpoint_camera.path,
+            RetailPathId {
+                zone: Eid::from_name("0z_eZ").expect("fixed Boulders route-zone EID is valid"),
+                index: 1,
+            }
+        );
+        assert_eq!(checkpoint_camera.progress.raw(), 16_878);
+        assert_eq!(
+            checkpoint_survey.final_player_translation,
+            Some([2_187_008, 5_946_482, 706_048])
+        );
+        assert_eq!(checkpoint_runtime.machine().random_seed(), 0xe51d_e0c4);
+        assert_eq!(checkpoint_runtime.draw_count(), 10_474);
+        assert!(
+            checkpoint_survey.is_clean(),
+            "Boulders checkpoint route must remain clean: {}",
+            checkpoint_survey.summary()
+        );
         eprintln!(
-            "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored prefix: 900 frames, 0Q_eZ:0@0 -> 0I_eZ:1@7168, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}",
+            "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored PBAK: 990 frames, 0Q_eZ:0@0 -> 0I_eZ:1@3840, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}; checkpoint route: {} frames, RNG {:#010x}, draw {}",
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,
             completion_survey.next_lid.unwrap().0,
@@ -6929,6 +7153,9 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             post_great_gate_map.runtime.draw_count(),
             boulders_runtime.machine().random_seed(),
             boulders_runtime.draw_count(),
+            checkpoint_survey.frames,
+            checkpoint_runtime.machine().random_seed(),
+            checkpoint_runtime.draw_count(),
         );
     }
 }

@@ -1261,18 +1261,19 @@ is 1,322,866 bytes with SHA-256
   22,472 source-expected rejections, 48,147 clean executions, 16 lifecycle transitions, 21 camera
   ranges and 26 path changes. It has no restart, LoadState, fall, VM fault, execution error, or
   checked issue. This is not an Up the Creek completion or browser-playthrough claim.
-- Ripper Roo's legally local 300-frame idle characterization matches the source project's current
-  allocator behavior. RooOC requests one ordinary executable-39/subtype-one child on every enabled
-  draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately
-  reuses one slot on frame 152, and subsequent saturated requests correctly return null. RRooC
-  still enters state one and traverses its deterministic pad loop without a fault. This narrows an
-  inherited source boundary; it is not evidence for a Big TNT completion path. A separate
-  10,000-frame ordinary-pad sweep produced 123 fall restarts but no transition. A targeted route
-  reached Ripper's pad and delivered repeated `WillC` to `RRooC` spin-hit event `0x400`; Ripper
-  correctly stayed in state one, then returned event `0x300` to damage Crash. No executable-34
-  `BoxsC` spawn request appeared in a 1,000-frame trace, while persistent `RooOC` children filled
-  the ordinary pool. The direct-boot graph therefore has no observed controller-only TNT/win path;
-  adding one would require speculative object or VM mutation.
+- Ripper Roo's legally local 300-frame characterization identifies RooOC executable-39/subtype-one
+  children as the authentic Big TNT waterfall objects. Entity seven requests one on every enabled
+  draw. Each child executes the source's state-three MOV from parent register 44, retains the same
+  non-null checked entity reference, and samples the authored 23-point waterfall in states four and
+  five. The first child begins at X/Z `[-251392, -1383332]`; all 81 live children remain anchored at
+  X `-251392` and within the checked path range after 300 frames. Without the entity-reference copy,
+  the later `+0xdc00` offsets accumulated diagonally into multi-million-unit off-screen positions.
+  The non-reclaiming objects still fill the 96-slot pool on frame 80, RRooC releases and immediately
+  reuses one slot on frame 152, and saturated requests correctly return null. RRooC enters state one
+  and traverses its deterministic pad loop without a fault. A read-only C-browser direct boot using
+  the same local S17 pair displayed the three expected Big TNTs. This establishes the missing
+  source-authored TNT presentation path; it does not claim that the complete controller-only boss
+  win route has been played through in the Rust browser.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1374,7 +1375,7 @@ C1_STREAM_DIR=/path/to/streams \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \
-  ripper_roo_idle_matches_source_hop_loop_and_pool_boundary \
+  ripper_roo_big_tnt_children_copy_authored_waterfall_path \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

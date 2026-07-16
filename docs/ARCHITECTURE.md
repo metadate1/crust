@@ -222,6 +222,14 @@ identity. MOV, stack, and linked-register copies carry that sidecar. Existing pr
 the same compact tag has already become a dangling pointer, so compact-handle reuse in another slot
 cannot silently retarget it.
 
+Relocated entity pointers use a separate aligned 32-bit tag backed by a machine-owned table of
+validated entity IDs, coordinate spaces and path points. The tag is an ordinary GOOL word, so MOV,
+stack, table, event-argument and retained-pool copies preserve its identity without a bespoke host
+route. Dereferencing the tag for path orientation is bounds checked, and the owned table outlives
+the GOOL object that first received the authored entity. This is required by Ripper Roo's generic
+RooOC state-three code: each runtime-created Big TNT copies its parent entity reference, then uses
+that copied path in states four and five.
+
 The 96 ordinary slots begin as native's ascending `free_objects` chain. Binding preflights handle,
 slot, occupancy, and free-list membership before installation is committed; unlinking an arbitrary
 slot reconnects its predecessor. Reclaim captures process storage, overwrites the freed object's
@@ -411,10 +419,11 @@ identity against its Pager, returns any resident eviction to the VM, and leaves 
 unapplied. The browser creates this runtime
 when a pair is mounted and runs it at 30 Hz in title, gameplay, bonus, boss, level-complete, intro
 and ending flow states. The host initializes the characterized ZDAT
-zone/path transform, rotation/mode flags, scale, colors and scalar process defaults without placing
-native entity pointers in the register file. Type-17 title entities retain their MDAT descriptor
-provenance, while native `cur_zone` supplies the arena object zone, origin and colors; children
-inherit typed parent state. Any checked
+zone/path transform, rotation/mode flags, scale, colors and scalar process defaults. Register 44
+contains a checked machine-owned entity-reference tag rather than a native pointer, so authored
+GOOL can copy the reference into runtime children and later resolve the same owned path. Type-17
+title entities retain their MDAT descriptor provenance, while native `cur_zone` supplies the arena
+object zone, origin and colors; children inherit typed parent state. Any checked
 execution failure quarantines that exact generational object identity, preventing a pre-incremented
 program counter from resuming past an unsupported operation while healthy siblings continue.
 Box special cases, some host effects, full progression and several dynamic object-rendering modes

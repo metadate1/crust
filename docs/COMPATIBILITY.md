@@ -291,8 +291,12 @@ gameplay path.
   the bounded arena and VM through explicit typed mappings, but it is not the complete object graph
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode
   flags, player/object colors and the characterized scalar process defaults; runtime children
-  inherit the parent transform and receive zone colors. Entity-pointer words deliberately remain
-  outside raw registers. Executable-`0x22` crate scans now retain owned entity locations and
+  inherit the parent transform and receive zone colors. Native entity pointers are represented by
+  aligned 32-bit references into a machine-owned validated path table. Ordinary GOOL copies retain
+  that identity after the authored parent is reclaimed; malformed or unbound references fail
+  checked. Ripper Roo's RooOC state-three MOV therefore gives each executable-39/subtype-one Big
+  TNT the authored entity-seven waterfall path used by states four and five. Executable-`0x22`
+  crate scans now retain owned entity locations and
   generation-checked object handles, reproduce strict vertical-stack adjacency, bidirectional
   misc-A links, blocked-crate height compaction, activation/restart resets and the native stagger
   counter without exposing raw pointers. The legally local `a3_9Z` entity 23/24 pair is covered by

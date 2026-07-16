@@ -237,7 +237,7 @@ fn ripper_roo_mount_creates_authored_root_controller_before_zone_scan() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
+fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
@@ -314,10 +314,11 @@ fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
             .expect("Ripper Roo entity 8 must remain live")
     };
 
-    let mut materialized_waterfall_children = 0_usize;
-    let mut waterfall_materialization_frames = Vec::new();
-    let mut requested_waterfall_children = 0_usize;
+    let mut materialized_big_tnts = 0_usize;
+    let mut big_tnt_materialization_frames = Vec::new();
+    let mut requested_big_tnts = 0_usize;
     let mut boss_samples = Vec::new();
+    let mut first_big_tnt_path_sample = None;
     for frame in 1_u32..=300 {
         runtime.set_frame_timing(34, 34);
         let _ = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
@@ -358,7 +359,7 @@ fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
                 .collect::<Vec<_>>()
         );
 
-        let frame_waterfall_children = report
+        let frame_big_tnts = report
             .spawned_children
             .iter()
             .filter(|child| {
@@ -371,11 +372,11 @@ fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
                 })
             })
             .count();
-        materialized_waterfall_children += frame_waterfall_children;
-        if frame_waterfall_children != 0 {
-            waterfall_materialization_frames.push(frame);
+        materialized_big_tnts += frame_big_tnts;
+        if frame_big_tnts != 0 {
+            big_tnt_materialization_frames.push(frame);
         }
-        requested_waterfall_children += report
+        requested_big_tnts += report
             .effects
             .iter()
             .filter_map(|effect| match effect {
@@ -390,29 +391,141 @@ fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
             })
             .sum::<usize>();
 
+        if frame == 1 {
+            let source = runtime
+                .arena()
+                .postorder_snapshot()
+                .unwrap()
+                .into_iter()
+                .find_map(|arena| {
+                    (runtime.arena().get(arena)?.entity_descriptor()?.id == 7)
+                        .then(|| runtime.object_for_arena(arena))
+                        .flatten()
+                })
+                .expect("RooOC entity 7 must own the waterfall path");
+            let big_tnt = report
+                .spawned_children
+                .iter()
+                .copied()
+                .find(|child| {
+                    runtime.arena().get(child.arena()).is_some_and(|spawned| {
+                        spawned.origin()
+                            == (ObjectOrigin::Runtime {
+                                executable: 39,
+                                subtype: 1,
+                            })
+                    })
+                })
+                .expect("RooOC entity 7 must create its first Big TNT on frame one");
+            let source_vm = runtime.machine().object(source.vm()).unwrap();
+            let big_tnt_vm = runtime.machine().object(big_tnt.vm()).unwrap();
+            first_big_tnt_path_sample = Some((
+                source_vm
+                    .register(process_register::ENTITY_REFERENCE)
+                    .unwrap(),
+                big_tnt_vm
+                    .register(process_register::ENTITY_REFERENCE)
+                    .unwrap(),
+                [
+                    big_tnt_vm
+                        .register(process_register::TRANSLATION_X)
+                        .unwrap()
+                        .cast_signed(),
+                    big_tnt_vm
+                        .register(process_register::TRANSLATION_Z)
+                        .unwrap()
+                        .cast_signed(),
+                ],
+            ));
+        }
+
         if matches!(frame, 1 | 80 | 151 | 200 | 230 | 270 | 300) {
             boss_samples.push((frame, boss_sample(&runtime)));
         }
     }
 
-    // RooOC state two requests one ordinary 0x8a child every enabled draw.
-    // Its state-four/five children are neither terminated nor marked with the
-    // 0x80000 reclaim flag in the current C source, so the exact 96-slot pool
-    // first saturates on frame 80. RRooC's intro releases one slot on frame
-    // 152 and the next waterfall request consumes it immediately; all other
-    // saturated requests correctly produce native's null misc_child result.
-    assert_eq!(requested_waterfall_children, 300);
+    // RooOC state two is the Big TNT waterfall controller: it requests one
+    // executable-39/subtype-one child on every enabled draw. State three
+    // copies the parent's native `process.entity` pointer before state four
+    // samples that path. Its non-reclaiming children fill the exact 96-slot
+    // pool on frame 80; RRooC releases one slot on frame 152 and the next
+    // request consumes it immediately.
+    assert_eq!(requested_big_tnts, 300);
     assert_eq!(
-        materialized_waterfall_children, 81,
-        "materialized on frames {waterfall_materialization_frames:?}"
+        materialized_big_tnts, 81,
+        "materialized on frames {big_tnt_materialization_frames:?}"
     );
     assert_eq!(
-        waterfall_materialization_frames,
+        big_tnt_materialization_frames,
         (1_u32..=80).chain([152]).collect::<Vec<_>>()
     );
     assert_eq!(runtime.arena().remaining_pool_capacity(), 0);
     assert_eq!(runtime.arena().len(), 97);
     assert_eq!(runtime.faulted_object_count(), 0);
+
+    let (source_reference, copied_reference, first_xz) =
+        first_big_tnt_path_sample.expect("frame-one Big TNT sample");
+    assert_ne!(source_reference, 0, "authored entity pointers are non-null");
+    assert_eq!(copied_reference, source_reference);
+    assert_eq!(first_xz, [-251_392, -1_383_332]);
+
+    let mut live_big_tnts = 0_usize;
+    for arena in runtime.arena().postorder_snapshot().unwrap() {
+        let spawned = runtime.arena().get(arena).unwrap();
+        let ObjectOrigin::Runtime {
+            executable,
+            subtype,
+        } = spawned.origin()
+        else {
+            continue;
+        };
+        if (executable, subtype) == (39, 1) {
+            live_big_tnts += 1;
+            let parent_id = match spawned.parent() {
+                TreeParent::Object(parent) => runtime
+                    .arena()
+                    .get(parent)
+                    .and_then(crust_sim::object_arena::SpawnedObject::entity_descriptor)
+                    .map(|descriptor| descriptor.id),
+                TreeParent::Root(_) => None,
+            };
+            assert_eq!(parent_id, Some(7));
+            let object = runtime.object_for_arena(arena).unwrap();
+            let vm = runtime.machine().object(object.vm()).unwrap();
+            assert_eq!(
+                vm.register(process_register::ENTITY_REFERENCE),
+                Ok(source_reference)
+            );
+            assert_eq!(
+                vm.register(process_register::TRANSLATION_X)
+                    .unwrap()
+                    .cast_signed(),
+                -251_392,
+                "Big TNT must be re-anchored to entity 7's waterfall path each update"
+            );
+            let z = vm
+                .register(process_register::TRANSLATION_Z)
+                .unwrap()
+                .cast_signed();
+            assert!(
+                (-1_500_000..=0).contains(&z),
+                "Big TNT escaped the authored waterfall: z={z}"
+            );
+        }
+    }
+    assert_eq!(live_big_tnts, 81);
+    let big_tnt_render = runtime
+        .render_objects()
+        .unwrap()
+        .into_iter()
+        .filter(|object| (object.executable, object.subtype) == (39, 1))
+        .collect::<Vec<_>>();
+    assert_eq!(big_tnt_render.len(), 81);
+    assert!(
+        big_tnt_render.iter().all(|object| {
+            object.display_eligible && object.transform.translation[0] == -251_392
+        })
+    );
     assert_eq!(
         boss_samples,
         [

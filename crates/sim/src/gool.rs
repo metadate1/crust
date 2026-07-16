@@ -5,6 +5,7 @@
 //! events, and call targets are checked logical indices.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crust_formats::binary::{Eid, PageIndex};
 use crust_formats::stream::{
@@ -155,6 +156,19 @@ const RETAIL_POOL_STORAGE_REFERENCE_REGISTER_MASK: u32 =
     RETAIL_POOL_STORAGE_REFERENCE_REGISTER_BITS << RETAIL_POOL_STORAGE_REFERENCE_REGISTER_SHIFT;
 const RETAIL_POOL_STORAGE_REFERENCE_PAYLOAD_MASK: u32 =
     RETAIL_POOL_STORAGE_REFERENCE_SLOT_MASK | RETAIL_POOL_STORAGE_REFERENCE_REGISTER_MASK;
+/// Checked replacement for a relocated `zone_entity *`/`mdat_entity *`.
+///
+/// Entity pointers are copied by ordinary GOOL MOV instructions (Ripper
+/// Roo's falling TNT objects are one retail example), so the identity must
+/// live in the 32-bit process word rather than only beside the object that was
+/// originally spawned from the entity. The machine-owned table keeps the
+/// validated path alive after the authored parent or a physical pool slot is
+/// reclaimed, without retaining a native pointer into user-supplied bytes.
+const ENTITY_REFERENCE_TAG: u32 = 0xa000_0000;
+const ENTITY_REFERENCE_SLOT_BITS: u32 = 0x003f_ffff;
+const ENTITY_REFERENCE_SLOT_SHIFT: u32 = 2;
+const ENTITY_REFERENCE_PAYLOAD_MASK: u32 =
+    ENTITY_REFERENCE_SLOT_BITS << ENTITY_REFERENCE_SLOT_SHIFT;
 const ENTRY_REFERENCE_TAG: u32 = 0xa400_0000;
 const ENTRY_REFERENCE_SLOT_BITS: u32 = 0x003f_ffff;
 const ENTRY_REFERENCE_SLOT_SHIFT: u32 = 2;
@@ -736,6 +750,33 @@ impl StorageReference {
             region: StorageRegion::Register,
             index: register,
         })
+    }
+}
+
+/// Stable index into [`Machine`]'s validated retail-entity table.
+///
+/// Low bits remain clear like the source pointer, and reserved payload bits
+/// are rejected so arbitrary scalar process values cannot select a path.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct EntityReference {
+    slot: u32,
+}
+
+impl EntityReference {
+    #[must_use]
+    const fn to_word(self) -> u32 {
+        ENTITY_REFERENCE_TAG | (self.slot << ENTITY_REFERENCE_SLOT_SHIFT)
+    }
+
+    #[must_use]
+    const fn from_word(word: u32) -> Option<Self> {
+        if word & !ENTITY_REFERENCE_PAYLOAD_MASK == ENTITY_REFERENCE_TAG {
+            Some(Self {
+                slot: (word & ENTITY_REFERENCE_PAYLOAD_MASK) >> ENTITY_REFERENCE_SLOT_SHIFT,
+            })
+        } else {
+            None
+        }
     }
 }
 
@@ -1683,6 +1724,11 @@ impl RetailSolidEnvironment {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RetailEntityPath {
+    /// Retail's level-wide entity/spawn identity. Including it prevents two
+    /// distinct entities with coincident paths from being interned as one
+    /// native pointer while allowing a later respawn to recover the same
+    /// stable identity.
+    entity_id: u16,
     space: RetailEntityPathSpace,
     points: Vec<ZoneEntityPathPoint>,
 }
@@ -2777,6 +2823,8 @@ pub enum VmError {
         slot: u8,
         register: usize,
     },
+    InvalidEntityReference(u32),
+    EntityReferenceTableFull,
     EntityPathTooLong(usize),
     EntityPathProgressOutOfBounds {
         progress: i32,
@@ -3072,7 +3120,10 @@ pub struct VmObject {
     colors: [u16; COLOR_COUNT],
     base_colors: [u16; COLOR_COUNT],
     entity_spawn_flags: Option<u16>,
-    entity_path: Option<RetailEntityPath>,
+    /// Validated entity awaiting registration in a [`Machine`]. Once the
+    /// object is inserted, register 44 contains a checked [`EntityReference`]
+    /// and the machine owns the corresponding path lifetime.
+    pending_entity_path: Option<Arc<RetailEntityPath>>,
     solid_environment: Option<RetailSolidEnvironment>,
     local_bound: Bounds3,
     solid_zone_eid: Option<Eid>,
@@ -3124,7 +3175,7 @@ impl VmObject {
             colors: [0; COLOR_COUNT],
             base_colors: [0; COLOR_COUNT],
             entity_spawn_flags: None,
-            entity_path: None,
+            pending_entity_path: None,
             solid_environment: None,
             local_bound: Bounds3::default(),
             solid_zone_eid: None,
@@ -3485,6 +3536,7 @@ impl VmObject {
         // listed here retain the last word stored in this physical pool slot.
         // Parent/root transform initialization is applied by the runtime,
         // which owns the checked intrusive-tree context.
+        self.pending_entity_path = None;
         for register in [
             process_register::MISC_A_X,
             process_register::MISC_A_Y,
@@ -3565,10 +3617,11 @@ impl VmObject {
             .path_points
             .first()
             .ok_or(VmError::EntityPathTooLong(0))?;
-        self.entity_path = Some(RetailEntityPath {
+        self.pending_entity_path = Some(Arc::new(RetailEntityPath {
+            entity_id: entity.id,
             space: path_space,
             points: entity.path_points.clone(),
-        });
+        }));
 
         self.set_register(process_register::PID_FLAGS, u32::from(entity.id) << 8)?;
         self.set_register(process_register::PATH_PROGRESS, 0)?;
@@ -3714,9 +3767,10 @@ impl VmObject {
 
     fn orient_retail_physics_on_path(
         &mut self,
+        path: Option<&RetailEntityPath>,
         state: &mut RetailPhysicsState,
     ) -> Result<(), VmError> {
-        let Some(path) = self.entity_path.as_ref() else {
+        let Some(path) = path else {
             // The source caller zero-initializes its out vector, ignores the
             // missing-entity error, and still copies that Y into `floor_y`.
             apply_path_orientation(state, Vec3::ZERO);
@@ -3785,12 +3839,13 @@ impl VmObject {
 
     fn orient_process_vector_on_path(
         &mut self,
+        path: Option<&RetailEntityPath>,
         progress: i32,
         vector_index: u8,
     ) -> Result<(), VmError> {
-        // GoolOpTransformVectors checks `process.entity`; runtime children
-        // therefore retain their vector unchanged after B has been translated.
-        let Some(path) = self.entity_path.as_ref() else {
+        // GoolOpTransformVectors checks `process.entity`; a null reference
+        // therefore retains the vector after B has been translated.
+        let Some(path) = path else {
             return Ok(());
         };
         let location = self.process_vector(vector_index)?;
@@ -4499,6 +4554,11 @@ fn initial_retail_pool_registers() -> Vec<Option<RetiredRetailProcessStorage>> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Machine {
     objects: BTreeMap<ObjectHandle, VmObject>,
+    /// Interned, owned replacements for relocated retail entity pointers.
+    /// GOOL copies the corresponding checked word through ordinary registers,
+    /// stacks, tables, event arguments, and reclaimed pool storage; keeping
+    /// the target here gives every such copy the source asset lifetime.
+    entity_paths: Vec<Arc<RetailEntityPath>>,
     /// Per-slot identity epoch. A host callback may reclaim and immediately
     /// reuse the same compact VM handle, so bare map membership cannot prove
     /// that the interpreter's original object still exists.
@@ -4604,6 +4664,7 @@ impl Machine {
     pub fn new(global_words: usize) -> Self {
         Self {
             objects: BTreeMap::new(),
+            entity_paths: Vec::new(),
             object_incarnations: [0; MAX_OBJECTS],
             retail_pool_slots_by_object: [None; MAX_OBJECTS],
             retired_retail_translations: [None; MAX_OBJECTS],
@@ -5648,8 +5709,9 @@ impl Machine {
             }
         }
         if path_orientation_requested(&state) {
+            let entity_path = self.entity_path(handle)?;
             self.object_mut(handle)?
-                .orient_retail_physics_on_path(&mut state)?;
+                .orient_retail_physics_on_path(entity_path.as_deref(), &mut state)?;
         }
         let result = finalize_retail_physics(&mut state, context);
         self.object_mut(handle)?.set_retail_physics_state(state)?;
@@ -6123,7 +6185,52 @@ impl Machine {
         Ok(())
     }
 
-    pub fn insert_object(&mut self, object: VmObject) -> Result<(), VmError> {
+    fn intern_entity_path(
+        &mut self,
+        path: Arc<RetailEntityPath>,
+    ) -> Result<EntityReference, VmError> {
+        if let Some(slot) = self
+            .entity_paths
+            .iter()
+            .position(|candidate| candidate.as_ref() == path.as_ref())
+        {
+            return Ok(EntityReference { slot: slot as u32 });
+        }
+        if self.entity_paths.len() > ENTITY_REFERENCE_SLOT_BITS as usize {
+            return Err(VmError::EntityReferenceTableFull);
+        }
+        let slot = self.entity_paths.len() as u32;
+        self.entity_paths.push(path);
+        Ok(EntityReference { slot })
+    }
+
+    fn bind_pending_entity_path(&mut self, object: &mut VmObject) -> Result<(), VmError> {
+        let Some(path) = object.pending_entity_path.clone() else {
+            return Ok(());
+        };
+        let reference = self.intern_entity_path(path)?;
+        object.set_register(process_register::ENTITY_REFERENCE, reference.to_word())?;
+        object.pending_entity_path = None;
+        Ok(())
+    }
+
+    fn entity_path(&self, handle: ObjectHandle) -> Result<Option<Arc<RetailEntityPath>>, VmError> {
+        let word = self
+            .object(handle)?
+            .register(process_register::ENTITY_REFERENCE)?;
+        if word == 0 {
+            return Ok(None);
+        }
+        let reference =
+            EntityReference::from_word(word).ok_or(VmError::InvalidEntityReference(word))?;
+        self.entity_paths
+            .get(reference.slot as usize)
+            .cloned()
+            .map(Some)
+            .ok_or(VmError::InvalidEntityReference(word))
+    }
+
+    pub fn insert_object(&mut self, mut object: VmObject) -> Result<(), VmError> {
         let handle = object.handle;
         if self.objects.contains_key(&handle) {
             return Err(VmError::DuplicateObject(handle));
@@ -6140,6 +6247,7 @@ impl Machine {
             &object.resident_pages,
             &object.entry_pages,
         )?;
+        self.bind_pending_entity_path(&mut object)?;
         self.objects.insert(handle, object);
         self.advance_object_incarnation(handle);
         Ok(())
@@ -6148,7 +6256,7 @@ impl Machine {
     /// Installs or replaces one validated VM object while preserving all
     /// stream-level paging metadata. Runtime pool reuse must take this path;
     /// assigning through `object_mut` would bypass EID/page registration.
-    pub fn upsert_object(&mut self, object: VmObject) -> Result<(), VmError> {
+    pub fn upsert_object(&mut self, mut object: VmObject) -> Result<(), VmError> {
         let handle = object.handle;
         if !self.objects.contains_key(&handle) && self.objects.len() == MAX_OBJECTS {
             return Err(VmError::TooManyObjects);
@@ -6162,6 +6270,7 @@ impl Machine {
             &object.resident_pages,
             &object.entry_pages,
         )?;
+        self.bind_pending_entity_path(&mut object)?;
         self.objects.insert(handle, object);
         self.advance_object_incarnation(handle);
         Ok(())
@@ -9466,8 +9575,12 @@ impl Machine {
                     0 => {
                         if let Some(input) = input {
                             let progress = self.read_storage_reference(input)?;
-                            self.object_mut(handle)?
-                                .orient_process_vector_on_path(progress as i32, input_vector)?;
+                            let entity_path = self.entity_path(handle)?;
+                            self.object_mut(handle)?.orient_process_vector_on_path(
+                                entity_path.as_deref(),
+                                progress as i32,
+                                input_vector,
+                            )?;
                         }
                     }
                     1 => {
@@ -12224,9 +12337,20 @@ mod tests {
         );
         assert_eq!(CodeAddress::from_word(pool_storage_word), None);
         assert_eq!(AnimationReference::from_word(pool_storage_word), None);
+        assert_eq!(EntityReference::from_word(pool_storage_word), None);
         assert_eq!(EntryReference::from_word(pool_storage_word), None);
         assert_eq!(CollisionObjectReference::from_word(pool_storage_word), None);
         assert_eq!(EventArgumentsReference::from_word(pool_storage_word), None);
+
+        let entity = EntityReference {
+            slot: ENTITY_REFERENCE_SLOT_BITS,
+        };
+        let entity_word = entity.to_word();
+        assert_eq!(
+            entity_word,
+            ENTITY_REFERENCE_TAG | ENTITY_REFERENCE_PAYLOAD_MASK
+        );
+        assert_eq!(EntityReference::from_word(entity_word), Some(entity));
 
         let entry = EntryReference {
             slot: ENTRY_REFERENCE_SLOT_BITS,
@@ -12238,7 +12362,13 @@ mod tests {
         );
         assert_eq!(EntryReference::from_word(entry_word), Some(entry));
 
-        for word in [code_word, storage_word, pool_storage_word, entry_word] {
+        for word in [
+            code_word,
+            storage_word,
+            pool_storage_word,
+            entity_word,
+            entry_word,
+        ] {
             assert_eq!(word & 3, 0, "logical pointer tokens remain word-aligned");
             assert!(!Eid::from_raw(word).is_named());
             assert!(matches!(
@@ -12265,6 +12395,7 @@ mod tests {
         let pool_storage_word = StorageReference::retail_pool_register(3, 7)
             .unwrap()
             .to_word();
+        let entity_word = EntityReference { slot: 7 }.to_word();
         let entry_word = EntryReference { slot: 7 }.to_word();
 
         for low_bits in 1..=3 {
@@ -12274,6 +12405,7 @@ mod tests {
                 StorageReference::from_word(pool_storage_word | low_bits),
                 None
             );
+            assert_eq!(EntityReference::from_word(entity_word | low_bits), None);
             assert_eq!(EntryReference::from_word(entry_word | low_bits), None);
         }
         assert_eq!(
@@ -20704,6 +20836,80 @@ mod tests {
     }
 
     #[test]
+    fn mov_copies_entity_path_reference_beyond_authored_parent_lifetime() {
+        let parent = handle(0);
+        let child = handle(1);
+        let mut parent_object = VmObject::new(parent, vec![0]).unwrap();
+        parent_object.initialize_retail_process(0, 0).unwrap();
+        parent_object
+            .initialize_retail_entity(
+                &entity_with_path(vec![
+                    ZoneEntityPathPoint {
+                        x: 10,
+                        y: 20,
+                        z: 30,
+                    },
+                    ZoneEntityPathPoint {
+                        x: 20,
+                        y: 20,
+                        z: 30,
+                    },
+                ]),
+                [100, 200, 300],
+            )
+            .unwrap();
+
+        let mut child_object = VmObject::new(
+            child,
+            vec![
+                // RooOC's state-three pointer copy: process.entity from the
+                // parent link into this runtime-created child.
+                0x11c6_ce2c,
+                transform_vectors_instruction(0, 0, 0, 0x0e2d),
+            ],
+        )
+        .unwrap();
+        child_object.initialize_retail_process(1, 0).unwrap();
+        child_object.set_link(1, Some(parent)).unwrap();
+        child_object.set_process_vector(0, [-1, -2, -3]).unwrap();
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(parent_object).unwrap();
+        machine.insert_object(child_object).unwrap();
+        assert_eq!(
+            machine.run(child, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
+
+        let parent_reference = machine
+            .object(parent)
+            .unwrap()
+            .register(process_register::ENTITY_REFERENCE)
+            .unwrap();
+        assert!(EntityReference::from_word(parent_reference).is_some());
+        assert_eq!(
+            machine
+                .object(child)
+                .unwrap()
+                .register(process_register::ENTITY_REFERENCE),
+            Ok(parent_reference)
+        );
+
+        // The native pointer targets immutable ZDAT storage, not the parent
+        // GOOL object. Removing the parent must therefore leave the copied
+        // reference usable by the child.
+        machine.remove_object(parent).unwrap();
+        assert_eq!(
+            machine.run(child, 1).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
+        assert_eq!(
+            machine.object(child).unwrap().process_vector(0),
+            Ok([35_840, 71_680, 107_520])
+        );
+    }
+
+    #[test]
     fn transform_vectors_uses_model_space_and_last_point_rule() {
         let h = handle(0);
         let mut object = VmObject::new(h, vec![0x8502_8e1f]).unwrap();
@@ -20772,8 +20978,28 @@ mod tests {
     }
 
     #[test]
+    fn transform_vectors_rejects_unbound_entity_reference() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(0, 0, 0, 0x0e2d)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        let word = EntityReference { slot: 7 }.to_word();
+        object
+            .set_register(process_register::ENTITY_REFERENCE, word)
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        assert_eq!(
+            machine.run(h, 1),
+            Err(VmError::InvalidEntityReference(word))
+        );
+    }
+
+    #[test]
     fn single_point_path_is_stationary_for_fractional_and_extreme_progress() {
         let path = RetailEntityPath {
+            entity_id: 0,
             space: RetailEntityPathSpace::Model,
             points: vec![ZoneEntityPathPoint {
                 x: 99,
@@ -20812,6 +21038,7 @@ mod tests {
     #[test]
     fn path_projection_sets_inertia_and_direction_flags_with_source_math() {
         let path = RetailEntityPath {
+            entity_id: 0,
             space: RetailEntityPathSpace::Model,
             points: vec![
                 ZoneEntityPathPoint { x: 0, y: 0, z: 0 },
@@ -21180,6 +21407,7 @@ mod tests {
             fraction in 0_i32..=255,
         ) {
             let path = RetailEntityPath {
+                entity_id: 0,
                 space: RetailEntityPathSpace::Model,
                 points: vec![
                     ZoneEntityPathPoint { x: -20, y: 4, z: 9 },

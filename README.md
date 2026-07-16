@@ -70,11 +70,14 @@ process word array at `init_sp`, state links apply target-state guards, and chec
 quarantine only the affected object. GOOL `0x8b` open cases one/six, close case two, and probe case
 three cross a typed synchronous pager boundary; cases four/five remain VM-local. An unavailable
 open rolls back its optimistic VM reference, a resident replacement re-arms the displaced page,
-and mismatched EID/page acknowledgements are rejected. Checked aligned code/storage/entry tags,
+and mismatched EID/page acknowledgements are rejected. Checked aligned code/storage/entry/entity tags,
 five-word pad history, camera-relative movement, gravity, rotation, every source selector in the
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
+Entity tags resolve through a machine-owned validated path table and survive ordinary GOOL copies;
+Ripper Roo's runtime-created Big TNTs therefore retain entity seven's authored waterfall path after
+copying register 44 from their parent.
 GOOL `0x14` (LEA) preserves input-before-output address translation and represents process-local
 animations as checked storage identities. Descriptors in internal or register storage are
 revalidated from the live aliased words: type one supplies its model to both bounds and vertex

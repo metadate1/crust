@@ -4076,7 +4076,7 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn lights_out_active_input_keeps_dark2_alive_across_doctor_pool_reclaim() {
+fn lights_out_active_input_keeps_null_zone_doctor_alive_across_restart() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -4105,7 +4105,7 @@ fn lights_out_active_input_keeps_dark2_alive_across_doctor_pool_reclaim() {
     assert_eq!(
         survey.restarts,
         1,
-        "the characterized input must exercise the doctor teardown path: {}",
+        "the characterized input must exercise the same-level restart: {}",
         survey.summary()
     );
     let doctor_word = runtime
@@ -4113,21 +4113,38 @@ fn lights_out_active_input_keeps_dark2_alive_across_doctor_pool_reclaim() {
         .expect("the retail global table contains doctor");
     let doctor = CollisionObjectReference::from_word(doctor_word)
         .expect("Lights Out retains the authored non-null doctor pool pointer");
+    let live_doctor = runtime
+        .object_for_vm(doctor.object())
+        .expect("the runtime-created doctor must survive neighbor-zone teardown");
     assert_eq!(
-        runtime.object_for_vm(doctor.object()),
-        None,
-        "the doctor identity must be reclaimed at the characterized boundary"
+        runtime
+            .arena()
+            .get(live_doctor.arena())
+            .expect("the live doctor must retain arena storage")
+            .zone(),
+        Eid::NONE,
+        "GoolObjectInit must keep executable 29 outside zone-owned restart teardown"
     );
-    assert!(
+    assert_eq!(
         runtime
             .machine()
-            .retired_retail_translation(doctor.object())
-            .is_some(),
-        "the static native pool slot must retain its last initialized translation"
+            .object(doctor.object())
+            .expect("the live doctor must retain VM storage")
+            .program_identity()
+            .map(GoolProgramIdentity::object_type),
+        Some(5),
+        "the retained runtime child must remain the authored DoctC program"
+    );
+    assert_eq!(
+        runtime
+            .machine()
+            .retired_retail_translation(doctor.object()),
+        None,
+        "a live null-zone doctor must not be represented as reclaimed storage"
     );
     assert!(
         survey.is_clean(),
-        "the stale-but-addressable native doctor slot must not fault Dark2: {}",
+        "the live null-zone doctor must keep Dark2 clean across restart: {}",
         survey.summary()
     );
 }
@@ -7554,7 +7571,7 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
                 "RNG {:#010x}, draw {}; completion route: {} frames -> Level Complete, 48 paths/53 ",
                 "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
-                "Upstream legally local authored PBAK: {} frames, 3 authored restarts, RNG ",
+                "Upstream carried-spawn PBAK input: {} frames, 3 deterministic restarts, RNG ",
                 "{:#010x}, draw {}",
             ),
             n_sanity_survey.next_lid.unwrap().0,

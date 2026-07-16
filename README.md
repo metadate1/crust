@@ -226,12 +226,15 @@ draw count 11,189. After the checked Title handoff, the Map waits 10 frames, fol
 2,304. Its carry has `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG
 `0xae2dd893`, and draw count 11,442.
 
-Upstream consumes all 934 34-tick frames from the user's legally local `pb0fB` without installing
-the PBAK restart snapshot or committing recording bytes or a derived pad trace. The complete
-recording performs 52 successful spawns from 11,840 attempts with 11,788 source-expected
-rejections, 30,551 clean executions, three lifecycle zone transitions, two camera ranges and six
-path changes. Its authored same-level `LoadState` restarts occur at frames 104, 231, and 816. It
-moves the camera from path zero/progress 256 to that same path at progress 7,059 and ends with Crash
+Upstream feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
+post-Boulders normal-spawn session, without installing the recording's mid-level snapshot or
+committing recording bytes or a derived pad trace. This is deliberately a carried-session stress
+run, not authentic demo playback; separate browser PBAK coverage installs the recording snapshot.
+The run performs 52 successful spawns from 11,840 attempts with 11,788 source-expected rejections,
+30,551 clean executions, three lifecycle zone transitions, two camera ranges and six path changes.
+Its phase-mismatched input produces deterministic same-level `LoadState` restarts at frames 104,
+231, and 816. It moves the camera from path zero/progress 256 to that same path at progress 7,059
+and ends with Crash
 at `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw count 118, with no death camera,
 below-zero or terminal fall, transition request, VM fault, execution error, or checked issue. These
 are deterministic native integration goldens over user-supplied local data, not a browser

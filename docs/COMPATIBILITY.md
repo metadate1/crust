@@ -499,12 +499,15 @@ gameplay path.
   `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
   11,442.
 
-  Upstream consumes all 934 34-tick frames from the user's legally local `pb0fB`; no recording
-  bytes or derived pad trace enter the repository, and the runtime does not install the PBAK restart
-  snapshot. The run records 52 successful spawns from 11,840 attempts with 11,788 source-expected
-  rejections, 30,551 clean executions, three lifecycle zone transitions, two camera ranges and six
-  path changes. Its authored same-level `LoadState` restarts occur at frames 104, 231, and 816. The
-  camera starts on path zero/progress 256 and ends on that same path at progress 7,059; Crash ends at
+  Upstream feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
+  post-Boulders normal-spawn session; no recording bytes or derived pad trace enter the repository,
+  and the runtime does not install the recording's mid-level snapshot. This deliberately
+  characterizes the carried session rather than claiming authentic demo playback; separate browser
+  PBAK coverage installs the snapshot. The run records 52 successful spawns from 11,840 attempts
+  with 11,788 source-expected rejections, 30,551 clean executions, three lifecycle zone transitions,
+  two camera ranges and six path changes. Its phase-mismatched input produces deterministic
+  same-level `LoadState` restarts at frames 104, 231, and 816. The camera starts on path
+  zero/progress 256 and ends on that same path at progress 7,059; Crash ends at
   `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw 118. It records no death camera,
   below-zero or terminal fall, transition request, VM fault, execution error, or checked issue.
   This is deterministic native integration over user-supplied local data, not browser execution or

@@ -651,8 +651,10 @@ legally local data:
   ownerless delayed-key thunder creation and template reset.
 - The strict direction/button survey ran every one of the 43 selectable pairs for 360 browser-
   ordered simulation frames with clean-runtime enforcement. Lights Out separately retained its
-  non-null doctor global across the authored pool reclamation and completed 360 active frames with
-  no checked issue. The five direct bonus boots (`0x24`, `0x25`, `0x26`, `0x33`, `0x34`) each
+  non-null executable-29 doctor global across the authored same-level restart. The runtime-created
+  `DoctC` remains live with native null-zone ownership instead of entering neighbor-zone teardown,
+  and completed 360 active frames with no checked issue. The five direct bonus boots (`0x24`,
+  `0x25`, `0x26`, `0x33`, `0x34`) each
   captured a same-level restart snapshot; the three routes that died within the window restarted
   cleanly. Parent-carried bonus return remains separately protected, while synthetic direct-boot
   completion is documented as an unresolved host-policy gap.
@@ -1085,12 +1087,14 @@ is 1,322,866 bytes with SHA-256
   `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
   11,442.
 
-  Upstream imports that carried session and consumes every one of the 934 34-tick frames in the
-  user's legally local `pb0fB`. The test does not install the PBAK restart snapshot and commits
-  neither recording bytes nor a derived pad trace. Across the complete recording it performs 52
-  successful spawns, 11,840 attempts, 11,788 source-expected rejections, and 30,551 clean
-  executions. It observes three lifecycle zone transitions, two camera ranges, six path changes,
-  and the three authored same-level `LoadState` restarts at frames 104, 231, and 816. It emits three
+  Upstream imports that carried normal-spawn session and feeds it every one of the 934 34-tick pad
+  frames in the user's legally local `pb0fB`. The test does not install the recording's mid-level
+  snapshot and commits neither recording bytes nor a derived pad trace. This deliberately
+  characterizes the carried session rather than claiming authentic demo playback; the separate
+  browser PBAK fixture installs the snapshot. Across the carried run it performs 52 successful
+  spawns, 11,840 attempts, 11,788 source-expected rejections, and 30,551 clean executions. It
+  observes three lifecycle zone transitions, two camera ranges, six path changes, and three
+  deterministic phase-mismatch `LoadState` restarts at frames 104, 231, and 816. It emits three
   load-state effects and no transition. The initial camera is path zero/progress 256; the final
   camera is the same path at progress 7,059. Crash ends at `[2150400, 1747085, 25025792]`, RNG at
   `0x78109dff`, and draw count at 118. There is no death camera, below-zero or terminal fall, VM

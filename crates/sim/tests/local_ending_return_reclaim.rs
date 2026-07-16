@@ -1,9 +1,9 @@
 //! Opt-in Ending lifecycle regression against the user's legally local streams.
 //!
 //! No game bytes or derived assets are written by this test. It follows the
-//! browser's spawn -> camera -> GOOL frame order through the first authored
-//! credits-object state-level return, then keeps running long enough to prove
-//! that returned objects are reclaimed instead of filling the 97-object arena.
+//! browser's spawn -> camera -> GOOL frame order through the authored credits
+//! sequence and its Title transition. It also proves that credits objects are
+//! reclaimed instead of filling the 97-object arena before that completion.
 
 #![allow(clippy::too_many_lines)]
 
@@ -35,7 +35,8 @@ use crust_sim::{
 
 const GLOBAL_WORDS: usize = 256;
 const INSTRUCTION_BUDGET: usize = 67;
-const END_FRAME: u32 = 1_800;
+const END_FRAME: u32 = 3_396;
+const TITLE_LEVEL: i32 = 0x19;
 const CREDITS_EXECUTABLE: u8 = 61;
 const CREDITS_SUBTYPE: u8 = 3;
 const RETURN_STATE: u16 = 1;
@@ -281,7 +282,7 @@ fn update_camera(
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn ending_state_level_returns_reclaim_credits_objects() {
+fn ending_credits_reclaim_and_request_title() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -318,6 +319,7 @@ fn ending_state_level_returns_reclaim_credits_objects() {
     let mut saw_first_credit_reclaim = false;
     let mut max_live = runtime.arena().len();
     let mut max_generation = 1_u32;
+    let mut title_transition = None;
     for frame in 1..=END_FRAME {
         runtime.set_frame_timing(34, 34);
         runtime
@@ -382,6 +384,14 @@ fn ending_state_level_returns_reclaim_credits_objects() {
             }
         }
         for effect in &report.effects {
+            if let VmEffect::Transition(destination) = effect {
+                assert_eq!(*destination, TITLE_LEVEL);
+                assert_eq!(
+                    title_transition.replace((frame, *destination)),
+                    None,
+                    "Ending emitted more than one transition"
+                );
+            }
             if let VmEffect::SpawnChildren {
                 executable,
                 subtype,
@@ -452,17 +462,13 @@ fn ending_state_level_returns_reclaim_credits_objects() {
         saw_first_credit_reclaim,
         "the bounded run must reclaim the first WinGC credits child"
     );
-    assert!(
-        credit_child_spawns >= 64,
-        "the bounded run must exercise the authored credits-child stream; saw {credit_child_spawns} spawns"
+    assert_eq!(credit_child_spawns, 113);
+    assert_eq!(
+        max_generation, 3,
+        "credits slots must be reclaimed and reused"
     );
-    assert!(
-        max_generation > 1,
-        "returned credits slots must be reclaimed and reused"
-    );
-    assert!(
-        max_live <= MAX_BOUNDED_LIVE_OBJECTS,
-        "credits lifecycle grew to {max_live} live objects instead of remaining bounded"
-    );
+    assert_eq!(max_live, 82);
+    assert!(max_live <= MAX_BOUNDED_LIVE_OBJECTS);
+    assert_eq!(title_transition, Some((END_FRAME, TITLE_LEVEL)));
     assert_eq!(runtime.faulted_object_count(), 0);
 }

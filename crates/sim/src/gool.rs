@@ -3144,7 +3144,9 @@ pub struct VmObject {
     state_flags: u32,
     status_c: u32,
     event_pc: Option<usize>,
-    transition_pc: Option<usize>,
+    /// Authoritative checked counterpart of native `gool_process.tp`.
+    /// GOOL may rewrite it to the live post-fetch PC for one-time prologues.
+    transition_address: Option<CodeAddress>,
     halted: bool,
 }
 
@@ -3196,7 +3198,7 @@ impl VmObject {
             state_flags: 0,
             status_c: 0,
             event_pc: None,
-            transition_pc: None,
+            transition_address: None,
             halted: false,
         })
     }
@@ -3246,7 +3248,10 @@ impl VmObject {
         object.set_register(process_register::STATE_FLAGS, program.state().flags)?;
         object.set_register(process_register::STATUS_C, program.state().status_c)?;
         object.event_pc = program.event_pc();
-        object.transition_pc = program.transition_pc();
+        object.transition_address = program.transition_pc().map(|pc| CodeAddress {
+            segment: CodeSegment::External,
+            pc,
+        });
         if let Some(pc) = program.code_pc() {
             object.pc = pc;
         } else {
@@ -3376,7 +3381,10 @@ impl VmObject {
 
     #[must_use]
     pub const fn transition_pc(&self) -> Option<usize> {
-        self.transition_pc
+        match self.transition_address {
+            Some(address) => Some(address.pc),
+            None => None,
+        }
     }
 
     #[must_use]
@@ -4232,7 +4240,10 @@ impl VmObject {
         self.set_register(process_register::STATE_FLAGS, program.state.flags)?;
         self.set_register(process_register::STATUS_C, program.state.status_c)?;
         self.event_pc = program.event_pc;
-        self.transition_pc = program.transition_pc;
+        self.transition_address = program.transition_pc.map(|pc| CodeAddress {
+            segment: CodeSegment::External,
+            pc,
+        });
         self.code_segment = CodeSegment::External;
         self.pc = program.code_pc.unwrap_or(0);
         self.halted = program.code_pc.is_none();
@@ -6561,11 +6572,7 @@ impl Machine {
         register: usize,
     ) -> Result<(u32, Option<u8>), VmError> {
         if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
-            let object = self.object(handle)?;
-            let value = object.register(register)?;
-            let provenance =
-                self.live_pool_slot_for_word(value, object.register_pool_slot(register)?);
-            return Ok((value, provenance));
+            return self.read_aliased_process_register_with_pool_slot(handle, register);
         }
         let storage = self
             .retired_retail_pool_registers
@@ -6635,9 +6642,9 @@ impl Machine {
         let provenance =
             self.preflight_retail_pool_register_write(pool_slot, register, value, provenance)?;
         if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
-            return self
-                .object_mut(handle)?
-                .set_register_with_pool_slot(register, value, provenance);
+            return self.write_aliased_process_register_with_pool_slot(
+                handle, register, value, provenance,
+            );
         }
 
         let storage = self
@@ -6698,6 +6705,13 @@ impl Machine {
             .filter(|_| CollisionObjectReference::from_word(value).is_some());
         if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
             self.object(handle)?.register(register)?;
+            if matches!(
+                register,
+                process_register::PROGRAM_COUNTER | process_register::TRANSITION_POINTER
+            ) && value != 0
+            {
+                self.object(handle)?.checked_code_address(value)?;
+            }
             return Ok(provenance);
         }
 
@@ -8115,13 +8129,17 @@ impl Machine {
     /// and recording `state_stamp`.
     fn begin_transition_block(&mut self, handle: ObjectHandle) -> Result<bool, VmError> {
         let object = self.object(handle)?;
-        let Some(transition_pc) = object.transition_pc else {
+        let Some(transition_address) = object.transition_address else {
             return Ok(false);
         };
-        if transition_pc >= object.code.len() {
+        let code_len = match transition_address.segment {
+            CodeSegment::External => object.code.len(),
+            CodeSegment::Global => object.global_code.len(),
+        };
+        if transition_address.pc >= code_len {
             return Err(VmError::InvalidJump {
                 object: handle,
-                target: transition_pc as i64,
+                target: transition_address.pc as i64,
             });
         }
         if object.call_stack.len() == MAX_CALL_DEPTH {
@@ -8172,8 +8190,8 @@ impl Machine {
             (u32::from(prior_rfp_bytes) << 16) | u32::from(prior_rsp_bytes),
         )?;
         let object = self.object_mut(handle)?;
-        object.code_segment = CodeSegment::External;
-        object.pc = transition_pc;
+        object.code_segment = transition_address.segment;
+        object.pc = transition_address.pc;
         object.halted = false;
         Ok(true)
     }
@@ -10557,19 +10575,45 @@ impl Machine {
         handle: ObjectHandle,
         register: usize,
     ) -> Result<u32, VmError> {
-        let object = self.object(handle)?;
         // `gool_process.regs` aliases the eight leading link pointers. Their
         // checked tags are ordinary raw register words here, so VM slot zero
         // is nonzero while scalar union values stay intact.
         if register == 0x1f {
-            object
+            self.object(handle)?
                 .stack
                 .last()
                 .copied()
                 .ok_or(VmError::StackUnderflow(handle))
         } else {
-            object.register(register)
+            self.read_aliased_process_register(handle, register)
         }
+    }
+
+    fn read_aliased_process_register_with_pool_slot(
+        &self,
+        handle: ObjectHandle,
+        register: usize,
+    ) -> Result<(u32, Option<u8>), VmError> {
+        let object = self.object(handle)?;
+        let raw = object.register(register)?;
+        let (value, retained) = match register {
+            // Instruction fetch advances the typed PC before opcode operands
+            // are translated, matching native `*pc++` visibility to GOOL.
+            process_register::PROGRAM_COUNTER => (
+                if object.halted {
+                    0
+                } else {
+                    object.code_address().to_word()
+                },
+                None,
+            ),
+            process_register::TRANSITION_POINTER => (
+                object.transition_address.map_or(0, CodeAddress::to_word),
+                None,
+            ),
+            _ => (raw, object.register_pool_slot(register)?),
+        };
+        Ok((value, self.live_pool_slot_for_word(value, retained)))
     }
 
     fn read_aliased_process_register(
@@ -10577,10 +10621,43 @@ impl Machine {
         handle: ObjectHandle,
         register: usize,
     ) -> Result<u32, VmError> {
-        // `VmObject::set_link` and `set_register` keep native's eight union
-        // words synchronized: a checked tagged handle is retained when the
-        // word is pointer-shaped, while ordinary scalar bits remain intact.
-        self.object(handle)?.register(register)
+        self.read_aliased_process_register_with_pool_slot(handle, register)
+            .map(|(value, _)| value)
+    }
+
+    fn write_aliased_process_register_with_pool_slot(
+        &mut self,
+        handle: ObjectHandle,
+        register: usize,
+        value: u32,
+        pool_slot: Option<u8>,
+    ) -> Result<(), VmError> {
+        let code_address = match register {
+            process_register::PROGRAM_COUNTER | process_register::TRANSITION_POINTER
+                if value != 0 =>
+            {
+                Some(self.object(handle)?.checked_code_address(value)?)
+            }
+            _ => None,
+        };
+        let object = self.object_mut(handle)?;
+        object.set_register_with_pool_slot(register, value, pool_slot)?;
+        match register {
+            process_register::PROGRAM_COUNTER => {
+                if let Some(address) = code_address {
+                    object.code_segment = address.segment;
+                    object.pc = address.pc;
+                    object.halted = false;
+                } else {
+                    object.halted = true;
+                }
+            }
+            process_register::TRANSITION_POINTER => {
+                object.transition_address = code_address;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn read_process_register_reference(
@@ -10963,10 +11040,10 @@ impl Machine {
                     let (value, provenance) = if let Some(pool_slot) = retained_pool_slot {
                         self.retail_pool_register_word(pool_slot, register)?
                     } else {
-                        let object = self.object(target.expect("checked live target"))?;
-                        let value = object.register(register)?;
-                        let retained = object.register_pool_slot(register)?;
-                        (value, self.live_pool_slot_for_word(value, retained))
+                        self.read_aliased_process_register_with_pool_slot(
+                            target.expect("checked live target"),
+                            register,
+                        )?
                     };
                     self.push_with_pool_slot(handle, value, provenance)?;
                 } else {
@@ -10978,8 +11055,12 @@ impl Machine {
                             pool_slot, register, value, provenance,
                         )?;
                     } else {
-                        self.object_mut(target.expect("checked live target"))?
-                            .set_register_with_pool_slot(register, value, provenance)?;
+                        self.write_aliased_process_register_with_pool_slot(
+                            target.expect("checked live target"),
+                            register,
+                            value,
+                            provenance,
+                        )?;
                     }
                 }
                 Ok(false)
@@ -11552,10 +11633,21 @@ impl Machine {
         &self,
         reference: StorageReference,
     ) -> Result<(u32, Option<u8>), VmError> {
-        if let StorageBacking::RetailPool(pool_slot) = reference.backing {
-            return self
-                .retail_pool_register_word(pool_slot, usize::from(reference.index))
-                .map_err(|_| VmError::InvalidStorageReference(reference.to_word()));
+        match (reference.backing, reference.region) {
+            (StorageBacking::RetailPool(pool_slot), _) => {
+                return self
+                    .retail_pool_register_word(pool_slot, usize::from(reference.index))
+                    .map_err(|_| VmError::InvalidStorageReference(reference.to_word()));
+            }
+            (StorageBacking::Object(object), StorageRegion::Register) => {
+                return self
+                    .read_aliased_process_register_with_pool_slot(
+                        object,
+                        usize::from(reference.index),
+                    )
+                    .map_err(|_| VmError::InvalidStorageReference(reference.to_word()));
+            }
+            (StorageBacking::Object(_), _) => {}
         }
         let value = self.read_storage_reference(reference)?;
         let index = usize::from(reference.index);
@@ -11575,10 +11667,7 @@ impl Machine {
                 .get(index)
                 .copied()
                 .ok_or(VmError::InvalidStorageReference(reference.to_word()))?,
-            StorageRegion::Register => self
-                .object(object)?
-                .register_pool_slot(index)
-                .map_err(|_| VmError::InvalidStorageReference(reference.to_word()))?,
+            StorageRegion::Register => unreachable!("live register storage returned above"),
             StorageRegion::Constant => self
                 .operand_constant_pool_slots
                 .get(index)
@@ -11641,8 +11730,12 @@ impl Machine {
                     Ok(())
                 }
                 StorageRegion::Register => self
-                    .object_mut(object_handle)?
-                    .set_register_with_pool_slot(index, value, pool_slot)
+                    .write_aliased_process_register_with_pool_slot(
+                        object_handle,
+                        index,
+                        value,
+                        pool_slot,
+                    )
                     .map_err(|_| VmError::InvalidStorageReference(reference.to_word())),
                 StorageRegion::Constant => {
                     *self
@@ -11782,19 +11875,13 @@ impl Machine {
                 let index = base
                     .checked_add_signed(isize::from(offset))
                     .ok_or(VmError::InvalidOperand(0))?;
-                let object = self.object(handle)?;
-                let value = object.register(index)?;
-                let retained = object.register_pool_slot(index)?;
-                Ok((value, self.live_pool_slot_for_word(value, retained)))
+                self.read_aliased_process_register_with_pool_slot(handle, index)
             }
             Operand::Null => Ok((NULL_INPUT_VALUE, None)),
             Operand::StackDouble => Err(VmError::InvalidOperand(0x0bf0)),
             Operand::ObjectRegister(index) => {
-                let object = self.object(handle)?;
                 let index = usize::from(index);
-                let value = object.register(index)?;
-                let retained = object.register_pool_slot(index)?;
-                Ok((value, self.live_pool_slot_for_word(value, retained)))
+                self.read_aliased_process_register_with_pool_slot(handle, index)
             }
             Operand::Stack => {
                 let (value, retained) = self.pop_with_pool_slot(handle)?;
@@ -11817,11 +11904,8 @@ impl Machine {
                 else {
                     return Ok((NULL_INPUT_VALUE, None));
                 };
-                let object = self.object(target)?;
                 let register = usize::from(register);
-                let value = object.register(register)?;
-                let retained = object.register_pool_slot(register)?;
-                Ok((value, self.live_pool_slot_for_word(value, retained)))
+                self.read_aliased_process_register_with_pool_slot(target, register)
             }
         }
     }
@@ -11865,7 +11949,8 @@ impl Machine {
                 );
             }
             if let Some(target) = self.resolve_process_link(handle, usize::from(link))? {
-                self.object_mut(target)?.set_register_with_pool_slot(
+                self.write_aliased_process_register_with_pool_slot(
+                    target,
                     usize::from(register),
                     value,
                     pool_slot,
@@ -13951,6 +14036,82 @@ mod tests {
         assert_eq!(object.frame_base, SYNTHETIC_STACK_POINTER);
         assert!(object.call_stack.is_empty());
         assert_eq!(object.stack(), state_stack);
+    }
+
+    #[test]
+    fn transition_pointer_can_capture_the_post_fetch_program_counter() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(VmObject::new(h, vec![control_flow(2, 0, 0, 0, 0)]).unwrap())
+            .unwrap();
+
+        let state_code_pc = 4;
+        let target = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: 0,
+                code_pc: state_code_pc as u16,
+            },
+            vec![
+                Instruction::encode(0x11, 0x0801, REG0 + 8),
+                // MOVE object[pc] -> object[tp], as used by PinOC state zero.
+                0x11e2_0e22,
+                Instruction::encode(0x11, 0x0802, REG0 + 9),
+                control_flow(2, 0, 0, 0, 0),
+                control_flow(2, 0, 0, 0, 0),
+            ],
+            Vec::new(),
+        )
+        .unwrap();
+        machine.rebind_state_program(h, &target, &[]).unwrap();
+
+        assert_eq!(
+            machine
+                .run_transition_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::TransitionCompleted,
+                steps: 4,
+            })
+        );
+        let captured = CodeAddress {
+            segment: CodeSegment::External,
+            pc: 2,
+        };
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.transition_pc(), Some(2));
+        assert_eq!(
+            object.register(process_register::TRANSITION_POINTER),
+            Ok(captured.to_word())
+        );
+        assert_eq!(object.register(8), Ok(0x100));
+        assert_eq!(object.register(9), Ok(0x200));
+        assert_eq!(object.pc(), state_code_pc);
+
+        machine
+            .object_mut(h)
+            .unwrap()
+            .set_register(8, 0xdead_beef)
+            .unwrap();
+        assert_eq!(
+            machine
+                .run_transition_with_host_effects(h, |_machine, _effect| Ok(()))
+                .unwrap(),
+            Some(Execution {
+                reason: HaltReason::TransitionCompleted,
+                steps: 2,
+            })
+        );
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.register(8), Ok(0xdead_beef));
+        assert_eq!(object.register(9), Ok(0x200));
+        assert_eq!(object.transition_pc(), Some(2));
+        assert_eq!(object.pc(), state_code_pc);
     }
 
     #[test]

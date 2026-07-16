@@ -14,6 +14,8 @@ mod app;
 #[cfg(target_arch = "wasm32")]
 mod assets;
 #[cfg(any(target_arch = "wasm32", test))]
+mod audio_output_metrics;
+#[cfg(any(target_arch = "wasm32", test))]
 mod card_persistence;
 #[cfg(target_arch = "wasm32")]
 mod disc_import;

@@ -1,4 +1,4 @@
-use crust_audio::mixer::{AudioMetrics, Mixer, SAMPLE_RATE};
+use crust_audio::mixer::{Mixer, SAMPLE_RATE};
 use crust_audio::output::OutputOptions;
 use crust_audio::retail::RetailAudioEngine;
 use crust_audio::retail_music::RetailMusic;
@@ -8,6 +8,8 @@ use crust_audio::retail_player::{
 use crust_formats::binary::Eid;
 use wasm_bindgen::JsValue;
 use web_sys::{AudioContext, GainNode};
+
+use crate::audio_output_metrics::ScheduledAudioMetrics;
 
 const CHUNK_FRAMES: usize = 1024;
 const SCHEDULE_AHEAD_SECONDS: f64 = 0.12;
@@ -20,6 +22,7 @@ pub struct WebAudio {
     mixer: Mixer,
     music: RetailMusicPlayer,
     output: OutputOptions,
+    metrics: ScheduledAudioMetrics,
     muted: bool,
     retail_master_gain: f32,
     next_time: f64,
@@ -37,6 +40,7 @@ impl WebAudio {
             mixer: Mixer::new(),
             music: RetailMusicPlayer::new(),
             output: OutputOptions::new(u8::MAX, u8::MAX, false),
+            metrics: ScheduledAudioMetrics::default(),
             muted: false,
             retail_master_gain: 1.0,
             next_time: 0.0,
@@ -139,6 +143,7 @@ impl WebAudio {
                 left[frame] = mixed[0];
                 right[frame] = mixed[1];
             }
+            self.metrics.record_chunk(&left, &right);
             let buffer = self.context.create_buffer(
                 2,
                 u32::try_from(CHUNK_FRAMES).expect("chunk size fits u32"),
@@ -158,8 +163,8 @@ impl WebAudio {
     }
 
     #[must_use]
-    pub const fn metrics(&self) -> AudioMetrics {
-        self.mixer.metrics()
+    pub const fn metrics(&self) -> ScheduledAudioMetrics {
+        self.metrics
     }
 
     fn refresh_master_gain(&self) {

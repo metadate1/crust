@@ -269,15 +269,89 @@ pub fn sequence_from_sep(sequence: &SepSequence, looped: bool) -> Sequence {
             micros_per_quarter: sequence.initial_tempo,
         },
     });
-    events.extend(sequence.events.iter().map(|event| SequenceEvent {
-        tick: event.tick,
-        kind: event_kind(event.kind),
-    }));
+    let (loop_starts, skipped) = collapse_sequence_loops(sequence);
+    for (index, event) in sequence.events.iter().enumerate() {
+        if let Some(repeat_count) = loop_starts[index] {
+            events.push(SequenceEvent {
+                tick: event.tick,
+                kind: EventKind::LoopStart { repeat_count },
+            });
+        }
+        if skipped[index] {
+            continue;
+        }
+        let kind = match event.kind {
+            SepEventKind::ControlChange {
+                controller: 99,
+                value: 30,
+                ..
+            } => {
+                let next_tick = sequence
+                    .events
+                    .get(index.saturating_add(1))
+                    .map_or(sequence.end_tick, |next| next.tick);
+                EventKind::LoopEnd {
+                    finite_delay_ticks: next_tick.saturating_sub(event.tick),
+                }
+            }
+            kind => event_kind(kind),
+        };
+        events.push(SequenceEvent {
+            tick: event.tick,
+            kind,
+        });
+    }
+    if let Some(repeat_count) = loop_starts[sequence.events.len()] {
+        events.push(SequenceEvent {
+            tick: sequence.end_tick,
+            kind: EventKind::LoopStart { repeat_count },
+        });
+    }
     let mut result = Sequence::new(sequence.ticks_per_quarter, events);
     if looped && sequence.end_tick > 0 {
         result.loop_tick = Some(0);
     }
     result
+}
+
+/// Collapses libsnd's global NRPN state into explicit loop boundaries. NRPN
+/// 20 saves the pointer to the immediately following event, while a later
+/// controller-6 data entry supplies the count. Folding that count back onto
+/// the saved boundary preserves interleaved events and makes the repeated
+/// pass start immediately, as the source's indefinite-loop jump does.
+fn collapse_sequence_loops(sequence: &SepSequence) -> (Vec<Option<u8>>, Vec<bool>) {
+    let mut loop_starts = vec![None; sequence.events.len().saturating_add(1)];
+    let mut skipped = vec![false; sequence.events.len()];
+    let mut pending_start = None;
+    for (index, event) in sequence.events.iter().enumerate() {
+        match event.kind {
+            SepEventKind::ControlChange {
+                controller: 99,
+                value: 20,
+                ..
+            } => {
+                pending_start = Some(index.saturating_add(1));
+                skipped[index] = true;
+            }
+            SepEventKind::ControlChange {
+                controller: 99,
+                value: 30,
+                ..
+            } => pending_start = None,
+            SepEventKind::ControlChange {
+                controller: 6,
+                value,
+                ..
+            } => {
+                if let Some(start) = pending_start.take() {
+                    loop_starts[start] = Some(value);
+                    skipped[index] = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    (loop_starts, skipped)
 }
 
 fn event_kind(kind: SepEventKind) -> EventKind {
@@ -554,6 +628,133 @@ mod tests {
             }
         );
         assert_eq!(converted.events.last().unwrap().kind, EventKind::Marker);
+    }
+
+    #[test]
+    fn conversion_collapses_sony_nrpn_loop_markers_without_losing_other_controls() {
+        let sequence = simple_sequence(
+            vec![
+                SepEvent {
+                    tick: 2,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 99,
+                        value: 20,
+                    },
+                },
+                SepEvent {
+                    tick: 3,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 7,
+                        value: 80,
+                    },
+                },
+                SepEvent {
+                    tick: 4,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 6,
+                        value: 3,
+                    },
+                },
+                SepEvent {
+                    tick: 5,
+                    kind: SepEventKind::NoteOn {
+                        channel: 4,
+                        note: 60,
+                        velocity: 100,
+                    },
+                },
+                SepEvent {
+                    tick: 8,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 99,
+                        value: 30,
+                    },
+                },
+                SepEvent {
+                    tick: 9,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 99,
+                        value: 40,
+                    },
+                },
+                SepEvent {
+                    tick: 10,
+                    kind: SepEventKind::ControlChange {
+                        channel: 4,
+                        controller: 6,
+                        value: 7,
+                    },
+                },
+                SepEvent {
+                    tick: 11,
+                    kind: SepEventKind::End,
+                },
+            ],
+            11,
+        );
+
+        let converted = sequence_from_sep(&sequence, false);
+        assert_eq!(
+            converted.events,
+            vec![
+                SequenceEvent {
+                    tick: 0,
+                    kind: EventKind::Tempo {
+                        micros_per_quarter: 500_000,
+                    },
+                },
+                SequenceEvent {
+                    tick: 3,
+                    kind: EventKind::LoopStart { repeat_count: 3 },
+                },
+                SequenceEvent {
+                    tick: 3,
+                    kind: EventKind::Volume {
+                        channel: 4,
+                        value: 80,
+                    },
+                },
+                SequenceEvent {
+                    tick: 5,
+                    kind: EventKind::NoteOn {
+                        channel: 4,
+                        note: 60,
+                        velocity: 100,
+                    },
+                },
+                SequenceEvent {
+                    tick: 8,
+                    kind: EventKind::LoopEnd {
+                        finite_delay_ticks: 1,
+                    },
+                },
+                SequenceEvent {
+                    tick: 9,
+                    kind: EventKind::ControlChange {
+                        channel: 4,
+                        controller: 99,
+                        value: 40,
+                    },
+                },
+                SequenceEvent {
+                    tick: 10,
+                    kind: EventKind::ControlChange {
+                        channel: 4,
+                        controller: 6,
+                        value: 7,
+                    },
+                },
+                SequenceEvent {
+                    tick: 11,
+                    kind: EventKind::Marker,
+                },
+            ]
+        );
     }
 
     proptest! {

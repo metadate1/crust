@@ -84,6 +84,18 @@ pub enum EventKind {
         controller: u8,
         value: u8,
     },
+    /// Sony SEQ NRPN 20 followed by data-entry controller 6. Values 1-126
+    /// count total passes; 127 repeats indefinitely and zero disables the
+    /// region.
+    LoopStart {
+        repeat_count: u8,
+    },
+    /// Sony SEQ NRPN 30. A valid non-empty active region jumps back without
+    /// resetting voices or channel controllers. Finite repeats retain the
+    /// following event's encoded delta; indefinite repeats jump immediately.
+    LoopEnd {
+        finite_delay_ticks: u64,
+    },
     Tempo {
         micros_per_quarter: u32,
     },
@@ -260,6 +272,13 @@ struct SynthVoice {
     age: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SequenceLoop {
+    start_event_index: usize,
+    start_tick: u64,
+    repeats_left: u8,
+}
+
 #[derive(Debug)]
 pub struct Sequencer {
     sequence: Option<Sequence>,
@@ -269,10 +288,12 @@ pub struct Sequencer {
     event_index: usize,
     sample_clock: u64,
     tick_position: u64,
+    event_tick_offset: u64,
     tick_fraction: f64,
     micros_per_quarter: u32,
     playing: bool,
     age_clock: u64,
+    sequence_loop: Option<SequenceLoop>,
 }
 
 impl Default for Sequencer {
@@ -292,10 +313,12 @@ impl Sequencer {
             event_index: 0,
             sample_clock: 0,
             tick_position: 0,
+            event_tick_offset: 0,
             tick_fraction: 0.0,
             micros_per_quarter: 500_000,
             playing: false,
             age_clock: 0,
+            sequence_loop: None,
         }
     }
 
@@ -334,9 +357,11 @@ impl Sequencer {
         self.event_index = 0;
         self.sample_clock = 0;
         self.tick_position = 0;
+        self.event_tick_offset = 0;
         self.tick_fraction = 0.0;
         self.micros_per_quarter = 500_000;
         self.age_clock = 0;
+        self.sequence_loop = None;
     }
 
     pub const fn set_playing(&mut self, playing: bool) {
@@ -437,17 +462,20 @@ impl Sequencer {
         let Some(start) = sequence.loop_tick.filter(|start| *start < end) else {
             return false;
         };
-        if self.tick_position < end {
+        let effective_end = end.saturating_add(self.event_tick_offset);
+        if self.tick_position < effective_end {
             return false;
         }
         let loop_len = end - start;
-        let overshoot = self.tick_position - end;
+        let overshoot = self.tick_position - effective_end;
         self.tick_position = start + overshoot % loop_len;
+        self.event_tick_offset = 0;
         self.event_index = sequence.events.partition_point(|event| event.tick < start);
         // A SEP loop restarts its hardware voices. Retaining sample tails here
         // would add another layer on every cycle and eventually hit the voice
         // ceiling even for a single sustained note.
         self.voices.clear();
+        self.sequence_loop = None;
         if start == 0 {
             self.channels = [Channel::default(); 16];
             self.micros_per_quarter = 500_000;
@@ -462,12 +490,54 @@ impl Sequencer {
             .and_then(|sequence| sequence.events.get(self.event_index))
             .copied()
         {
-            if event.tick > self.tick_position {
+            let effective_tick = event.tick.saturating_add(self.event_tick_offset);
+            if effective_tick > self.tick_position {
                 break;
             }
             self.event_index += 1;
-            self.apply(event.kind);
+            match event.kind {
+                EventKind::LoopStart { repeat_count } => {
+                    self.sequence_loop = Some(SequenceLoop {
+                        start_event_index: self.event_index,
+                        start_tick: event.tick,
+                        repeats_left: repeat_count,
+                    });
+                }
+                EventKind::LoopEnd { finite_delay_ticks } => {
+                    self.repeat_sequence_region(event.tick, finite_delay_ticks);
+                }
+                kind => self.apply(kind),
+            }
         }
+    }
+
+    /// Applies Sony's non-nested NRPN loop. Conversion places `LoopStart`
+    /// immediately before the first event after NRPN 20 and folds the later
+    /// data-entry count into it, so this index matches libsnd's saved sequence
+    /// pointer without replaying a synthetic control event.
+    fn repeat_sequence_region(&mut self, end_tick: u64, finite_delay_ticks: u64) {
+        let Some(mut sequence_loop) = self.sequence_loop else {
+            return;
+        };
+        if sequence_loop.repeats_left == 0 || sequence_loop.start_tick >= end_tick {
+            self.sequence_loop = None;
+            return;
+        }
+        let mut delay = 0;
+        if sequence_loop.repeats_left < 127 {
+            sequence_loop.repeats_left -= 1;
+            if sequence_loop.repeats_left == 0 {
+                self.sequence_loop = None;
+                return;
+            }
+            delay = finite_delay_ticks;
+        }
+        let effective_end = end_tick.saturating_add(self.event_tick_offset);
+        self.event_index = sequence_loop.start_event_index;
+        self.event_tick_offset = effective_end
+            .saturating_add(delay)
+            .saturating_sub(sequence_loop.start_tick);
+        self.sequence_loop = Some(sequence_loop);
     }
 
     fn apply(&mut self, event: EventKind) {
@@ -977,6 +1047,142 @@ mod tests {
         sequencer.render(&mut [0.0; 8]);
         assert!(sequencer.channels[0].volume.abs() < f32::EPSILON);
         assert_eq!(sequencer.tick_position, 2);
+    }
+
+    #[test]
+    fn nrpn_loop_count_is_total_passes_and_retains_live_voices() {
+        let mut sequencer = Sequencer::new();
+        sequencer.load(Sequence::new(
+            60,
+            vec![
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::LoopStart { repeat_count: 3 },
+                },
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::NoteOn {
+                        channel: 0,
+                        note: 60,
+                        velocity: 127,
+                    },
+                },
+                SequenceEvent {
+                    tick: 3,
+                    kind: EventKind::LoopEnd {
+                        finite_delay_ticks: 1,
+                    },
+                },
+                SequenceEvent {
+                    tick: 4,
+                    kind: EventKind::Marker,
+                },
+            ],
+        ));
+
+        sequencer.tick_position = 3;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.age_clock, 1);
+        assert_eq!(sequencer.event_tick_offset, 3);
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.age_clock, 1, "finite repeat retains its delta");
+        sequencer.tick_position = 4;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.age_clock, 2);
+        sequencer.tick_position = 6;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.event_tick_offset, 6);
+        sequencer.tick_position = 7;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.age_clock, 3);
+        sequencer.tick_position = 9;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.tick_position, 9);
+        assert_eq!(sequencer.event_tick_offset, 6);
+        assert_eq!(sequencer.voices.len(), 3);
+        assert_eq!(sequencer.sequence_loop, None);
+    }
+
+    #[test]
+    fn nrpn_loop_127_is_infinite_until_rewind() {
+        let mut sequencer = Sequencer::new();
+        sequencer.load(Sequence::new(
+            60,
+            vec![
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::LoopStart { repeat_count: 127 },
+                },
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::NoteOn {
+                        channel: 0,
+                        note: 60,
+                        velocity: 127,
+                    },
+                },
+                SequenceEvent {
+                    tick: 3,
+                    kind: EventKind::LoopEnd {
+                        finite_delay_ticks: 99,
+                    },
+                },
+            ],
+        ));
+
+        sequencer.tick_position = 1;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.age_clock, 1);
+        for pass in 2_u64..=5 {
+            sequencer.tick_position = pass * 2 - 1;
+            sequencer.dispatch_due_events();
+            assert_eq!(sequencer.age_clock, pass);
+            assert_eq!(sequencer.event_tick_offset, (pass - 1) * 2);
+            assert_eq!(
+                sequencer
+                    .sequence_loop
+                    .expect("the infinite region stays armed")
+                    .repeats_left,
+                127
+            );
+        }
+        sequencer.rewind();
+        assert_eq!(sequencer.sequence_loop, None);
+        assert_eq!(sequencer.event_tick_offset, 0);
+        assert!(sequencer.voices.is_empty());
+    }
+
+    #[test]
+    fn empty_nrpn_loop_is_inert_instead_of_spinning() {
+        let mut sequencer = Sequencer::new();
+        sequencer.load(Sequence::new(
+            60,
+            vec![
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::LoopStart { repeat_count: 127 },
+                },
+                SequenceEvent {
+                    tick: 1,
+                    kind: EventKind::LoopEnd {
+                        finite_delay_ticks: 0,
+                    },
+                },
+                SequenceEvent {
+                    tick: 2,
+                    kind: EventKind::NoteOn {
+                        channel: 0,
+                        note: 60,
+                        velocity: 127,
+                    },
+                },
+            ],
+        ));
+        sequencer.tick_position = 2;
+        sequencer.dispatch_due_events();
+        assert_eq!(sequencer.tick_position, 2);
+        assert_eq!(sequencer.age_clock, 1);
+        assert_eq!(sequencer.sequence_loop, None);
     }
 
     #[test]

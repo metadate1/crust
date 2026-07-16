@@ -396,9 +396,14 @@ gameplay path.
   the exact `MidiInit` level/volume partition between music and SFX slots and restores the native
   full-scale inactive master fade before destination audio starts. Both ADIO SFX and sampled VAB
   music use the SPU's fixed four-point Gaussian coefficient ROM, phase indexing, per-product signed
-  shifts, zero key-on history, loop history, and maximum pitch step. Remaining gaps are vibrato,
-  portamento, pressure and unsupported generic controllers, spatial reverb/effects, SPU noise/FM,
-  and hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
+  shifts, zero key-on history, loop history, and maximum pitch step. Sony SEQ NRPN 20/controller-6/
+  NRPN 30 regions now repeat with their source count and finite-delay semantics without resetting
+  live voices or channel controls. The 44-pair legally local census found 42 MIDI entries, 64 sequences, 98,067
+  events and 778 tones. Exactly four sequences contain six loop starts and four loop ends; all six
+  data entries use the indefinite value 127. It found no nonzero vibrato/portamento tone fields and
+  no polyphonic/channel-pressure events. Generic handling for those unobserved forms remains
+  absent. Other gaps are marking/VAB-mutation NRPNs, spatial reverb/effects, SPU noise/FM, and
+  hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
   sequencer currently has a separate 64-voice software limit. The newest music path was compile-,
   model- and legally-local-disc tested but not yet manually auditioned.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses

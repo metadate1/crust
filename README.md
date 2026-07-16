@@ -333,8 +333,11 @@ Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
 fades, the native all-bus master fade and GOOL-controlled alternate tracks. Sampled VAB voices
 apply the two retail ADSR register words through an exact fixed-point 44.1 kHz attack, decay,
-sustain, and release generator before mixing. Every stream mount also applies retail's level- and
-volume-specific MIDI/SFX slot boundary and resets the all-bus fade to full scale. Authored
+sustain, and release generator before mixing. Sony SEQ NRPN 20/data-entry/NRPN 30 regions repeat
+from their checked event boundary without resetting live voices or channel controls; repeat counts
+zero through 126 and the source's indefinite value 127 are modeled. Every stream mount also applies
+retail's level- and volume-specific MIDI/SFX slot boundary and resets the all-bus fade to full
+scale. Authored
 `next_lid`
 writes now run the eight-root postorder `LEVEL_END` phase, carry process-lifetime state into a
 fresh destination runtime, and restore bonus returns from the saved zone/path/progress.

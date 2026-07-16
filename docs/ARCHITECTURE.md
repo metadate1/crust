@@ -480,7 +480,12 @@ gain, so a level-end fade cannot silence the destination stream.
 VAB waves become owned PCM sample banks and SEP events drive two independent sequencers. A
 browser-independent owner applies source-timed thirty-tick zone fades, defers transitions while
 GOOL selects the second track, and drops both banks at a level boundary. The WebAudio master gain
-also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Each sampled VAB voice decodes its
+also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Sony's global SEQ loop protocol is
+collapsed from NRPN 20, controller-6 data entry and NRPN 30 into explicit non-nested regions. The
+runtime stores the first event after the NRPN 20 selector, folds the later data-entry count onto
+that boundary, treats values 1-126 as total pass counts with the encoded post-end delta and 127 as
+an immediate indefinite jump, rejects empty/backward regions, and jumps without clearing live
+voices or channel controllers. Each sampled VAB voice decodes its
 two ADSR register words into a fixed-point Q15 generator advanced once per 44.1 kHz sample. Attack,
 decay, sustain, release, linear/exponential modes, slowdown strictly above the `0x6000` attack
 threshold, rate counters, all-one frozen rates, key-on/off, and phase targets follow the hardware
@@ -488,11 +493,14 @@ integer rules. SFX and sampled VAB voices share one fixed-point SPU cursor: pitc
 select the four coefficients from the 512-word Gaussian ROM, each signed product is shifted before
 addition, key-on history starts at zero, later loop passes retain the three samples preceding the
 loop edge, and an unmodulated pitch step is capped at `0x4000`. Gaussian and ADSR arithmetic stays
-integer until the filtered sample and envelope reach the final mix gains. Remaining gaps include
-SPU reverb/effects, noise and FM/modulation, vibrato/portamento, pressure and unsupported generic
-controllers, and hardware-equivalent priority across one shared 24-voice SFX/music pool. The music
-sequencer currently owns a separate bounded software-voice pool. There is no procedural sine
-fallback: browser sound comes only from mounted ADIO SFX and the mounted retail music synthesizer.
+integer until the filtered sample and envelope reach the final mix gains. The legally local corpus
+contains 42 MIDI entries, 64 sequences and 778 tones. Its only controllers are volume and the six
+NRPN-loop data entries; no tone requests vibrato/portamento and no sequence contains polyphonic or
+channel pressure. Generic support for those unused features remains absent. Other gaps include SPU
+reverb/effects, noise and FM/modulation, marking/VAB-mutation NRPNs, and hardware-equivalent
+priority across one shared 24-voice SFX/music pool. The music sequencer currently owns a separate
+bounded software-voice pool. There is no procedural sine fallback: browser sound comes only from
+mounted ADIO SFX and the mounted retail music synthesizer.
 
 ## Persistence
 

@@ -40,6 +40,12 @@ License:
 > DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT
 > OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+Sony SEQ NRPN loop behavior was validated against the public Net Yaroze User Guide's sound-service
+description at <https://www.psxdev.net/downloads/Net%20Yaroze%20Official%20-%20Startup%20Guide.pdf>
+and independently cross-checked against `ps2dev/ps2sdk` at
+`b1adc2eab736d5717e8c53bd6d4a67cab20fd1d5`, whose libsnd2 implementation is distributed under the
+Academic Free License 2.0. No source from either reference is included in this repository.
+
 Those C1 repositories do not provide an express root license. No C source is included or linked
 into this runtime. This repository must remain private and must not be redistributed, hosted, or
 published as a playable build until contributor permissions and the original-game rights have

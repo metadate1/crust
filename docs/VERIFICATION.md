@@ -1100,24 +1100,66 @@ is 1,322,866 bytes with SHA-256
   and 54, and uses fresh Square taps every 18 frames to suppress repeated lethal contact from
   entity 55. BoxsC subtype-four entity 57 activates on frame 1,935. Its synchronous SaveState
   captures checkpoint `0x3900`, translation `[2252800, 2350080, 15564288]`, and pre-increment box
-  count zero; the live count then becomes `0x100` and spawn flags become nine. Across 2,300 frames
-  the carried run performs 90 successful spawns, 30,585 attempts, 30,495 source-expected
-  rejections, and 89,957 clean executions. It observes 11 lifecycle zone transitions, 14 camera
-  ranges, and 19 path changes. The final camera is `0n_fZ` path zero/progress 16,371; Crash is
-  `[2236476, 2380788, 15601332]`, RNG `0x526e3d90`, and draw count 1,484. There is no post-prefix
-  restart, death camera, below-zero or terminal fall, transition, VM fault, execution error,
-  unexpected spawn error, or checked issue. This is deterministic native integration over
-  user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
-  end remains open, and the full carried chain has not been exercised in a browser.
+  count zero; the live count then becomes `0x100` and spawn flags become nine. The same controller
+  crosses the live RivOC chains through `0q`, `0x`, `0z`, and `0A`, including entities
+  76/77/82/36/35/34, 96/108/109, and 113/112. It breaks two more counted boxes and requests the
+  authored normal-end `Transition(0x2d)` on frame 3,791. The complete carried leg performs 152
+  successful spawns, 52,371 attempts, 52,219 source-expected rejections, and 146,470 clean
+  executions. It observes 24 lifecycle zone transitions, 35 camera ranges, and 40 path changes.
+  The final camera is `0A_fZ` path one/progress 8,352; Crash is
+  `[2228500, 6590796, -472100]`, live box count is `0x400`, RNG is `0xa7ef4deb`, and draw count is
+  2,975. There is no post-prefix restart, death camera, below-zero or terminal fall, VM fault,
+  execution error, unexpected spawn error, or checked issue.
+
+  Upstream's checked `LEVEL_END` exports globals
+  `game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
+  runtime requests Title `0x19` on frame 225 after two successful spawns, 450 attempts, 448
+  source-expected rejections, and 1,212 clean executions. Its terminal globals are
+  `game=0x300, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`, with RNG
+  `0xbe5213fd` and draw 3,200. The Map becomes ready at frame 10, runs 120 idle frames, taps Up,
+  runs another 120 idle frames, and presses Cross. It requests Papu Papu `0x0a` at frame 253 on
+  `1d_pZ` path zero/progress 1,024. Its exported carry has
+  `game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0xa984c5b5`, and
+  draw 3,453.
+
+  A state-gated ordinary-pad controller completes that carried Papu Papu fight. It approaches the
+  arena center with bounded jump windows and retreats outward while ChefC is hurt; it does not
+  inject a VM event, object state, or transition. Same-frame ChefC-contact/Crash-event-zero damage
+  pairs occur on frames 302/484/666. Entity eight enters ChefC state two on frames 303/485/667,
+  recovers to state one on 382/564, and enters win state three on 668. The authored runtime requests
+  Title `0x19` on frame 812. It records 6 successful spawns, 5,684 attempts, 5,678 source-expected
+  rejections, 16,377 clean executions, three camera ranges, two path changes, no restart or death
+  camera, and no terminal fall (the only below-zero sample is an observed eight-unit grounded
+  rounding). It has no VM fault, execution error, unexpected spawn error, or checked issue. The
+  checked boss carry has
+  `game=0x300, title=15, saved-title=15, map=6, count=1, unlocked=7, island=0`, RNG `0xf3ab9165`,
+  and draw 4,265.
+
+  The post-boss Map becomes ready on frame 10 at `1e_pZ` path zero/progress `0x1500`. It waits for
+  the frame-52 current-node gate at `1d_pZ:0@0x0400`, taps Up on frame 53 and releases on 54, waits
+  for `1d_pZ:1@0x0300` on frame 65, and presses Cross on 66. The authored transition requests
+  Rolling Stones `0x15`; the clean `LEVEL_END` carry has map/unlocked seven, island one, and draw
+  4,331. Rolling Stones imports that exact carry and executes 120 idle frames with no transition,
+  restart, death camera, terminal fall, VM fault, or execution error. It records 19 successful
+  spawns, 2,280 attempts, 2,261 expected rejections, and 3,476 clean executions while `0a_lZ` path
+  zero advances from progress 256 to 6,400. Crash moves only from
+  `[2252544, 1023744, 31794432]` to `[2252544, 969366, 31794432]`; RNG is `0x2c8492d5` and draw is
+  4,451. This is deterministic native integration over user-supplied local data, not a browser
+  playthrough or full-game parity claim. The complete carried chain has not been exercised in a
+  browser.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
-  runs 1,160 frames with no restart, death camera, terminal fall, VM fault, execution error, or
-  LoadState. It performs 61 successful spawns and 26,887 clean executions across 16 lifecycle zone
-  transitions, 19 camera ranges, and 20 path changes. The route breaks its authored opening wall,
-  defeats PlanC entities 18/49/57 and turtle entities 15/72, and times jumps over JunOC entity 69's
-  moving-stone collision. BoxsC subtype-four entity eight activates on frame 1,160. The synchronous
-  SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment
-  box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become nine. This is an
-  independent direct-boot first-checkpoint regression, not carried entry or normal-end evidence.
+  runs 1,630 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
+  execution error, or LoadState. It performs 85 successful spawns and 35,923 clean executions
+  across 23 lifecycle zone transitions, 30 camera ranges, and 31 path changes. The route breaks its
+  authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
+  JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
+  neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,160. The
+  synchronous SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and
+  pre-increment box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become
+  nine. At frame 1,630 Crash is grounded on `0B_lZ` path zero/progress 7,353 at
+  `[3226784, 3852293, 9936128]`. This is an independent direct-boot mid-route regression, not
+  carried normal-end evidence. The post-Papu chain proves the carried entry, but the fixed-timing
+  direct controller later diverges against that session's moving-stone phase.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1172,7 +1214,7 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_four_levels_reach_upstream_with_session_carry \
+  authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

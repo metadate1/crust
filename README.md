@@ -171,8 +171,8 @@ the later b7 stop came from steering `LEFT` around the live portal lane. Correct
 actions required no camera or collision runtime change. The current six-frame change instead comes
 from restoring `PlotObjWalls(flag=1)`'s ordered `GoolCollide` calls for overlapping frame bounds.
 `docs/VERIFICATION.md` records the exact invocation and boundaries.
-An opt-in legally local vertical-flow test now keeps the native process session intact across four
-normal-level completions and the next Map choice into Upstream. A fresh authored Map initialized
+An opt-in legally local vertical-flow test now keeps the native process session intact across five
+normal-level completions and the next Map choice into Papu Papu. A fresh authored Map initialized
 through the card-payload restore path emits N. Sanity Beach `0x09` on frame 11. N. Sanity emits Level Complete
 `0x2d` at frame 1,900, its checked `LEVEL_END` phase exports `RetailSessionCarry`; Level Complete
 imports that carry and emits Title `0x19` at
@@ -238,23 +238,50 @@ live entity-23 orbital leaf, crosses the entity-47/46/54 platform chain, and use
 every 18 frames to suppress the lethal entity-55 fish contact. It activates authentic BoxsC
 subtype-four entity 57 on frame 1,935: checkpoint `0x3900`, saved pre-increment box count zero,
 saved player translation `[2252800, 2350080, 15564288]`, then live box count `0x100` and native
-spawn flags nine. Across 2,300 frames the carried run performs 90 successful spawns from 30,585
-attempts with 30,495 source-expected rejections, 89,957 clean executions, 11 lifecycle zone
-transitions, 14 camera ranges and 19 path changes. It ends stable on `0n_fZ` path zero/progress
-16,371 with Crash at `[2236476, 2380788, 15601332]`, RNG `0x526e3d90`, and draw count 1,484, with
-no post-prefix restart, death camera, below-zero or terminal fall, transition request, VM fault,
-execution error, or checked issue. These are deterministic native integration goldens over
-user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
-end remains open, as does a browser exercise of this complete carried chain.
-An independent legally local direct-boot route now reaches Rolling Stones' first main-path
-checkpoint using only ordinary 30 Hz pad input. It crosses 16 lifecycle zones and 19 camera paths,
-breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57, turtle entities
-15/72, and clears JunOC entity 69's moving-stone window. A fresh Square edge opens BoxsC
-subtype-four entity 8 on frame 1,160. SaveState captures checkpoint `0x0800`, player translation
-`[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live count then becomes
-`0x0b00` and spawn flags become nine. The 61-spawn/26,887-execution route has no restart, death
-camera, terminal fall, VM fault, execution error, or LoadState. This is a deterministic direct-boot
-checkpoint regression, not yet the carried Rolling Stones entry or its normal completion.
+spawn flags nine. The controller then crosses the live RivOC leaf/platform sequence through `0q`
+to `0A`, including entities 76/77/82/36/35/34, 96/108/109, and the final 113/112 pair. It breaks
+two more counted boxes and reaches the authored normal-end `Transition(0x2d)` on frame 3,791.
+That complete Upstream leg performs 152 successful spawns from 52,371 attempts with 52,219
+source-expected rejections, 146,470 clean executions, 24 lifecycle zone transitions, 35 camera
+ranges and 40 path changes. It ends on `0A_fZ` path one/progress 8,352 with Crash at
+`[2228500, 6590796, -472100]`, box count `0x400`, RNG `0xa7ef4deb`, and draw count 2,975, with no
+post-prefix restart, death camera, terminal fall, VM fault, execution error, or checked issue.
+
+Upstream's checked `LEVEL_END` exports globals
+`game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
+screen requests Title `0x19` on frame 225 after two successful spawns, 450 attempts, 448 expected
+rejections, and 1,212 clean executions; the resulting RNG is `0xbe5213fd` at draw count 3,200.
+After the checked Title handoff, the Map follows 120-idle/Up/120-idle/Cross and selects Papu Papu
+`0x0a` on frame 253 at `1d_pZ` path zero/progress 1,024. Its carry has
+`game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0xa984c5b5`, and draw
+count 3,453. A state-gated ordinary-pad route completes the carried Papu Papu fight without a
+restart or host-injected event. Crash and ChefC exchange the three authored damage collisions on
+frames 302, 484, and 666; ChefC enters hurt state two on frames 303, 485, and 667, recovers on
+frames 382 and 564, and enters win state three on frame 668. The boss requests Title `0x19` on
+frame 812 after 6 successful spawns, 5,684 attempts, 5,678 expected rejections, and 16,377 clean
+executions. The carry unlocks level seven with RNG `0xf3ab9165` and draw 4,265.
+
+The post-boss Map becomes ready on frame 10, waits for its authored current-node camera gate,
+taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
+Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. The first 120
+carried Rolling Stones frames are clean: 19 successful spawns, 3,476 executions, the authored
+`0a_lZ` camera from progress 256 to 6,400, RNG `0x2c8492d5`, and draw 4,451. These are
+deterministic native integration goldens over user-supplied local data, not a browser playthrough
+or full-game parity claim; a browser exercise of this complete carried chain remains open.
+
+An independent legally local direct-boot route now continues Rolling Stones from its first
+main-path checkpoint through the initial moving-stone gauntlet using only ordinary 30 Hz pad input.
+It breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57 and turtle
+entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths from JunOC entities
+75/77/52. BoxsC subtype-four entity 8 still activates on frame 1,160: SaveState captures checkpoint
+`0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live
+count then becomes `0x0b00` and spawn flags become nine. At frame 1,630 the route is grounded on
+`0B_lZ` path zero/progress 7,353 at `[3226784, 3852293, 9936128]`. It records 85 successful spawns,
+35,923 clean executions, 23 lifecycle zone transitions, 30 camera ranges and 31 path changes, with
+no restart, state-31 squash, death camera, terminal fall, VM fault, execution error, or LoadState.
+This remains a deterministic direct-boot route, not the carried Rolling Stones completion. The
+carried entry and its first 120 frames are covered by the post-Papu chain above; its later moving-
+stone phase requires a session-relative controller and remains open.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -267,9 +294,10 @@ focused deterministic route, not broad checkpoint/death certification.
 The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
-The current native schedule includes this deterministic carried sequence through four authored
-normal-level completions, the complete Upstream PBAK input, and Upstream's first checkpoint; this
-is not a full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
+The current native schedule includes this deterministic carried sequence through five authored
+normal-level completions, the complete Upstream PBAK input and normal route, Papu Papu's authored
+completion, and the carried Rolling Stones mount; this is not a full retail playthrough or a
+browser-playthrough claim. Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.

@@ -307,6 +307,15 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
+Up the Creek now has a bounded direct-boot ordinary-pad route beyond its first two moving logs. At
+the 500-frame boundary Crash stands on `0f_oZ`'s static raw `0x0003` cell at
+`[2075548, 1414590, 26064412]`; the cell top is `Y=1414592`, the player has no entity reference,
+and the recorded floor-impact registers distinguish it from the preceding carried log contact. The
+route then crosses the raised stepping stone and reaches `0g_oZ`, where contact advances platform
+entity 44 from state 11 to 12. At frame 580 Crash remains alive and supported at
+`[2074052, 1647954, 25003356]` after 18,922 clean executions and no restart, LoadState, terminal
+fall, VM fault, or execution error. This is opening-route characterization through the first `0g`
+platform, not an Up the Creek completion or browser-playthrough claim.
 The current native schedule therefore includes seven deterministic normal-level completions, the
 complete carried Upstream route, Papu Papu's authored completion, and both direct and carried
 Rolling Stones completion; this is not a full retail playthrough or a browser-playthrough claim.
@@ -395,8 +404,8 @@ does not certify the complete ending flow.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 546 passing tests; the locked default workspace gate has 881, plus 77
-ignored-by-default legally local tests. Native
+The `crust-sim` library has 546 passing tests; the locked workspace inventory has 885 default-active
+tests plus 87 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,

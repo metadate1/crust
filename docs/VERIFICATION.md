@@ -1183,7 +1183,7 @@ is 1,322,866 bytes with SHA-256
   frame 253. The checked carry retains exact title/map/unlock globals, RNG and draw count, with no
   restart, VM fault, or execution error. This proves the post-Hog unlock handoff, not completion of
   Native Fortress; its first rotating-platform gap remains an active route boundary.
-- Up the Creek (`0x18`) has an exact ordinary-pad opening route through its first two authored
+- Up the Creek (`0x18`) has an exact ordinary-pad opening route beyond its first two authored
   moving logs. It clears the opening boxes and four small-platform jumps, brakes onto executable-28
   entity 30, waits for the log's forward arc, builds speed while supported, and transfers to entity
   31. At frame 370 Crash remains alive and supported at `[2047648, 1166978, 27486512]`; the camera
@@ -1191,6 +1191,19 @@ is 1,322,866 bytes with SHA-256
   executions across three lifecycle transitions, seven camera ranges and eight path changes, with
   no restart, death/fall, VM fault, execution error, or LoadState. Local collision characterization
   also established that entity 54 sends `HIT` and is a hazard, not the intended handoff surface.
+  The continued route reaches the first static `0f_oZ` island at the 500-frame boundary. Crash is
+  `[2075548, 1414590, 26064412]` over raw ZDAT cell `0x0003`, whose top is `Y=1414592`; the player
+  has floor-impact stamp 499, impact velocity `-2049723`, entity reference zero, and node
+  `0xffff`. Those values distinguish static floor contact from the preceding entity-59 carried
+  bounce. The 500-frame run records 42 successful spawns and 16,673 clean executions with no
+  restart, LoadState, fall, VM fault, or execution error.
+  The same controller then crosses the raised stepping stone and reaches `0g_oZ`. Its contact with
+  platform entity 44 advances that object from state 11 to 12; at frame 580 Crash remains alive and
+  supported at `[2074052, 1647954, 25003356]`, and entity 44 is in state 12. This run records 50
+  successful spawns, 18,922 clean executions, seven lifecycle transitions, ten camera ranges and
+  thirteen path changes, with no restart, LoadState, fall, VM fault, or execution error. It is a
+  bounded route through the first `0g` platform, not a level-completion or browser-playthrough
+  claim.
 - Ripper Roo's legally local 300-frame idle characterization matches the source project's current
   allocator behavior. RooOC requests one ordinary executable-39/subtype-one child on every enabled
   draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately
@@ -1202,12 +1215,12 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked workspace currently enumerates 970 tests: 885 default-active and 85 ignored
+- The locked workspace currently enumerates 972 tests: 885 default-active and 87 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
   Rolling Stones completion test, the Ripper Roo pool characterization, the Up the Creek
-  log-transfer test, and the full carried completion regression pass independently on the current
-  tree.
+  log-transfer/static-island/`0g` tests, and the full carried completion regression pass
+  independently on the current tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
@@ -1275,6 +1288,14 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   up_the_creek_direct_route_reaches_second_moving_log \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  up_the_creek_direct_route_reaches_static_zero_f_island \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  up_the_creek_direct_route_activates_zero_g_platform \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \

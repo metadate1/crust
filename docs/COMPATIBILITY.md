@@ -589,6 +589,15 @@ gameplay path.
   queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
+  Up the Creek has a separate bounded ordinary-pad direct route through its two opening moving logs,
+  the first `0f_oZ` island, the raised stepping stone, and the first `0g_oZ` platform. At the
+  500-frame boundary, Crash is supported at `[2075548, 1414590, 26064412]` on static ZDAT cell raw
+  `0x0003`, whose top is `Y=1414592`; the floor-impact registers are populated and the entity
+  reference is zero, distinguishing that floor from the preceding entity-59 carried contact. By
+  frame 580 the route has contacted platform entity 44 and observed its state move from 11 to 12,
+  while Crash remains alive and supported at `[2074052, 1647954, 25003356]`. This establishes a
+  clean opening-route handoff into `0g_oZ`; it does not establish Up the Creek's checkpoint, bonus,
+  later hazards, normal end, or browser playthrough.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
   authored graph cannot be spawned, the browser remains on its loading/error presentation rather

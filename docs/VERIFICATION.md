@@ -1149,18 +1149,20 @@ is 1,322,866 bytes with SHA-256
   native integration over user-supplied local data, not a browser playthrough or full-game parity
   claim. The complete carried chain has not been exercised in a browser.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
-  runs 2,024 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
-  execution error, or LoadState. It performs 105 successful spawns and 45,223 clean executions
-  across 28 lifecycle zone transitions, 38 camera ranges, and 39 path changes. The route breaks its
+  runs 2,191 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
+  execution error, or LoadState. It performs 113 successful spawns and 48,958 clean executions
+  across 30 lifecycle zone transitions, 42 camera ranges, and 43 path changes. The route breaks its
   authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
   JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
   neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,160. The
   synchronous SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and
   pre-increment box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become
-  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0c00`. At frame
-  2,024 Crash is supported on `0I_lZ` path zero/progress 12,032 at
-  `[2374144, 3767956, 3370240]`. This is an independent direct-boot mid-route regression, not
-  normal-end evidence. The post-Papu chain independently proves carried progression through `0F`.
+  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0c00`. The route
+  retains `0I -> 0J -> 0K`, avoids category-`0x300` entity 103 with an ordinary right/left lane
+  change, and crosses the successive `0K` pads. At frame 2,191 Crash is supported in physical zone
+  `0M_lZ` at `[3066368, 5009761, 460032]`; the camera is `0K_lZ` path two/progress 5,376. This is
+  an independent direct-boot mid-route regression, not normal-end evidence. The post-Papu chain
+  independently proves carried progression through `0F`.
 - Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
   traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and
   30, advances live boxes to `0x700`, observes WarpC states zero through four, and requests Level
@@ -1178,7 +1180,8 @@ is 1,322,866 bytes with SHA-256
 - The locked workspace currently enumerates 967 tests: 885 default-active and 82 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
-  Rolling Stones `0I` test, and the full carried regression pass independently on the current tree.
+  Rolling Stones `0K`-to-`0M` boundary test, and the full carried regression pass independently on
+  the current tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
@@ -1231,7 +1234,7 @@ C1_STREAM_DIR=/path/to/streams \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  rolling_stones_direct_boot_reaches_i0_ledge -- --ignored --exact --nocapture
+  rolling_stones_direct_boot_reaches_zero_m_boundary_pad -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   hog_wild_direct_boot_reaches_level_complete -- --ignored --exact --nocapture

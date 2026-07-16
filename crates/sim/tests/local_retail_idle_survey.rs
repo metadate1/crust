@@ -872,13 +872,24 @@ impl RollingStonesRouteController {
                     .expect("the post-bank route was gated immediately above");
                 self.post_bank_tick = Some(post_bank_tick.saturating_add(1));
                 // A fresh spin opens BoxsC 92 at the 0F bank. The following
-                // jumps and neutral phase cross JunOC 93's sweep, then the
-                // final right-jump settles on I0's supported approach.
+                // jumps and neutral phase cross JunOC 93's sweep. The final
+                // right-jump reaches 0I's upper approach; ordinary jumps and
+                // one lane change then retain the authored 0I -> 0J -> 0K
+                // route through the narrow 0K -> 0M boundary pad.
                 return match post_bank_tick {
                     0..=9 => PAD_UP | PAD_SQUARE,
-                    10..=17 | 50..=57 | 98..=105 => PAD_UP | PAD_CROSS,
+                    10..=17
+                    | 50..=57
+                    | 98..=105
+                    | 146..=153
+                    | 171..=178
+                    | 256..=265
+                    | 280..=289 => PAD_UP | PAD_CROSS,
                     32..=41 => 0,
                     124..=131 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                    212..=225 => PAD_UP | PAD_RIGHT,
+                    240..=251 => PAD_UP | PAD_LEFT,
+                    304..=313 => PAD_UP | PAD_LEFT | PAD_CROSS,
                     _ => PAD_UP,
                 };
             }
@@ -6480,7 +6491,7 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn rolling_stones_direct_boot_reaches_i0_ledge() {
+fn rolling_stones_direct_boot_reaches_zero_m_boundary_pad() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -6492,41 +6503,53 @@ fn rolling_stones_direct_boot_reaches_i0_ledge() {
         .expect("the retail level catalog contains Rolling Stones");
     let (nsd, nsf, nsf_bytes) =
         parse_local_pair(&root, level).expect("the legally local Rolling Stones pair must parse");
-    let survey = survey_pair(
+    let (survey, runtime) = survey_pair_with_runtime(
         known.name,
         level,
         &nsd,
         &nsf,
         &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
         SurveyInputProfile::RollingStonesCheckpoint,
-        2_024,
+        2_191,
     )
-    .expect("Rolling Stones must execute through its post-0F route to I0's supported ledge");
+    .expect("Rolling Stones must execute through the 0K-to-0M boundary pad");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 2_024);
-    assert_eq!(survey.successful_spawns, 105);
-    assert_eq!(survey.spawn_attempts, 24_937);
-    assert_eq!(survey.expected_spawn_rejections, 24_832);
-    assert_eq!(survey.executions, 45_223);
-    assert_eq!(survey.zone_transitions, 28);
-    assert_eq!(survey.camera_ranges.len(), 38);
-    assert_eq!(survey.camera_path_changes, 39);
-    assert_eq!(survey.last_camera_path_change, 1_998);
+    assert_eq!(survey.frames, 2_191);
+    assert_eq!(survey.successful_spawns, 113);
+    assert_eq!(survey.spawn_attempts, 26_698);
+    assert_eq!(survey.expected_spawn_rejections, 26_585);
+    assert_eq!(survey.executions, 48_958);
+    assert_eq!(survey.zone_transitions, 30);
+    assert_eq!(survey.camera_ranges.len(), 42);
+    assert_eq!(survey.camera_path_changes, 43);
+    assert_eq!(survey.last_camera_path_change, 2_180);
+    assert_eq!(survey.last_camera_progress_change, 2_191);
     let final_camera = survey
         .final_camera
         .expect("the Rolling Stones survey must retain its final camera");
     assert_eq!(
         final_camera.path.zone,
-        Eid::from_name("0I_lZ").expect("fixed Rolling Stones ledge-zone EID is valid")
+        Eid::from_name("0K_lZ").expect("fixed Rolling Stones boundary-zone EID is valid")
     );
-    assert_eq!(final_camera.path.index, 0);
-    assert_eq!(final_camera.progress.raw(), 12_032);
+    assert_eq!(final_camera.path.index, 2);
+    assert_eq!(final_camera.progress.raw(), 5_376);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_374_144, 3_767_956, 3_370_240])
+        Some([3_066_368, 5_009_761, 460_032])
     );
-    assert_eq!(survey.final_live_objects, 26);
+    let player = player_trace(&runtime)
+        .expect("Rolling Stones boundary player trace must resolve")
+        .expect("Rolling Stones boundary pad must keep Crash alive");
+    assert_eq!(
+        player.zone,
+        Eid::from_name("0M_lZ").expect("fixed Rolling Stones next-zone EID is valid")
+    );
+    assert_eq!(player.state, 2);
+    assert_ne!(player.status_a & 1, 0);
+    assert_eq!(survey.final_live_objects, 23);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -6584,11 +6607,11 @@ fn rolling_stones_direct_boot_reaches_i0_ledge() {
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&103));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&187));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&205));
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(
         survey.is_clean(),
-        "Rolling Stones I0-ledge route reached a checked runtime boundary: {}",
+        "Rolling Stones 0K-to-0M boundary route reached a checked runtime boundary: {}",
         survey.summary()
     );
 }

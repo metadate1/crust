@@ -4310,14 +4310,25 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
     }
     {
         let document = dom.document.clone();
+        let fullscreen = dom.fullscreen.clone();
         let screen: Element = dom.screen.clone().into();
         bind_click(&dom.fullscreen, move || {
             if document.fullscreen_enabled() {
                 let Ok(promise) = request_fullscreen_promise(&screen) else {
+                    fullscreen.set_disabled(true);
+                    let _ = fullscreen
+                        .set_attribute("title", "Fullscreen was denied by this browser context");
                     return;
                 };
+                let fullscreen = fullscreen.clone();
                 spawn_local(async move {
-                    let _ = JsFuture::from(promise).await;
+                    if JsFuture::from(promise).await.is_err() {
+                        fullscreen.set_disabled(true);
+                        let _ = fullscreen.set_attribute(
+                            "title",
+                            "Fullscreen was denied by this browser context",
+                        );
+                    }
                 });
             }
         })?;

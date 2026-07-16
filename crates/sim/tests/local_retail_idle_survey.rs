@@ -614,7 +614,8 @@ struct HogWildCompletionRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 /// Ordinary 30 Hz inputs for the authored Up the Creek opening. The route
 /// clears the opening boxes, crosses the first four small platforms, lands on
-/// moving log 30, waits for its forward arc, and transfers to moving log 31.
+/// moving log 30, transfers to moving log 31, then uses the second log's
+/// forward arc to reach the next static island at the start of `0f_oZ`.
 struct UpTheCreekRouteController {
     stage: u8,
     tick: u16,
@@ -810,6 +811,156 @@ impl UpTheCreekRouteController {
                     self.tick = 0;
                 }
                 if tick < 8 { PAD_UP } else { PAD_UP | PAD_CROSS }
+            }
+            15 => {
+                // Wait for the second moving log to swing forward before
+                // beginning the next authored transfer.
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && player.status_a & 1 != 0
+                        && player.translation[2] <= 27_180_000
+                }) {
+                    self.stage = 16;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            16 => {
+                // Keep the long run/spin transfer active through the final
+                // forward bounce, then coast on the carried contact. Releasing
+                // on the preceding bounce reverses the authored handoff.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 55 {
+                    self.stage = 17;
+                    self.tick = 0;
+                }
+                if tick < 8 {
+                    PAD_UP
+                } else {
+                    PAD_UP | PAD_CROSS | PAD_SQUARE
+                }
+            }
+            17 => {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 26_150_000
+                }) {
+                    self.stage = 18;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            18 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 4 {
+                    PAD_DOWN | PAD_LEFT | PAD_CROSS
+                } else if tick < 8 {
+                    PAD_DOWN | PAD_RIGHT
+                } else {
+                    self.stage = 19;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            19 => {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (25_900_000..=26_200_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 20;
+                    self.tick = 0;
+                }
+                0
+            }
+            20 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 12 {
+                    PAD_UP
+                } else {
+                    self.stage = 21;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            21 => {
+                if self.tick == 0 {
+                    self.tick = 1;
+                    PAD_DOWN
+                } else {
+                    self.stage = 22;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            22 => {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (25_850_000..=26_000_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 23;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            23 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 12 {
+                    PAD_UP | PAD_CROSS
+                } else {
+                    self.stage = 24;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            24 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 13 {
+                    PAD_UP
+                } else {
+                    self.stage = 25;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            25 => {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (25_400_000..=25_600_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 26;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            26 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 24 {
+                    PAD_UP | PAD_CROSS
+                } else {
+                    self.stage = 27;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            27 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 10 {
+                    PAD_DOWN
+                } else {
+                    self.stage = 28;
+                    self.tick = 0;
+                    0
+                }
             }
             _ => 0,
         }
@@ -7438,6 +7589,198 @@ fn up_the_creek_direct_route_reaches_second_moving_log() {
     assert!(
         survey.is_clean(),
         "Up the Creek's supported second-log route crossed a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_direct_route_reaches_static_zero_f_island() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Up the Creek");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::UpTheCreekRoute,
+        500,
+    )
+    .expect("Up the Creek must execute through its first static 0f island contact");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 500);
+    assert_eq!(survey.successful_spawns, 42);
+    assert_eq!(survey.spawn_attempts, 7_157);
+    assert_eq!(survey.expected_spawn_rejections, 7_115);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 16_673);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 6);
+    assert_eq!(survey.camera_ranges.len(), 9);
+    assert_eq!(survey.camera_path_changes, 11);
+    assert_eq!(survey.last_camera_path_change, 486);
+    assert_eq!(survey.last_camera_progress_change, 487);
+    let final_camera = survey
+        .final_camera
+        .expect("Up the Creek must retain the camera behind the first static island");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0e_oZ").expect("fixed Up the Creek camera-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 22_272);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_075_548, 1_414_590, 26_064_412])
+    );
+    let trace = player_trace(&runtime)
+        .expect("Up the Creek player trace must resolve")
+        .expect("the first static island must keep Crash alive");
+    assert_eq!(
+        trace.zone,
+        Eid::from_name("0f_oZ").expect("fixed Up the Creek island-zone EID is valid")
+    );
+    assert_eq!(trace.translation, [2_075_548, 1_414_590, 26_064_412]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 10);
+    assert_ne!(trace.status_a & 1, 0);
+
+    // The local ZDAT characterization resolves raw cell 0x0003 with top
+    // Y=1_414_592 at this exact position. The impact registers and absent
+    // entity reference distinguish that static floor from carried entity 59.
+    let arena = runtime.arena().main_object().expect("player arena handle");
+    let object = runtime.object_for_arena(arena).expect("player VM binding");
+    let player_vm = runtime
+        .machine()
+        .object(object.vm())
+        .expect("player VM object");
+    assert_eq!(
+        player_vm.register(process_register::FLOOR_IMPACT_STAMP),
+        Ok(499)
+    );
+    assert_eq!(
+        player_vm
+            .register(process_register::FLOOR_IMPACT_VELOCITY)
+            .map(u32::cast_signed),
+        Ok(-2_049_723)
+    );
+    assert_eq!(
+        player_vm.register(process_register::ENTITY_REFERENCE),
+        Ok(0)
+    );
+    assert_eq!(player_vm.register(process_register::NODE), Ok(0xffff));
+    assert_eq!(survey.final_live_objects, 23);
+    assert_eq!(survey.max_live_objects, 61);
+    assert_eq!(survey.effect_counts.get("solid"), Some(&175));
+    assert!(survey.spawn_flag_samples.contains(&(473, 44, 5)));
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert!(survey.next_lid.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(
+        survey.is_clean(),
+        "Up the Creek's first static-island contact crossed a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_direct_route_activates_zero_g_platform() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Up the Creek");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::UpTheCreekRoute,
+        580,
+    )
+    .expect("Up the Creek must execute through its first 0g platform interaction");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 580);
+    assert_eq!(survey.successful_spawns, 50);
+    assert_eq!(survey.spawn_attempts, 8_422);
+    assert_eq!(survey.expected_spawn_rejections, 8_372);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 18_922);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 7);
+    assert_eq!(survey.camera_ranges.len(), 10);
+    assert_eq!(survey.camera_path_changes, 13);
+    assert_eq!(survey.last_camera_path_change, 538);
+    assert_eq!(survey.last_camera_progress_change, 575);
+    let final_camera = survey
+        .final_camera
+        .expect("Up the Creek must retain its 0f-to-0g handoff camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0f_oZ").expect("fixed Up the Creek handoff-zone EID is valid"),
+            index: 1,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 9_670);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_074_052, 1_647_954, 25_003_356])
+    );
+    let trace = player_trace(&runtime)
+        .expect("Up the Creek player trace must resolve")
+        .expect("the 0g platform interaction must keep Crash alive");
+    assert_eq!(
+        trace.zone,
+        Eid::from_name("0g_oZ").expect("fixed Up the Creek platform-zone EID is valid")
+    );
+    assert_eq!(trace.translation, [2_074_052, 1_647_954, 25_003_356]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 1);
+    assert_ne!(trace.status_a & 1, 0);
+    assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(12)));
+    assert_eq!(survey.final_live_objects, 27);
+    assert_eq!(survey.max_live_objects, 61);
+    assert_eq!(survey.effect_counts.get("solid"), Some(&179));
+    assert!(survey.spawn_flag_samples.contains(&(506, 44, 5)));
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert!(survey.next_lid.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(
+        survey.is_clean(),
+        "Up the Creek's 0g platform interaction crossed a checked runtime boundary: {}",
         survey.summary()
     );
 }

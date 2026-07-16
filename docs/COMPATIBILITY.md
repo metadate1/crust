@@ -583,12 +583,14 @@ gameplay path.
   Rust's contact-window direct events are `0x400`, then `0x1000`/`0x400`; CrabC's grounded-contact
   gate does not emit `0x300`. The earlier contrary C observation came from rAF-derived clock phase,
   not a collision special case. Broader collision and later
-  Crash, boss, box, checkpoint, enemy, bonus and ending behavior remain open. A legally
-  local 1,800-frame Ending lifecycle regression now reclaims state-returned `WinGC`
-  credits children, reaches at least 64 authored credits-child spawns, reuses arena generations,
-  peaks at 82 live objects, and reports no VM fault; this replaces the broken 97-slot saturation at
-  frame 1,437 but does not complete or certify the ending. Hog Wild now has a complete ordinary-pad
-  direct-boot route: it traverses 67 camera paths, activates checkpoints 13 and 30, reaches live box
+  Crash, boss, box, checkpoint, enemy, and bonus behavior remain open. A legally local Ending
+  completion regression now reclaims state-returned `WinGC` credits children, processes exactly
+  113 authored credits-child spawns, reuses arena slots through generation three, peaks at 82 live
+  objects, and requests Title `0x19` on frame 3,396 without a VM fault. This replaces the broken
+  97-slot saturation at frame 1,437 and covers the authored Ending-to-Title request; it does not
+  claim that the subsequent browser remount was exercised in the same run. Hog Wild now has a
+  complete ordinary-pad direct-boot route: it traverses 67 camera paths, activates checkpoints 13
+  and 30, reaches live box
   count `0x700`, observes WarpC states zero through four, and requests Level Complete `0x2d` on
   frame 1,950. Its 24,311 executions complete with no restart, LoadState, fatal-surface state,
   death camera, terminal fall, VM error, faulted object, or checked issue. A separate idle trace

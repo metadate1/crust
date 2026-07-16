@@ -559,11 +559,13 @@ The focused checks below were also completed:
 - The parsed-retail unit fixture executes raw RETURN word `0x82894000` through its initial frame and
   reports `InvalidInitialReturn`; the synthetic `VmObject::new` compatibility case still reports
   `Halted`. The legally local Ending regression then ran the browser-ordered spawn/camera/GOOL loop
-  for 1,800 frames. It anchored `WinGC` executable 61/subtype 3, state 1 at external PC 53, observed
-  at least 64 credits-child spawns, reclaimed the first returned child, reused arena generations,
-  and had zero faulted objects. Live population peaked at 82, below the regression bound of 89;
+  through the complete authored credits request. It anchored `WinGC` executable 61/subtype 3,
+  state 1 at external PC 53, processed exactly 113 credits-child spawns, reclaimed returned
+  children, reused arena slots through generation three, and requested Title `0x19` on frame 3,396
+  with zero faulted objects. Live population peaked at 82, below the regression bound of 89;
   before the fix, returned children remained at PC 54 and filled all 97 slots at frame 1,437. This
-  verifies no-TERM return reclamation and bounded credits spawning, not a completed ending.
+  verifies no-TERM reclamation and the Ending-to-Title request, but not the subsequent browser
+  remount in the same run.
 - The legally local N. Sanity → Level Complete → Title vertical-flow golden now asserts the native
   process-lifetime `draw_count` at both exported carries, both imported runtimes, and Title's first
   display frame. The observed sequence retained 1,900 into Level Complete, 2,413 into Title, and
@@ -1241,7 +1243,13 @@ is 1,322,866 bytes with SHA-256
   draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately
   reuses one slot on frame 152, and subsequent saturated requests correctly return null. RRooC
   still enters state one and traverses its deterministic pad loop without a fault. This narrows an
-  inherited source boundary; it is not evidence for a Big TNT completion path.
+  inherited source boundary; it is not evidence for a Big TNT completion path. A separate
+  10,000-frame ordinary-pad sweep produced 123 fall restarts but no transition. A targeted route
+  reached Ripper's pad and delivered repeated `WillC` to `RRooC` spin-hit event `0x400`; Ripper
+  correctly stayed in state one, then returned event `0x300` to damage Crash. No executable-34
+  `BoxsC` spawn request appeared in a 1,000-frame trace, while persistent `RooOC` children filled
+  the ordinary pool. The direct-boot graph therefore has no observed controller-only TNT/win path;
+  adding one would require speculative object or VM mutation.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

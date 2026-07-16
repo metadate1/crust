@@ -965,6 +965,242 @@ impl UpTheCreekRouteController {
                     0
                 }
             }
+            28 => {
+                // Leave entity 44 for the narrow static pad before the paired
+                // orbiting platforms in 0h.
+                if self.tick >= 12
+                    && player.is_some_and(|player| {
+                        matches!(player.state, 1 | 2 | 10)
+                            && player.status_a & 1 != 0
+                            && (24_300_000..=24_600_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 29;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 8 { PAD_UP } else { PAD_UP | PAD_CROSS }
+            }
+            29 => {
+                self.stage = 30;
+                self.tick = 0;
+                PAD_UP
+            }
+            30 => {
+                // The second jump lands on the first orbiting platform. Its
+                // authored path must carry Crash forward before the side hop.
+                if self.tick >= 12
+                    && player.is_some_and(|player| {
+                        matches!(player.state, 1 | 2 | 10)
+                            && player.status_a & 1 != 0
+                            && (23_850_000..=24_050_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 31;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS
+            }
+            31 => {
+                // Wait for entity 33's forward apex; jumping immediately from
+                // its initial contact drops short of the companion platform.
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (2_240_000..=2_280_000).contains(&player.translation[0])
+                        && (23_220_000..=23_260_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 32;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            32 => {
+                if self.tick >= 15
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (1_850_000..=2_050_000).contains(&player.translation[0])
+                            && (23_150_000..=23_350_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 33;
+                    self.tick = 0;
+                    return 0;
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_LEFT | PAD_CROSS
+            }
+            33 => {
+                // Entity 32 begins behind the next island, so ride it until it
+                // has carried Crash past Z=22.65 before jumping straight on.
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (2_000_000..=2_100_000).contains(&player.translation[0])
+                        && player.translation[2] <= 22_650_000
+                }) {
+                    self.stage = 34;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            34 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (21_950_000..=22_250_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 35;
+                    self.tick = 0;
+                    return 0;
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS
+            }
+            35 => {
+                self.stage = 36;
+                self.tick = 0;
+                PAD_UP
+            }
+            36 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (21_300_000..=21_800_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 37;
+                    self.tick = 0;
+                    return 0;
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS | if tick < 4 { PAD_RIGHT } else { 0 }
+            }
+            37 => {
+                // Spin both counted crates, then take a short run-up toward
+                // the 0i-to-0j handoff.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 8 {
+                    PAD_SQUARE
+                } else if tick < 16 {
+                    PAD_UP
+                } else {
+                    self.stage = 38;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            38 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (20_800_000..=21_600_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 39;
+                    self.tick = 0;
+                    return 0;
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS
+            }
+            39 => {
+                self.stage = 40;
+                self.tick = 0;
+                PAD_UP
+            }
+            40 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (20_700_000..=21_100_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 41;
+                    self.tick = 0;
+                    return 0;
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS | if tick < 3 { PAD_LEFT } else { 0 }
+            }
+            41 => {
+                self.stage = 42;
+                self.tick = 0;
+                PAD_UP
+            }
+            42 => {
+                // Keep the spin held through the jump: it defeats entity 72
+                // at the authored contact boundary instead of killing Crash.
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (20_300_000..=20_650_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 43;
+                    self.tick = 0;
+                    return 0;
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS | PAD_SQUARE
+            }
+            43 => {
+                self.stage = 44;
+                self.tick = 0;
+                PAD_UP
+            }
+            44 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (19_750_000..=20_100_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 45;
+                    self.tick = 0;
+                    return 0;
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS | if tick < 2 { PAD_LEFT } else { 0 }
+            }
+            45 => {
+                // The checkpoint crate sits beyond entity 71. Ten grounded
+                // forward frames provide the retail jump's required reach.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 10 {
+                    PAD_UP
+                } else {
+                    self.stage = 46;
+                    self.tick = 0;
+                    self.held(camera, player)
+                }
+            }
+            46 => {
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (19_200_000..=19_600_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 47;
+                    self.tick = 0;
+                    return 0;
+                }
+                self.tick = self.tick.saturating_add(1);
+                PAD_UP | PAD_CROSS
+            }
+            // After stage 46, release the pad so the checkpoint bounce and
+            // synchronous save handshake remain an isolated boundary.
             _ => 0,
         }
     }
@@ -7967,7 +8203,7 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
     assert_eq!(survey.camera_ranges.len(), 10);
     assert_eq!(survey.camera_path_changes, 13);
     assert_eq!(survey.last_camera_path_change, 538);
-    assert_eq!(survey.last_camera_progress_change, 575);
+    assert_eq!(survey.last_camera_progress_change, 580);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain its 0f-to-0g handoff camera");
@@ -7978,10 +8214,10 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 9_670);
+    assert_eq!(final_camera.progress.raw(), 12_800);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_074_052, 1_647_954, 25_003_356])
+        Some([2_074_052, 1_647_954, 24_950_108])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -7990,9 +8226,9 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
         trace.zone,
         Eid::from_name("0g_oZ").expect("fixed Up the Creek platform-zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_074_052, 1_647_954, 25_003_356]);
-    assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 1);
+    assert_eq!(trace.translation, [2_074_052, 1_647_954, 24_950_108]);
+    assert_eq!(trace.velocity, [0, -136_000, -510_000]);
+    assert_eq!(trace.state, 2);
     assert_ne!(trace.status_a & 1, 0);
     assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(12)));
     assert_eq!(survey.final_live_objects, 27);
@@ -8008,6 +8244,132 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
     assert!(
         survey.is_clean(),
         "Up the Creek's 0g platform interaction crossed a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_direct_route_activates_first_checkpoint() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Up the Creek");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::UpTheCreekRoute,
+        1_057,
+    )
+    .expect("Up the Creek must execute through its first checkpoint handshake");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 1_057);
+    assert_eq!(survey.successful_spawns, 71);
+    assert_eq!(survey.spawn_attempts, 15_436);
+    assert_eq!(survey.expected_spawn_rejections, 15_365);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 35_975);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 12);
+    assert_eq!(survey.camera_ranges.len(), 18);
+    assert_eq!(survey.camera_path_changes, 21);
+    assert_eq!(survey.last_camera_path_change, 1_055);
+    assert_eq!(survey.last_camera_progress_change, 1_057);
+    let final_camera = survey
+        .final_camera
+        .expect("Up the Creek must retain its first-checkpoint camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0k_oZ").expect("fixed Up the Creek checkpoint-zone EID is valid"),
+            index: 1,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 1_171);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_144_160, 1_907_526, 19_457_328])
+    );
+    let trace = player_trace(&runtime)
+        .expect("Up the Creek player trace must resolve")
+        .expect("the first checkpoint bounce must keep Crash alive");
+    assert_eq!(trace.zone, final_camera.path.zone);
+    assert_eq!(trace.translation, [2_144_160, 1_907_526, 19_457_328]);
+    assert_eq!(trace.velocity, [0, 803_200, -571_900]);
+    assert_eq!(trace.state, 14);
+    assert_eq!(survey.final_live_objects, 23);
+    assert_eq!(survey.max_live_objects, 63);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(
+        survey.box_count_samples,
+        [(1, 0), (895, 0x100), (906, 0x200), (1_057, 0x300)]
+    );
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (896, -1, [2_148_864, 1_818_624, 21_605_376]),
+            (1_057, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_057, 0x200)]);
+    for boundary in [(895, 49, 3), (906, 50, 3), (969, 72, 3), (1_057, 76, 9)] {
+        assert!(
+            survey.spawn_flag_samples.contains(&boundary),
+            "the route must retain authored spawn-flag boundary {boundary:?}: {}",
+            survey.summary()
+        );
+    }
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&51));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&403));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x300));
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(76 << 8));
+    assert_eq!(
+        CHECKPOINT_TRANSLATION_GLOBALS.map(|index| {
+            runtime
+                .global_word(index)
+                .expect("checkpoint translation global is readable")
+                .cast_signed()
+        }),
+        [2_048_000, 1_738_240, 19_455_744]
+    );
+    let snapshot = runtime
+        .saved_level_state()
+        .expect("the first checkpoint must retain a restart snapshot");
+    assert_eq!(snapshot.level, level);
+    assert_eq!(
+        snapshot.player_translation,
+        [2_048_000, 1_738_240, 19_455_744]
+    );
+    assert_eq!(snapshot.player_rotation_yxz, [0; 3]);
+    assert_eq!(snapshot.player_scale, [4_096; 3]);
+    assert_eq!(snapshot.location.path, final_camera.path);
+    assert_eq!(snapshot.location.progress.raw(), 249);
+    assert_eq!(snapshot.box_count, 0x200);
+    assert!(!snapshot.death_resets_counter);
+    assert!(survey.next_lid.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(
+        survey.is_clean(),
+        "Up the Creek's first checkpoint handshake crossed a checked runtime boundary: {}",
         survey.summary()
     );
 }

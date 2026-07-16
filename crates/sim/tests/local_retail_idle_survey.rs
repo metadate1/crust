@@ -103,7 +103,8 @@ enum SurveyInputProfile {
     ForwardWithActions,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
-    GreatGateExactCarry,
+    GreatGatePhaseRobust,
+    GreatGateTawnaBonus,
     GreatGateYellowGemExactCarry,
     LocalPbakPrefix,
 }
@@ -123,7 +124,8 @@ impl SurveyInputProfile {
             Self::ForwardWithActions => "forward-with-actions",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
-            Self::GreatGateExactCarry => "great-gate-exact-carry",
+            Self::GreatGatePhaseRobust => "great-gate-phase-robust",
+            Self::GreatGateTawnaBonus => "great-gate-tawna-bonus",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
         }
@@ -135,7 +137,8 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweepToTransition
                 | Self::ForwardWithActions
                 | Self::JunglePhaseRobust
-                | Self::GreatGateExactCarry
+                | Self::GreatGatePhaseRobust
+                | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
         )
     }
@@ -169,6 +172,7 @@ impl JungleRouteController {
         }
 
         let zone_0b = Eid::from_name("0b_cZ").expect("fixed Jungle route EID is valid");
+        let zone_0d = Eid::from_name("0d_cZ").expect("fixed Jungle route EID is valid");
         let zone_0e = Eid::from_name("0e_cZ").expect("fixed Jungle route EID is valid");
         let zone_0f = Eid::from_name("0f_cZ").expect("fixed Jungle route EID is valid");
         let zone_0g = Eid::from_name("0g_cZ").expect("fixed Jungle route EID is valid");
@@ -196,6 +200,26 @@ impl JungleRouteController {
         let zone_0o_upper = Eid::from_name("0O_cZ").expect("fixed Jungle route EID is valid");
         let grounded = player.is_some_and(|player| player.status_a & 1 != 0);
         let progress = camera.progress.raw();
+        if camera.path.zone == zone_0d
+            && camera.path.index == 1
+            && (2_500..5_000).contains(&progress)
+        {
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.stage == 28
+            && camera.path.zone == zone_0g_upper
+            && camera.path.index == 0
+            && progress < 4_000
+        {
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.stage == 13
+            && camera.path.zone == zone_0u
+            && camera.path.index == 0
+            && progress < 1_000
+        {
+            return PAD_UP | PAD_RIGHT;
+        }
         let triggered = grounded
             && match self.stage {
                 0 => camera.path.zone == zone_0b && camera.path.index == 1 && progress >= 4_000,
@@ -210,7 +234,7 @@ impl JungleRouteController {
                 9 => camera.path.zone == zone_0p && camera.path.index == 0 && progress >= 21_000,
                 10 => camera.path.zone == zone_0q && camera.path.index == 0 && progress >= 10_500,
                 11 => camera.path.zone == zone_0r && camera.path.index == 0 && progress >= 18_000,
-                12 => camera.path.zone == zone_0s && camera.path.index == 0 && progress >= 18_000,
+                12 => camera.path.zone == zone_0s && camera.path.index == 0 && progress >= 19_900,
                 13 => camera.path.zone == zone_0u && camera.path.index == 0 && progress >= 12_000,
                 14 => camera.path.zone == zone_0u && camera.path.index == 1 && progress >= 5_000,
                 15 => camera.path.zone == zone_0u && camera.path.index == 1 && progress >= 18_500,
@@ -309,7 +333,14 @@ impl JungleRouteController {
                 button_frames: 32,
                 ..RouteAction::default()
             },
-            11 | 12 => RouteAction {
+            11 => RouteAction {
+                button: PAD_CROSS,
+                button_frames: 32,
+                ..RouteAction::default()
+            },
+            12 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 28,
                 button: PAD_CROSS,
                 button_frames: 32,
                 ..RouteAction::default()
@@ -317,6 +348,13 @@ impl JungleRouteController {
             14 => RouteAction {
                 button: PAD_SQUARE,
                 button_frames: 8,
+                ..RouteAction::default()
+            },
+            17 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: 48,
+                button: PAD_CROSS,
+                button_frames: 16,
                 ..RouteAction::default()
             },
             24 => RouteAction {
@@ -331,7 +369,7 @@ impl JungleRouteController {
             },
             28 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 32,
+                direction_frames: 40,
                 button: PAD_CROSS,
                 button_frames: 32,
                 ..RouteAction::default()
@@ -974,11 +1012,11 @@ impl NSanityRouteController {
     }
 }
 
-/// State-anchored route through The Great Gate's normal end `WarpC`. The
-/// opening sequence is anchored to the end of Crash's authored spawn animation
-/// and the first climb waits for grounded camera locations. Past that anchor,
-/// short pad windows preserve the authentic carried hazard phase through the
-/// checkpoint, rotating logs, later gaps, and final warp.
+/// State-anchored route through The Great Gate's normal end `WarpC` or the
+/// Yellow Gem platform path. The opening sequence is anchored to the end of
+/// Crash's authored spawn animation and the first climb waits for grounded
+/// camera locations. Past that anchor, short pad windows preserve the
+/// authentic carried hazard phase through the checkpoint and later gaps.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct GreatGateRouteController {
     yellow_gem_route: bool,
@@ -987,15 +1025,64 @@ struct GreatGateRouteController {
     stage: u8,
     active: Option<RouteAction>,
     action_tick: u8,
+    pickup_wait_frames: u16,
 }
 
 impl GreatGateRouteController {
     // Keep equal actions as separate numbered stages so the deterministic
     // route remains auditable against its frame-by-frame pad trace.
     #[allow(clippy::match_same_arms)]
-    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        collect_tawna_tokens: bool,
+    ) -> u32 {
         if let Some(action) = self.active {
-            let held = action.held(self.action_tick);
+            let mut held = action.held(self.action_tick);
+            if !self.yellow_gem_route && self.stage == 72 && (18..48).contains(&self.action_tick) {
+                held = 0;
+            }
+            if self.stage == 90 && self.action_tick >= 4 {
+                held &= !PAD_UP;
+            }
+            if self.stage == 102 && !collect_tawna_tokens && self.action_tick < 16 {
+                held = 0;
+            }
+            if self.stage == 102
+                && !collect_tawna_tokens
+                && !self.yellow_gem_route
+                && camera.path.zone
+                    == Eid::from_name("c6_iZ").expect("fixed Great Gate route EID is valid")
+            {
+                held = PAD_RIGHT;
+            }
+            if self.stage == 102
+                && self.yellow_gem_route
+                && self.action_tick < 47
+                && camera.path.zone
+                    == Eid::from_name("c6_iZ").expect("fixed Great Gate route EID is valid")
+            {
+                held = PAD_RIGHT;
+            }
+            if self.stage == 106 && self.yellow_gem_route {
+                held &= !(PAD_UP | PAD_DOWN);
+                if self.action_tick < 3 {
+                    held |= PAD_UP;
+                }
+            }
+            if self.stage == 107 && self.yellow_gem_route {
+                let braking = self.action_tick >= 24
+                    && player.is_some_and(|player| player.translation[0] <= 3_780_000);
+                if braking {
+                    held = PAD_RIGHT;
+                } else {
+                    held = PAD_LEFT;
+                    if self.action_tick < 16 || self.action_tick >= 24 {
+                        held |= PAD_CROSS;
+                    }
+                }
+            }
             self.action_tick = self.action_tick.saturating_add(1);
             if self.action_tick >= action.total_frames() {
                 self.active = None;
@@ -1021,10 +1108,42 @@ impl GreatGateRouteController {
         let a8 = Eid::from_name("a8_iZ").expect("fixed Great Gate route EID is valid");
         let a9 = Eid::from_name("a9_iZ").expect("fixed Great Gate route EID is valid");
         let b0 = Eid::from_name("b0_iZ").expect("fixed Great Gate route EID is valid");
-        let c6 = Eid::from_name("c6_iZ").expect("fixed Great Gate route EID is valid");
         let c7 = Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid");
         let grounded = player.status_a & 1 != 0;
         let progress = camera.progress.raw();
+
+        // Retain forward momentum between the two c7 platform jumps, but
+        // release Cross so the grounded action below produces a fresh tap.
+        if self.yellow_gem_route && self.stage == 109 && camera.path.zone == c7 && !grounded {
+            return PAD_LEFT;
+        }
+
+        let pickup_target = if self.stage == 76 && player.tawna_counter < 0x200 {
+            Some([15_154_944, 127_744])
+        } else if collect_tawna_tokens && self.stage == 102 && player.tawna_counter < 0x300 {
+            Some([5_426_944, 127_744])
+        } else {
+            None
+        };
+        if let Some([target_x, target_z]) = pickup_target {
+            self.pickup_wait_frames = self.pickup_wait_frames.saturating_add(1);
+            let mut held = 0;
+            if player.translation[0] < target_x - 20_000 {
+                held |= PAD_RIGHT;
+            } else if player.translation[0] > target_x + 20_000 {
+                held |= PAD_LEFT;
+            }
+            if player.translation[2] < target_z - 12_000 {
+                held |= PAD_DOWN;
+            } else if player.translation[2] > target_z + 12_000 {
+                held |= PAD_UP;
+            }
+            if (self.pickup_wait_frames % 45) >= 14 && (self.pickup_wait_frames % 45) < 30 {
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        self.pickup_wait_frames = 0;
 
         if self.opening_stage < 12 {
             if self.opening_stage == 0 && self.opening_ready_frames < 4 {
@@ -1115,7 +1234,7 @@ impl GreatGateRouteController {
                 },
                 _ => unreachable!("all Great Gate opening stages are matched"),
             });
-            return self.held(camera, Some(player));
+            return self.held(camera, Some(player), collect_tawna_tokens);
         }
 
         let triggered = match self.stage {
@@ -1156,7 +1275,7 @@ impl GreatGateRouteController {
             }
             40 => camera.path.zone == b0 && camera.path.index == 1 && grounded,
             107 if self.yellow_gem_route => true,
-            108 if self.yellow_gem_route => camera.path.zone == c6 && grounded,
+            108 if self.yellow_gem_route => grounded,
             109 if self.yellow_gem_route => camera.path.zone == c7 && grounded,
             110 if self.yellow_gem_route => camera.path.zone == c7 && grounded,
             _ => false,
@@ -1179,12 +1298,16 @@ impl GreatGateRouteController {
             2 => RouteAction {
                 direction: PAD_RIGHT,
                 direction_frames: 80,
-                ..RouteAction::default()
+                button: PAD_CROSS | PAD_SQUARE,
+                button_start: 40,
+                button_frames: 11,
             },
             4 => RouteAction {
                 direction: PAD_RIGHT,
                 direction_frames: 60,
-                ..RouteAction::default()
+                button: PAD_CROSS | PAD_SQUARE,
+                button_start: 4,
+                button_frames: 11,
             },
             5 | 22 => RouteAction {
                 direction: PAD_RIGHT,
@@ -1521,7 +1644,7 @@ impl GreatGateRouteController {
             },
             72 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 52,
+                direction_frames: if self.yellow_gem_route { 52 } else { 82 },
                 ..RouteAction::default()
             },
             73 => RouteAction {
@@ -1534,6 +1657,12 @@ impl GreatGateRouteController {
             74 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 24,
+                button: if self.yellow_gem_route {
+                    0
+                } else {
+                    PAD_CROSS | PAD_SQUARE
+                },
+                button_frames: if self.yellow_gem_route { 0 } else { 16 },
                 ..RouteAction::default()
             },
             75 => RouteAction {
@@ -1544,7 +1673,7 @@ impl GreatGateRouteController {
                 ..RouteAction::default()
             },
             76 => RouteAction {
-                direction: PAD_DOWN | PAD_LEFT,
+                direction: PAD_LEFT,
                 direction_frames: 96,
                 ..RouteAction::default()
             },
@@ -1569,8 +1698,8 @@ impl GreatGateRouteController {
                 direction: PAD_LEFT,
                 direction_frames: 16,
                 button: PAD_CROSS,
-                button_frames: 16,
-                ..RouteAction::default()
+                button_start: 8,
+                button_frames: 8,
             },
             81 => RouteAction {
                 direction: PAD_LEFT,
@@ -1579,10 +1708,10 @@ impl GreatGateRouteController {
             },
             82 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 16,
+                direction_frames: 24,
                 button: PAD_CROSS,
+                button_start: 8,
                 button_frames: 16,
-                ..RouteAction::default()
             },
             83 => RouteAction {
                 direction: PAD_LEFT,
@@ -1616,7 +1745,9 @@ impl GreatGateRouteController {
             88 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 72,
-                ..RouteAction::default()
+                button: PAD_CROSS | PAD_SQUARE,
+                button_start: 32,
+                button_frames: 11,
             },
             89 => RouteAction {
                 direction: PAD_LEFT,
@@ -1629,10 +1760,12 @@ impl GreatGateRouteController {
             90 => RouteAction {
                 direction: PAD_UP | PAD_LEFT,
                 direction_frames: 22,
+                button: PAD_CROSS,
+                button_frames: 22,
                 ..RouteAction::default()
             },
             91 => RouteAction {
-                direction: PAD_UP | PAD_LEFT,
+                direction: PAD_LEFT,
                 direction_frames: 16,
                 button: PAD_CROSS,
                 button_frames: 16,
@@ -1643,7 +1776,7 @@ impl GreatGateRouteController {
             // one jump onto the log and a second jump off its far edge.
             92 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 18,
+                direction_frames: 14,
                 ..RouteAction::default()
             },
             93 => RouteAction {
@@ -1678,7 +1811,9 @@ impl GreatGateRouteController {
             98 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 62,
-                ..RouteAction::default()
+                button: PAD_CROSS,
+                button_start: 48,
+                button_frames: 14,
             },
             99 => RouteAction {
                 direction: PAD_LEFT,
@@ -1697,46 +1832,78 @@ impl GreatGateRouteController {
             101 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 8,
-                button: PAD_SQUARE,
+                button: if collect_tawna_tokens {
+                    PAD_SQUARE
+                } else {
+                    PAD_CROSS
+                },
                 button_frames: 8,
                 ..RouteAction::default()
             },
             // Jump off c6's lowered WalOC, then cross the final gap into c7.
             102 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 51,
+                direction_frames: if collect_tawna_tokens { 51 } else { 67 },
+                button: if collect_tawna_tokens {
+                    0
+                } else {
+                    PAD_CROSS | PAD_SQUARE
+                },
+                button_start: if collect_tawna_tokens { 0 } else { 24 },
+                button_frames: if collect_tawna_tokens { 0 } else { 16 },
                 ..RouteAction::default()
             },
             103 => RouteAction {
-                direction: PAD_LEFT,
+                direction: if self.yellow_gem_route {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                },
                 direction_frames: 16,
-                button: PAD_CROSS | PAD_SQUARE,
+                button: if self.yellow_gem_route {
+                    PAD_SQUARE
+                } else {
+                    PAD_CROSS | PAD_SQUARE
+                },
                 button_frames: 16,
                 ..RouteAction::default()
             },
             104 => RouteAction {
-                direction: PAD_LEFT,
-                direction_frames: 18,
+                direction: if self.yellow_gem_route {
+                    PAD_DOWN | PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                },
+                direction_frames: if self.yellow_gem_route {
+                    18
+                } else if collect_tawna_tokens {
+                    18
+                } else {
+                    12
+                },
                 ..RouteAction::default()
             },
             105 => RouteAction {
+                direction: PAD_LEFT,
+                direction_frames: if self.yellow_gem_route { 48 } else { 16 },
+                button: PAD_CROSS,
+                button_start: if self.yellow_gem_route { 24 } else { 0 },
+                button_frames: 16,
+            },
+            // The Yellow Gem's retail entitlement makes GemsC subtype five
+            // solid. Enter its narrow depth lane before the staged c6 jumps.
+            106 if self.yellow_gem_route => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 16,
                 button: PAD_CROSS,
                 button_frames: 16,
                 ..RouteAction::default()
             },
-            // The Yellow Gem's retail entitlement makes GemsC subtype five
-            // solid. Release Cross before jumping onto c6's upper platform.
-            106 if self.yellow_gem_route => RouteAction {
-                direction_frames: 8,
-                ..RouteAction::default()
-            },
             107 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 10,
-                button: PAD_CROSS,
-                button_frames: 16,
+                direction_frames: if self.yellow_gem_route { 38 } else { 10 },
+                button: if self.yellow_gem_route { 0 } else { PAD_CROSS },
+                button_frames: if self.yellow_gem_route { 0 } else { 16 },
                 ..RouteAction::default()
             },
             108 => RouteAction {
@@ -1763,11 +1930,14 @@ impl GreatGateRouteController {
             106 => RouteAction {
                 direction: PAD_LEFT,
                 direction_frames: 250,
+                button: PAD_CROSS,
+                button_start: 18,
+                button_frames: 16,
                 ..RouteAction::default()
             },
             _ => unreachable!("all triggered Great Gate stages are matched"),
         });
-        self.held(camera, Some(player))
+        self.held(camera, Some(player), collect_tawna_tokens)
     }
 }
 
@@ -1806,6 +1976,7 @@ impl SurveyInputController {
                 stage: 0,
                 active: None,
                 action_tick: 0,
+                pickup_wait_frames: 0,
             },
         }
     }
@@ -1832,9 +2003,10 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::JunglePhaseRobust => self.jungle.held(camera, player),
-            SurveyInputProfile::GreatGateExactCarry
-            | SurveyInputProfile::GreatGateYellowGemExactCarry => {
-                self.great_gate.held(camera, player)
+            SurveyInputProfile::GreatGatePhaseRobust => self.great_gate.held(camera, player, false),
+            SurveyInputProfile::GreatGateTawnaBonus => self.great_gate.held(camera, player, true),
+            SurveyInputProfile::GreatGateYellowGemExactCarry => {
+                self.great_gate.held(camera, player, false)
             }
             SurveyInputProfile::LocalPbakPrefix => local_pbak_held
                 .expect("the legally local PBAK prefix is loaded before frame execution"),
@@ -1861,6 +2033,7 @@ struct PlayerTrace {
     state_flags: u32,
     status_a: u32,
     status_b: u32,
+    tawna_counter: u32,
     event: u32,
     animation_stamp: u32,
     state_stamp: u32,
@@ -2759,6 +2932,7 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
         state_flags: register(process_register::STATE_FLAGS)?,
         status_a: register(process_register::STATUS_A)?,
         status_b: register(process_register::STATUS_B)?,
+        tawna_counter: register(0x48)?,
         event: register(process_register::EVENT)?,
         animation_stamp: register(process_register::ANIMATION_STAMP)?,
         state_stamp: register(process_register::STATE_STAMP)?,
@@ -3418,12 +3592,14 @@ fn survey_pair_with_runtime(
             && matches!(
                 input_profile,
                 SurveyInputProfile::ForwardWithActions
-                    | SurveyInputProfile::GreatGateExactCarry
+                    | SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
             )
             && (matches!(
                 input_profile,
-                SurveyInputProfile::GreatGateExactCarry
+                SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
             ) || frame >= 300
                 || frame <= 120)
@@ -5413,7 +5589,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         3_000,
     )
     .expect("Jungle Rollers authentic-phase route must execute");
-    assert_eq!(jungle_survey.frames, 2_546);
+    assert_eq!(jungle_survey.frames, 2_602);
     assert_eq!(jungle_survey.zone_transitions, 30);
     assert_eq!(jungle_survey.restarts, 0);
     assert!(jungle_survey.restart_frames.is_empty());
@@ -5422,7 +5598,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     assert!(jungle_survey.first_terminal_fall.is_none());
     assert_eq!(
         jungle_survey.next_lid,
-        Some((2_546, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+        Some((2_602, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
     );
     assert_eq!(jungle_survey.faulted_objects, 0);
     assert_eq!(jungle_survey.execution_errors, 0);
@@ -5442,25 +5618,22 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         jungle_survey.box_count_samples,
         [
             (1, 0),
-            (291, 0x100),
-            (533, 0x200),
-            (534, 0x300),
-            (1_025, 0x400),
-            (1_117, 0x500),
-            (1_149, 0x600),
-            (1_150, 0x700),
-            (1_153, 0x800),
-            (1_154, 0x900),
-            (1_155, 0xa00),
-            (1_168, 0xb00),
-            (1_344, 0xc00),
-            (1_502, 0xd00),
-            (1_503, 0xe00),
-            (1_504, 0xf00),
-            (1_872, 0x1000),
+            (533, 0x100),
+            (534, 0x200),
+            (1_117, 0x300),
+            (1_148, 0x400),
+            (1_149, 0x500),
+            (1_152, 0x600),
+            (1_153, 0x700),
+            (1_154, 0x800),
+            (1_162, 0x900),
+            (1_168, 0xa00),
+            (1_558, 0xb00),
+            (1_559, 0xc00),
+            (1_560, 0xd00),
         ]
     );
-    assert_eq!(jungle_survey.saved_box_count_samples, [(1_117, 0x400)]);
+    assert_eq!(jungle_survey.saved_box_count_samples, [(1_117, 0x200)]);
     assert_eq!(
         jungle_survey.effect_counts.get("save-state").copied(),
         Some(1)
@@ -5485,7 +5658,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         }),
         [-563_968, 2_236_928, 15_717_376]
     );
-    assert_eq!(jungle_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x1000));
+    assert_eq!(jungle_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xd00));
     let jungle_final_camera = jungle_survey
         .final_camera
         .expect("Jungle Rollers route retains a camera location");
@@ -5499,10 +5672,10 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     assert_eq!(jungle_final_camera.progress.raw(), 17_836);
     assert_eq!(
         jungle_survey.final_player_translation,
-        Some([2_193_152, 7_732_277, -2_147_072])
+        Some([2_193_152, 7_732_265, -2_147_072])
     );
-    assert_eq!(jungle_runtime.machine().random_seed(), 0x742c_4322);
-    assert_eq!(jungle_runtime.draw_count(), 5_223);
+    assert_eq!(jungle_runtime.machine().random_seed(), 0x10f8_41ad);
+    assert_eq!(jungle_runtime.draw_count(), 5_279);
 
     let jungle_completion_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&jungle_nsd, &jungle_nsf, &jungle_nsf_bytes);
@@ -5548,8 +5721,8 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             0,
         ]
     );
-    assert_eq!(jungle_completion_carry.random_seed, 0x742c_4322);
-    assert_eq!(jungle_completion_carry.draw_count, 5_223);
+    assert_eq!(jungle_completion_carry.random_seed, 0x10f8_41ad);
+    assert_eq!(jungle_completion_carry.draw_count, 5_279);
     let jungle_completion_runtime = RetailRuntime::new_from_session(
         GLOBAL_WORDS,
         LevelId::LEVEL_COMPLETE,
@@ -5568,7 +5741,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         COMPLETION_FRAMES,
     )
     .expect("Jungle Rollers' Level Complete runtime must execute");
-    assert_eq!(jungle_completion_survey.frames, 306);
+    assert_eq!(jungle_completion_survey.frames, 393);
     assert_eq!(jungle_completion_survey.zone_transitions, 0);
     assert_eq!(jungle_completion_survey.restarts, 0);
     assert!(jungle_completion_survey.restart_frames.is_empty());
@@ -5577,7 +5750,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     assert!(jungle_completion_survey.first_terminal_fall.is_none());
     assert_eq!(
         jungle_completion_survey.next_lid,
-        Some((306, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        Some((393, i32::try_from(LevelId::TITLE.get()).unwrap()))
     );
     assert_eq!(jungle_completion_survey.faulted_objects, 0);
     assert_eq!(jungle_completion_survey.execution_errors, 0);
@@ -5616,9 +5789,9 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     );
     assert_eq!(
         jungle_completion_runtime.machine().random_seed(),
-        0xa442_cb3a
+        0xbeee_4520
     );
-    assert_eq!(jungle_completion_runtime.draw_count(), 5_529);
+    assert_eq!(jungle_completion_runtime.draw_count(), 5_672);
 
     let post_jungle_title_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -5661,16 +5834,16 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             0,
         ]
     );
-    assert_eq!(post_jungle_title_carry.random_seed, 0xa442_cb3a);
-    assert_eq!(post_jungle_title_carry.draw_count, 5_529);
+    assert_eq!(post_jungle_title_carry.random_seed, 0xbeee_4520);
+    assert_eq!(post_jungle_title_carry.draw_count, 5_672);
     let mut post_jungle_map = AuthoredTitleMapHarness::from_session(
         &title_nsd,
         &title_nsf,
         &title_nsf_bytes,
         post_jungle_title_carry,
     );
-    assert_eq!(post_jungle_map.runtime.draw_count(), 5_529);
-    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0xa442_cb3a);
+    assert_eq!(post_jungle_map.runtime.draw_count(), 5_672);
+    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0xbeee_4520);
     post_jungle_map.wait_until_ready(64);
     assert_eq!(post_jungle_map.frame, 10);
     for _ in 0..120 {
@@ -5715,8 +5888,8 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         ]
     );
     assert_eq!(post_jungle_map.runtime.faulted_object_count(), 0);
-    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x4a04_f4bf);
-    assert_eq!(post_jungle_map.runtime.draw_count(), 5_782);
+    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x679d_ffe4);
+    assert_eq!(post_jungle_map.runtime.draw_count(), 5_925);
 
     let great_gate_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -5757,12 +5930,12 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             1,
         ]
     );
-    assert_eq!(great_gate_carry.random_seed, 0x4a04_f4bf);
-    assert_eq!(great_gate_carry.draw_count, 5_782);
+    assert_eq!(great_gate_carry.random_seed, 0x679d_ffe4);
+    assert_eq!(great_gate_carry.draw_count, 5_925);
     let (great_gate_nsd, great_gate_nsf, great_gate_nsf_bytes) =
         parse_local_pair(&root, great_gate).expect("The Great Gate pair must parse");
     let great_gate_runtime =
-        RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry)
+        RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry.clone())
             .expect("The Great Gate must import the second-completion map carry");
     let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_runtime(
         known_name(great_gate),
@@ -5772,29 +5945,26 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         &great_gate_nsf_bytes,
         great_gate_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::GreatGateExactCarry,
-        2_600,
+        SurveyInputProfile::GreatGateTawnaBonus,
+        4_000,
     )
-    .expect("The Great Gate must execute through its end WarpC transition");
-    assert_eq!(great_gate_survey.frames, 2_372);
-    assert_eq!(great_gate_survey.successful_spawns, 97);
-    assert_eq!(great_gate_survey.executions, 39_979);
-    assert_eq!(great_gate_survey.zone_transitions, 34);
-    assert_eq!(great_gate_survey.camera_ranges.len(), 30);
-    assert_eq!(great_gate_survey.camera_path_changes, 37);
-    assert_eq!(great_gate_survey.last_camera_path_change, 2_272);
+    .expect("The Great Gate must execute through its Tawna bonus transition");
+    assert_eq!(great_gate_survey.frames, 2_321);
+    assert_eq!(great_gate_survey.successful_spawns, 85);
+    assert_eq!(great_gate_survey.executions, 43_706);
+    assert_eq!(great_gate_survey.zone_transitions, 32);
+    assert_eq!(great_gate_survey.camera_ranges.len(), 28);
+    assert_eq!(great_gate_survey.camera_path_changes, 35);
+    assert_eq!(great_gate_survey.last_camera_path_change, 2_175);
     assert_eq!(great_gate_survey.restarts, 0);
     assert!(great_gate_survey.restart_frames.is_empty());
     assert_eq!(great_gate_survey.death_camera_frames, 0);
     assert!(great_gate_survey.first_terminal_fall.is_none());
     assert_eq!(
         great_gate_survey.terminal.as_deref(),
-        Some("frame 2372 requested level transition to 0x2d")
+        Some("frame 2321 requested level transition to 0x33")
     );
-    assert_eq!(
-        great_gate_survey.next_lid,
-        Some((2_372, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
-    );
+    assert_eq!(great_gate_survey.next_lid, Some((2_321, 0x33)));
     assert_eq!(great_gate_survey.faulted_objects, 0);
     assert_eq!(great_gate_survey.execution_errors, 0);
     assert_eq!(
@@ -5811,11 +5981,11 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             (769, 0x800),
             (779, 0x900),
             (1_152, 0xa00),
-            (1_472, 0xb00),
-            (1_473, 0xc00),
-            (1_474, 0xd00),
-            (1_758, 0xe00),
-            (2_167, 0xf00),
+            (1_502, 0xb00),
+            (1_503, 0xc00),
+            (1_504, 0xd00),
+            (1_817, 0xe00),
+            (2_222, 0xf00),
         ]
     );
     assert_eq!(
@@ -5824,9 +5994,15 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             (1, -1, [-563_968, 2_236_928, 15_717_376]),
             (515, -1, [15_871_744, -10_670_848, 127_744]),
             (1_152, 76 << 8, [20_991_488, -8_397_312, 127_744]),
+            (1_532, 76 << 8, [15_154_944, -8_104_292, 127_744]),
+            (2_263, 76 << 8, [5_426_944, -8_332_092, 127_744]),
+            (2_265, 113 << 8, [5_426_944, -8_332_092, 127_744]),
         ]
     );
-    assert_eq!(great_gate_survey.saved_box_count_samples, [(1_152, 0x900)]);
+    assert_eq!(
+        great_gate_survey.saved_box_count_samples,
+        [(1_152, 0x900), (2_265, 0xf00)]
+    );
     assert!(
         great_gate_survey
             .spawn_flag_samples
@@ -5841,7 +6017,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("send-event").copied(),
-        Some(162)
+        Some(177)
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("transition").copied(),
@@ -5849,32 +6025,32 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("save-state").copied(),
-        Some(1)
+        Some(2)
     );
     assert!(
         great_gate_survey.is_clean(),
-        "The Great Gate end-Warp route must remain clean: {}",
+        "The Great Gate Tawna route must remain clean: {}",
         great_gate_survey.summary()
     );
     let great_gate_camera = great_gate_survey
         .final_camera
-        .expect("The Great Gate end-Warp route retains a camera location");
+        .expect("The Great Gate Tawna route retains a camera location");
     assert_eq!(
         great_gate_camera.path,
         RetailPathId {
-            zone: Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid"),
+            zone: Eid::from_name("c5_iZ").expect("fixed Great Gate route EID is valid"),
             index: 0,
         }
     );
-    assert_eq!(great_gate_camera.progress.raw(), 5_292);
+    assert_eq!(great_gate_camera.progress.raw(), 16_550);
     assert_eq!(
         great_gate_survey.final_player_translation,
-        Some([3_483_392, -4_780_693, 83_712])
+        Some([5_408_512, -8_168_640, 116_480])
     );
     assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xf00));
     assert_eq!(
         great_gate_runtime.global_word(CHECKPOINT_ID_GLOBAL),
-        Ok(76 << 8)
+        Ok(113 << 8)
     );
     assert_eq!(
         CHECKPOINT_TRANSLATION_GLOBALS.map(|index| {
@@ -5883,7 +6059,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
                 .expect("checkpoint translation global is readable")
                 .cast_signed()
         }),
-        [20_991_488, -8_397_312, 127_744]
+        [5_426_944, -8_332_092, 127_744]
     );
 
     let waloc = Eid::from_name("WalOC").expect("fixed rotating-log EID is valid");
@@ -5893,393 +6069,868 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             .contains(&(waloc, 2)),
         "the route must flip the rotating log into its horizontal state before climbing"
     );
-    let warp = Eid::from_name("WarpC").expect("fixed warp EID is valid");
-    let crash = Eid::from_name("WillC").expect("fixed player EID is valid");
-    assert!(
-        great_gate_survey
-            .observed_program_states
-            .contains(&(warp, 1)),
-        "the route must activate the normal end WarpC"
-    );
-    assert!(
-        great_gate_survey
-            .observed_program_states
-            .contains(&(crash, 32)),
-        "WarpC must hand Crash to authored warp state 32"
-    );
+    for token in [(514, 27, 7), (1_504, 89, 7), (2_263, 113, 10)] {
+        assert!(
+            great_gate_survey.spawn_flag_samples.contains(&token),
+            "all three authored Tawna crates must break on the carried route: {token:?}"
+        );
+    }
+    assert_eq!(great_gate_runtime.global_word(60), Ok(4));
+    assert_eq!(great_gate_runtime.machine().random_seed(), 0x4ca9_620f);
+    assert_eq!(great_gate_runtime.draw_count(), 8_246);
     assert_eq!(
-        [
-            GAME_STATE_GLOBAL,
-            TITLE_STATE_GLOBAL,
-            SAVED_TITLE_STATE_GLOBAL,
-            CURRENT_MAP_LEVEL_GLOBAL,
-            LEVEL_COUNT_GLOBAL,
-            LEVELS_UNLOCKED_GLOBAL,
-            ISLAND_CAMERA_STATE_GLOBAL,
-        ]
-        .map(|index| great_gate_runtime.global_word(index).unwrap()),
-        [
-            0x500,
-            TitleScreen::Map.raw(),
-            TitleScreen::Map.raw(),
-            3,
-            1,
-            4,
-            0,
-        ]
+        player_trace(&great_gate_runtime)
+            .unwrap()
+            .expect("Crash remains live through the bonus transition")
+            .tawna_counter,
+        0,
+        "DispC clears the three-token counter after selecting Bonus 2"
     );
-    assert_eq!(great_gate_runtime.machine().random_seed(), 0x9ada_2711);
-    assert_eq!(great_gate_runtime.draw_count(), 8_154);
+    let expected_parent_snapshot = great_gate_runtime
+        .saved_level_state()
+        .cloned()
+        .expect("the third Tawna pickup must save the complete Great Gate return state");
+    assert_eq!(expected_parent_snapshot.level, great_gate);
+    assert_eq!(expected_parent_snapshot.box_count, 0xf00);
+    assert_eq!(
+        expected_parent_snapshot.player_translation,
+        [5_426_944, -8_332_092, 127_744]
+    );
+    assert_eq!(expected_parent_snapshot.location.progress.raw(), 293);
 
-    let great_gate_completion_carry: RetailSessionCarry = {
+    let bonus = LevelId::new_const(0x33);
+    let bonus_transition = {
         let mut host = NsfProgramHost::new(&great_gate_nsd, &great_gate_nsf, &great_gate_nsf_bytes);
-        let report = great_gate_runtime
+        great_gate_runtime
             .finish_level_transition(
                 &mut host,
-                i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+                i32::try_from(bonus.get()).expect("bonus LID fits i32"),
             )
-            .expect("The Great Gate LEVEL_END must export a Level Complete carry");
-        assert!(
-            report.event_failures.is_empty(),
-            "The Great Gate LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
-        );
-        assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
-        assert!(!report.resolved.bonus_return);
-        assert!(report.effects.is_empty());
-        report.carry
+            .expect("The Great Gate LEVEL_END phase must preserve Bonus 2")
     };
+    assert!(bonus_transition.event_failures.is_empty());
+    assert_eq!(bonus_transition.resolved.level, bonus);
+    assert!(!bonus_transition.resolved.bonus_return);
     assert_eq!(
-        [
-            GAME_STATE_GLOBAL,
-            TITLE_STATE_GLOBAL,
-            SAVED_TITLE_STATE_GLOBAL,
-            CURRENT_MAP_LEVEL_GLOBAL,
-            LEVEL_COUNT_GLOBAL,
-            LEVELS_UNLOCKED_GLOBAL,
-            ISLAND_CAMERA_STATE_GLOBAL,
-        ]
-        .map(|index| great_gate_completion_carry.globals[index]),
-        [
-            0x500,
-            TitleScreen::Map.raw(),
-            TitleScreen::Map.raw(),
-            3,
-            1,
-            4,
-            0,
-        ]
+        bonus_transition.carry.saved_level_state.as_ref(),
+        Some(&expected_parent_snapshot)
     );
-    assert_eq!(great_gate_completion_carry.random_seed, 0x9ada_2711);
-    assert_eq!(great_gate_completion_carry.draw_count, 8_154);
-    let great_gate_completion_runtime = RetailRuntime::new_from_session(
-        GLOBAL_WORDS,
-        LevelId::LEVEL_COMPLETE,
-        great_gate_completion_carry,
+
+    let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
+        parse_local_pair(&root, bonus).expect("Bonus 2 pair must parse");
+    let bonus_graph = graph_for_pair(bonus, &bonus_nsd, &bonus_nsf, &bonus_nsf_bytes)
+        .expect("Bonus 2 zone graph must parse");
+    let (bonus_zones, _) = zone_catalog(
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        &bonus_graph,
+        bonus,
     )
-    .expect("Level Complete must import The Great Gate's session carry");
-    let (great_gate_completion_survey, mut great_gate_completion_runtime) =
-        survey_pair_with_runtime(
-            known_name(LevelId::LEVEL_COMPLETE),
-            LevelId::LEVEL_COMPLETE,
-            &completion_nsd,
-            &completion_nsf,
-            &completion_nsf_bytes,
-            great_gate_completion_runtime,
-            LevelContextSource::SessionGlobals,
-            SurveyInputProfile::DirectionAndButtonSweepToTransition,
-            COMPLETION_FRAMES,
+    .expect("Bonus 2 zones must parse");
+    let bonus_spawn = bonus_graph
+        .zone(bonus_graph.spawn_path().zone)
+        .expect("Bonus 2 spawn zone must be present");
+    assert_eq!(bonus_spawn.graphics_flags, 0x2002);
+    let portal_zone = Eid::from_name("2__PZ").expect("fixed Bonus 2 portal zone EID is valid");
+    let portal_entity = bonus_zones[&portal_zone]
+        .entities
+        .iter()
+        .find(|entity| entity.id == 14)
+        .expect("Bonus 2's authored return portal must be present");
+    assert_eq!(
+        (
+            portal_entity.group,
+            portal_entity.executable,
+            portal_entity.subtype,
+            portal_entity.spawn_flags,
+        ),
+        (3, 0x20, 1, 0x0008)
+    );
+
+    let bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, bonus_transition.carry)
+            .expect("Bonus 2 must import the Great Gate session carry");
+    let (_, mut bonus_runtime) = survey_pair_with_runtime(
+        known_name(bonus),
+        bonus,
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        bonus_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Bonus 2 must mount with the carried Great Gate snapshot");
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&expected_parent_snapshot),
+        "the save-restricted bonus spawn must not replace its parent return"
+    );
+
+    let player = bonus_runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| bonus_runtime.object_for_arena(arena))
+        .expect("mounted Bonus 2 must have Crash");
+    let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    let portal_entities = [portal_entity.clone()];
+    let portal_display_flags = bonus_graph
+        .zone(portal_zone)
+        .expect("Bonus 2 portal zone must be in its graph")
+        .display_flags
+        | 2;
+    let portal_attempts = bonus_runtime.spawn_current_zone_neighbors(
+        &[NeighborZone {
+            eid: portal_zone,
+            display_flags: portal_display_flags,
+            entities: &portal_entities,
+        }],
+        &mut bonus_host,
+    );
+    assert_eq!(portal_attempts.len(), 1);
+    let warp = *portal_attempts[0]
+        .result
+        .as_ref()
+        .expect("Bonus 2's authored WarpC portal must materialize");
+    assert_eq!(
+        bonus_runtime
+            .machine()
+            .object(warp.vm())
+            .ok()
+            .and_then(crust_sim::gool::VmObject::program_identity)
+            .map(GoolProgramIdentity::global_eid),
+        Some(Eid::from_name("WarpC").expect("fixed retail portal EID is valid"))
+    );
+    let dispatch = bonus_runtime
+        .dispatch_event(
+            &mut bonus_host,
+            Some(warp),
+            Some(player),
+            22 << 8,
+            Some(&[0]),
         )
-        .expect("The Great Gate's Level Complete runtime must execute");
-    assert_eq!(great_gate_completion_survey.frames, 273);
-    assert_eq!(great_gate_completion_survey.zone_transitions, 0);
-    assert_eq!(great_gate_completion_survey.restarts, 0);
-    assert!(great_gate_completion_survey.restart_frames.is_empty());
-    assert_eq!(great_gate_completion_survey.death_camera_frames, 0);
-    assert!(great_gate_completion_survey.first_below_zero.is_none());
-    assert!(great_gate_completion_survey.first_terminal_fall.is_none());
+        .expect("WarpC must synchronously select WillC's authored WARP state");
     assert_eq!(
-        great_gate_completion_survey.next_lid,
-        Some((273, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        dispatch.state_change.as_ref().map(|change| change.state),
+        Some(32)
     );
-    assert_eq!(great_gate_completion_survey.faulted_objects, 0);
-    assert_eq!(great_gate_completion_survey.execution_errors, 0);
-    assert_eq!(
-        great_gate_completion_survey
-            .effect_counts
-            .get("transition")
-            .copied(),
-        Some(1)
-    );
-    assert!(
-        great_gate_completion_survey.is_clean(),
-        "The Great Gate's Level Complete screen reached a checked boundary: {}",
-        great_gate_completion_survey.summary()
-    );
-    assert_eq!(
-        [
-            GAME_STATE_GLOBAL,
-            TITLE_STATE_GLOBAL,
-            SAVED_TITLE_STATE_GLOBAL,
-            CURRENT_MAP_LEVEL_GLOBAL,
-            LEVEL_COUNT_GLOBAL,
-            LEVELS_UNLOCKED_GLOBAL,
-            ISLAND_CAMERA_STATE_GLOBAL,
-        ]
-        .map(|index| great_gate_completion_runtime.global_word(index).unwrap()),
-        [
-            0x300,
-            TitleScreen::Map.raw(),
-            TitleScreen::Map.raw(),
-            3,
-            1,
-            4,
-            0,
-        ]
-    );
-    assert_eq!(
-        great_gate_completion_runtime.machine().random_seed(),
-        0xa906_7f4f
-    );
-    assert_eq!(great_gate_completion_runtime.draw_count(), 8_427);
-    let post_great_gate_title_carry: RetailSessionCarry = {
-        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
-        let report = great_gate_completion_runtime
-            .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
-            .expect("third Level Complete LEVEL_END must export a Title carry");
+
+    let mut load_state = None;
+    for frame in 1..=5_400_u32 {
+        bonus_runtime.set_frame_timing(34, 34);
+        let pad = if frame == 300 {
+            RetailPadSnapshot {
+                tapped: PAD_CROSS,
+                held: PAD_CROSS,
+                ..RetailPadSnapshot::default()
+            }
+        } else {
+            RetailPadSnapshot::default()
+        };
+        bonus_runtime
+            .set_pad_snapshot(0, pad)
+            .expect("Bonus 2 must accept the return prompt input");
+        let report = bonus_runtime
+            .run_frame(&mut bonus_host, INSTRUCTION_BUDGET)
+            .unwrap_or_else(|error| panic!("Bonus 2 WARP frame {frame} failed: {error:?}"));
         assert!(
-            report.event_failures.is_empty(),
-            "third Level Complete LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "Bonus 2 WARP frame {frame} faulted: {:?}",
+            report.executions
+        );
+        let load_states = report
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::LoadState { saved_level, .. } => Some(*saved_level),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if !load_states.is_empty() {
+            assert_eq!(load_states.len(), 1);
+            load_state = Some((
+                frame,
+                load_states[0].expect("Bonus 2 must resolve its parent save level"),
+            ));
+            break;
+        }
+    }
+    let (load_frame, captured_saved_level) =
+        load_state.expect("Bonus 2 WillC WARP must reach LoadState");
+    assert_eq!(load_frame, 301);
+    assert_eq!(captured_saved_level, great_gate);
+    assert_eq!(
+        bonus_runtime.restart_saved_level_from_effect(&mut bonus_host, captured_saved_level),
+        Ok(RetailRestartOutcome::DifferentLevel {
+            saved_level: great_gate,
+            requested_level_sentinel: -2,
+        })
+    );
+    let return_transition = bonus_runtime
+        .finish_level_transition(&mut bonus_host, -2)
+        .expect("Bonus 2 LEVEL_END must resolve the carried Great Gate snapshot");
+    assert!(return_transition.event_failures.is_empty());
+    assert_eq!(return_transition.next_lid_after_event, -2);
+    assert_eq!(return_transition.resolved.level, great_gate);
+    assert!(return_transition.resolved.bonus_return);
+    assert_eq!(
+        return_transition.carry.saved_level_state.as_ref(),
+        Some(&expected_parent_snapshot)
+    );
+    assert_eq!(
+        return_transition.carry.globals[CHECKPOINT_ID_GLOBAL],
+        113 << 8
+    );
+
+    let parent_graph = graph_for_pair(
+        great_gate,
+        &great_gate_nsd,
+        &great_gate_nsf,
+        &great_gate_nsf_bytes,
+    )
+    .expect("the returned Great Gate camera graph must parse");
+    let (parent_zones, parent_lifecycle) = zone_catalog(
+        &great_gate_nsd,
+        &great_gate_nsf,
+        &great_gate_nsf_bytes,
+        &parent_graph,
+        great_gate,
+    )
+    .expect("the returned Great Gate zone catalog must parse");
+    let game_state =
+        return_transition.carry.globals[crust_sim::gool::GAME_STATE_GLOBAL].cast_signed();
+    let parent_camera = RetailCameraRuntime::at_path(
+        &parent_graph,
+        expected_parent_snapshot.location.path,
+        expected_parent_snapshot.location.progress.raw(),
+        game_state,
+    )
+    .expect("the returned Great Gate camera must accept the saved location");
+    assert_eq!(parent_camera.location(), expected_parent_snapshot.location);
+
+    let mut returned_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, return_transition.carry)
+            .expect("Great Gate must import the Bonus 2 return carry");
+    seed_mounted_level_context_from_globals(
+        &mut returned_runtime,
+        &parent_graph,
+        &parent_lifecycle,
+        parent_camera.location(),
+    )
+    .expect("returned Great Gate must publish its saved camera context");
+    let mut parent_host =
+        NsfProgramHost::new(&great_gate_nsd, &great_gate_nsf, &great_gate_nsf_bytes);
+    returned_runtime
+        .create_retail_core_objects(parent_camera.location().path.zone, &mut parent_host)
+        .expect("returned Great Gate core objects must materialize");
+    returned_runtime
+        .create_retail_level_misc_object(parent_camera.location().path.zone, &mut parent_host)
+        .expect("returned Great Gate level-misc object must materialize");
+    let returned_neighbors = parent_lifecycle
+        .next_frame_spawn_scan()
+        .iter()
+        .map(|candidate| {
+            let zone = parent_zones
+                .get(&candidate.zone)
+                .expect("returned lifecycle zone exists in the catalog");
+            NeighborZone {
+                eid: zone.eid,
+                display_flags: candidate.display_flags,
+                entities: zone.entities.as_slice(),
+            }
+        })
+        .collect::<Vec<_>>();
+    returned_runtime.set_initial_crash_save_suppressed(true);
+    let protected_spawn =
+        returned_runtime.spawn_current_zone_neighbors(&returned_neighbors, &mut parent_host);
+    returned_runtime.set_initial_crash_save_suppressed(false);
+    assert!(
+        protected_spawn
+            .iter()
+            .all(|attempt| attempt.result.is_ok() || expected_spawn_rejection(&attempt.result))
+    );
+    assert_eq!(
+        returned_runtime.saved_level_state(),
+        Some(&expected_parent_snapshot)
+    );
+
+    let RetailRestartOutcome::Restarted(restart) = returned_runtime
+        .restart_saved_level(&mut parent_host)
+        .expect("the protected Great Gate restart must complete")
+    else {
+        panic!("the returned Great Gate snapshot requested another remount");
+    };
+    assert_eq!(restart.snapshot, expected_parent_snapshot);
+    assert!(restart.respawn_event_failures.is_empty());
+    assert!(
+        restart
+            .zone_reports
+            .iter()
+            .all(|(_, report)| report.event_failures.is_empty())
+    );
+    assert_eq!(restart.restored_box_count, 0xe00);
+    assert_eq!(returned_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xe00));
+    assert_eq!(
+        returned_runtime
+            .level_state_context()
+            .expect("restarted Great Gate retains camera context")
+            .location,
+        expected_parent_snapshot.location
+    );
+    let mut expected_spawn_words = expected_parent_snapshot.spawn_words.map(|word| word & !1);
+    expected_spawn_words[113] = (expected_spawn_words[113] & !2) | 8;
+    assert_eq!(
+        returned_runtime.arena().spawn_table().snapshot(),
+        expected_spawn_words,
+        "first-spawn restoration preserves the carried table, marks checkpoint 113 seen, and clears transient active/blocked bits"
+    );
+    let returned_player = returned_runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| returned_runtime.object_for_arena(arena))
+        .and_then(|object| returned_runtime.machine().object(object.vm()).ok())
+        .expect("restarted Great Gate must retain Crash");
+    assert_eq!(
+        [
+            process_register::TRANSLATION_X,
+            process_register::TRANSLATION_Y,
+            process_register::TRANSLATION_Z,
+        ]
+        .map(|register| returned_player.register(register).unwrap().cast_signed()),
+        expected_parent_snapshot.player_translation
+    );
+
+    // Fork the same authentic post-Jungle carry through the ordinary end warp
+    // and into Boulders. The bonus branch above consumes only its cloned carry.
+    {
+        let great_gate_runtime =
+            RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry)
+                .expect("The Great Gate must import the second-completion map carry");
+        let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_runtime(
+            known_name(great_gate),
+            great_gate,
+            &great_gate_nsd,
+            &great_gate_nsf,
+            &great_gate_nsf_bytes,
+            great_gate_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::GreatGatePhaseRobust,
+            2_600,
+        )
+        .expect("The Great Gate must execute through its end WarpC transition");
+        assert_eq!(great_gate_survey.frames, 2_471);
+        assert_eq!(great_gate_survey.successful_spawns, 111);
+        assert_eq!(great_gate_survey.executions, 47_371);
+        assert_eq!(great_gate_survey.zone_transitions, 38);
+        assert_eq!(great_gate_survey.camera_ranges.len(), 30);
+        assert_eq!(great_gate_survey.camera_path_changes, 41);
+        assert_eq!(great_gate_survey.last_camera_path_change, 2_377);
+        assert_eq!(great_gate_survey.restarts, 0);
+        assert!(great_gate_survey.restart_frames.is_empty());
+        assert_eq!(great_gate_survey.death_camera_frames, 0);
+        assert!(great_gate_survey.first_terminal_fall.is_none());
+        assert_eq!(
+            great_gate_survey.terminal.as_deref(),
+            Some("frame 2471 requested level transition to 0x2d")
         );
         assert_eq!(
-            report.requested_lid,
-            i32::try_from(LevelId::TITLE.get()).unwrap()
+            great_gate_survey.next_lid,
+            Some((2_471, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
         );
-        assert_eq!(report.next_lid_after_event, report.requested_lid);
-        assert_eq!(report.resolved.level, LevelId::TITLE);
-        assert!(!report.resolved.bonus_return);
-        assert!(report.effects.is_empty());
-        report.carry
-    };
-    assert_eq!(post_great_gate_title_carry.random_seed, 0xa906_7f4f);
-    assert_eq!(post_great_gate_title_carry.draw_count, 8_427);
-    let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
-        &title_nsd,
-        &title_nsf,
-        &title_nsf_bytes,
-        post_great_gate_title_carry,
-    );
-    post_great_gate_map.wait_until_ready(64);
-    assert_eq!(post_great_gate_map.frame, 10);
-    for _ in 0..120 {
-        post_great_gate_map.step(0);
-    }
-    post_great_gate_map.tap(PAD_UP);
-    for _ in 0..120 {
-        post_great_gate_map.step(0);
-    }
-    post_great_gate_map.step(PAD_CROSS);
-    let boulders = LevelId::new_const(0x0e);
-    let boulders_lid = i32::try_from(boulders.get()).unwrap();
-    assert_eq!(post_great_gate_map.frame, 253);
-    assert_eq!(post_great_gate_map.transitions, [(253, boulders_lid)]);
-    assert_eq!(
-        post_great_gate_map.camera.location().path,
-        RetailPathId {
-            zone: Eid::from_name("1c_pZ").expect("fixed fourth map-zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(post_great_gate_map.camera.location().progress.raw(), 0x0f00);
-    assert_eq!(
-        [
-            GAME_STATE_GLOBAL,
-            TITLE_STATE_GLOBAL,
-            SAVED_TITLE_STATE_GLOBAL,
-            CURRENT_MAP_LEVEL_GLOBAL,
-            LEVEL_COUNT_GLOBAL,
-            LEVELS_UNLOCKED_GLOBAL,
-            ISLAND_CAMERA_STATE_GLOBAL,
-        ]
-        .map(|index| post_great_gate_map.runtime.global_word(index).unwrap()),
-        [
-            0,
-            TitleScreen::Map.raw(),
-            TitleScreen::Map.raw(),
-            4,
-            1,
-            4,
-            1,
-        ]
-    );
-    assert_eq!(
-        post_great_gate_map.runtime.machine().random_seed(),
-        0xf2b6_db12
-    );
-    assert_eq!(post_great_gate_map.runtime.draw_count(), 8_680);
-    let boulders_carry: RetailSessionCarry = {
-        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-        let report = post_great_gate_map
-            .runtime
-            .finish_level_transition(&mut host, boulders_lid)
-            .expect("post-Great-Gate Map must export the Boulders carry");
+        assert_eq!(great_gate_survey.faulted_objects, 0);
+        assert_eq!(great_gate_survey.execution_errors, 0);
+        assert_eq!(
+            great_gate_survey.box_count_samples,
+            [
+                (1, 0),
+                (58, 0x100),
+                (78, 0x200),
+                (92, 0x300),
+                (112, 0x400),
+                (299, 0x500),
+                (300, 0x600),
+                (514, 0x700),
+                (769, 0x800),
+                (779, 0x900),
+                (1_152, 0xa00),
+                (1_502, 0xb00),
+                (1_503, 0xc00),
+                (1_504, 0xd00),
+                (1_817, 0xe00),
+            ]
+        );
+        assert_eq!(
+            great_gate_survey.checkpoint_samples,
+            [
+                (1, -1, [-563_968, 2_236_928, 15_717_376]),
+                (515, -1, [15_871_744, -10_670_848, 127_744]),
+                (1_152, 76 << 8, [20_991_488, -8_397_312, 127_744]),
+                (1_532, 76 << 8, [15_154_944, -8_104_292, 127_744]),
+            ]
+        );
+        assert_eq!(great_gate_survey.saved_box_count_samples, [(1_152, 0x900)]);
         assert!(
-            report.event_failures.is_empty(),
-            "post-Great-Gate Map LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
+            great_gate_survey
+                .spawn_flag_samples
+                .contains(&(1_054, 63, 3)),
+            "the carried route must trigger the first vertical arrow crate"
         );
-        assert_eq!(report.requested_lid, boulders_lid);
-        assert_eq!(report.next_lid_after_event, boulders_lid);
-        assert_eq!(report.resolved.level, boulders);
-        assert!(!report.resolved.bonus_return);
-        assert!(report.effects.is_empty());
-        report.carry
-    };
-    assert_eq!(
-        [
-            GAME_STATE_GLOBAL,
-            TITLE_STATE_GLOBAL,
-            SAVED_TITLE_STATE_GLOBAL,
-            CURRENT_MAP_LEVEL_GLOBAL,
-            LEVEL_COUNT_GLOBAL,
-            LEVELS_UNLOCKED_GLOBAL,
-            ISLAND_CAMERA_STATE_GLOBAL,
-        ]
-        .map(|index| boulders_carry.globals[index]),
-        [
-            0,
-            TitleScreen::Map.raw(),
-            TitleScreen::Map.raw(),
-            4,
-            1,
-            4,
-            1,
-        ]
-    );
-    assert_eq!(boulders_carry.random_seed, 0xf2b6_db12);
-    assert_eq!(boulders_carry.draw_count, 8_680);
-    let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
-        parse_local_pair(&root, boulders).expect("Boulders pair must parse");
-    let boulders_pbak_entry = boulders_nsf
-        .entries()
-        .find(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
-        .expect("legally local Boulders pair must contain its authored PBAK");
-    assert_eq!(
-        boulders_pbak_entry.eid,
-        Eid::from_name("pb0eB").expect("fixed Boulders PBAK EID is valid")
-    );
-    let boulders_pbak = load_pbak_entry(boulders_pbak_entry, &boulders_nsf_bytes)
-        .expect("legally local Boulders PBAK must parse");
-    assert_eq!(boulders_pbak.frames.len(), 990);
-    assert_eq!(boulders_pbak.ticks_per_frame, 34);
-    let boulders_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
-        .expect("Boulders must import the third-completion map carry");
-    let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
-        known_name(boulders),
-        boulders,
-        &boulders_nsd,
-        &boulders_nsf,
-        &boulders_nsf_bytes,
-        boulders_runtime,
-        LevelContextSource::SessionGlobals,
-        SurveyInputProfile::LocalPbakPrefix,
-        900,
-    )
-    .expect("Boulders must execute the legally local authored pad prefix");
-    assert_eq!(boulders_survey.frames, 900);
-    assert!(boulders_survey.terminal.is_none());
-    assert_eq!(boulders_survey.successful_spawns, 37);
-    assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
-    assert_eq!(boulders_survey.executions, 13_709);
-    assert_eq!(boulders_survey.zone_transitions, 10);
-    assert_eq!(boulders_survey.camera_ranges.len(), 16);
-    assert_eq!(boulders_survey.camera_path_changes, 21);
-    assert_eq!(boulders_survey.last_camera_path_change, 884);
-    assert_eq!(boulders_survey.restarts, 0);
-    assert!(boulders_survey.restart_frames.is_empty());
-    assert_eq!(boulders_survey.save_handshakes, 0);
-    assert_eq!(boulders_survey.death_camera_frames, 0);
-    assert!(boulders_survey.first_below_zero.is_none());
-    assert!(boulders_survey.first_terminal_fall.is_none());
-    assert!(boulders_survey.next_lid.is_none());
-    assert_eq!(boulders_survey.faulted_objects, 0);
-    assert_eq!(boulders_survey.execution_errors, 0);
-    assert!(!boulders_survey.effect_counts.contains_key("transition"));
-    assert!(!boulders_survey.effect_counts.contains_key("save-state"));
-    assert!(boulders_survey.issue_counts.is_empty());
-    assert_eq!(
-        boulders_survey.box_count_samples,
-        [
-            (1, 0),
-            (71, 0x100),
-            (173, 0x200),
-            (174, 0x300),
-            (197, 0x400),
-            (232, 0x500),
-            (633, 0x600),
-            (636, 0x700),
-            (695, 0x800),
-        ]
-    );
-    assert_eq!(
-        boulders_survey.checkpoint_samples,
-        [(1, -1, [20_991_488, -8_397_312, 127_744])]
-    );
-    assert!(boulders_survey.saved_box_count_samples.is_empty());
-    assert!(
-        boulders_survey.is_clean(),
-        "Boulders carried authored prefix must remain clean: {}",
-        boulders_survey.summary()
-    );
-    let boulders_initial_camera = boulders_survey
-        .initial_camera
-        .expect("Boulders authored prefix starts with a camera location");
-    assert_eq!(
-        boulders_initial_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("0Q_eZ").expect("fixed Boulders spawn-zone EID is valid"),
-            index: 0,
+        assert!(
+            great_gate_survey
+                .spawn_flag_samples
+                .contains(&(1_152, 76, 9)),
+            "the carried route must break checkpoint crate 76"
+        );
+        assert_eq!(
+            great_gate_survey.effect_counts.get("send-event").copied(),
+            Some(206)
+        );
+        assert_eq!(
+            great_gate_survey.effect_counts.get("transition").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            great_gate_survey.effect_counts.get("save-state").copied(),
+            Some(1)
+        );
+        assert!(
+            great_gate_survey.is_clean(),
+            "The Great Gate end-Warp route must remain clean: {}",
+            great_gate_survey.summary()
+        );
+        let great_gate_camera = great_gate_survey
+            .final_camera
+            .expect("The Great Gate end-Warp route retains a camera location");
+        assert_eq!(
+            great_gate_camera.path,
+            RetailPathId {
+                zone: Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid"),
+                index: 0,
+            }
+        );
+        assert_eq!(great_gate_camera.progress.raw(), 2_528);
+        assert_eq!(
+            great_gate_survey.final_player_translation,
+            Some([3_593_984, -4_780_682, 83_712])
+        );
+        assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xe00));
+        assert_eq!(
+            great_gate_runtime.global_word(CHECKPOINT_ID_GLOBAL),
+            Ok(76 << 8)
+        );
+        assert_eq!(
+            CHECKPOINT_TRANSLATION_GLOBALS.map(|index| {
+                great_gate_runtime
+                    .global_word(index)
+                    .expect("checkpoint translation global is readable")
+                    .cast_signed()
+            }),
+            [15_154_944, -8_104_292, 127_744]
+        );
+
+        let waloc = Eid::from_name("WalOC").expect("fixed rotating-log EID is valid");
+        assert!(
+            great_gate_survey
+                .observed_program_states
+                .contains(&(waloc, 2)),
+            "the route must flip the rotating log into its horizontal state before climbing"
+        );
+        let warp = Eid::from_name("WarpC").expect("fixed warp EID is valid");
+        let crash = Eid::from_name("WillC").expect("fixed player EID is valid");
+        assert!(
+            great_gate_survey
+                .observed_program_states
+                .contains(&(warp, 1)),
+            "the route must activate the normal end WarpC"
+        );
+        assert!(
+            great_gate_survey
+                .observed_program_states
+                .contains(&(crash, 32)),
+            "WarpC must hand Crash to authored warp state 32"
+        );
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| great_gate_runtime.global_word(index).unwrap()),
+            [
+                0x500,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                3,
+                1,
+                4,
+                0,
+            ]
+        );
+        assert_eq!(great_gate_runtime.machine().random_seed(), 0x6a21_9f2c);
+        assert_eq!(great_gate_runtime.draw_count(), 8_396);
+
+        let great_gate_completion_carry: RetailSessionCarry = {
+            let mut host =
+                NsfProgramHost::new(&great_gate_nsd, &great_gate_nsf, &great_gate_nsf_bytes);
+            let report = great_gate_runtime
+                .finish_level_transition(
+                    &mut host,
+                    i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+                )
+                .expect("The Great Gate LEVEL_END must export a Level Complete carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "The Great Gate LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| great_gate_completion_carry.globals[index]),
+            [
+                0x500,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                3,
+                1,
+                4,
+                0,
+            ]
+        );
+        assert_eq!(great_gate_completion_carry.random_seed, 0x6a21_9f2c);
+        assert_eq!(great_gate_completion_carry.draw_count, 8_396);
+        let great_gate_completion_runtime = RetailRuntime::new_from_session(
+            GLOBAL_WORDS,
+            LevelId::LEVEL_COMPLETE,
+            great_gate_completion_carry,
+        )
+        .expect("Level Complete must import The Great Gate's session carry");
+        let (great_gate_completion_survey, mut great_gate_completion_runtime) =
+            survey_pair_with_runtime(
+                known_name(LevelId::LEVEL_COMPLETE),
+                LevelId::LEVEL_COMPLETE,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                great_gate_completion_runtime,
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                COMPLETION_FRAMES,
+            )
+            .expect("The Great Gate's Level Complete runtime must execute");
+        assert_eq!(great_gate_completion_survey.frames, 225);
+        assert_eq!(great_gate_completion_survey.zone_transitions, 0);
+        assert_eq!(great_gate_completion_survey.restarts, 0);
+        assert!(great_gate_completion_survey.restart_frames.is_empty());
+        assert_eq!(great_gate_completion_survey.death_camera_frames, 0);
+        assert!(great_gate_completion_survey.first_below_zero.is_none());
+        assert!(great_gate_completion_survey.first_terminal_fall.is_none());
+        assert_eq!(
+            great_gate_completion_survey.next_lid,
+            Some((225, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        );
+        assert_eq!(great_gate_completion_survey.faulted_objects, 0);
+        assert_eq!(great_gate_completion_survey.execution_errors, 0);
+        assert_eq!(
+            great_gate_completion_survey
+                .effect_counts
+                .get("transition")
+                .copied(),
+            Some(1)
+        );
+        assert!(
+            great_gate_completion_survey.is_clean(),
+            "The Great Gate's Level Complete screen reached a checked boundary: {}",
+            great_gate_completion_survey.summary()
+        );
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| great_gate_completion_runtime.global_word(index).unwrap()),
+            [
+                0x300,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                3,
+                1,
+                4,
+                0,
+            ]
+        );
+        assert_eq!(
+            great_gate_completion_runtime.machine().random_seed(),
+            0x2875_d290
+        );
+        assert_eq!(great_gate_completion_runtime.draw_count(), 8_621);
+        let post_great_gate_title_carry: RetailSessionCarry = {
+            let mut host =
+                NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+            let report = great_gate_completion_runtime
+                .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+                .expect("third Level Complete LEVEL_END must export a Title carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "third Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(
+                report.requested_lid,
+                i32::try_from(LevelId::TITLE.get()).unwrap()
+            );
+            assert_eq!(report.next_lid_after_event, report.requested_lid);
+            assert_eq!(report.resolved.level, LevelId::TITLE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(post_great_gate_title_carry.random_seed, 0x2875_d290);
+        assert_eq!(post_great_gate_title_carry.draw_count, 8_621);
+        let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            post_great_gate_title_carry,
+        );
+        post_great_gate_map.wait_until_ready(64);
+        assert_eq!(post_great_gate_map.frame, 10);
+        for _ in 0..120 {
+            post_great_gate_map.step(0);
         }
-    );
-    assert_eq!(boulders_initial_camera.progress.raw(), 0);
-    let boulders_camera = boulders_survey
-        .final_camera
-        .expect("Boulders authored prefix retains a camera location");
-    assert_eq!(
-        boulders_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("0I_eZ").expect("fixed Boulders route-zone EID is valid"),
-            index: 1,
+        post_great_gate_map.tap(PAD_UP);
+        for _ in 0..120 {
+            post_great_gate_map.step(0);
         }
-    );
-    assert_eq!(boulders_camera.progress.raw(), 7_168);
-    assert_eq!(
-        boulders_survey.final_player_translation,
-        Some([2_377_472, 7_550_502, -12_167_680])
-    );
-    assert_eq!(boulders_runtime.machine().random_seed(), 0x53e2_1381);
-    assert_eq!(boulders_runtime.draw_count(), 9_580);
-    eprintln!(
-        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored prefix: 900 frames, 0Q_eZ:0@0 -> 0I_eZ:1@7168, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}",
-        n_sanity_survey.next_lid.unwrap().0,
-        n_sanity_draw_count,
-        completion_survey.next_lid.unwrap().0,
-        completion_draw_count,
-        2_677,
-        jungle_survey.next_lid.unwrap().0,
-        5_223,
-        jungle_completion_survey.next_lid.unwrap().0,
-        5_529,
-        5_782,
-        great_gate_survey.frames,
-        great_gate_runtime.draw_count(),
-        great_gate_completion_survey.frames,
-        great_gate_completion_runtime.draw_count(),
-        post_great_gate_map.runtime.draw_count(),
-        boulders_runtime.machine().random_seed(),
-        boulders_runtime.draw_count(),
-    );
+        post_great_gate_map.step(PAD_CROSS);
+        let boulders = LevelId::new_const(0x0e);
+        let boulders_lid = i32::try_from(boulders.get()).unwrap();
+        assert_eq!(post_great_gate_map.frame, 253);
+        assert_eq!(post_great_gate_map.transitions, [(253, boulders_lid)]);
+        assert_eq!(
+            post_great_gate_map.camera.location().path,
+            RetailPathId {
+                zone: Eid::from_name("1c_pZ").expect("fixed fourth map-zone EID is valid"),
+                index: 0,
+            }
+        );
+        assert_eq!(post_great_gate_map.camera.location().progress.raw(), 0x0f00);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| post_great_gate_map.runtime.global_word(index).unwrap()),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                4,
+                1,
+                4,
+                1,
+            ]
+        );
+        assert_eq!(
+            post_great_gate_map.runtime.machine().random_seed(),
+            0x4196_95fd
+        );
+        assert_eq!(post_great_gate_map.runtime.draw_count(), 8_874);
+        let boulders_carry: RetailSessionCarry = {
+            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+            let report = post_great_gate_map
+                .runtime
+                .finish_level_transition(&mut host, boulders_lid)
+                .expect("post-Great-Gate Map must export the Boulders carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "post-Great-Gate Map LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, boulders_lid);
+            assert_eq!(report.next_lid_after_event, boulders_lid);
+            assert_eq!(report.resolved.level, boulders);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| boulders_carry.globals[index]),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                4,
+                1,
+                4,
+                1,
+            ]
+        );
+        assert_eq!(boulders_carry.random_seed, 0x4196_95fd);
+        assert_eq!(boulders_carry.draw_count, 8_874);
+        let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
+            parse_local_pair(&root, boulders).expect("Boulders pair must parse");
+        let boulders_pbak_entry = boulders_nsf
+            .entries()
+            .find(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
+            .expect("legally local Boulders pair must contain its authored PBAK");
+        assert_eq!(
+            boulders_pbak_entry.eid,
+            Eid::from_name("pb0eB").expect("fixed Boulders PBAK EID is valid")
+        );
+        let boulders_pbak = load_pbak_entry(boulders_pbak_entry, &boulders_nsf_bytes)
+            .expect("legally local Boulders PBAK must parse");
+        assert_eq!(boulders_pbak.frames.len(), 990);
+        assert_eq!(boulders_pbak.ticks_per_frame, 34);
+        let boulders_runtime =
+            RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
+                .expect("Boulders must import the third-completion map carry");
+        let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
+            known_name(boulders),
+            boulders,
+            &boulders_nsd,
+            &boulders_nsf,
+            &boulders_nsf_bytes,
+            boulders_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::LocalPbakPrefix,
+            900,
+        )
+        .expect("Boulders must execute the legally local authored pad prefix");
+        assert_eq!(boulders_survey.frames, 900);
+        assert!(boulders_survey.terminal.is_none());
+        assert_eq!(boulders_survey.successful_spawns, 37);
+        assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
+        assert_eq!(boulders_survey.executions, 18_990);
+        assert_eq!(boulders_survey.zone_transitions, 10);
+        assert_eq!(boulders_survey.camera_ranges.len(), 16);
+        assert_eq!(boulders_survey.camera_path_changes, 21);
+        assert_eq!(boulders_survey.last_camera_path_change, 884);
+        assert_eq!(boulders_survey.restarts, 0);
+        assert!(boulders_survey.restart_frames.is_empty());
+        assert_eq!(boulders_survey.save_handshakes, 0);
+        assert_eq!(boulders_survey.death_camera_frames, 0);
+        assert!(boulders_survey.first_below_zero.is_none());
+        assert!(boulders_survey.first_terminal_fall.is_none());
+        assert!(boulders_survey.next_lid.is_none());
+        assert_eq!(boulders_survey.faulted_objects, 0);
+        assert_eq!(boulders_survey.execution_errors, 0);
+        assert!(!boulders_survey.effect_counts.contains_key("transition"));
+        assert!(!boulders_survey.effect_counts.contains_key("save-state"));
+        assert!(boulders_survey.issue_counts.is_empty());
+        assert_eq!(
+            boulders_survey.box_count_samples,
+            [
+                (1, 0),
+                (71, 0x100),
+                (173, 0x200),
+                (174, 0x300),
+                (197, 0x400),
+                (232, 0x500),
+                (633, 0x600),
+                (636, 0x700),
+                (695, 0x800),
+            ]
+        );
+        assert_eq!(
+            boulders_survey.checkpoint_samples,
+            [(1, -1, [15_154_944, -8_104_292, 127_744])]
+        );
+        assert!(boulders_survey.saved_box_count_samples.is_empty());
+        assert!(
+            boulders_survey.is_clean(),
+            "Boulders carried authored prefix must remain clean: {}",
+            boulders_survey.summary()
+        );
+        let boulders_initial_camera = boulders_survey
+            .initial_camera
+            .expect("Boulders authored prefix starts with a camera location");
+        assert_eq!(
+            boulders_initial_camera.path,
+            RetailPathId {
+                zone: Eid::from_name("0Q_eZ").expect("fixed Boulders spawn-zone EID is valid"),
+                index: 0,
+            }
+        );
+        assert_eq!(boulders_initial_camera.progress.raw(), 0);
+        let boulders_camera = boulders_survey
+            .final_camera
+            .expect("Boulders authored prefix retains a camera location");
+        assert_eq!(
+            boulders_camera.path,
+            RetailPathId {
+                zone: Eid::from_name("0I_eZ").expect("fixed Boulders route-zone EID is valid"),
+                index: 1,
+            }
+        );
+        assert_eq!(boulders_camera.progress.raw(), 7_168);
+        assert_eq!(
+            boulders_survey.final_player_translation,
+            Some([2_377_472, 7_550_502, -12_167_680])
+        );
+        assert_eq!(boulders_runtime.machine().random_seed(), 0x0581_be15);
+        assert_eq!(boulders_runtime.draw_count(), 9_774);
+        eprintln!(
+            "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored prefix: 900 frames, 0Q_eZ:0@0 -> 0I_eZ:1@7168, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}",
+            n_sanity_survey.next_lid.unwrap().0,
+            n_sanity_draw_count,
+            completion_survey.next_lid.unwrap().0,
+            completion_draw_count,
+            2_677,
+            jungle_survey.next_lid.unwrap().0,
+            5_223,
+            jungle_completion_survey.next_lid.unwrap().0,
+            5_529,
+            5_782,
+            great_gate_survey.frames,
+            great_gate_runtime.draw_count(),
+            great_gate_completion_survey.frames,
+            great_gate_completion_runtime.draw_count(),
+            post_great_gate_map.runtime.draw_count(),
+            boulders_runtime.machine().random_seed(),
+            boulders_runtime.draw_count(),
+        );
+    }
 }
 
 #[test]
@@ -6352,7 +7003,7 @@ fn raw_bin_extraction_matches_every_local_pair_and_bootable_graph() {
 #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
 fn great_gate_yellow_gem_card_route_reaches_c8() {
     const YELLOW_GEM_BIT: u32 = 1 << 29;
-    const ROUTE_FRAMES: u32 = 2_385;
+    const ROUTE_FRAMES: u32 = 2_600;
 
     let disc_path = PathBuf::from(
         std::env::var_os("C1_DISC_IMAGE")
@@ -6457,20 +7108,20 @@ fn great_gate_yellow_gem_card_route_reaches_c8() {
     assert_eq!(
         *c8_range,
         CameraProgressRange {
-            first_frame: 2_382,
+            first_frame: 2_479,
             last_frame: ROUTE_FRAMES,
-            minimum: 171,
-            maximum: 1_625,
+            minimum: 120,
+            maximum: 14_067,
         }
     );
     let final_camera = survey
         .final_camera
         .expect("Yellow Gem route must retain its c8 camera");
     assert_eq!(final_camera.path, c8_path);
-    assert_eq!(final_camera.progress.raw(), 1_625);
+    assert_eq!(final_camera.progress.raw(), 14_067);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_316_032, -8_385_266, 83_712])
+        Some([1_836_800, -8_385_264, 132_864])
     );
     assert_eq!(survey.frames, ROUTE_FRAMES);
     assert_eq!(survey.restarts, 0);

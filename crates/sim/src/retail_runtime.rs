@@ -483,6 +483,14 @@ pub struct ProgramBinding<'a> {
     pub origin: ProgramOrigin<'a>,
 }
 
+/// `GoolObjectInit` clears `obj->zone` for these process-lifetime programs.
+/// `GoolObjectSpawn` subsequently restores an entity's ZDAT owner, so the
+/// null-zone rule applies only to objects created by `GoolObjectCreate`.
+const fn runtime_program_clears_object_zone(binding: ProgramBinding<'_>) -> bool {
+    matches!(binding.origin, ProgramOrigin::RuntimeChild { .. })
+        && matches!(binding.executable, 4 | 5 | 29)
+}
+
 /// Fully typed request to materialize code/data for a changed GOOL state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StateProgramBinding {
@@ -9084,6 +9092,12 @@ impl RetailRuntime {
                 if let Some(environment) = solid_environment {
                     vm_object.bind_retail_solid_environment(environment);
                 }
+                if runtime_program_clears_object_zone(binding) {
+                    arena
+                        .set_zone(object.arena, Eid::NONE)
+                        .map_err(RuntimeError::Tree)?;
+                    vm_object.set_retail_solid_zone_eid(None);
+                }
                 Self::initialize_vm_links(arena, handles, machine, object, &mut vm_object)?;
                 Self::install_vm_object(machine, vm_object, object.arena.slot())?;
                 arena
@@ -9152,6 +9166,12 @@ impl RetailRuntime {
         )?;
         if let Some(environment) = solid_environment {
             vm_object.bind_retail_solid_environment(environment);
+        }
+        if runtime_program_clears_object_zone(binding) {
+            self.arena
+                .set_zone(binding.object.arena, Eid::NONE)
+                .map_err(RuntimeError::Tree)?;
+            vm_object.set_retail_solid_zone_eid(None);
         }
         Self::initialize_vm_links(
             &self.arena,
@@ -17324,6 +17344,31 @@ mod tests {
             Ok(Some(objects))
         );
         assert_eq!(host.bindings.len(), 3, "a same-level restart is idempotent");
+    }
+
+    #[test]
+    fn retail_core_objects_keep_native_null_zone_with_a_solid_environment() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        let mut host = SolidZoneHost::default();
+
+        let objects = runtime
+            .create_retail_core_objects(ZONE, &mut host)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(host.calls, [ZONE, ZONE, ZONE]);
+        for object in [objects.life, objects.fruit, objects.pickup] {
+            assert_eq!(runtime.arena.get(object.arena).unwrap().zone(), Eid::NONE);
+            assert_eq!(
+                runtime
+                    .machine
+                    .object(object.vm)
+                    .unwrap()
+                    .retail_solid_zone_eid(),
+                None,
+                "runtime-created executable four must preserve GoolObjectInit's null obj->zone"
+            );
+        }
     }
 
     #[test]

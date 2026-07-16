@@ -594,6 +594,7 @@ struct RollingStonesRouteController {
     post_tick: u16,
     checkpoint_route_started: bool,
     checkpoint_tick: u16,
+    checkpoint_lateral_corrected: bool,
 }
 
 impl RollingStonesRouteController {
@@ -651,6 +652,28 @@ impl RollingStonesRouteController {
         }
         if self.checkpoint_route_started {
             let tick = self.checkpoint_tick;
+            let zero_y =
+                Eid::from_name("0y_lZ").expect("fixed Rolling Stones correction-zone EID is valid");
+            if !self.checkpoint_lateral_corrected && tick == 295 {
+                let Some(player) = player else {
+                    return 0;
+                };
+                if camera.path.zone != zero_y
+                    || camera.path.index != 0
+                    || !matches!(player.state, 1 | 2 | 13)
+                    || player.status_a & 1 == 0
+                {
+                    return 0;
+                }
+                self.checkpoint_lateral_corrected = true;
+                if player.translation[0] > 2_330_000 {
+                    // The session-carried runtime phase leaves Crash roughly
+                    // 76k right of the direct route on this supported approach.
+                    // One ordinary sample recenters him; a direct boot is
+                    // already centered and falls through.
+                    return PAD_LEFT;
+                }
+            }
             self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
             // These are ordinary 30 Hz retail pad samples. Each jump window
             // starts from an observed terrain or PoPlC support contact. The
@@ -4246,6 +4269,7 @@ impl SurveyInputController {
                 post_tick: 0,
                 checkpoint_route_started: false,
                 checkpoint_tick: 0,
+                checkpoint_lateral_corrected: false,
             },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
@@ -10722,7 +10746,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
 
         // This second call frame similarly bounds the mounted gameplay runtime.
         #[allow(clippy::items_after_statements)]
-        fn assert_carried_rolling_stones_mount(
+        fn assert_carried_rolling_stones_route(
             root: &Path,
             rolling_stones_carry: RetailSessionCarry,
         ) {
@@ -10747,22 +10771,24 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 &rolling_stones_nsf_bytes,
                 rolling_stones_runtime,
                 LevelContextSource::SessionGlobals,
-                SurveyInputProfile::Idle,
-                120,
+                SurveyInputProfile::RollingStonesCheckpoint,
+                2_000,
             )
-            .expect("Rolling Stones' carried initial window must execute");
-            assert_eq!(rolling_stones_survey.frames, 120);
+            .expect("Rolling Stones' carried ordinary-pad route must execute");
+            assert_eq!(rolling_stones_survey.frames, 2_000);
             assert!(rolling_stones_survey.terminal.is_none());
-            assert_eq!(rolling_stones_survey.final_live_objects, 28);
-            assert_eq!(rolling_stones_survey.max_live_objects, 32);
-            assert_eq!(rolling_stones_survey.successful_spawns, 19);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 2_280);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 2_261);
+            assert_eq!(rolling_stones_survey.final_live_objects, 18);
+            assert_eq!(rolling_stones_survey.max_live_objects, 36);
+            assert_eq!(rolling_stones_survey.successful_spawns, 92);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 23_656);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 23_564);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 3_476);
-            assert_eq!(rolling_stones_survey.zone_transitions, 0);
-            assert_eq!(rolling_stones_survey.camera_ranges.len(), 1);
-            assert_eq!(rolling_stones_survey.camera_path_changes, 0);
+            assert_eq!(rolling_stones_survey.executions, 43_609);
+            assert_eq!(rolling_stones_survey.zone_transitions, 26);
+            assert_eq!(rolling_stones_survey.camera_ranges.len(), 34);
+            assert_eq!(rolling_stones_survey.camera_path_changes, 35);
+            assert_eq!(rolling_stones_survey.last_camera_path_change, 1_826);
+            assert_eq!(rolling_stones_survey.last_camera_progress_change, 1_855);
             assert_eq!(rolling_stones_survey.restarts, 0);
             assert!(rolling_stones_survey.restart_frames.is_empty());
             assert_eq!(rolling_stones_survey.death_camera_frames, 0);
@@ -10772,6 +10798,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(rolling_stones_survey.faulted_objects, 0);
             assert_eq!(rolling_stones_survey.execution_errors, 0);
             assert!(rolling_stones_survey.issue_counts.is_empty());
+            assert!(!rolling_stones_survey.observed_player_states.contains(&31));
             let rolling_initial_camera = rolling_stones_survey
                 .initial_camera
                 .expect("Rolling Stones begins on its authored camera path");
@@ -10788,16 +10815,51 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 }
             );
             assert_eq!(rolling_initial_camera.progress.raw(), 0x0100);
-            assert_eq!(rolling_final_camera.path, rolling_initial_camera.path);
-            assert_eq!(rolling_final_camera.progress.raw(), 0x1900);
+            assert_eq!(
+                rolling_final_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("0F_lZ")
+                        .expect("fixed Rolling Stones carried-route EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(rolling_final_camera.progress.raw(), 11_742);
             assert_eq!(
                 rolling_stones_survey.initial_player_translation,
                 Some([2_252_544, 1_023_744, 31_794_432])
             );
             assert_eq!(
                 rolling_stones_survey.final_player_translation,
-                Some([2_252_544, 969_366, 31_794_432])
+                Some([2_706_176, 4_623_368, 6_061_312])
             );
+            assert_eq!(
+                player_trace(&rolling_stones_runtime)
+                    .expect("carried Rolling Stones final player trace must resolve")
+                    .expect("carried Rolling Stones keeps Crash alive")
+                    .state,
+                2
+            );
+            assert_eq!(
+                rolling_stones_survey.checkpoint_samples.last(),
+                Some(&(1_160, 8 << 8, [2_815_232, 2_979_072, 17_458_688]))
+            );
+            assert_eq!(
+                rolling_stones_survey.saved_box_count_samples,
+                [(1_160, 0xa00)]
+            );
+            assert_eq!(
+                rolling_stones_runtime.global_word(BOX_COUNT_GLOBAL),
+                Ok(0xb00_u32)
+            );
+            assert_eq!(
+                rolling_stones_survey.effect_counts.get("save-state"),
+                Some(&1)
+            );
+            assert_eq!(
+                rolling_stones_survey.effect_counts.get("send-event"),
+                Some(&88)
+            );
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&178));
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -10819,15 +10881,15 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     0,
                 ]
             );
-            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x2c84_92d5);
-            assert_eq!(rolling_stones_runtime.draw_count(), 4_451);
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x497f_40ca);
+            assert_eq!(rolling_stones_runtime.draw_count(), 6_331);
             assert!(
                 rolling_stones_survey.is_clean(),
-                "Rolling Stones' carried initial window must remain clean: {}",
+                "Rolling Stones' carried ordinary-pad route must remain clean: {}",
                 rolling_stones_survey.summary()
             );
         }
-        assert_carried_rolling_stones_mount(&root, rolling_stones_carry);
+        assert_carried_rolling_stones_route(&root, rolling_stones_carry);
         eprintln!(
             concat!(
                 "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",
@@ -10844,8 +10906,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
                 "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
                 "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4265); Map -> Rolling ",
-                "Stones at frame 66 (draw 4331); Rolling Stones carried idle mount: 120 clean ",
-                "frames (draw 4451)",
+                "Stones at frame 66 (draw 4331); Rolling Stones carried route: 2000 clean ",
+                "frames through 0F (draw 6331)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

@@ -506,7 +506,8 @@ logic is Rust. Static HTML/CSS and the small Wasm bootstrap are the only hand-au
   zone shader modes, object-only fixed-camera substitution, clipping, blend passes, title
   composition and WebGL2-ready commands.
 - `crust-audio` — SPU ADPCM, retail 24-voice SFX control/cache/mixer, sequence events, exact
-  fixed-point sampled-voice ADSR, and a 44.1 kHz software synth.
+  fixed-point four-point Gaussian interpolation and sampled-voice ADSR, and a 44.1 kHz software
+  synth.
 - `crust-platform` — keyboard/gamepad/touch mapping and versioned browser persistence envelopes.
 - `crust-web` — Blob-backed local imports, WebGL2/WebAudio presentation, browser storage and the
   cooperative application loop.

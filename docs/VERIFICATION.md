@@ -515,8 +515,12 @@ The focused checks below were also completed:
   the minimum nonzero high-rate counter increment, all-one frozen rates, key-off/release, and Q15
   bounds. The sampled-voice integration test proves ADSR gain is applied
   before each mix sample and that note-off enters the hardware release phase. The legally local
-  VAB/SEP bank and raw-disc audio checks also passed. This is ADSR evidence, not proof of Gaussian
-  interpolation, reverb, modulation, or shared 24-voice SFX/music arbitration.
+  VAB/SEP bank and raw-disc audio checks also passed. Gaussian interpolation goldens cover all 256
+  phase coefficient sums, ignored low counter bits, signed extreme inputs, zero-filled key-on
+  history, retained loop-edge history, one-shot completion, repeat reset, the `0x4000` pitch cap,
+  and positive/negative final mixer samples. An arbitrary PCM/cursor property test keeps malformed
+  states deterministic and bounded. This is not proof of reverb, modulation, or shared 24-voice
+  SFX/music arbitration.
 - Process-local animation tests passed for complete bounded type-one through type-five payloads in
   same-object internal and register storage, plus type-zero/unknown native no-draw
   behavior. Truncation cases and a 256-case arbitrary-word property test produced checked results

@@ -168,12 +168,13 @@ An external `git archive` copy produced these results:
   Camera crossings apply checked zone
   teardown/paging/activation, and typed
   ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
-  PCM/sequencer data, with source-timed fades and typed GOOL track toggles. The browser has no
-  procedural sine fallback. Effects remain data rather than unchecked host pointers; exact SPU
-  reverb/modulation, every collision edge, pixel-level rendering equivalence and full progression
-  are not implied. World Lightning, combined Dark and Dark2 state/rendering are now connected with
-  their process-lifetime shader scratch, shared RNG-B ordering, thunder ADIO handshake and hidden-
-  frame transform behavior.
+  PCM/sequencer data, with source-timed fades and typed GOOL track toggles. Both paths share exact
+  fixed-point SPU four-point Gaussian interpolation across key-on, pitch and loop boundaries. The
+  browser has no procedural sine fallback. Effects remain data rather than unchecked host pointers;
+  exact SPU reverb/modulation, every collision edge, pixel-level rendering equivalence and full
+  progression are not implied. World Lightning, combined Dark and Dark2 state/rendering are now
+  connected with their process-lifetime shader scratch, shared RNG-B ordering, thunder ADIO
+  handshake and hidden-frame transform behavior.
 - The mount-time `LevelInitMisc(1)` transaction creates source-mapped root-four controllers for
   levels `0x05`, `0x14`, `0x16`, `0x17`, `0x22`, and `0x2e`. Ripper Roo's 39/4 controller publishes
   a checked tagged `ambiance_obj` reference in global 8. Same-level `LevelInitMisc(0)` does not

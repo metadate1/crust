@@ -5,13 +5,13 @@ use std::f32::consts::TAU;
 use crate::{
     mixer::{SAMPLE_RATE, Sample},
     spu_envelope::SpuAdsrEnvelope,
+    spu_interpolation::{PITCH_UNITS, SpuSampleCursor},
 };
 
 pub const SYNTH_VOICES: usize = 64;
 const MIDI_CHANNELS: u8 = 16;
 const MIDI_NOTE_MAX: u8 = 127;
 const SAMPLE_RATE_F32: f32 = 44_100.0;
-const PITCH_UNITS: u64 = 4_096;
 const PITCH_RATIO_UNITS: u64 = 1_u64 << 32;
 const CENT_RATIO_UP_Q32: u64 = 4_297_448_883;
 const CENT_RATIO_DOWN_Q32: u64 = 4_292_487_142;
@@ -236,7 +236,7 @@ enum VoiceSource {
     },
     Sampled {
         sample: Sample,
-        position: u64,
+        cursor: SpuSampleCursor,
         base_cents: i32,
         step: u64,
     },
@@ -600,7 +600,7 @@ impl Sequencer {
                     note,
                     source: VoiceSource::Sampled {
                         sample: tone.sample.clone(),
-                        position: 0,
+                        cursor: SpuSampleCursor::new(),
                         base_cents,
                         step: sample_step(base_cents.saturating_add(bend)),
                     },
@@ -737,40 +737,17 @@ fn next_voice_sample(source: &mut VoiceSource, waveform: Waveform) -> Option<f32
         }
         VoiceSource::Sampled {
             sample,
-            position,
+            cursor,
             step,
             ..
-        } => sampled_next(sample, position, *step),
+        } => sampled_next(sample, cursor, *step),
     }
 }
 
-fn sampled_next(sample: &Sample, position: &mut u64, step: u64) -> Option<f32> {
-    if sample.is_empty() {
-        return None;
-    }
-    let mut index = usize::try_from(*position / PITCH_UNITS).ok()?;
-    if index >= sample.len() {
-        let start = sample.loop_start()?;
-        let loop_samples = sample.len().checked_sub(start)?;
-        if loop_samples == 0 {
-            return None;
-        }
-        let start_units = u64::try_from(start).ok()?.checked_mul(PITCH_UNITS)?;
-        let loop_units = u64::try_from(loop_samples).ok()?.checked_mul(PITCH_UNITS)?;
-        *position = start_units + position.checked_sub(start_units)? % loop_units;
-        index = usize::try_from(*position / PITCH_UNITS).ok()?;
-    }
-    let current = f32::from(sample.sample(index)?);
-    let next_index = if index + 1 < sample.len() {
-        index + 1
-    } else {
-        sample.loop_start().unwrap_or(index)
-    };
-    let next = f32::from(sample.sample(next_index)?);
-    let fraction = f32::from(u16::try_from(*position % PITCH_UNITS).ok()?)
-        / f32::from(u16::try_from(PITCH_UNITS).expect("pitch unit fits u16"));
-    *position = position.saturating_add(step.max(1));
-    Some((current + fraction * (next - current)) / 32_768.0)
+fn sampled_next(sample: &Sample, cursor: &mut SpuSampleCursor, step: u64) -> Option<f32> {
+    cursor
+        .next(sample, step)
+        .map(|sample| f32::from(sample) / 32_768.0)
 }
 
 fn normalized_midi_gain(value: u8) -> f32 {
@@ -1041,6 +1018,30 @@ mod tests {
         assert!(!sequencer.voices[0].release);
         sequencer.set_sustain(0, false);
         assert!(sequencer.voices[0].release);
+    }
+
+    #[test]
+    #[allow(
+        clippy::float_cmp,
+        reason = "i16 SPU samples convert exactly to binary f32 fractions"
+    )]
+    fn sampled_voice_source_uses_the_shared_gaussian_cursor() {
+        let sample = Sample::new(vec![1_000, 2_000, 3_000, 4_000], None);
+        let mut cursor = SpuSampleCursor::new();
+        assert_eq!(
+            [
+                sampled_next(&sample, &mut cursor, PITCH_UNITS),
+                sampled_next(&sample, &mut cursor, PITCH_UNITS),
+                sampled_next(&sample, &mut cursor, PITCH_UNITS),
+                sampled_next(&sample, &mut cursor, PITCH_UNITS),
+            ],
+            [
+                Some(-1.0 / 32_768.0),
+                Some(147.0 / 32_768.0),
+                Some(996.0 / 32_768.0),
+                Some(1_991.0 / 32_768.0),
+            ]
+        );
     }
 
     #[test]

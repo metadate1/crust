@@ -394,10 +394,11 @@ gameplay path.
   zone fades and dual-track toggles. Sampled voices now use exact fixed-point SPU ADSR timing for
   attack, decay, sustain, release, key-off, and linear/exponential rate modes. Each mount applies
   the exact `MidiInit` level/volume partition between music and SFX slots and restores the native
-  full-scale inactive master fade before destination audio starts. Remaining gaps are
-  Gaussian interpolation (the synth currently interpolates linearly), vibrato, portamento,
-  pressure and unsupported generic controllers, spatial reverb/effects, SPU noise/FM, and
-  hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
+  full-scale inactive master fade before destination audio starts. Both ADIO SFX and sampled VAB
+  music use the SPU's fixed four-point Gaussian coefficient ROM, phase indexing, per-product signed
+  shifts, zero key-on history, loop history, and maximum pitch step. Remaining gaps are vibrato,
+  portamento, pressure and unsupported generic controllers, spatial reverb/effects, SPU noise/FM,
+  and hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
   sequencer currently has a separate 64-voice software limit. The newest music path was compile-,
   model- and legally-local-disc tested but not yet manually auditioned.
 - Camera path selection is coupled to the hosted main object, and the checked GOOL solid query uses

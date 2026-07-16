@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::adpcm;
+use crate::{adpcm, spu_interpolation::SpuSampleCursor};
 
 pub const SAMPLE_RATE: u32 = 44_100;
 pub const VOICE_COUNT: usize = 24;
@@ -11,8 +11,6 @@ pub const MUSIC_VOICE: usize = 0;
 pub const SAMPLE_CACHE_ENTRIES: usize = 128;
 pub const SAMPLE_CACHE_BYTES: usize = 8 * 1024 * 1024;
 const VOLUME_BASE: f64 = 16_383.0;
-const PITCH_BASE: f64 = 4_096.0;
-const PITCH_UNITS: u64 = 4_096;
 const MIX_DIVISOR: f64 = 12.0;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,8 +55,7 @@ impl Sample {
 #[derive(Clone, Debug)]
 struct Voice {
     sample: Option<Sample>,
-    /// Playback position in 1/4096-sample units, matching the SPU pitch base exactly.
-    position: u64,
+    cursor: SpuSampleCursor,
     gain: f64,
     left: f64,
     right: f64,
@@ -72,7 +69,7 @@ impl Default for Voice {
     fn default() -> Self {
         Self {
             sample: None,
-            position: 0,
+            cursor: SpuSampleCursor::new(),
             gain: 1.0,
             left: 1.0,
             right: 1.0,
@@ -209,7 +206,7 @@ impl Mixer {
         };
         *voice = Voice {
             sample: Some(sample),
-            position: 0,
+            cursor: SpuSampleCursor::new(),
             gain: 1.0,
             left: f64::from(volume_left.min(16_383)) / VOLUME_BASE,
             right: f64::from(volume_right.min(16_383)) / VOLUME_BASE,
@@ -305,8 +302,8 @@ impl Mixer {
             let sfx_sample = self.sfx_scratch[index] / MIX_DIVISOR;
             music_square += music_sample * music_sample;
             sfx_square += sfx_sample * sfx_sample;
-            music_peak = music_peak.max(float_magnitude_to_i32(music_sample));
-            sfx_peak = sfx_peak.max(float_magnitude_to_i32(sfx_sample));
+            music_peak = music_peak.max(float_magnitude_to_i32(music_sample.abs()));
+            sfx_peak = sfx_peak.max(float_magnitude_to_i32(sfx_sample.abs()));
             let mixed = if self.muted {
                 0.0
             } else {
@@ -336,44 +333,16 @@ fn voice_next(voice: &mut Voice) -> Option<f64> {
             voice.active = false;
             return None;
         };
-        if let Some(value) = sample_linear(sample, &mut voice.position) {
-            voice.position = voice.position.saturating_add(u64::from(voice.pitch));
-            return Some(value);
+        if let Some(value) = voice.cursor.next(sample, u64::from(voice.pitch)) {
+            return Some(f64::from(value));
         }
         if voice.repeats_left <= 1 {
             voice.active = false;
             return None;
         }
         voice.repeats_left -= 1;
-        voice.position = 0;
+        voice.cursor.reset();
     }
-}
-
-fn sample_linear(sample: &Sample, position: &mut u64) -> Option<f64> {
-    if sample.is_empty() {
-        return None;
-    }
-    let mut index = usize::try_from(*position / PITCH_UNITS).ok()?;
-    if index >= sample.len() {
-        let start = sample.loop_start?;
-        let loop_len = sample.len().checked_sub(start)?;
-        if loop_len == 0 {
-            return None;
-        }
-        let start = u64::try_from(start).ok()?.checked_mul(PITCH_UNITS)?;
-        let loop_len = u64::try_from(loop_len).ok()?.checked_mul(PITCH_UNITS)?;
-        *position = start + position.checked_sub(start)? % loop_len;
-        index = usize::try_from(*position / PITCH_UNITS).ok()?;
-    }
-    let fraction = f64::from(u16::try_from(*position % PITCH_UNITS).ok()?) / PITCH_BASE;
-    let current = f64::from(sample.pcm[index]);
-    let next_index = if index + 1 < sample.len() {
-        index + 1
-    } else {
-        sample.loop_start.unwrap_or(index)
-    };
-    let next = f64::from(sample.pcm[next_index]);
-    Some(current + fraction * (next - current))
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -399,42 +368,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn interpolation_wraps_across_loop_boundary() {
-        let sample = Sample::new(vec![0, 1_000, 2_000, 3_000], Some(1));
-        let mut position = 3 * 4_096 + 2_048;
-        assert_eq!(sample_linear(&sample, &mut position), Some(2_000.0));
-        position += 4_096;
-        assert_eq!(sample_linear(&sample, &mut position), Some(1_500.0));
-    }
-
-    #[test]
-    fn one_shot_holds_terminal_sample_during_fraction() {
-        let sample = Sample::new(vec![0, 1_000], None);
-        let mut position = 4_096 + 2_048;
-        assert_eq!(sample_linear(&sample, &mut position), Some(1_000.0));
-        position += 4_096;
-        assert_eq!(sample_linear(&sample, &mut position), None);
-    }
-
-    #[test]
     fn repeats_restart_without_a_silent_frame() {
-        let sample = Sample::new(vec![12_000], None);
+        let sample = Sample::new(vec![12_000; 4], None);
         let mut mixer = Mixer::new();
         assert!(mixer.play(1, sample, 16_383, 16_383, 4_096, 0, 2));
-        let mut output = [0_i16; 6];
+        let mut output = [0_i16; 18];
         mixer.mix(&mut output);
-        assert_eq!(output, [1_000, 1_000, 1_000, 1_000, 0, 0]);
+        assert_eq!(
+            output,
+            [
+                0, 0, 148, 148, 849, 849, 995, 995, 0, 0, 148, 148, 849, 849, 995, 995, 0, 0,
+            ]
+        );
         assert!(!mixer.is_active(1));
     }
 
     #[test]
     fn odd_destination_keeps_unpaired_sample_silent() {
-        let sample = Sample::new(vec![12_000; 4], None);
+        let sample = Sample::new(vec![12_000; 8], None);
         let mut mixer = Mixer::new();
         assert!(mixer.play(1, sample, 16_383, 16_383, 4_096, 0, 1));
+        mixer.mix(&mut [0_i16; 2]);
         let mut output = [7_i16; 3];
         mixer.mix(&mut output);
-        assert_eq!(output, [1_000, 1_000, 0]);
+        assert_eq!(output, [148, 148, 0]);
+    }
+
+    #[test]
+    fn negative_gaussian_output_updates_peak_metrics_by_magnitude() {
+        let sample = Sample::new(vec![-12_000; 4], None);
+        let mut mixer = Mixer::new();
+        assert!(mixer.play(1, sample, 16_383, 16_383, 4_096, 0, 1));
+        let mut output = [0_i16; 8];
+        mixer.mix(&mut output);
+        assert_eq!(output, [0, 0, -148, -148, -849, -849, -996, -996]);
+        assert_eq!(mixer.metrics().sfx_peak, 996);
     }
 
     #[test]
@@ -515,7 +483,7 @@ mod tests {
         let misses = mixer.metrics().cache_misses;
         assert!(mixer.cache_adpcm(0, &encoded).is_some());
         assert_eq!(mixer.metrics().cache_misses, misses + 1);
-        let mut output = [0_i16; 2];
+        let mut output = [0_i16; 8];
         mixer.mix(&mut output);
         assert!(output.iter().any(|sample| *sample != 0));
     }

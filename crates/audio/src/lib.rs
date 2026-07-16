@@ -10,3 +10,4 @@ pub mod retail_music;
 pub mod retail_player;
 pub mod sequencer;
 pub mod spu_envelope;
+mod spu_interpolation;

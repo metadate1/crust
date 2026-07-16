@@ -483,9 +483,12 @@ GOOL selects the second track, and drops both banks at a level boundary. The Web
 also follows the exact signed 25-tick `MidiResetFadeStep` ramp. Each sampled VAB voice decodes its
 two ADSR register words into a fixed-point Q15 generator advanced once per 44.1 kHz sample. Attack,
 decay, sustain, release, linear/exponential modes, slowdown strictly above the `0x6000` attack
-threshold, rate counters,
-all-one frozen rates, key-on/off, and phase targets follow the hardware integer rules; conversion to
-floating-point happens only at the final mix gain. Remaining gaps include Gaussian interpolation,
+threshold, rate counters, all-one frozen rates, key-on/off, and phase targets follow the hardware
+integer rules. SFX and sampled VAB voices share one fixed-point SPU cursor: pitch-counter bits 4..11
+select the four coefficients from the 512-word Gaussian ROM, each signed product is shifted before
+addition, key-on history starts at zero, later loop passes retain the three samples preceding the
+loop edge, and an unmodulated pitch step is capped at `0x4000`. Gaussian and ADSR arithmetic stays
+integer until the filtered sample and envelope reach the final mix gains. Remaining gaps include
 SPU reverb/effects, noise and FM/modulation, vibrato/portamento, pressure and unsupported generic
 controllers, and hardware-equivalent priority across one shared 24-voice SFX/music pool. The music
 sequencer currently owns a separate bounded software-voice pool. There is no procedural sine

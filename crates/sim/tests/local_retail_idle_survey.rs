@@ -455,28 +455,69 @@ impl PapuPapuCompletionRouteController {
 
 /// Deterministic ordinary-pad route through Ripper Roo's authored TNT waves.
 ///
-/// The fixed waits select stable retail bomb and boss phases; every state change
-/// and hit still comes from GOOL collision/event execution rather than test-side
-/// register or level-state mutation.
+/// The route first reaches retail's safe top-right platform, then makes three
+/// identical excursions to platform six to arm one authored Big TNT per boss
+/// phase. Every hit still comes from GOOL collision/event execution rather than
+/// test-side register or level-state mutation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RipperRooCompletionRouteController {
     started: bool,
     tick: u32,
     stage: u8,
-    stage_tick: u16,
 }
 
 impl RipperRooCompletionRouteController {
+    fn advance(&mut self, held: u32) -> u32 {
+        self.stage = self.stage.saturating_add(1);
+        held
+    }
+
+    fn tnt_excursion(&mut self, player: PlayerTrace) -> u32 {
+        let (base_stage, start_tick) = match self.stage {
+            6..=12 => (6, 690),
+            13..=19 => (13, 1_145),
+            20..=26 => (20, 1_561),
+            _ => return 0,
+        };
+        match self.stage - base_stage {
+            0 if self.tick < start_tick => 0,
+            0 if player.translation[2] < -850_000 => PAD_DOWN,
+            0 => self.advance(PAD_DOWN | PAD_CROSS),
+            1 if player.translation[2] < -500_000 => PAD_DOWN | PAD_CROSS,
+            1 if player.state != 1 => 0,
+            1 => self.advance(PAD_LEFT),
+            2 if player.translation[0] > 410_000 => PAD_LEFT,
+            2 => self.advance(PAD_LEFT | PAD_CROSS),
+            3 if player.translation[0] > 230_000 => PAD_LEFT | PAD_CROSS,
+            3 => self.advance(PAD_RIGHT | PAD_CROSS),
+            4 if player.translation[0] < 410_000 => PAD_RIGHT | PAD_CROSS,
+            4 if player.state != 1 => 0,
+            4 => self.advance(PAD_UP),
+            5 if player.translation[2] > -500_000 => PAD_UP,
+            5 => self.advance(PAD_UP | PAD_CROSS),
+            6 if player.translation[2] > -800_000 => PAD_UP | PAD_CROSS,
+            6 if player.state != 1 => 0,
+            6 => self.advance(0),
+            _ => 0,
+        }
+    }
+
     fn held(
         &mut self,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         boss_state: Option<u16>,
+        route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         let arena = Eid::from_name("a__nZ").expect("fixed Ripper Roo arena EID is valid");
+        let ripper = Eid::from_name("RRooC").expect("fixed Ripper Roo program EID is valid");
         let Some(player) = player else {
             return 0;
         };
+        let boss = route_objects.iter().find(|object| {
+            object.program == ripper
+                && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 8)
+        });
         if !self.started {
             if camera.path.zone != arena
                 || camera.path.index != 1
@@ -488,151 +529,32 @@ impl RipperRooCompletionRouteController {
             self.started = true;
         }
         self.tick = self.tick.saturating_add(1);
-        if self.tick <= 309 {
+        if self.tick <= 420 {
             return 0;
         }
-        let held = match self.stage {
-            0 if player.translation[0] > -240_000 => PAD_LEFT | PAD_CROSS,
-            0 => {
-                self.stage = 1;
-                self.stage_tick = 0;
-                PAD_RIGHT | PAD_CROSS
-            }
-            1 if player.translation[0] < -20_000 => PAD_RIGHT | PAD_CROSS,
-            1 => {
-                self.stage = 2;
-                self.stage_tick = 0;
-                PAD_LEFT | PAD_CROSS
-            }
-            2 | 18 if self.stage_tick < 10 => PAD_LEFT | PAD_CROSS,
-            2 => {
-                self.stage = 3;
-                self.stage_tick = 0;
+        if self.stage >= 6 {
+            return self.tnt_excursion(player);
+        }
+        match self.stage {
+            0 if boss
+                .is_none_or(|boss| boss.translation[0] > -350_000 || boss.translation[2] < 0) =>
+            {
                 0
             }
-            3 if self.tick < 560 => 0,
-            3 if player.translation[0] < -20_000 => PAD_RIGHT,
-            3 => {
-                self.stage = 4;
-                self.stage_tick = 0;
-                PAD_LEFT
-            }
-            4 if self.stage_tick < 4 => PAD_LEFT,
-            4 | 14 | 16 if player.state != 1 || player.velocity[0] != 0 => 0,
-            4 => {
-                self.stage = 5;
-                self.stage_tick = 0;
-                PAD_UP
-            }
-            5 | 20 if player.translation[2] > 0 => PAD_UP,
-            5 => {
-                self.stage = 6;
-                self.stage_tick = 0;
-                PAD_UP | PAD_CROSS
-            }
-            6 | 21 if player.translation[2] > -300_000 => PAD_UP | PAD_CROSS,
-            6 => {
-                self.stage = 7;
-                self.stage_tick = 0;
-                0
-            }
-            7 | 21 if player.state != 1 => 0,
-            7 => {
-                self.stage = 8;
-                self.stage_tick = 0;
-                PAD_RIGHT
-            }
-            8 if player.translation[0] < 60_000 => PAD_RIGHT,
-            8 => {
-                self.stage = 9;
-                self.stage_tick = 0;
-                PAD_RIGHT | PAD_CROSS
-            }
-            9 if player.translation[0] < 350_000 => PAD_RIGHT | PAD_CROSS,
-            9 if player.state != 1 => 0,
-            9 => {
-                self.stage = 10;
-                self.stage_tick = 0;
-                PAD_DOWN
-            }
-            10 if player.translation[2] < -340_000 => PAD_DOWN,
-            10 => {
-                self.stage = 11;
-                self.stage_tick = 0;
-                PAD_DOWN | PAD_CROSS
-            }
-            11 if player.translation[2] < 0 => PAD_DOWN | PAD_CROSS,
-            11 if player.state != 1 => 0,
-            11 if self.tick < 765 => 0,
-            11 => {
-                self.stage = 12;
-                self.stage_tick = 0;
-                PAD_LEFT
-            }
-            12 if player.translation[0] > 410_000 => PAD_LEFT,
-            12 => {
-                self.stage = 13;
-                self.stage_tick = 0;
-                PAD_LEFT | PAD_CROSS
-            }
-            13 if player.translation[0] > 100_000 => PAD_LEFT | PAD_CROSS,
-            13 if player.state != 1 => 0,
-            13 if self.tick < 784 => 0,
-            13 => {
-                self.stage = 14;
-                self.stage_tick = 0;
-                0
-            }
-            14 => {
-                self.stage = 15;
-                self.stage_tick = 0;
-                PAD_LEFT | PAD_CROSS
-            }
-            15 if player.translation[0] > -350_000 => PAD_LEFT | PAD_CROSS,
-            15 if player.state != 1 => 0,
-            15 => {
-                self.stage = 16;
-                self.stage_tick = 0;
-                0
-            }
-            16 if self.tick < 979 => 0,
-            16 => {
-                self.stage = 17;
-                self.stage_tick = 0;
-                PAD_RIGHT | PAD_CROSS
-            }
-            17 if player.translation[0] < -230_000 => PAD_RIGHT | PAD_CROSS,
-            17 => {
-                self.stage = 18;
-                self.stage_tick = 0;
-                PAD_LEFT | PAD_CROSS
-            }
-            18 => {
-                self.stage = 19;
-                self.stage_tick = 0;
-                PAD_RIGHT | PAD_CROSS
-            }
-            19 if player.translation[0] < -50_000 => PAD_RIGHT | PAD_CROSS,
-            19 if player.state != 1 => 0,
-            19 => {
-                self.stage = 20;
-                self.stage_tick = 0;
-                PAD_UP
-            }
-            20 => {
-                self.stage = 21;
-                self.stage_tick = 0;
-                PAD_UP | PAD_CROSS
-            }
-            21 => {
-                self.stage = 22;
-                self.stage_tick = 0;
-                0
-            }
+            0 if player.translation[0] < 60_000 => PAD_RIGHT,
+            0 => self.advance(PAD_RIGHT | PAD_CROSS),
+            1 if player.translation[0] < 350_000 => PAD_RIGHT | PAD_CROSS,
+            2 if player.translation[2] > 0 => PAD_UP,
+            3 if player.translation[2] > -300_000 => PAD_UP | PAD_CROSS,
+            4 if player.translation[2] > -500_000 => PAD_UP,
+            1 | 3 if player.state != 1 => 0,
+            1 | 3 => self.advance(PAD_UP),
+            2 | 4 => self.advance(PAD_UP | PAD_CROSS),
+            5 if player.translation[2] > -800_000 => PAD_UP | PAD_CROSS,
+            5 if player.state != 1 => 0,
+            5 => self.advance(0),
             _ => 0,
-        };
-        self.stage_tick = self.stage_tick.saturating_add(1);
-        held
+        }
     }
 }
 
@@ -642,7 +564,6 @@ impl RipperRooCompletionRouteController {
             started: false,
             tick: 0,
             stage: 0,
-            stage_tick: 0,
         }
     }
 }
@@ -5906,7 +5827,8 @@ impl SurveyInputController {
                 self.papu_papu.held(camera, player, boss_state)
             }
             SurveyInputProfile::RipperRooCompletionRoute => {
-                self.ripper_roo.held(camera, player, boss_state)
+                self.ripper_roo
+                    .held(camera, player, boss_state, route_objects)
             }
             SurveyInputProfile::KoalaKongCompletionRoute => {
                 KoalaKongCompletionRouteController::held(camera, player, route_objects)
@@ -7631,6 +7553,10 @@ fn survey_pair_with_runtime(
             SurveyInputProfile::PinstripeCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("PinsC").expect("fixed Pinstripe boss EID is valid")],
+            )?,
+            SurveyInputProfile::RipperRooCompletionRoute => program_object_traces(
+                &runtime,
+                &[Eid::from_name("RRooC").expect("fixed Ripper Roo boss EID is valid")],
             )?,
             _ => Vec::new(),
         };
@@ -10027,28 +9953,24 @@ fn ripper_roo_ordinary_pad_completion_route() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::RipperRooCompletionRoute,
-        2_000,
+        2_200,
     )
     .expect("Ripper Roo's ordinary-pad route must execute");
-    assert_eq!(survey.frames, 1_424, "{}", survey.summary());
+    assert_eq!(survey.frames, 2_064, "{}", survey.summary());
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((1_424, 0x19)));
+    assert_eq!(survey.next_lid, Some((2_064, 0x19)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 1424 requested level transition to 0x19")
+        Some("frame 2064 requested level transition to 0x19")
     );
     assert_eq!(
         survey.entity_state_samples,
-        [(2, 8, 0), (152, 8, 1), (1_292, 8, 2)],
+        [(2, 8, 0), (152, 8, 1), (1_932, 8, 2)],
         "the authored boss must progress from setup through combat and defeat"
     );
     assert_eq!(
-        survey
-            .entity_counter_samples
-            .iter()
-            .map(|(_, id, counter)| (*id, *counter))
-            .collect::<Vec<_>>(),
-        [(8, 0), (8, 1), (8, 2), (8, 3)],
+        survey.entity_counter_samples,
+        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_866, 8, 3),],
         "only RooOC's authored explosion event may advance Ripper Roo's hit counter"
     );
 
@@ -10065,9 +9987,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         activation_frames,
-        [485, 604, 605, 606, 708, 709, 710, 1_154]
-            .into_iter()
-            .collect(),
+        [919, 1_371, 1_785].into_iter().collect(),
         "the route must arm the authored TNT objects through Crash collision events"
     );
     let boss_event_frames = survey
@@ -10076,7 +9996,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .filter(|sample| sample.event == 0x300 && sample.recipient == Some(ripper))
         .map(|sample| sample.frame)
         .collect::<BTreeSet<_>>();
-    for frame in [699, 788, 1_234] {
+    for frame in [999, 1_451, 1_865] {
         assert!(
             boss_event_frames.contains(&frame),
             "missing authored RooOC-to-RRooC event cluster at frame {frame}: {boss_event_frames:?}"

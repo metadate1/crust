@@ -471,4 +471,25 @@ fn ending_credits_reclaim_and_request_title() {
     assert!(max_live <= MAX_BOUNDED_LIVE_OBJECTS);
     assert_eq!(title_transition, Some((END_FRAME, TITLE_LEVEL)));
     assert_eq!(runtime.faulted_object_count(), 0);
+
+    let ending_draw_count = runtime.draw_count();
+    assert_eq!(ending_draw_count, END_FRAME);
+    let level_end = runtime
+        .finish_level_transition(&mut host, TITLE_LEVEL)
+        .expect("Ending LEVEL_END must export a Title session carry");
+    assert!(
+        level_end.event_failures.is_empty(),
+        "Ending LEVEL_END handlers must complete cleanly: {:?}",
+        level_end.event_failures
+    );
+    assert_eq!(level_end.requested_lid, TITLE_LEVEL);
+    assert_eq!(level_end.next_lid_after_event, TITLE_LEVEL);
+    assert_eq!(level_end.resolved.level, LevelId::TITLE);
+    assert!(!level_end.resolved.bonus_return);
+    assert_eq!(level_end.carry.draw_count, ending_draw_count);
+
+    let title_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, level_end.carry)
+            .expect("Title must import Ending's checked session carry");
+    assert_eq!(title_runtime.draw_count(), ending_draw_count);
 }

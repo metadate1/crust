@@ -415,7 +415,8 @@ dedicated main object outside Title. This fixes the Ending credits-object leak t
 filled all 97 arena slots at frame 1,437. The legally local completion regression now runs the
 authored credits sequence through 113 credits-child spawns, peaks at 82 live objects while reusing
 returned slots through generation three, and requests Title `0x19` on frame 3,396 without a VM
-fault. The subsequent browser remount is not part of that native golden.
+fault. Its checked `LEVEL_END` exports a clean session carry that a fresh Title runtime imports
+with the exact draw phase; the subsequent browser graph remount is not part of that native golden.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.

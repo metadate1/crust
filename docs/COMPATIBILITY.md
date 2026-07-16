@@ -587,8 +587,9 @@ gameplay path.
   completion regression now reclaims state-returned `WinGC` credits children, processes exactly
   113 authored credits-child spawns, reuses arena slots through generation three, peaks at 82 live
   objects, and requests Title `0x19` on frame 3,396 without a VM fault. This replaces the broken
-  97-slot saturation at frame 1,437 and covers the authored Ending-to-Title request; it does not
-  claim that the subsequent browser remount was exercised in the same run. Hog Wild now has a
+  97-slot saturation at frame 1,437 and covers the authored Ending-to-Title request. Its clean
+  `LEVEL_END` exports a session carry that a fresh Title runtime imports with the same draw phase;
+  the subsequent browser graph remount was not exercised in the same run. Hog Wild now has a
   complete ordinary-pad direct-boot route: it traverses 67 camera paths, activates checkpoints 13
   and 30, reaches live box
   count `0x700`, observes WarpC states zero through four, and requests Level Complete `0x2d` on

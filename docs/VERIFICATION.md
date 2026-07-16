@@ -564,7 +564,8 @@ The focused checks below were also completed:
   children, reused arena slots through generation three, and requested Title `0x19` on frame 3,396
   with zero faulted objects. Live population peaked at 82, below the regression bound of 89;
   before the fix, returned children remained at PC 54 and filled all 97 slots at frame 1,437. This
-  verifies no-TERM reclamation and the Ending-to-Title request, but not the subsequent browser
+  verifies no-TERM reclamation, a clean `LEVEL_END`, and a session carry imported into a fresh
+  Title runtime without losing draw phase; it does not exercise the subsequent browser graph
   remount in the same run.
 - The legally local N. Sanity → Level Complete → Title vertical-flow golden now asserts the native
   process-lifetime `draw_count` at both exported carries, both imported runtimes, and Title's first

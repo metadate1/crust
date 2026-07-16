@@ -469,8 +469,14 @@ gameplay path.
   RNG `0x9ada2711`, and draw count 8,154. Across the Great Gate leg it records 97 successful spawns,
   39,979 clean executions, and 34 lifecycle zone transitions without a restart, death camera,
   terminal fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch,
-  box-complete gem evaluation, following Level Complete screen, and browser playthrough remain open;
-  this is exact native main-route integration coverage rather than a full player-facing claim.
+  box-complete gem evaluation, and browser playthrough remain open; this is exact native main-route
+  integration coverage rather than a full player-facing claim. The ordinary carry completes the
+  following Level Complete screen at frame 273 and returns to Title with RNG `0xa9067f4f`/draw
+  8,427. The remounted Map takes Up/Cross to Boulders `0x0e` at frame 253 on `1c_pZ` path
+  zero/progress `0x0f00`, retaining RNG `0xf2b6db12` and draw 8,680. Boulders imports that carry and
+  executes one clean mounted frame with 15 successful spawns, 23 clean executions, zero
+  restart/fault/error, RNG `0x82f84399`, and draw 8,681. This proves the next handoff, not Boulders
+  gameplay.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

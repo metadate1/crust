@@ -1045,8 +1045,15 @@ is 1,322,866 bytes with SHA-256
   `0xa00`. It then traverses `b3_iZ`-`c7_iZ`, clears the snake and later hazards, breaks five more
   boxes, and enters the normal end `WarpC`. That warp emits `Transition(0x2d)` at frame 2,372 with
   Crash at `[3483392, -4780693, 83712]`, live count `0xf00`, four unlocked levels, RNG `0x9ada2711`,
-  and draw count 8,154. The yellow-gem alternate branch, box-complete gem evaluation, following
-  Level Complete screen, and browser execution are not covered by this native golden.
+  and draw count 8,154. Its Level Complete screen emits Title at frame 273 with RNG `0xa9067f4f`
+  and draw count 8,427. The next Map takes the same 120-idle/Up/120-idle/Cross schedule to Boulders
+  `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00`, with current map four, four unlocked
+  levels, RNG `0xf2b6db12`, and draw count 8,680. Boulders imports that exact carry and executes one
+  clean frame with 15 successful spawns, 23 clean executions, no transition/restart/fault/error,
+  camera `0Q_eZ` path zero/progress zero, RNG `0x82f84399`, and draw count 8,681. All ten outgoing
+  `LEVEL_END` broadcasts in the chain have no checked handler failure. The yellow-gem alternate
+  branch, box-complete gem evaluation, Boulders gameplay, and browser execution are not covered by
+  this native golden.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
@@ -1101,7 +1108,7 @@ C1_STREAM_DIR=/path/to/streams \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_two_completions_reach_great_gate_with_session_carry \
+  authored_first_three_completions_reach_boulders_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

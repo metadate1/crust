@@ -198,8 +198,13 @@ end `WarpC`, and emits `Transition(0x2d)` at frame 2,372 with 15 counted boxes. 
 retains the exact carried phase at RNG `0x9ada2711`/draw count 8,154, after 97 successful spawns,
 39,979 clean executions, and 34 lifecycle zone transitions, with no restart, death camera, terminal
 fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch, box-complete gem
-evaluation, following Level Complete screen, and browser playthrough remain outside this native
-integration claim.
+evaluation, and browser playthrough remain outside this native integration claim. The ordinary
+completion carry continues through Level Complete to Title at frame 273 (RNG `0xa9067f4f`, draw
+8,427), then takes the same Map Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path
+zero/progress `0x0f00` (RNG `0xf2b6db12`, draw 8,680). Boulders imports that exact carry and executes
+one clean frame with 15 successful spawns, 23 clean executions, zero restart/fault/error, RNG
+`0x82f84399`, and draw 8,681. That last frame proves the next session handoff; it is not Boulders
+gameplay coverage.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

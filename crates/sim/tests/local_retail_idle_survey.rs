@@ -4998,7 +4998,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_two_completions_reach_great_gate_with_session_carry() {
+fn authored_first_three_completions_reach_boulders_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -5656,7 +5656,7 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
     let great_gate_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry)
             .expect("The Great Gate must import the second-completion map carry");
-    let (great_gate_survey, great_gate_runtime) = survey_pair_with_runtime(
+    let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_runtime(
         known_name(great_gate),
         great_gate,
         &great_gate_nsd,
@@ -5822,8 +5822,286 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
     );
     assert_eq!(great_gate_runtime.machine().random_seed(), 0x9ada_2711);
     assert_eq!(great_gate_runtime.draw_count(), 8_154);
+
+    let great_gate_completion_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&great_gate_nsd, &great_gate_nsf, &great_gate_nsf_bytes);
+        let report = great_gate_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+            )
+            .expect("The Great Gate LEVEL_END must export a Level Complete carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "The Great Gate LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| great_gate_completion_carry.globals[index]),
+        [
+            0x500,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            3,
+            1,
+            4,
+            0,
+        ]
+    );
+    assert_eq!(great_gate_completion_carry.random_seed, 0x9ada_2711);
+    assert_eq!(great_gate_completion_carry.draw_count, 8_154);
+    let great_gate_completion_runtime = RetailRuntime::new_from_session(
+        GLOBAL_WORDS,
+        LevelId::LEVEL_COMPLETE,
+        great_gate_completion_carry,
+    )
+    .expect("Level Complete must import The Great Gate's session carry");
+    let (great_gate_completion_survey, mut great_gate_completion_runtime) =
+        survey_pair_with_runtime(
+            known_name(LevelId::LEVEL_COMPLETE),
+            LevelId::LEVEL_COMPLETE,
+            &completion_nsd,
+            &completion_nsf,
+            &completion_nsf_bytes,
+            great_gate_completion_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::DirectionAndButtonSweepToTransition,
+            COMPLETION_FRAMES,
+        )
+        .expect("The Great Gate's Level Complete runtime must execute");
+    assert_eq!(great_gate_completion_survey.frames, 273);
+    assert_eq!(great_gate_completion_survey.zone_transitions, 0);
+    assert_eq!(great_gate_completion_survey.restarts, 0);
+    assert!(great_gate_completion_survey.restart_frames.is_empty());
+    assert_eq!(great_gate_completion_survey.death_camera_frames, 0);
+    assert!(great_gate_completion_survey.first_below_zero.is_none());
+    assert!(great_gate_completion_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        great_gate_completion_survey.next_lid,
+        Some((273, i32::try_from(LevelId::TITLE.get()).unwrap()))
+    );
+    assert_eq!(great_gate_completion_survey.faulted_objects, 0);
+    assert_eq!(great_gate_completion_survey.execution_errors, 0);
+    assert_eq!(
+        great_gate_completion_survey
+            .effect_counts
+            .get("transition")
+            .copied(),
+        Some(1)
+    );
+    assert!(
+        great_gate_completion_survey.is_clean(),
+        "The Great Gate's Level Complete screen reached a checked boundary: {}",
+        great_gate_completion_survey.summary()
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| great_gate_completion_runtime.global_word(index).unwrap()),
+        [
+            0x300,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            3,
+            1,
+            4,
+            0,
+        ]
+    );
+    assert_eq!(
+        great_gate_completion_runtime.machine().random_seed(),
+        0xa906_7f4f
+    );
+    assert_eq!(great_gate_completion_runtime.draw_count(), 8_427);
+    let post_great_gate_title_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+        let report = great_gate_completion_runtime
+            .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+            .expect("third Level Complete LEVEL_END must export a Title carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "third Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(
+            report.requested_lid,
+            i32::try_from(LevelId::TITLE.get()).unwrap()
+        );
+        assert_eq!(report.next_lid_after_event, report.requested_lid);
+        assert_eq!(report.resolved.level, LevelId::TITLE);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(post_great_gate_title_carry.random_seed, 0xa906_7f4f);
+    assert_eq!(post_great_gate_title_carry.draw_count, 8_427);
+    let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        post_great_gate_title_carry,
+    );
+    post_great_gate_map.wait_until_ready(64);
+    assert_eq!(post_great_gate_map.frame, 10);
+    for _ in 0..120 {
+        post_great_gate_map.step(0);
+    }
+    post_great_gate_map.tap(PAD_UP);
+    for _ in 0..120 {
+        post_great_gate_map.step(0);
+    }
+    post_great_gate_map.step(PAD_CROSS);
+    let boulders = LevelId::new_const(0x0e);
+    let boulders_lid = i32::try_from(boulders.get()).unwrap();
+    assert_eq!(post_great_gate_map.frame, 253);
+    assert_eq!(post_great_gate_map.transitions, [(253, boulders_lid)]);
+    assert_eq!(
+        post_great_gate_map.camera.location().path,
+        RetailPathId {
+            zone: Eid::from_name("1c_pZ").expect("fixed fourth map-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(post_great_gate_map.camera.location().progress.raw(), 0x0f00);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_great_gate_map.runtime.global_word(index).unwrap()),
+        [
+            0,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            4,
+            1,
+            4,
+            1,
+        ]
+    );
+    assert_eq!(
+        post_great_gate_map.runtime.machine().random_seed(),
+        0xf2b6_db12
+    );
+    assert_eq!(post_great_gate_map.runtime.draw_count(), 8_680);
+    let boulders_carry: RetailSessionCarry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        let report = post_great_gate_map
+            .runtime
+            .finish_level_transition(&mut host, boulders_lid)
+            .expect("post-Great-Gate Map must export the Boulders carry");
+        assert!(
+            report.event_failures.is_empty(),
+            "post-Great-Gate Map LEVEL_END handlers must complete cleanly: {:?}",
+            report.event_failures
+        );
+        assert_eq!(report.requested_lid, boulders_lid);
+        assert_eq!(report.next_lid_after_event, boulders_lid);
+        assert_eq!(report.resolved.level, boulders);
+        assert!(!report.resolved.bonus_return);
+        assert!(report.effects.is_empty());
+        report.carry
+    };
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| boulders_carry.globals[index]),
+        [
+            0,
+            TitleScreen::Map.raw(),
+            TitleScreen::Map.raw(),
+            4,
+            1,
+            4,
+            1,
+        ]
+    );
+    assert_eq!(boulders_carry.random_seed, 0xf2b6_db12);
+    assert_eq!(boulders_carry.draw_count, 8_680);
+    let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
+        parse_local_pair(&root, boulders).expect("Boulders pair must parse");
+    let boulders_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
+        .expect("Boulders must import the third-completion map carry");
+    let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
+        known_name(boulders),
+        boulders,
+        &boulders_nsd,
+        &boulders_nsf,
+        &boulders_nsf_bytes,
+        boulders_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Boulders must execute its first carried frame");
+    assert_eq!(boulders_survey.frames, 1);
+    assert_eq!(boulders_survey.successful_spawns, 15);
+    assert_eq!(boulders_survey.executions, 23);
+    assert_eq!(boulders_survey.zone_transitions, 0);
+    assert_eq!(boulders_survey.restarts, 0);
+    assert!(boulders_survey.restart_frames.is_empty());
+    assert_eq!(boulders_survey.death_camera_frames, 0);
+    assert!(boulders_survey.first_terminal_fall.is_none());
+    assert!(boulders_survey.next_lid.is_none());
+    assert_eq!(boulders_survey.faulted_objects, 0);
+    assert_eq!(boulders_survey.execution_errors, 0);
+    assert!(
+        boulders_survey.is_clean(),
+        "Boulders first carried frame must remain clean: {}",
+        boulders_survey.summary()
+    );
+    let boulders_camera = boulders_survey
+        .final_camera
+        .expect("Boulders first carried frame retains a camera location");
+    assert_eq!(
+        boulders_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0Q_eZ").expect("fixed Boulders spawn-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(boulders_camera.progress.raw(), 0);
+    assert_eq!(
+        boulders_survey.final_player_translation,
+        Some([2_303_744, 9_011_200, -23_501_312])
+    );
+    assert_eq!(boulders_runtime.machine().random_seed(), 0x82f8_4399);
+    assert_eq!(boulders_runtime.draw_count(), 8_681);
     eprintln!(
-        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {})",
+        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders first frame draw {}",
         n_sanity_survey.next_lid.unwrap().0,
         n_sanity_draw_count,
         completion_survey.next_lid.unwrap().0,
@@ -5836,6 +6114,10 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
         5_782,
         great_gate_survey.frames,
         great_gate_runtime.draw_count(),
+        great_gate_completion_survey.frames,
+        great_gate_completion_runtime.draw_count(),
+        post_great_gate_map.runtime.draw_count(),
+        boulders_runtime.draw_count(),
     );
 }
 

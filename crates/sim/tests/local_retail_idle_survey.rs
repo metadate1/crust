@@ -2284,12 +2284,15 @@ enum UpstreamRecoveryStage {
     WaitOnZeroTHazard,
     EscapeZeroTHazard,
     StablePastZeroTHazard,
+    AdvanceAcrossZeroUvw,
+    WaitForZeroXBank,
+    StableInZeroX,
 }
 
 /// Recovers from applying Upstream's mid-level PBAK input to the normal
 /// post-Map spawn, then follows camera paths and live moving platforms into
 /// 0n's first checkpoint, across 0o's moving platform, past 0p's hazard, and
-/// through 0q's leaves and 0s's platforms to 0t's first stable bank.
+/// through 0q's leaves and 0s's platforms to 0x's first stable bank.
 ///
 /// Every Cross interval is bounded by an explicit release window. Platform
 /// transfers are gated on Crash's landed state and live `RivOC` entities
@@ -2330,6 +2333,8 @@ impl UpstreamRecoveryRouteController {
     const ZERO_S_FIRST_PLATFORM_WAIT_FRAMES: u8 = 12;
     const ZERO_S_SECOND_PLATFORM_WAIT_FRAMES: u8 = 26;
     const ZERO_T_HAZARD_WAIT_FRAMES: u8 = 14;
+    const ZERO_T_BANK_WAIT_FRAMES: u8 = 20;
+    const ZERO_UVW_ADVANCE_FRAMES: u8 = 227;
 
     const SHORT_JUMP: RouteAction = RouteAction {
         direction: PAD_UP,
@@ -2799,7 +2804,23 @@ impl UpstreamRecoveryRouteController {
                 32,
                 UpstreamRecoveryStage::StablePastZeroTHazard,
             ),
-            UpstreamRecoveryStage::StablePastZeroTHazard => 0,
+            UpstreamRecoveryStage::StablePastZeroTHazard => {
+                if self.wait_tick < Self::ZERO_T_BANK_WAIT_FRAMES {
+                    self.wait_tick += 1;
+                    return 0;
+                }
+                self.stage = UpstreamRecoveryStage::AdvanceAcrossZeroUvw;
+                self.action_tick = 0;
+                self.advance_zero_uvw_action()
+            }
+            UpstreamRecoveryStage::AdvanceAcrossZeroUvw => self.advance_zero_uvw_action(),
+            UpstreamRecoveryStage::WaitForZeroXBank => {
+                if Self::zero_x_bank_is_ready(camera, player) {
+                    self.stage = UpstreamRecoveryStage::StableInZeroX;
+                }
+                0
+            }
+            UpstreamRecoveryStage::StableInZeroX => 0,
         }
     }
 
@@ -3117,6 +3138,24 @@ impl UpstreamRecoveryRouteController {
         self.action_tick = self.action_tick.saturating_add(1);
         if self.action_tick >= total_frames {
             self.stage = next_stage;
+            self.action_tick = 0;
+            self.wait_tick = 0;
+        }
+        held
+    }
+
+    fn advance_zero_uvw_action(&mut self) -> u32 {
+        let tick = self.action_tick;
+        let mut held = PAD_UP;
+        if (tick % 25) >= 4 && (tick % 25) < 20 {
+            held |= PAD_CROSS;
+        }
+        if tick.is_multiple_of(18) {
+            held |= PAD_SQUARE;
+        }
+        self.action_tick = self.action_tick.saturating_add(1);
+        if self.action_tick >= Self::ZERO_UVW_ADVANCE_FRAMES {
+            self.stage = UpstreamRecoveryStage::WaitForZeroXBank;
             self.action_tick = 0;
             self.wait_tick = 0;
         }
@@ -3596,6 +3635,18 @@ impl UpstreamRecoveryRouteController {
                     && hazard.translation[0].abs_diff(2_252_544) <= 4_096
                     && hazard.translation[1].abs_diff(2_272_256) <= 4_096
                     && hazard.translation[2].abs_diff(8_396_544) <= 4_096
+            })
+    }
+
+    fn zero_x_bank_is_ready(camera: RetailCameraLocation, player: Option<PlayerTrace>) -> bool {
+        let zone = Eid::from_name("0x_fZ").expect("fixed Upstream bank-zone EID is valid");
+        camera.path.zone == zone
+            && camera.path.index == 1
+            && player.is_some_and(|player| {
+                player.state == 1
+                    && (2_200_000..=2_300_000).contains(&player.translation[0])
+                    && (2_900_000..=3_100_000).contains(&player.translation[1])
+                    && (3_400_000..=3_650_000).contains(&player.translation[2])
             })
     }
 
@@ -9198,19 +9249,19 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
         .expect("Upstream must recover from the carried-spawn PBAK phase mismatch");
         assert_eq!(upstream_survey.frames, 3_600);
         assert!(upstream_survey.terminal.is_none());
-        assert_eq!(upstream_survey.final_live_objects, 57);
+        assert_eq!(upstream_survey.final_live_objects, 25);
         assert_eq!(upstream_survey.max_live_objects, 97);
-        assert_eq!(upstream_survey.successful_spawns, 115);
-        assert_eq!(upstream_survey.spawn_attempts, 49_067);
-        assert_eq!(upstream_survey.expected_spawn_rejections, 48_952);
+        assert_eq!(upstream_survey.successful_spawns, 137);
+        assert_eq!(upstream_survey.spawn_attempts, 49_787);
+        assert_eq!(upstream_survey.expected_spawn_rejections, 49_650);
         assert_eq!(upstream_survey.unexpected_spawn_errors, 0);
-        assert_eq!(upstream_survey.executions, 150_273);
-        assert_eq!(upstream_survey.zone_transitions, 17);
-        assert_eq!(upstream_survey.camera_ranges.len(), 23);
-        assert_eq!(upstream_survey.camera_path_changes, 28);
-        assert_eq!(upstream_survey.last_camera_path_change, 3_053);
-        assert_eq!(upstream_survey.last_camera_progress_change, 3_072);
-        assert_eq!(upstream_survey.last_player_movement, 3_071);
+        assert_eq!(upstream_survey.executions, 141_243);
+        assert_eq!(upstream_survey.zone_transitions, 21);
+        assert_eq!(upstream_survey.camera_ranges.len(), 29);
+        assert_eq!(upstream_survey.camera_path_changes, 34);
+        assert_eq!(upstream_survey.last_camera_path_change, 3_313);
+        assert_eq!(upstream_survey.last_camera_progress_change, 3_314);
+        assert_eq!(upstream_survey.last_player_movement, 3_313);
         assert_eq!(upstream_survey.restarts, 3);
         assert_eq!(upstream_survey.restart_frames, [104, 231, 816]);
         assert_eq!(
@@ -9225,7 +9276,13 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
         assert_eq!(upstream_survey.save_handshakes, 0);
         assert_eq!(
             upstream_survey.box_count_samples,
-            [(1, 0), (1_935, 0x100), (2_316, 0x200)]
+            [
+                (1, 0),
+                (1_935, 0x100),
+                (2_316, 0x200),
+                (3_088, 0x300),
+                (3_094, 0x400),
+            ]
         );
         assert_eq!(
             upstream_survey.checkpoint_samples,
@@ -9264,28 +9321,28 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
         assert_eq!(
             upstream_final_camera.path,
             RetailPathId {
-                zone: Eid::from_name("0t_fZ").expect("fixed Upstream hazard-zone EID is valid"),
+                zone: Eid::from_name("0x_fZ").expect("fixed Upstream bank-zone EID is valid"),
                 index: 1,
             }
         );
-        assert_eq!(upstream_final_camera.progress.raw(), 7_424);
+        assert_eq!(upstream_final_camera.progress.raw(), 768);
         assert_eq!(
             upstream_survey.final_player_translation,
-            Some([2_244_848, 2_361_337, 7_818_176])
+            Some([2_244_032, 2_976_000, 3_556_928])
         );
         assert_eq!(
             upstream_survey.player_minimum,
-            Some([1_993_028, 1_580_414, 7_818_176])
+            Some([1_993_028, 1_580_414, 3_556_928])
         );
         assert_eq!(
             upstream_survey.player_maximum,
-            Some([2_329_096, 2_714_041, 25_025_792])
+            Some([2_329_096, 3_280_068, 25_025_792])
         );
         assert_eq!(
             upstream_runtime.global_word(CHECKPOINT_ID_GLOBAL),
             Ok(57 << 8)
         );
-        assert_eq!(upstream_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x200));
+        assert_eq!(upstream_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x400));
         let upstream_checkpoint = upstream_runtime
             .saved_level_state()
             .expect("BoxsC entity 57 must install a saved checkpoint snapshot");
@@ -9294,7 +9351,7 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
             upstream_checkpoint.player_translation,
             [2_252_800, 2_350_080, 15_564_288]
         );
-        assert_eq!(upstream_runtime.machine().random_seed(), 0x2ecf_10ce);
+        assert_eq!(upstream_runtime.machine().random_seed(), 0xd4d9_3541);
         assert_eq!(upstream_runtime.draw_count(), 2_784);
         assert!(
             upstream_survey.is_clean(),
@@ -9315,7 +9372,7 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
                 "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
-                "restarts, 0n checkpoint through stable 0t bank, RNG {:#010x}, draw {}",
+                "restarts, 0n checkpoint through stable 0x bank, RNG {:#010x}, draw {}",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

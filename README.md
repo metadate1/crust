@@ -264,31 +264,33 @@ executions. The carry unlocks level seven with RNG `0xf3ab9165` and draw 4,265.
 The post-boss Map becomes ready on frame 10, waits for its authored current-node camera gate,
 taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
 Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. A session-gated
-ordinary-pad continuation now runs 2,000 carried Rolling Stones frames through stable
-`0F_lZ:0@11742`, ending at `[2706176, 4623368, 6061312]`. It activates checkpoint `0x0800` on
-frame 1,160, retains saved box count `0x0a00` and live count `0x0b00`, and records 92 successful
-spawns from 23,656 attempts with 23,564 source-expected rejections, 43,609 clean executions, 26
-lifecycle zone transitions, 34 camera ranges and 35 path changes. It has no restart, state-31
-squash, death camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x497f40ca`
-at draw 6,331. These are deterministic native integration goldens over user-supplied local data,
-not a browser playthrough or full-game parity claim; a browser exercise of this complete carried
-chain remains open.
+ordinary-pad continuation now completes carried Rolling Stones and requests Level Complete `0x2d`
+on frame 2,450. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
+the end `WarpC`, and ends at camera `0O_lZ:0@12199` with Crash in warp state 32 at
+`[2101120, 9256238, -1866496]`. It activates checkpoint `0x0800` on frame 1,160, retains saved box
+count `0x0a00`, and advances the live count to `0x0c00`. The route records 117 successful spawns
+from 29,236 attempts with 29,119 source-expected rejections, 55,106 clean executions, 32 lifecycle
+zone transitions, 45 camera ranges and 46 path changes. It has no restart, state-31 squash, death
+camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x96bb47ac` at draw 6,781.
+These are deterministic native integration goldens over user-supplied local data, not a browser
+playthrough or full-game parity claim; a browser exercise of this complete carried chain remains
+open.
 
-An independent legally local direct-boot route now continues Rolling Stones from its first
-main-path checkpoint through the initial moving-stone gauntlet and onto the `0I` ledge using only
-ordinary 30 Hz pad input.
+An independent legally local direct-boot route now completes Rolling Stones using only ordinary
+30 Hz pad input.
 It breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57 and turtle
 entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths from JunOC entities
 75/77/52. BoxsC subtype-four entity 8 still activates on frame 1,160: SaveState captures checkpoint
 `0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live
 count then becomes `0x0b00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
-1,860, advancing the live count to `0x0c00`. At frame 2,024 the route is supported on
-`0I_lZ` path zero/progress 12,032 at `[2374144, 3767956, 3370240]`. It records 105 successful
-spawns from 24,937 attempts with 24,832 source-expected rejections, 45,223 clean executions, 28
-lifecycle zone transitions, 38 camera ranges and 39 path changes, with no restart, state-31
-squash, death camera, terminal fall, VM fault, execution error, or LoadState. This remains a
-deterministic direct-boot route, not Rolling Stones normal-end coverage. The carried route above
-independently reaches `0F`; both routes still need the later normal end.
+1,860, advancing the live count to `0x0c00`. Three ordinary terrain jumps carry Crash from `0M`
+into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
+WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,448. The
+route records 117 successful spawns from 29,223 attempts with 29,106 source-expected rejections,
+55,226 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
+final camera is `0O_lZ:0@12199`, RNG is `0x9e602d68` at draw 2,448, and it has no restart,
+state-31 squash, death camera, terminal fall, VM fault, execution error, or LoadState. The carried
+route above independently reaches the same authored end two frames later.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -305,10 +307,10 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
-The current native schedule therefore includes six deterministic normal-level completions, the
-complete carried Upstream route, Papu Papu's authored completion, and carried Rolling Stones
-through `0F`; this is not a full retail playthrough or a browser-playthrough claim. Broader
-progression, several GOOL host
+The current native schedule therefore includes seven deterministic normal-level completions, the
+complete carried Upstream route, Papu Papu's authored completion, and both direct and carried
+Rolling Stones completion; this is not a full retail playthrough or a browser-playthrough claim.
+Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.

@@ -537,25 +537,27 @@ gameplay path.
   current-node gate on frame 52, taps Up on 53, reaches the next-node gate on 65, and presses Cross
   on 66 to request Rolling Stones `0x15`. Its checked carry has map/unlocked seven, island one, and
   draw 4,331. Rolling Stones imports that exact session and follows ordinary state/camera-gated pad
-  input for 2,000 frames through stable `0F_lZ:0@11742`, ending at
-  `[2706176, 4623368, 6061312]`. It activates checkpoint `0x0800` on frame 1,160, retains saved
-  boxes `0x0a00` and live boxes `0x0b00`, and records 92 successful spawns, 43,609 clean
-  executions, 26 lifecycle zone transitions, 34 camera ranges and 35 path changes. It has no
-  restart, state-31 squash, death camera, terminal fall, fault, execution error, or LoadState; RNG
-  is `0x497f40ca` at draw 6,331. This is deterministic native integration over user-supplied local
-  data, not browser execution or full-game parity. A browser exercise of the complete chain remains
-  open.
+  input through normal `0M_lZ -> 0O_lZ`, bypasses alternate `0N_lZ`, enters the end `WarpC`, and
+  requests Level Complete `0x2d` on frame 2,450. It activates checkpoint `0x0800` on frame 1,160,
+  retains saved boxes `0x0a00`, advances live boxes to `0x0c00`, and records 117 successful spawns,
+  55,106 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes.
+  The final camera is `0O_lZ:0@12199`; Crash is in warp state 32 at
+  `[2101120, 9256238, -1866496]`. It has no restart, state-31 squash, death camera, terminal fall,
+  fault, execution error, or LoadState; RNG is `0x96bb47ac` at draw 6,781. This is deterministic
+  native integration over user-supplied local data, not browser execution or full-game parity. A
+  browser exercise of the complete chain remains open.
 
-  A separate legally local Rolling Stones direct-boot controller now continues from checkpoint
-  entity eight through `0I_lZ`. It avoids the `0x1900` squash paths from JunOC entities 75/77/52
-  with ordinary neutral/run/jump windows and breaks BoxsC entity 92 on frame 1,860. At frame 2,024
-  it is supported on path zero/progress 12,032 at `[2374144, 3767956, 3370240]`. The route records
-  105 successful spawns, 45,223 clean executions, 28 lifecycle zone transitions, 38 camera ranges
-  and 39 path changes, while retaining checkpoint `0x0800`, saved translation
+  A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
+  avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
+  windows and breaks BoxsC entity 92 on frame 1,860. Three terrain jumps continue `0M -> 0O`
+  without taking alternate `0N`; a short right-jump enters end `WarpC`, which executes states zero
+  through four and requests Level Complete on frame 2,448. The route records 117 successful spawns,
+  55,226 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
+  while retaining checkpoint `0x0800`, saved translation
   `[2815232, 2979072, 17458688]`, saved boxes `0x0a00`, and live boxes `0x0c00`. It has no restart,
-  state-31 squash, fall, fault, execution error, or LoadState. This is direct-boot mid-route
-  coverage, not normal-end evidence. The independent carried route reaches `0F`; both later legs
-  remain open.
+  state-31 squash, fall, fault, execution error, or LoadState. Its final camera is
+  `0O_lZ:0@12199`, and RNG is `0x9e602d68` at draw 2,448. The independent carried route reaches the
+  same authored transition two frames later.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -598,12 +600,12 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Six deterministic retail-authored normal-level routes now reach their real end warps and request
-  Level Complete, including the independent Hog Wild route. The carried chain executes the
-  complete legally local Upstream PBAK input,
+- Seven deterministic retail-authored normal levels now reach their real end warps and request
+  Level Complete, including the independent Hog Wild and Rolling Stones routes. The carried chain
+  executes the complete legally local Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
-  carries Rolling Stones from the post-boss Map handoff through `0F`. The independent Rolling Stones
-  route reaches `0I` after its first checkpoint but not its normal end.
+  carries Rolling Stones from the post-boss Map handoff through its normal end. The independent
+  Rolling Stones direct boot reaches the same end on its own deterministic phase.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

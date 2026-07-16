@@ -1139,19 +1139,21 @@ is 1,322,866 bytes with SHA-256
   the frame-52 current-node gate at `1d_pZ:0@0x0400`, taps Up on frame 53 and releases on 54, waits
   for `1d_pZ:1@0x0300` on frame 65, and presses Cross on 66. The authored transition requests
   Rolling Stones `0x15`; the clean `LEVEL_END` carry has map/unlocked seven, island one, and draw
-  4,331. Rolling Stones imports that exact carry and executes a 2,000-frame ordinary-pad route with
-  no transition, restart, state-31 squash, death camera, terminal fall, VM fault, execution error,
-  or LoadState. It activates checkpoint `0x0800` on frame 1,160, retains saved boxes `0x0a00` and
-  live boxes `0x0b00`, and records 92 successful spawns, 23,656 attempts, 23,564 source-expected
-  rejections, and 43,609 clean executions across 26 lifecycle zone transitions, 34 camera ranges,
-  and 35 path changes. At frame 2,000 Crash is stable at `[2706176, 4623368, 6061312]` on
-  `0F_lZ` path zero/progress 11,742; RNG is `0x497f40ca` and draw is 6,331. This is deterministic
-  native integration over user-supplied local data, not a browser playthrough or full-game parity
-  claim. The complete carried chain has not been exercised in a browser.
+  4,331. Rolling Stones imports that exact carry and executes an ordinary-pad normal route through
+  `0M_lZ -> 0O_lZ`, bypassing alternate `0N_lZ`. It enters end `WarpC` and requests Level Complete
+  `0x2d` on frame 2,450 with no restart, state-31 squash, death camera, terminal fall, VM fault,
+  execution error, or LoadState. It activates checkpoint `0x0800` on frame 1,160, retains saved
+  boxes `0x0a00`, advances live boxes to `0x0c00`, and records 117 successful spawns, 29,236
+  attempts, 29,119 source-expected rejections, and 55,106 clean executions across 32 lifecycle zone
+  transitions, 45 camera ranges, and 46 path changes. The final camera is `0O_lZ:0@12199`; Crash is
+  in warp state 32 at `[2101120, 9256238, -1866496]`. RNG is `0x96bb47ac` and draw is 6,781. This
+  is deterministic native integration over user-supplied local data, not a browser playthrough or
+  full-game parity claim. The complete carried chain has not been exercised in a browser.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
-  runs 2,191 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
-  execution error, or LoadState. It performs 113 successful spawns and 48,958 clean executions
-  across 30 lifecycle zone transitions, 42 camera ranges, and 43 path changes. The route breaks its
+  requests Level Complete `0x2d` on frame 2,448 with no restart, state-31 squash, death camera,
+  terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
+  29,223 attempts with 29,106 source-expected rejections and 55,226 clean executions across 32
+  lifecycle zone transitions, 45 camera ranges, and 46 path changes. The route breaks its
   authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
   JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
   neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,160. The
@@ -1159,10 +1161,12 @@ is 1,322,866 bytes with SHA-256
   pre-increment box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become
   nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0c00`. The route
   retains `0I -> 0J -> 0K`, avoids category-`0x300` entity 103 with an ordinary right/left lane
-  change, and crosses the successive `0K` pads. At frame 2,191 Crash is supported in physical zone
-  `0M_lZ` at `[3066368, 5009761, 460032]`; the camera is `0K_lZ` path two/progress 5,376. This is
-  an independent direct-boot mid-route regression, not normal-end evidence. The post-Papu chain
-  independently proves carried progression through `0F`.
+  change, and crosses the successive `0K` pads. Three terrain jumps carry Crash from physical `0M`
+  into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
+  WarpC executes states zero through four before the transition. The final camera is
+  `0O_lZ:0@12199`, Crash is `[2101152, 9256238, -1866496]` in warp state 32, and RNG is
+  `0x9e602d68` at draw 2,448. The post-Papu chain independently reaches the same authored end two
+  frames later.
 - Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
   traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and
   30, advances live boxes to `0x700`, observes WarpC states zero through four, and requests Level
@@ -1201,8 +1205,9 @@ is 1,322,866 bytes with SHA-256
 - The locked workspace currently enumerates 970 tests: 885 default-active and 85 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
-  Rolling Stones `0K`-to-`0M` boundary test, the Ripper Roo pool characterization, the Up the Creek
-  log-transfer test, and the full carried regression pass independently on the current tree.
+  Rolling Stones completion test, the Ripper Roo pool characterization, the Up the Creek
+  log-transfer test, and the full carried completion regression pass independently on the current
+  tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.

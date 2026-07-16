@@ -9,7 +9,8 @@
 //! A separate vertical-flow test retains the authored session carry across
 //! N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, their
 //! Level Complete screens, the Title map, Papu Papu's authored win, and the
-//! following Rolling Stones mount without writing any game data.
+//! following Rolling Stones mount and normal-end completion without writing
+//! any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -1060,14 +1061,11 @@ impl RollingStonesRouteController {
                     let Some(player) = player else {
                         return PAD_UP;
                     };
-                    // Direct boot settles at this authored camera sample with
-                    // support already established. Session carry settles
-                    // three units earlier in a different JunOC phase, so it
-                    // retains the safe bank hold until that phase has its own
-                    // characterized continuation.
+                    // Direct boot and the session-carried route settle three
+                    // progress units apart on this authored supported bank.
                     if camera.path.zone != zero_f
                         || camera.path.index != 0
-                        || camera.progress.raw() != 11_745
+                        || !matches!(camera.progress.raw(), 11_742 | 11_745)
                         || player.state != 2
                         || player.status_a & 1 == 0
                     {
@@ -1083,7 +1081,9 @@ impl RollingStonesRouteController {
                 // jumps and neutral phase cross JunOC 93's sweep. The final
                 // right-jump reaches 0I's upper approach; ordinary jumps and
                 // one lane change then retain the authored 0I -> 0J -> 0K
-                // route through the narrow 0K -> 0M boundary pad.
+                // route through the narrow 0K -> 0M boundary pad. Three more
+                // terrain jumps follow 0M into normal-route 0O, skipping the
+                // alternate 0N branch; a short right-jump enters end WarpC.
                 return match post_bank_tick {
                     0..=9 => PAD_UP | PAD_SQUARE,
                     10..=17
@@ -1092,9 +1092,13 @@ impl RollingStonesRouteController {
                     | 146..=153
                     | 171..=178
                     | 256..=265
-                    | 280..=289 => PAD_UP | PAD_CROSS,
+                    | 280..=289
+                    | 330..=339
+                    | 355..=364
+                    | 387..=396
+                    | 488..=493 => PAD_UP | PAD_CROSS,
                     32..=41 => 0,
-                    124..=131 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                    124..=131 | 484..=487 => PAD_UP | PAD_RIGHT | PAD_CROSS,
                     212..=225 => PAD_UP | PAD_RIGHT,
                     240..=251 => PAD_UP | PAD_LEFT,
                     304..=313 => PAD_UP | PAD_LEFT | PAD_CROSS,
@@ -6702,7 +6706,7 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn rolling_stones_direct_boot_reaches_zero_m_boundary_pad() {
+fn rolling_stones_direct_boot_reaches_level_complete() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -6723,51 +6727,54 @@ fn rolling_stones_direct_boot_reaches_zero_m_boundary_pad() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::RollingStonesCheckpoint,
-        2_191,
+        2_448,
     )
-    .expect("Rolling Stones must execute through the 0K-to-0M boundary pad");
+    .expect("Rolling Stones' ordinary-pad completion route must execute");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 2_191);
-    assert_eq!(survey.successful_spawns, 113);
-    assert_eq!(survey.spawn_attempts, 26_698);
-    assert_eq!(survey.expected_spawn_rejections, 26_585);
-    assert_eq!(survey.executions, 48_958);
-    assert_eq!(survey.zone_transitions, 30);
-    assert_eq!(survey.camera_ranges.len(), 42);
-    assert_eq!(survey.camera_path_changes, 43);
-    assert_eq!(survey.last_camera_path_change, 2_180);
-    assert_eq!(survey.last_camera_progress_change, 2_191);
+    assert_eq!(survey.frames, 2_448);
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2448 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.successful_spawns, 117);
+    assert_eq!(survey.spawn_attempts, 29_223);
+    assert_eq!(survey.expected_spawn_rejections, 29_106);
+    assert_eq!(survey.executions, 55_226);
+    assert_eq!(survey.zone_transitions, 32);
+    assert_eq!(survey.camera_ranges.len(), 45);
+    assert_eq!(survey.camera_path_changes, 46);
+    assert_eq!(survey.last_camera_path_change, 2_312);
+    assert_eq!(survey.last_camera_progress_change, 2_359);
     let final_camera = survey
         .final_camera
         .expect("the Rolling Stones survey must retain its final camera");
     assert_eq!(
         final_camera.path.zone,
-        Eid::from_name("0K_lZ").expect("fixed Rolling Stones boundary-zone EID is valid")
+        Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
-    assert_eq!(final_camera.path.index, 2);
-    assert_eq!(final_camera.progress.raw(), 5_376);
+    assert_eq!(final_camera.path.index, 0);
+    assert_eq!(final_camera.progress.raw(), 12_199);
     assert_eq!(
         survey.final_player_translation,
-        Some([3_066_368, 5_009_761, 460_032])
+        Some([2_101_152, 9_256_238, -1_866_496])
     );
     let player = player_trace(&runtime)
-        .expect("Rolling Stones boundary player trace must resolve")
-        .expect("Rolling Stones boundary pad must keep Crash alive");
+        .expect("Rolling Stones completion player trace must resolve")
+        .expect("Rolling Stones completion must retain Crash");
     assert_eq!(
         player.zone,
-        Eid::from_name("0M_lZ").expect("fixed Rolling Stones next-zone EID is valid")
+        Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
-    assert_eq!(player.state, 2);
-    assert_ne!(player.status_a & 1, 0);
-    assert_eq!(survey.final_live_objects, 23);
+    assert_eq!(player.state, 32);
+    assert_eq!(survey.final_live_objects, 22);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.next_lid, Some((2_448, 0x2d)));
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(survey.execution_errors, 0);
     assert!(
@@ -6817,12 +6824,23 @@ fn rolling_stones_direct_boot_reaches_zero_m_boundary_pad() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&103));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&205));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&108));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&211));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert!(!survey.effect_counts.contains_key("load-state"));
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(runtime.machine().random_seed(), 0x9e60_2d68);
+    assert_eq!(runtime.draw_count(), 2_448);
     assert!(
         survey.is_clean(),
-        "Rolling Stones 0K-to-0M boundary route reached a checked runtime boundary: {}",
+        "Rolling Stones completion route must remain clean: {}",
         survey.summary()
     );
 }
@@ -11846,32 +11864,35 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     .expect("Rolling Stones must import the post-Papu Map carry"),
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::RollingStonesCheckpoint,
-                    2_000,
+                    2_600,
                 )
                 .expect("Rolling Stones' carried ordinary-pad route must execute"),
             );
             let rolling_stones_survey = &rolling_stones_result.0;
             let rolling_stones_runtime = &rolling_stones_result.1;
-            assert_eq!(rolling_stones_survey.frames, 2_000);
-            assert!(rolling_stones_survey.terminal.is_none());
-            assert_eq!(rolling_stones_survey.final_live_objects, 18);
+            assert_eq!(rolling_stones_survey.frames, 2_450);
+            assert_eq!(
+                rolling_stones_survey.terminal.as_deref(),
+                Some("frame 2450 requested level transition to 0x2d")
+            );
+            assert_eq!(rolling_stones_survey.final_live_objects, 22);
             assert_eq!(rolling_stones_survey.max_live_objects, 36);
-            assert_eq!(rolling_stones_survey.successful_spawns, 92);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 23_656);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 23_564);
+            assert_eq!(rolling_stones_survey.successful_spawns, 117);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 29_236);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_119);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 43_609);
-            assert_eq!(rolling_stones_survey.zone_transitions, 26);
-            assert_eq!(rolling_stones_survey.camera_ranges.len(), 34);
-            assert_eq!(rolling_stones_survey.camera_path_changes, 35);
-            assert_eq!(rolling_stones_survey.last_camera_path_change, 1_826);
-            assert_eq!(rolling_stones_survey.last_camera_progress_change, 1_855);
+            assert_eq!(rolling_stones_survey.executions, 55_106);
+            assert_eq!(rolling_stones_survey.zone_transitions, 32);
+            assert_eq!(rolling_stones_survey.camera_ranges.len(), 45);
+            assert_eq!(rolling_stones_survey.camera_path_changes, 46);
+            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_314);
+            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_361);
             assert_eq!(rolling_stones_survey.restarts, 0);
             assert!(rolling_stones_survey.restart_frames.is_empty());
             assert_eq!(rolling_stones_survey.death_camera_frames, 0);
             assert!(rolling_stones_survey.first_below_zero.is_none());
             assert!(rolling_stones_survey.first_terminal_fall.is_none());
-            assert!(rolling_stones_survey.next_lid.is_none());
+            assert_eq!(rolling_stones_survey.next_lid, Some((2_450, 0x2d)));
             assert_eq!(rolling_stones_survey.faulted_objects, 0);
             assert_eq!(rolling_stones_survey.execution_errors, 0);
             assert!(rolling_stones_survey.issue_counts.is_empty());
@@ -11895,26 +11916,26 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(
                 rolling_final_camera.path,
                 RetailPathId {
-                    zone: Eid::from_name("0F_lZ")
-                        .expect("fixed Rolling Stones carried-route EID is valid"),
+                    zone: Eid::from_name("0O_lZ")
+                        .expect("fixed Rolling Stones end-zone EID is valid"),
                     index: 0,
                 }
             );
-            assert_eq!(rolling_final_camera.progress.raw(), 11_742);
+            assert_eq!(rolling_final_camera.progress.raw(), 12_199);
             assert_eq!(
                 rolling_stones_survey.initial_player_translation,
                 Some([2_252_544, 1_023_744, 31_794_432])
             );
             assert_eq!(
                 rolling_stones_survey.final_player_translation,
-                Some([2_706_176, 4_623_368, 6_061_312])
+                Some([2_101_120, 9_256_238, -1_866_496])
             );
             assert_eq!(
                 player_trace(rolling_stones_runtime)
                     .expect("carried Rolling Stones final player trace must resolve")
-                    .expect("carried Rolling Stones keeps Crash alive")
+                    .expect("carried Rolling Stones retains Crash through completion")
                     .state,
-                2
+                32
             );
             assert_eq!(
                 rolling_stones_survey.checkpoint_samples.last(),
@@ -11926,7 +11947,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_stones_runtime.global_word(BOX_COUNT_GLOBAL),
-                Ok(0xb00_u32)
+                Ok(0xc00_u32)
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("save-state"),
@@ -11934,9 +11955,17 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("send-event"),
-                Some(&88)
+                Some(&102)
             );
-            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&178));
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&208));
+            assert_eq!(
+                rolling_stones_survey.effect_counts.get("master-fade-reset"),
+                Some(&1)
+            );
+            assert_eq!(
+                rolling_stones_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -11949,17 +11978,26 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 ]
                 .map(|index| rolling_stones_runtime.global_word(index).unwrap()),
                 [
-                    0x100,
+                    0x500,
                     TitleScreen::Map.raw(),
                     TitleScreen::Map.raw(),
                     7,
                     1,
-                    7,
+                    8,
                     0,
                 ]
             );
-            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x497f_40ca);
-            assert_eq!(rolling_stones_runtime.draw_count(), 6_331);
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x96bb_47ac);
+            let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+            for state in 0..=4 {
+                assert!(
+                    rolling_stones_survey
+                        .observed_program_states
+                        .contains(&(warp, state)),
+                    "carried WarpC state {state} must execute before the authored transition"
+                );
+            }
+            assert_eq!(rolling_stones_runtime.draw_count(), 6_781);
             assert!(
                 rolling_stones_survey.is_clean(),
                 "Rolling Stones' carried ordinary-pad route must remain clean: {}",
@@ -11998,8 +12036,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
                 "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
                 "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4265); Map -> Rolling ",
-                "Stones at frame 66 (draw 4331); Rolling Stones carried route: 2000 clean ",
-                "frames through 0F (draw 6331)",
+                "Stones at frame 66 (draw 4331); Rolling Stones carried route: 2450 frames -> ",
+                "Level Complete, 45 paths/46 changes, 32 zone transitions, 12 boxes, RNG ",
+                "0x96bb47ac, draw 6781",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

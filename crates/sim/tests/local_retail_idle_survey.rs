@@ -764,6 +764,7 @@ struct RollingStonesRouteController {
     checkpoint_route_started: bool,
     checkpoint_tick: u16,
     checkpoint_lateral_corrected: bool,
+    post_bank_tick: Option<u16>,
 }
 
 impl RollingStonesRouteController {
@@ -844,6 +845,43 @@ impl RollingStonesRouteController {
                 }
             }
             self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+            if tick >= 697 {
+                let zero_f =
+                    Eid::from_name("0F_lZ").expect("fixed Rolling Stones bank-zone EID is valid");
+                if self.post_bank_tick.is_none() {
+                    let Some(player) = player else {
+                        return PAD_UP;
+                    };
+                    // Direct boot settles at this authored camera sample with
+                    // support already established. Session carry settles
+                    // three units earlier in a different JunOC phase, so it
+                    // retains the safe bank hold until that phase has its own
+                    // characterized continuation.
+                    if camera.path.zone != zero_f
+                        || camera.path.index != 0
+                        || camera.progress.raw() != 11_745
+                        || player.state != 2
+                        || player.status_a & 1 == 0
+                    {
+                        return PAD_UP;
+                    }
+                    self.post_bank_tick = Some(0);
+                }
+                let post_bank_tick = self
+                    .post_bank_tick
+                    .expect("the post-bank route was gated immediately above");
+                self.post_bank_tick = Some(post_bank_tick.saturating_add(1));
+                // A fresh spin opens BoxsC 92 at the 0F bank. The following
+                // jumps and neutral phase cross JunOC 93's sweep, then the
+                // final right-jump settles on I0's supported approach.
+                return match post_bank_tick {
+                    0..=9 => PAD_UP | PAD_SQUARE,
+                    10..=17 | 50..=57 | 98..=105 => PAD_UP | PAD_CROSS,
+                    32..=41 => 0,
+                    124..=131 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                    _ => PAD_UP,
+                };
+            }
             // These are ordinary 30 Hz retail pad samples. Each jump window
             // starts from an observed terrain or PoPlC support contact. The
             // neutral windows let JunOC's authored moving-stone cycles clear
@@ -4440,6 +4478,7 @@ impl SurveyInputController {
                 checkpoint_route_started: false,
                 checkpoint_tick: 0,
                 checkpoint_lateral_corrected: false,
+                post_bank_tick: None,
             },
             hog_wild: HogWildCompletionRouteController {
                 stage: 0,
@@ -6441,7 +6480,7 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn rolling_stones_direct_boot_reaches_zero_f_bank() {
+fn rolling_stones_direct_boot_reaches_i0_ledge() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -6460,34 +6499,34 @@ fn rolling_stones_direct_boot_reaches_zero_f_bank() {
         &nsf,
         &nsf_bytes,
         SurveyInputProfile::RollingStonesCheckpoint,
-        1_860,
+        2_024,
     )
-    .expect("Rolling Stones must execute through its post-checkpoint moving-stone gauntlet");
+    .expect("Rolling Stones must execute through its post-0F route to I0's supported ledge");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_860);
-    assert_eq!(survey.successful_spawns, 92);
-    assert_eq!(survey.spawn_attempts, 22_677);
-    assert_eq!(survey.expected_spawn_rejections, 22_585);
-    assert_eq!(survey.executions, 41_202);
-    assert_eq!(survey.zone_transitions, 26);
-    assert_eq!(survey.camera_ranges.len(), 34);
-    assert_eq!(survey.camera_path_changes, 35);
-    assert_eq!(survey.last_camera_path_change, 1_827);
+    assert_eq!(survey.frames, 2_024);
+    assert_eq!(survey.successful_spawns, 105);
+    assert_eq!(survey.spawn_attempts, 24_937);
+    assert_eq!(survey.expected_spawn_rejections, 24_832);
+    assert_eq!(survey.executions, 45_223);
+    assert_eq!(survey.zone_transitions, 28);
+    assert_eq!(survey.camera_ranges.len(), 38);
+    assert_eq!(survey.camera_path_changes, 39);
+    assert_eq!(survey.last_camera_path_change, 1_998);
     let final_camera = survey
         .final_camera
         .expect("the Rolling Stones survey must retain its final camera");
     assert_eq!(
         final_camera.path.zone,
-        Eid::from_name("0F_lZ").expect("fixed Rolling Stones bank-zone EID is valid")
+        Eid::from_name("0I_lZ").expect("fixed Rolling Stones ledge-zone EID is valid")
     );
     assert_eq!(final_camera.path.index, 0);
-    assert_eq!(final_camera.progress.raw(), 11_745);
+    assert_eq!(final_camera.progress.raw(), 12_032);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_705_920, 4_623_365, 6_061_312])
+        Some([2_374_144, 3_767_956, 3_370_240])
     );
-    assert_eq!(survey.final_live_objects, 19);
+    assert_eq!(survey.final_live_objects, 26);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -6516,6 +6555,7 @@ fn rolling_stones_direct_boot_reaches_zero_f_bank() {
             (1_037, 0x900),
             (1_054, 0xa00),
             (1_160, 0xb00),
+            (1_860, 0xc00),
         ]
     );
     assert_eq!(
@@ -6534,6 +6574,7 @@ fn rolling_stones_direct_boot_reaches_zero_f_bank() {
         (1_118, 72, 3),
         (1_160, 8, 9),
         (1_697, 86, 3),
+        (1_860, 92, 3),
     ] {
         assert!(
             survey.spawn_flag_samples.contains(&defeated),
@@ -6542,12 +6583,12 @@ fn rolling_stones_direct_boot_reaches_zero_f_bank() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&87));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&178));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&103));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&187));
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(
         survey.is_clean(),
-        "Rolling Stones 0F-bank route reached a checked runtime boundary: {}",
+        "Rolling Stones I0-ledge route reached a checked runtime boundary: {}",
         survey.summary()
     );
 }

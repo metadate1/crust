@@ -119,6 +119,7 @@ enum SurveyInputProfile {
     NativeFortressExtendedRoute,
     PapuPapuCompletionRoute,
     KoalaKongCompletionRoute,
+    PinstripeCompletionRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +151,7 @@ impl SurveyInputProfile {
             Self::NativeFortressExtendedRoute => "native-fortress-extended-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
             Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
+            Self::PinstripeCompletionRoute => "pinstripe-completion-route",
         }
     }
 
@@ -172,7 +174,95 @@ impl SurveyInputProfile {
                 | Self::NativeFortressExtendedRoute
                 | Self::PapuPapuCompletionRoute
                 | Self::KoalaKongCompletionRoute
+                | Self::PinstripeCompletionRoute
         )
+    }
+}
+
+/// Ordinary-pad controller for Pinstripe's cover-and-reload fight.
+///
+/// Entity eight's `PinsC` state seven is the authored vulnerable run between
+/// firing positions, while state two is the second-phase gun jam. Crash leaves
+/// the couch on those openings, closes to spin range, and returns to whichever
+/// couch is opposite Pinstripe. The final center jam needs a jump over the desk
+/// before the sixth spin.
+struct PinstripeCompletionRouteController;
+
+impl PinstripeCompletionRouteController {
+    const SAFE_X: i32 = 384_512;
+    const SAFE_Z: i32 = 895_744;
+    const AXIS_TOLERANCE: i32 = 28_000;
+    const SPIN_X_RANGE: i32 = 90_000;
+    const SPIN_Z_RANGE: i32 = 120_000;
+
+    fn held(player: Option<PlayerTrace>, objects: &[ProgramObjectTrace]) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let pins = Eid::from_name("PinsC").expect("fixed Pinstripe boss EID is valid");
+        let boss = objects.iter().find(|object| {
+            object.program == pins
+                && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 8)
+        });
+        let Some(boss) = boss else {
+            return 0;
+        };
+
+        if boss.state == 9 {
+            return 0;
+        }
+        if !matches!(boss.state, 2 | 7) {
+            if player.translation[2] < Self::SAFE_Z - 50_000 {
+                return PAD_DOWN | PAD_CROSS;
+            }
+            let safe_x = if boss.translation[0] < 0 {
+                -Self::SAFE_X
+            } else {
+                Self::SAFE_X
+            };
+            return Self::move_toward(
+                player.translation,
+                [safe_x, player.translation[1], Self::SAFE_Z],
+            );
+        }
+        if player.translation[2] > 800_000 {
+            return PAD_UP | PAD_CROSS;
+        }
+
+        let delta_x = boss.translation[0].wrapping_sub(player.translation[0]);
+        let delta_z = boss.translation[2].wrapping_sub(player.translation[2]);
+        if boss.state == 2 && boss.translation[0].abs() < 100_000 {
+            if player.translation[2] > 450_000 {
+                return PAD_UP;
+            }
+            if delta_x < -Self::SPIN_X_RANGE {
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if delta_x > Self::SPIN_X_RANGE {
+                return PAD_RIGHT | PAD_CROSS;
+            }
+        }
+        if delta_x.abs() <= Self::SPIN_X_RANGE && delta_z.abs() <= Self::SPIN_Z_RANGE {
+            PAD_SQUARE
+        } else {
+            Self::move_toward(player.translation, boss.translation)
+        }
+    }
+
+    fn move_toward(from: [i32; 3], to: [i32; 3]) -> u32 {
+        let delta_z = to[2].wrapping_sub(from[2]);
+        if delta_z.abs() > Self::AXIS_TOLERANCE {
+            if delta_z < 0 { PAD_UP } else { PAD_DOWN }
+        } else {
+            let delta_x = to[0].wrapping_sub(from[0]);
+            if delta_x < -Self::AXIS_TOLERANCE {
+                PAD_LEFT
+            } else if delta_x > Self::AXIS_TOLERANCE {
+                PAD_RIGHT
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -5566,7 +5656,7 @@ impl SurveyInputController {
         local_pbak_held: Option<u32>,
         upstream_platforms: &UpstreamPlatformTraces,
         papu_boss_state: Option<u16>,
-        koala_objects: &[ProgramObjectTrace],
+        route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
@@ -5617,7 +5707,10 @@ impl SurveyInputController {
                 self.papu_papu.held(camera, player, papu_boss_state)
             }
             SurveyInputProfile::KoalaKongCompletionRoute => {
-                KoalaKongCompletionRouteController::held(camera, player, koala_objects)
+                KoalaKongCompletionRouteController::held(camera, player, route_objects)
+            }
+            SurveyInputProfile::PinstripeCompletionRoute => {
+                PinstripeCompletionRouteController::held(player, route_objects)
             }
         }
     }
@@ -7264,6 +7357,7 @@ fn survey_pair_with_runtime(
     let mut previous_box_count = None;
     let mut previous_checkpoint = None;
     let mut previous_papu_boss_state = None;
+    let mut previous_pinstripe_boss_state = None;
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);
@@ -7286,20 +7380,37 @@ fn survey_pair_with_runtime(
             } else {
                 None
             };
-        let koala_objects = if matches!(input_profile, SurveyInputProfile::KoalaKongCompletionRoute)
-        {
-            program_object_traces(
+        let route_objects = match input_profile {
+            SurveyInputProfile::KoalaKongCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("KonOC").expect("fixed Koala Kong boulder EID is valid")],
-            )?
-        } else {
-            Vec::new()
+            )?,
+            SurveyInputProfile::PinstripeCompletionRoute => program_object_traces(
+                &runtime,
+                &[Eid::from_name("PinsC").expect("fixed Pinstripe boss EID is valid")],
+            )?,
+            _ => Vec::new(),
         };
+        let pinstripe_boss_state =
+            if matches!(input_profile, SurveyInputProfile::PinstripeCompletionRoute) {
+                route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 8)
+                        .then_some(object.state)
+                })
+            } else {
+                None
+            };
         if previous_papu_boss_state != papu_boss_state {
             if let Some(state) = papu_boss_state {
                 survey.entity_state_samples.push((frame, 8, state));
             }
             previous_papu_boss_state = papu_boss_state;
+        }
+        if previous_pinstripe_boss_state != pinstripe_boss_state {
+            if let Some(state) = pinstripe_boss_state {
+                survey.entity_state_samples.push((frame, 8, state));
+            }
+            previous_pinstripe_boss_state = pinstripe_boss_state;
         }
         let held = input_controller.held(
             frame,
@@ -7312,7 +7423,7 @@ fn survey_pair_with_runtime(
                 .copied(),
             &upstream_platforms,
             papu_boss_state,
-            &koala_objects,
+            &route_objects,
         );
         if matches!(input_profile, SurveyInputProfile::HogWildCompletionRoute)
             && survey
@@ -7432,6 +7543,7 @@ fn survey_pair_with_runtime(
                 input_profile,
                 SurveyInputProfile::PapuPapuCompletionRoute
                     | SurveyInputProfile::KoalaKongCompletionRoute
+                    | SurveyInputProfile::PinstripeCompletionRoute
             ) && survey.direct_send_program_samples.len() < 128
                 && let VmEffect::SendEvent(request) = effect
                 && let SendEventTarget::Direct { recipient } = request.target
@@ -7450,18 +7562,46 @@ fn survey_pair_with_runtime(
                     sender: program(request.sender),
                     recipient: program(recipient),
                 };
-                let retain = matches!(input_profile, SurveyInputProfile::PapuPapuCompletionRoute)
-                    || (sample.event == 0x0300
-                        && sample.sender
-                            == Some(
-                                Eid::from_name("KonOC")
-                                    .expect("fixed Koala Kong controller EID is valid"),
-                            )
-                        && sample.recipient
-                            == Some(
-                                Eid::from_name("KongC")
-                                    .expect("fixed Koala Kong boss EID is valid"),
-                            ));
+                let retain = match input_profile {
+                    SurveyInputProfile::PapuPapuCompletionRoute => true,
+                    SurveyInputProfile::KoalaKongCompletionRoute => {
+                        sample.event == 0x0300
+                            && sample.sender
+                                == Some(
+                                    Eid::from_name("KonOC")
+                                        .expect("fixed Koala Kong controller EID is valid"),
+                                )
+                            && sample.recipient
+                                == Some(
+                                    Eid::from_name("KongC")
+                                        .expect("fixed Koala Kong boss EID is valid"),
+                                )
+                    }
+                    SurveyInputProfile::PinstripeCompletionRoute => {
+                        (sample.event == 0x1c00
+                            && sample.sender
+                                == Some(
+                                    Eid::from_name("PinsC")
+                                        .expect("fixed Pinstripe boss EID is valid"),
+                                )
+                            && sample.recipient
+                                == Some(
+                                    Eid::from_name("PinOC")
+                                        .expect("fixed Pinstripe controller EID is valid"),
+                                ))
+                            || (sample.event == 0x1600
+                                && sample.sender
+                                    == Some(
+                                        Eid::from_name("PinOC")
+                                            .expect("fixed Pinstripe exit EID is valid"),
+                                    )
+                                && sample.recipient
+                                    == Some(
+                                        Eid::from_name("WillC").expect("fixed player EID is valid"),
+                                    ))
+                    }
+                    _ => false,
+                };
                 if retain {
                     survey.direct_send_program_samples.push(sample);
                 }
@@ -9491,6 +9631,105 @@ fn koala_kong_ordinary_pad_route_reaches_authored_title_transition() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn pinstripe_ordinary_pad_route_reaches_authored_title_transition() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x08);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Pinstripe's local stream pair must parse");
+    let survey = survey_pair(
+        "Pinstripe",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::PinstripeCompletionRoute,
+        1_700,
+    )
+    .expect("Pinstripe's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 1_654);
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 1654 requested level transition to 0x19")
+    );
+    assert_eq!(
+        survey.next_lid,
+        Some((1_654, i32::try_from(LevelId::TITLE.get()).unwrap()))
+    );
+    assert_eq!(survey.successful_spawns, 4);
+    assert_eq!(survey.spawn_attempts, 6_616);
+    assert_eq!(survey.expected_spawn_rejections, 6_612);
+    assert_eq!(survey.executions, 47_634);
+    assert_eq!(survey.zone_transitions, 0);
+    assert_eq!(survey.final_live_objects, 35);
+    assert_eq!(survey.max_live_objects, 54);
+    assert_eq!(survey.save_handshakes, 1);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.last_player_movement, 1_575);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([68_096, 406_051, 387_840])
+    );
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&75));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_069));
+    assert_eq!(survey.effect_counts.get("reparent"), Some(&98));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let boss_hit_frames = survey
+        .entity_state_samples
+        .iter()
+        .filter_map(|(frame, entity, state)| (*entity == 8 && *state == 8).then_some(*frame))
+        .collect::<Vec<_>>();
+    assert_eq!(boss_hit_frames, [194, 430, 544, 742, 1_143, 1_466]);
+    assert_eq!(survey.entity_state_samples.last(), Some(&(1_467, 8, 9)));
+
+    let pins = Eid::from_name("PinsC").expect("fixed Pinstripe boss EID is valid");
+    let pin_controller = Eid::from_name("PinOC").expect("fixed Pinstripe controller EID is valid");
+    let player = Eid::from_name("WillC").expect("fixed player EID is valid");
+    assert_eq!(
+        survey.direct_send_program_samples,
+        [
+            DirectSendProgramSample {
+                frame: 1_488,
+                event: 0x1c00,
+                sender: Some(pins),
+                recipient: Some(pin_controller),
+            },
+            DirectSendProgramSample {
+                frame: 1_566,
+                event: 0x1600,
+                sender: Some(pin_controller),
+                recipient: Some(player),
+            },
+        ]
+    );
+    assert!(survey.observed_program_states.contains(&(pins, 9)));
+    assert!(
+        survey
+            .observed_program_states
+            .contains(&(pin_controller, 4))
+    );
+    assert!(survey.observed_player_states.contains(&32));
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert!(
+        survey.is_clean(),
+        "Pinstripe's authored completion route must remain clean: {}",
+        survey.summary()
+    );
+}
+
 fn requested_survey_level() -> Option<LevelId> {
     let raw = std::env::var("C1_SURVEY_LEVEL").ok()?;
     let digits = raw
@@ -9524,6 +9763,10 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
                 && std::env::var_os("C1_SURVEY_KOALA_ROUTE").is_some()
             {
                 SurveyInputProfile::KoalaKongCompletionRoute
+            } else if known.id == LevelId::new_const(0x08)
+                && std::env::var_os("C1_SURVEY_PINSTRIPE_ROUTE").is_some()
+            {
+                SurveyInputProfile::PinstripeCompletionRoute
             } else if std::env::var_os("C1_SURVEY_ACTIVE_INPUT").is_some() {
                 SurveyInputProfile::DirectionAndButtonSweep
             } else {

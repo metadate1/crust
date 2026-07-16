@@ -1270,17 +1270,12 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked workspace currently enumerates 976 tests: 888 default-active and 88 ignored
-  legally-local tests. The complete 885-test default gate and the complete then-current 80-test
-  owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
-  Rolling Stones completion test, the Ripper Roo pool characterization, the Native Fortress first-
-  grease and `a7_qZ` tests, the Up the Creek log-transfer/static-island/`0g` tests, and the full
-  carried completion regression pass independently on the current tree. The three alias-lifetime tests
-  and the complete current 553-test simulation library plus default simulation integration suite also
-  pass on this tree.
-  Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
-  remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
-  `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
+- The locked workspace currently enumerates 1,004 tests: 909 default-active and 95 legally-local
+  ignored tests. The complete 909-test default gate and the complete 95-test owned-data sweep pass
+  with zero failures, including the final Native Fortress and Up the Creek route goldens. Rustfmt, warnings-denied
+  native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm release builds, and
+  all eight Node distribution tests pass. The final `npm run build`, distribution verification,
+  and fresh browser pass remain to be repeated after this documentation checkpoint.
 - The checkpoint-specific in-app-browser pass loaded the release picker at 1,280 pixels wide,
   exposed the matching build identity in the DOM, reported 43 playable pairs, 30 Hz standby and all
   15 virtual-card slots, showed no horizontal overflow, and produced no warning/error diagnostics.

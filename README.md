@@ -423,8 +423,8 @@ with the exact draw phase; the subsequent browser graph remount is not part of t
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 553 passing tests; the locked workspace inventory has 888 default-active
-tests plus 88 ignored-by-default legally local tests. Native
+The `crust-sim` library has 553 passing tests; the locked workspace inventory has 909 default-active
+tests plus 95 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,

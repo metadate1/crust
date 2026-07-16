@@ -263,25 +263,32 @@ executions. The carry unlocks level seven with RNG `0xf3ab9165` and draw 4,265.
 
 The post-boss Map becomes ready on frame 10, waits for its authored current-node camera gate,
 taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
-Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. The first 120
-carried Rolling Stones frames are clean: 19 successful spawns, 3,476 executions, the authored
-`0a_lZ` camera from progress 256 to 6,400, RNG `0x2c8492d5`, and draw 4,451. These are
-deterministic native integration goldens over user-supplied local data, not a browser playthrough
-or full-game parity claim; a browser exercise of this complete carried chain remains open.
+Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. A session-gated
+ordinary-pad continuation now runs 2,000 carried Rolling Stones frames through stable
+`0F_lZ:0@11742`, ending at `[2706176, 4623368, 6061312]`. It activates checkpoint `0x0800` on
+frame 1,160, retains saved box count `0x0a00` and live count `0x0b00`, and records 92 successful
+spawns from 23,656 attempts with 23,564 source-expected rejections, 43,609 clean executions, 26
+lifecycle zone transitions, 34 camera ranges and 35 path changes. It has no restart, state-31
+squash, death camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x497f40ca`
+at draw 6,331. These are deterministic native integration goldens over user-supplied local data,
+not a browser playthrough or full-game parity claim; a browser exercise of this complete carried
+chain remains open.
 
 An independent legally local direct-boot route now continues Rolling Stones from its first
-main-path checkpoint through the initial moving-stone gauntlet using only ordinary 30 Hz pad input.
+main-path checkpoint through the initial moving-stone gauntlet and onto the `0I` ledge using only
+ordinary 30 Hz pad input.
 It breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57 and turtle
 entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths from JunOC entities
 75/77/52. BoxsC subtype-four entity 8 still activates on frame 1,160: SaveState captures checkpoint
 `0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live
-count then becomes `0x0b00` and spawn flags become nine. At frame 1,630 the route is grounded on
-`0B_lZ` path zero/progress 7,353 at `[3226784, 3852293, 9936128]`. It records 85 successful spawns,
-35,923 clean executions, 23 lifecycle zone transitions, 30 camera ranges and 31 path changes, with
-no restart, state-31 squash, death camera, terminal fall, VM fault, execution error, or LoadState.
-This remains a deterministic direct-boot route, not the carried Rolling Stones completion. The
-carried entry and its first 120 frames are covered by the post-Papu chain above; its later moving-
-stone phase requires a session-relative controller and remains open.
+count then becomes `0x0b00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
+1,860, advancing the live count to `0x0c00`. At frame 2,024 the route is supported on
+`0I_lZ` path zero/progress 12,032 at `[2374144, 3767956, 3370240]`. It records 105 successful
+spawns from 24,937 attempts with 24,832 source-expected rejections, 45,223 clean executions, 28
+lifecycle zone transitions, 38 camera ranges and 39 path changes, with no restart, state-31
+squash, death camera, terminal fall, VM fault, execution error, or LoadState. This remains a
+deterministic direct-boot route, not Rolling Stones normal-end coverage. The carried route above
+independently reaches `0F`; both routes still need the later normal end.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -291,13 +298,17 @@ sample observes zero at frame 1,151, and the respawned checkpoint recounts to `0
 1,152. A fixed-34-tick reference-C oracle confirms the early Box7, CrabC and Box12 contact order;
 the Crab gate does not emit the previously observed premature direct event `0x300`. This is a
 focused deterministic route, not broad checkpoint/death certification.
-The previously recorded strict 360-frame Hog Wild idle characterization delivered the authored
-`0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
-same-level load-state restarts, and retained no terminal fall or checked runtime issue.
-The current native schedule includes this deterministic carried sequence through five authored
-normal-level completions, the complete Upstream PBAK input and normal route, Papu Papu's authored
-completion, and the carried Rolling Stones mount; this is not a full retail playthrough or a
-browser-playthrough claim. Broader progression, several GOOL host
+Hog Wild now also has a complete direct-boot ordinary-pad route. It traverses 67 camera paths,
+activates checkpoints 13 and 30, advances live boxes to `0x700`, observes WarpC states zero through
+four, and requests Level Complete `0x2d` on frame 1,950. The route performs 39 successful spawns
+from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, with no restart,
+LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
+issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
+authored fall/load-state cadence at frames 178 and 355.
+The current native schedule therefore includes six deterministic normal-level completions, the
+complete carried Upstream route, Papu Papu's authored completion, and carried Rolling Stones
+through `0F`; this is not a full retail playthrough or a browser-playthrough claim. Broader
+progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.

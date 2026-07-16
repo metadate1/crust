@@ -1139,36 +1139,49 @@ is 1,322,866 bytes with SHA-256
   the frame-52 current-node gate at `1d_pZ:0@0x0400`, taps Up on frame 53 and releases on 54, waits
   for `1d_pZ:1@0x0300` on frame 65, and presses Cross on 66. The authored transition requests
   Rolling Stones `0x15`; the clean `LEVEL_END` carry has map/unlocked seven, island one, and draw
-  4,331. Rolling Stones imports that exact carry and executes 120 idle frames with no transition,
-  restart, death camera, terminal fall, VM fault, or execution error. It records 19 successful
-  spawns, 2,280 attempts, 2,261 expected rejections, and 3,476 clean executions while `0a_lZ` path
-  zero advances from progress 256 to 6,400. Crash moves only from
-  `[2252544, 1023744, 31794432]` to `[2252544, 969366, 31794432]`; RNG is `0x2c8492d5` and draw is
-  4,451. This is deterministic native integration over user-supplied local data, not a browser
-  playthrough or full-game parity claim. The complete carried chain has not been exercised in a
-  browser.
+  4,331. Rolling Stones imports that exact carry and executes a 2,000-frame ordinary-pad route with
+  no transition, restart, state-31 squash, death camera, terminal fall, VM fault, execution error,
+  or LoadState. It activates checkpoint `0x0800` on frame 1,160, retains saved boxes `0x0a00` and
+  live boxes `0x0b00`, and records 92 successful spawns, 23,656 attempts, 23,564 source-expected
+  rejections, and 43,609 clean executions across 26 lifecycle zone transitions, 34 camera ranges,
+  and 35 path changes. At frame 2,000 Crash is stable at `[2706176, 4623368, 6061312]` on
+  `0F_lZ` path zero/progress 11,742; RNG is `0x497f40ca` and draw is 6,331. This is deterministic
+  native integration over user-supplied local data, not a browser playthrough or full-game parity
+  claim. The complete carried chain has not been exercised in a browser.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
-  runs 1,630 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
-  execution error, or LoadState. It performs 85 successful spawns and 35,923 clean executions
-  across 23 lifecycle zone transitions, 30 camera ranges, and 31 path changes. The route breaks its
+  runs 2,024 frames with no restart, state-31 squash, death camera, terminal fall, VM fault,
+  execution error, or LoadState. It performs 105 successful spawns and 45,223 clean executions
+  across 28 lifecycle zone transitions, 38 camera ranges, and 39 path changes. The route breaks its
   authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
   JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
   neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,160. The
   synchronous SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and
   pre-increment box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become
-  nine. At frame 1,630 Crash is grounded on `0B_lZ` path zero/progress 7,353 at
-  `[3226784, 3852293, 9936128]`. This is an independent direct-boot mid-route regression, not
-  carried normal-end evidence. The post-Papu chain proves the carried entry, but the fixed-timing
-  direct controller later diverges against that session's moving-stone phase.
+  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0c00`. At frame
+  2,024 Crash is supported on `0I_lZ` path zero/progress 12,032 at
+  `[2374144, 3767956, 3370240]`. This is an independent direct-boot mid-route regression, not
+  normal-end evidence. The post-Papu chain independently proves carried progression through `0F`.
+- Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
+  traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and
+  30, advances live boxes to `0x700`, observes WarpC states zero through four, and requests Level
+  Complete `0x2d` on frame 1,950. It records 39 successful spawns, 5,857 attempts, 5,818
+  source-expected rejections, and 24,311 clean executions. The final camera is
+  `1M_hZ:0@10239`, Crash is `[5395712, 13171420, -31800992]`, and RNG is `0xc3448148` after
+  1,950 draws. It has no restart, LoadState, fatal-surface state 39, death camera, below-zero or
+  terminal fall, VM fault, execution error, or checked issue. A separate 360-frame idle route pins
+  its authored restart frames at 178 and 355.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- Rustfmt, native and Wasm Clippy with warnings denied, eight dependency-free Node tests, all 890
-  non-ignored locked workspace tests, all 78 legally local ignored tests, the native workspace
-  release, the `wasm32-unknown-unknown` web release, `npm run build`, and the distribution verifier
-  passed. The simulation library contributed 555 active tests to the default gate.
+- The locked workspace currently enumerates 967 tests: 885 default-active and 82 ignored
+  legally-local tests. The complete 885-test default gate and the complete then-current 80-test
+  owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
+  Rolling Stones `0I` test, and the full carried regression pass independently on the current tree.
+  Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
+  remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
+  `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
 - The checkpoint-specific in-app-browser pass loaded the release picker at 1,280 pixels wide,
   exposed the matching build identity in the DOM, reported 43 playable pairs, 30 Hz standby and all
   15 virtual-card slots, showed no horizontal overflow, and produced no warning/error diagnostics.
@@ -1215,6 +1228,16 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  rolling_stones_direct_boot_reaches_i0_ledge -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  hog_wild_direct_boot_reaches_level_complete -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  hog_wild_idle_restarts_on_the_authored_surface_cadence \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

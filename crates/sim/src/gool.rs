@@ -11050,10 +11050,6 @@ impl Machine {
                     })?;
                     Ok(true)
                 }
-                // Native cases three and ten intentionally do nothing after
-                // translating GOP B. Translation remains observable for a
-                // stack operand because it consumes exactly one word.
-                3 | 10 => Ok(false),
                 4 => {
                     let input = input.ok_or(VmError::MissingMiscOperand {
                         primary,
@@ -11130,11 +11126,13 @@ impl Machine {
                     self.emit(VmEffect::ResetLevelGlobals { object: handle })?;
                     Ok(true)
                 }
-                _ => Err(VmError::UnsupportedMiscOperation {
-                    primary,
-                    secondary,
-                    operand: instruction as u16 & 0x0fff,
-                }),
+                // Native cases three/ten intentionally do nothing, and its
+                // inner `switch (sop2)` has no default arm. Every other
+                // signed selector likewise performs only the GOP-B
+                // translation that happened before the switch. Preserve its
+                // stack/immediate cursor effects without quarantining the
+                // object when a dormant or later retail path selects one.
+                _ => Ok(false),
             },
             13 => {
                 let input = input.ok_or(VmError::MissingMiscOperand {
@@ -17128,6 +17126,30 @@ mod tests {
             Execution {
                 reason: HaltReason::BudgetExhausted,
                 steps: 3,
+            }
+        );
+        assert!(machine.object(object).unwrap().stack().is_empty());
+        assert_eq!(
+            machine.effects(),
+            &[VmEffect::ResetMasterFadeStep { object }]
+        );
+    }
+
+    #[test]
+    fn native_misc_unknown_suboperation_is_translation_only_noop() {
+        let object = handle(0);
+        let vm_object =
+            VmObject::new(object, vec![misc(12, -1, STACK), misc(12, 5, STACK)]).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(vm_object).unwrap();
+        machine.push(object, 0x1111_1111).unwrap();
+        machine.push(object, 0x2222_2222).unwrap();
+
+        assert_eq!(
+            machine.run(object, 2).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: 2,
             }
         );
         assert!(machine.object(object).unwrap().stack().is_empty());

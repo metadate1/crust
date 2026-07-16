@@ -1109,6 +1109,15 @@ is 1,322,866 bytes with SHA-256
   unexpected spawn error, or checked issue. This is deterministic native integration over
   user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
   end remains open, and the full carried chain has not been exercised in a browser.
+- The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
+  runs 1,160 frames with no restart, death camera, terminal fall, VM fault, execution error, or
+  LoadState. It performs 61 successful spawns and 26,887 clean executions across 16 lifecycle zone
+  transitions, 19 camera ranges, and 20 path changes. The route breaks its authored opening wall,
+  defeats PlanC entities 18/49/57 and turtle entities 15/72, and times jumps over JunOC entity 69's
+  moving-stone collision. BoxsC subtype-four entity eight activates on frame 1,160. The synchronous
+  SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment
+  box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become nine. This is an
+  independent direct-boot first-checkpoint regression, not carried entry or normal-end evidence.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

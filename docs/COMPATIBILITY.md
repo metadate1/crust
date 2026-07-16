@@ -517,6 +517,14 @@ gameplay path.
   transition request, VM fault, execution error, or checked issue. This is deterministic native
   integration over user-supplied local data, not browser execution or full-game parity. Upstream's
   normal end remains open, as does a browser exercise of the complete carried chain.
+  A separate legally local Rolling Stones direct-boot controller crosses 16 lifecycle zones and 19
+  camera paths using ordinary pad input, breaks its authored opening wall, defeats the characterized
+  PlanC/turtle hazards, and clears JunOC entity 69's moving-stone window. BoxsC subtype-four entity
+  eight activates on frame 1,160. SaveState captures checkpoint `0x0800`, translation
+  `[2815232, 2979072, 17458688]`, and box count `0x0a00` before the live count reaches `0x0b00`;
+  spawn flags become nine. All 61 spawns and 26,887 executions are clean, with no restart, fall,
+  fault, execution error, or LoadState. This is direct-boot first-checkpoint coverage, not carried
+  entry or normal-end evidence.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -561,7 +569,8 @@ gameplay path.
 - Four deterministic retail-authored normal-level routes now reach their real end warps and request
   Level Complete, and their carried chain executes the complete legally local Upstream PBAK input
   before reaching Upstream's first authentic checkpoint. Upstream's normal end remains open. The
-  Tawna bonus control path is covered at
+  independent Rolling Stones route reaches its first checkpoint but not its normal end. The Tawna
+  bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser
   bonus round trip has been completed.
   No boss, complete ending, broad death/checkpoint

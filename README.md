@@ -246,6 +246,15 @@ no post-prefix restart, death camera, below-zero or terminal fall, transition re
 execution error, or checked issue. These are deterministic native integration goldens over
 user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
 end remains open, as does a browser exercise of this complete carried chain.
+An independent legally local direct-boot route now reaches Rolling Stones' first main-path
+checkpoint using only ordinary 30 Hz pad input. It crosses 16 lifecycle zones and 19 camera paths,
+breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57, turtle entities
+15/72, and clears JunOC entity 69's moving-stone window. A fresh Square edge opens BoxsC
+subtype-four entity 8 on frame 1,160. SaveState captures checkpoint `0x0800`, player translation
+`[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live count then becomes
+`0x0b00` and spawn flags become nine. The 61-spawn/26,887-execution route has no restart, death
+camera, terminal fall, VM fault, execution error, or LoadState. This is a deterministic direct-boot
+checkpoint regression, not yet the carried Rolling Stones entry or its normal completion.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

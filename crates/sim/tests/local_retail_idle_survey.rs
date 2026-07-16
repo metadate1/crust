@@ -109,6 +109,7 @@ enum SurveyInputProfile {
     LocalPbakPrefix,
     BouldersCompletionRoute,
     UpstreamCarriedRecovery,
+    RollingStonesCheckpoint,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +133,7 @@ impl SurveyInputProfile {
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
+            Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
         }
     }
 
@@ -146,6 +148,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateYellowGemExactCarry
                 | Self::BouldersCompletionRoute
                 | Self::UpstreamCarriedRecovery
+                | Self::RollingStonesCheckpoint
         )
     }
 }
@@ -460,6 +463,79 @@ impl RouteAction {
             0
         };
         direction | button
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RollingStonesRouteController {
+    opening_started: bool,
+    opening_tick: u16,
+    post_tick: u16,
+}
+
+impl RollingStonesRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        let zero_a = Eid::from_name("0a_lZ").expect("fixed Rolling Stones route EID is valid");
+        if !self.opening_started
+            && let Some(player) = player
+            && camera.path.zone == zero_a
+            && camera.progress.raw() == 6_400
+            && player.state == 40
+            && player.animation_sequence == 2_801_795_288
+            && player.animation_frame == 256
+        {
+            self.opening_started = true;
+            return self.held(camera, Some(player));
+        }
+
+        if !self.opening_started {
+            return PAD_UP;
+        }
+        if self.opening_tick < 240 {
+            let phase = (u32::from(self.opening_tick) + 32) % 120;
+            let held = match phase {
+                0..=31 => PAD_UP,
+                32..=39 => PAD_UP | PAD_CROSS,
+                40..=55 => PAD_RIGHT,
+                56..=63 => PAD_RIGHT | PAD_SQUARE,
+                64..=71 => PAD_SQUARE,
+                72..=79 => PAD_DOWN,
+                80..=87 => PAD_LEFT,
+                88..=95 => 0x0020,
+                96..=103 => 0x0010,
+                104 => 0x0800,
+                _ => 0,
+            };
+            self.opening_tick = self.opening_tick.saturating_add(1);
+            return held;
+        }
+
+        // Each offset is one 30 Hz retail pad sample after the anchored opening.
+        // The route uses only ordinary directional, jump, and spin inputs: the
+        // pauses at 672 and the following jumps time authored moving platforms.
+        let held = match self.post_tick {
+            0..=7 | 80..=87 => PAD_UP | PAD_LEFT | PAD_SQUARE,
+            8..=15
+            | 112..=115
+            | 132..=135
+            | 164..=167
+            | 208..=211
+            | 292..=295
+            | 384..=387
+            | 492..=495
+            | 718..=721
+            | 743..=746
+            | 808..=811 => PAD_UP | PAD_CROSS,
+            64..=71 => PAD_UP | PAD_LEFT,
+            300..=303 => PAD_UP | PAD_RIGHT,
+            // A fresh one-frame spin edge opens checkpoint crate 8 after the
+            // turtle immediately before it has been defeated at offset 842.
+            344..=355 | 416..=427 | 540..=551 | 560..=571 | 842..=849 | 876 => PAD_UP | PAD_SQUARE,
+            672..=685 => 0,
+            _ => PAD_UP,
+        };
+        self.post_tick = self.post_tick.saturating_add(1);
+        held
     }
 }
 
@@ -3121,6 +3197,7 @@ struct SurveyInputController {
     great_gate: GreatGateRouteController,
     boulders: BouldersCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
+    rolling_stones: RollingStonesRouteController,
 }
 
 impl SurveyInputController {
@@ -3163,6 +3240,11 @@ impl SurveyInputController {
                 wait_tick: 0,
                 leaf_reached_far_side: false,
                 leaf_completed_cycle: false,
+            },
+            rolling_stones: RollingStonesRouteController {
+                opening_started: false,
+                opening_tick: 0,
+                post_tick: 0,
             },
         }
     }
@@ -3209,6 +3291,7 @@ impl SurveyInputController {
                         .held(camera, player, upstream_platforms, checkpoint_id)
                 }
             }
+            SurveyInputProfile::RollingStonesCheckpoint => self.rolling_stones.held(camera, player),
         }
     }
 }
@@ -4874,12 +4957,14 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GreatGatePhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
+                    | SurveyInputProfile::RollingStonesCheckpoint
             )
             && (matches!(
                 input_profile,
                 SurveyInputProfile::GreatGatePhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
+                    | SurveyInputProfile::RollingStonesCheckpoint
             ) || frame >= 300
                 || frame <= 120)
         {
@@ -5013,6 +5098,95 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
     let nsd = parse_nsd(&nsd_bytes, level).map_err(|error| error.to_string())?;
     let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
     Ok((nsd, nsf, nsf_bytes))
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn rolling_stones_direct_boot_reaches_first_checkpoint() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x15);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Rolling Stones");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Rolling Stones pair must parse");
+    let survey = survey_pair(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        SurveyInputProfile::RollingStonesCheckpoint,
+        1_160,
+    )
+    .expect("Rolling Stones must execute to its first checkpoint");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 1_160);
+    assert_eq!(survey.successful_spawns, 61);
+    assert_eq!(survey.executions, 26_887);
+    assert_eq!(survey.zone_transitions, 16);
+    assert_eq!(survey.camera_ranges.len(), 19);
+    assert_eq!(survey.camera_path_changes, 20);
+    assert_eq!(survey.last_camera_path_change, 1_108);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (275, 0x100),
+            (276, 0x200),
+            (278, 0x300),
+            (279, 0x400),
+            (281, 0x500),
+            (297, 0x600),
+            (355, 0x700),
+            (630, 0x800),
+            (1_037, 0x900),
+            (1_054, 0xa00),
+            (1_160, 0xb00),
+        ]
+    );
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_160, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_160, 0xa00)]);
+    for defeated in [
+        (627, 18, 3),
+        (691, 15, 3),
+        (826, 49, 3),
+        (846, 57, 3),
+        (1_118, 72, 3),
+        (1_160, 8, 9),
+    ] {
+        assert!(
+            survey.spawn_flag_samples.contains(&defeated),
+            "the retail route must retain spawn-flag boundary {defeated:?}: {}",
+            survey.summary()
+        );
+    }
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert!(
+        survey.is_clean(),
+        "Rolling Stones checkpoint route reached a checked runtime boundary: {}",
+        survey.summary()
+    );
 }
 
 fn requested_survey_level() -> Option<LevelId> {

@@ -116,6 +116,7 @@ enum SurveyInputProfile {
     UpTheCreekRoute,
     NativeFortressRoute,
     NativeFortressA7Route,
+    NativeFortressExtendedRoute,
     PapuPapuCompletionRoute,
 }
 
@@ -145,6 +146,7 @@ impl SurveyInputProfile {
             Self::UpTheCreekRoute => "up-the-creek-route",
             Self::NativeFortressRoute => "native-fortress-route",
             Self::NativeFortressA7Route => "native-fortress-a7-route",
+            Self::NativeFortressExtendedRoute => "native-fortress-extended-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
         }
     }
@@ -165,6 +167,7 @@ impl SurveyInputProfile {
                 | Self::UpTheCreekRoute
                 | Self::NativeFortressRoute
                 | Self::NativeFortressA7Route
+                | Self::NativeFortressExtendedRoute
                 | Self::PapuPapuCompletionRoute
         )
     }
@@ -1326,11 +1329,13 @@ impl UpTheCreekRouteController {
 /// Ordinary 30 Hz pad routes through Native Fortress's opening arrow crates.
 ///
 /// The base profile brakes into the last stable contact before the first
-/// subtype-2 `WalOC`. The extended profile hops back to regain runway, then
-/// carries a running jump across the grease segment into `a7_qZ`.
+/// subtype-2 `WalOC`. The a7 profile hops back to regain runway, then carries
+/// a running jump across the grease segment into `a7_qZ`. The longest profile
+/// continues over the authored falling-platform series and settles in `a8_qZ`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NativeFortressRouteController {
     continue_into_a7: bool,
+    continue_past_a7: bool,
     stage: u8,
     jump_frames: u8,
     grounded_frames: u8,
@@ -1371,6 +1376,11 @@ impl NativeFortressRouteController {
             }
             self.route_tick = self.route_tick.saturating_add(1);
             if self.stage == 4 {
+                if self.continue_past_a7 && self.route_tick >= 190 {
+                    self.stage = 5;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
                 let mut held = 0;
                 if self.route_tick <= 3 {
                     held |= PAD_LEFT;
@@ -1394,6 +1404,92 @@ impl NativeFortressRouteController {
                     }
                 }
                 return held;
+            }
+
+            if self.stage == 5 {
+                if self.route_tick > 20 && grounded {
+                    self.stage = 6;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let mut held = if self.route_tick <= 15 {
+                    PAD_LEFT
+                } else if self.route_tick <= 31 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if self.route_tick <= 20 {
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            if self.stage == 6 {
+                if self.route_tick < 20 {
+                    return 0;
+                }
+                self.stage = 7;
+                self.route_tick = 0;
+                return PAD_LEFT;
+            }
+            if self.stage == 7 {
+                if self.route_tick > 22 && grounded {
+                    self.stage = 8;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let mut held = if self.route_tick <= 18 {
+                    PAD_LEFT
+                } else if self.route_tick <= 36 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if self.route_tick <= 22 {
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            if self.stage == 8 {
+                if self.route_tick < 20 {
+                    return 0;
+                }
+                self.stage = 9;
+                self.route_tick = 0;
+                return PAD_LEFT;
+            }
+            if self.stage == 9 {
+                let jump_end = 22;
+                if self.route_tick > jump_end && grounded {
+                    self.stage = 10;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let forward_end = 18;
+                let reverse_end = 36;
+                let mut held = if self.route_tick <= forward_end {
+                    PAD_LEFT
+                } else if self.route_tick <= reverse_end {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if self.route_tick <= jump_end {
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            if self.stage == 10 {
+                let a7 = Eid::from_name("a7_qZ").expect("fixed Native Fortress a7 EID is valid");
+                if camera.path.zone == a7 {
+                    if self.route_tick < 20 {
+                        return 0;
+                    }
+                    self.stage = 9;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return 0;
             }
 
             let mut held = PAD_LEFT;
@@ -5368,7 +5464,15 @@ impl SurveyInputController {
             },
             up_the_creek: UpTheCreekRouteController { stage: 0, tick: 0 },
             native_fortress: NativeFortressRouteController {
-                continue_into_a7: matches!(profile, SurveyInputProfile::NativeFortressA7Route),
+                continue_into_a7: matches!(
+                    profile,
+                    SurveyInputProfile::NativeFortressA7Route
+                        | SurveyInputProfile::NativeFortressExtendedRoute
+                ),
+                continue_past_a7: matches!(
+                    profile,
+                    SurveyInputProfile::NativeFortressExtendedRoute
+                ),
                 stage: 0,
                 jump_frames: 0,
                 grounded_frames: 0,
@@ -5434,7 +5538,9 @@ impl SurveyInputController {
                 self.hog_wild.held(camera, player, checkpoint_id)
             }
             SurveyInputProfile::UpTheCreekRoute => self.up_the_creek.held(camera, player),
-            SurveyInputProfile::NativeFortressRoute | SurveyInputProfile::NativeFortressA7Route => {
+            SurveyInputProfile::NativeFortressRoute
+            | SurveyInputProfile::NativeFortressA7Route
+            | SurveyInputProfile::NativeFortressExtendedRoute => {
                 self.native_fortress.held(camera, player)
             }
             SurveyInputProfile::PapuPapuCompletionRoute => {
@@ -7972,6 +8078,92 @@ fn native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7() {
     assert!(
         survey.is_clean(),
         "Native Fortress's a7 route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_ordinary_pad_route_crosses_falling_platforms_into_a8() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Native Fortress",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NativeFortressExtendedRoute,
+        800,
+    )
+    .expect("Native Fortress's extended ordinary-pad route must execute");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 800);
+    assert!(survey.terminal.is_none());
+    assert_eq!(survey.successful_spawns, 22);
+    assert_eq!(survey.spawn_attempts, 5_009);
+    assert_eq!(survey.expected_spawn_rejections, 4_987);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 13_428);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 7);
+    assert_eq!(survey.camera_ranges.len(), 10);
+    assert_eq!(survey.camera_path_changes, 9);
+    assert_eq!(survey.last_camera_path_change, 749);
+    assert_eq!(survey.last_camera_progress_change, 761);
+    let final_camera = survey
+        .final_camera
+        .expect("Native Fortress's a8 route must retain its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a8_qZ").expect("fixed Native Fortress a8 EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 4_883);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([4_685_568, -10_782_730, 118_784])
+    );
+    assert_eq!(survey.last_player_movement, 761);
+    let final_player = player_trace(&runtime)
+        .expect("Native Fortress's a8 player trace must resolve")
+        .expect("Native Fortress's a8 route must retain the player");
+    assert_eq!(final_player.zone, final_camera.path.zone);
+    assert_eq!(final_player.translation, [4_685_568, -10_782_730, 118_784]);
+    assert_eq!(final_player.velocity, [0, -136_000, 0]);
+    assert_eq!(final_player.state, 1);
+    assert_ne!(final_player.status_a & 1, 0);
+    assert_eq!(survey.final_live_objects, 17);
+    assert_eq!(survey.max_live_objects, 23);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.effect_counts.get("solid"), Some(&24));
+    assert!(
+        survey.observed_program_states.contains(&(
+            Eid::from_name("WalOC").expect("fixed Native Fortress grease-platform EID is valid"),
+            11,
+        )),
+        "the authored falling WalOC series must execute its retail state"
+    );
+    assert_eq!(runtime.machine().random_seed(), 0x8ff1_4640);
+    assert_eq!(runtime.draw_count(), 800);
+    assert!(
+        survey.is_clean(),
+        "Native Fortress's falling-platform route into a8 must remain clean: {}",
         survey.summary()
     );
 }

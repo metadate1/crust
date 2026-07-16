@@ -614,8 +614,13 @@ gameplay path.
   zero/progress 6,240 and Crash is alive and grounded at `[5885696, -10880527, 118784]`; the next
   subtype-two `WalOC` is live in state 11. The extension performs 19 successful spawns from 4,109
   attempts and 10,880 checked executions across six lifecycle transitions, without a restart,
-  death camera, terminal fall, VM fault, execution error, or checked issue. This establishes the
-  authored `a7_qZ` handoff, not Native Fortress completion.
+  death camera, terminal fall, VM fault, execution error, or checked issue. A second ordinary-pad
+  extension crosses the authored falling-platform series: the camera enters `a8_qZ` on frame 749
+  and settles at path zero/progress 4,883 on frame 761, while Crash remains grounded there through
+  frame 800 at `[4685568, -10782730, 118784]`. It performs 22 successful spawns from 5,009
+  attempts and 13,428 checked executions across seven lifecycle transitions, with the same clean
+  fault/restart/fall result. This establishes the authored `a8_qZ` handoff, not Native Fortress
+  completion.
   Up the Creek has a separate bounded ordinary-pad direct route through its opening moving logs,
   the first `0f_oZ` static island, the `0g`/`0h` orbiters, and checkpoint entity 76. The checkpoint
   emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box

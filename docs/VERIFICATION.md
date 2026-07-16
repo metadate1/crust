@@ -1218,8 +1218,16 @@ is 1,322,866 bytes with SHA-256
   entity 33 remains live in state 11. The extension records 19 successful spawns from 4,109
   attempts with 4,090 source-expected rejections, 10,880 clean executions, six lifecycle
   transitions, nine camera ranges and eight path changes. It has no restart, death camera,
-  terminal fall, level transition, VM fault, execution error, or checked issue. This establishes
-  the authored handoff into `a7_qZ`, not a level-completion or browser-playthrough claim.
+  terminal fall, level transition, VM fault, execution error, or checked issue. A second extension
+  continues across the authored falling-platform series using only ordinary left/right/Cross pad
+  words. Its camera enters `a8_qZ` on frame 749 and stops changing on frame 761 at path
+  zero/progress 4,883; Crash remains alive and grounded in state one through frame 800 at
+  `[4685568, -10782730, 118784]`. The run records 22 successful spawns from 5,009 attempts with
+  4,987 source-expected rejections, 13,428 clean executions, seven lifecycle transitions, ten
+  camera ranges and nine path changes. RNG is `0x8ff14640` after 800 draws. It likewise has no
+  restart, death camera, terminal fall, level transition, VM fault, execution error, or checked
+  issue. This establishes the authored handoff into `a8_qZ`, not a level-completion or browser
+  playthrough claim.
 - Up the Creek (`0x18`) has an exact ordinary-pad opening route beyond its first two authored
   moving logs. It clears the opening boxes and four small-platform jumps, brakes onto executable-28
   entity 30, waits for the log's forward arc, builds speed while supported, and transfers to entity

@@ -319,7 +319,13 @@ first subtype-two `WalOC`. At frame 650 the camera is `a7_qZ` path zero/progress
 grounded at `[5885696, -10880527, 118784]`, with the next subtype-two `WalOC` live in state 11. It
 performs 19 successful spawns from 4,109 attempts, 10,880 clean executions and six lifecycle
 transitions with no restart, death camera, terminal fall, VM fault, execution error, or checked
-issue. This establishes the authored handoff into `a7_qZ`, not Native Fortress completion.
+issue. A second extension continues with ordinary left/right/Cross pad samples over the authored
+falling-platform series. The camera enters `a8_qZ` on frame 749, settles at path zero/progress
+4,883 on frame 761, and Crash remains grounded there through frame 800 at
+`[4685568, -10782730, 118784]`. That run performs 22 successful spawns from 5,009 attempts and
+13,428 clean executions across seven lifecycle transitions, again with no restart, death camera,
+terminal fall, VM fault, execution error, or checked issue. This establishes the authored handoff
+into `a8_qZ`, not Native Fortress completion.
 Up the Creek now has a bounded direct-boot ordinary-pad route through its opening logs, first
 checkpoint, and three post-checkpoint platforms. The route activates checkpoint entity 76 on
 frame 1,057, retaining saved box count `0x200` before the live count becomes `0x300`. It rides

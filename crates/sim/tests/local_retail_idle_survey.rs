@@ -5479,7 +5479,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_three_completions_reach_boulders_with_session_carry() {
+fn authored_first_four_levels_reach_upstream_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -7542,7 +7542,21 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             upstream_survey.summary()
         );
         eprintln!(
-            "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored PBAK: 990 frames, 0Q_eZ:0@0 -> 0I_eZ:1@3840, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}; completion route: {} frames -> Level Complete, 48 paths/53 changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}",
+            concat!(
+                "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",
+                "at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); ",
+                "Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete ",
+                "at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); ",
+                "Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at ",
+                "frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> ",
+                "Boulders at frame 253 (draw {}); Boulders legally local authored PBAK: 990 frames, ",
+                "0Q_eZ:0@0 -> 0I_eZ:1@3840, 16 paths/21 changes, 10 zone transitions, 8 boxes, ",
+                "RNG {:#010x}, draw {}; completion route: {} frames -> Level Complete, 48 paths/53 ",
+                "changes, 26 zone transitions, 15 boxes, RNG {:#010x}, draw {}; fourth Level ",
+                "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
+                "Upstream legally local authored PBAK: {} frames, 3 authored restarts, RNG ",
+                "{:#010x}, draw {}",
+            ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,
             completion_survey.next_lid.unwrap().0,
@@ -7563,6 +7577,12 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
             completion_route_survey.frames,
             completion_route_runtime.machine().random_seed(),
             completion_route_runtime.draw_count(),
+            boulders_completion_survey.frames,
+            boulders_completion_runtime.draw_count(),
+            post_boulders_map.runtime.draw_count(),
+            upstream_survey.frames,
+            upstream_runtime.machine().random_seed(),
+            upstream_runtime.draw_count(),
         );
     }
 }

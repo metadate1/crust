@@ -1048,12 +1048,18 @@ is 1,322,866 bytes with SHA-256
   and draw count 8,154. Its Level Complete screen emits Title at frame 273 with RNG `0xa9067f4f`
   and draw count 8,427. The next Map takes the same 120-idle/Up/120-idle/Cross schedule to Boulders
   `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00`, with current map four, four unlocked
-  levels, RNG `0xf2b6db12`, and draw count 8,680. Boulders imports that exact carry and executes one
-  clean frame with 15 successful spawns, 23 clean executions, no transition/restart/fault/error,
-  camera `0Q_eZ` path zero/progress zero, RNG `0x82f84399`, and draw count 8,681. All ten outgoing
-  `LEVEL_END` broadcasts in the chain have no checked handler failure. The yellow-gem alternate
-  branch, box-complete gem evaluation, Boulders gameplay, and browser execution are not covered by
-  this native golden.
+  levels, RNG `0xf2b6db12`, and draw count 8,680. Boulders imports that exact carry and consumes the
+  first 900 pad frames directly from the legally local `pb0eB` PBAK. The test never installs its
+  restart snapshot and never writes PBAK bytes or a derived pad trace. The independently live
+  session moves from `0Q_eZ:0@0` to `0I_eZ:1@7168`, visiting 16 distinct camera paths through 21
+  path changes and 10 lifecycle zone transitions. It performs 37 successful spawns and 13,709
+  clean executions; the exact box timeline is frames 71/173/174/197/232/633/636/695, ending at
+  `0x800`. The final Crash translation is `[2377472, 7550502, -12167680]`, RNG is `0x53e21381`, and
+  draw count is 9,580. There is no restart, save handshake, death camera, below-zero or terminal
+  fall, transition request, VM fault, execution error or checked issue. All ten outgoing
+  `LEVEL_END` broadcasts in the preceding chain have no checked handler failure. The yellow-gem
+  alternate branch, box-complete gem evaluation, Boulders checkpoint/end warp/Level Complete, and
+  browser execution are not covered by this native golden.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

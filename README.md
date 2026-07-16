@@ -201,10 +201,14 @@ fall, VM error, faulted object, or checked issue. The yellow-gem alternate branc
 evaluation, and browser playthrough remain outside this native integration claim. The ordinary
 completion carry continues through Level Complete to Title at frame 273 (RNG `0xa9067f4f`, draw
 8,427), then takes the same Map Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path
-zero/progress `0x0f00` (RNG `0xf2b6db12`, draw 8,680). Boulders imports that exact carry and executes
-one clean frame with 15 successful spawns, 23 clean executions, zero restart/fault/error, RNG
-`0x82f84399`, and draw 8,681. That last frame proves the next session handoff; it is not Boulders
-gameplay coverage.
+zero/progress `0x0f00` (RNG `0xf2b6db12`, draw 8,680). Boulders imports that exact carry, reads the
+first 900 ordinary pad words directly from its legally local `pb0eB` recording, and feeds them to
+the live carried session without installing the recording snapshot or committing recording bytes
+or a derived pad trace. The clean prefix moves from `0Q_eZ:0@0` to `0I_eZ:1@7168` across 16 camera
+paths, 21 path changes and 10 lifecycle zone transitions, breaks eight counted boxes, and ends at
+RNG `0x53e21381`/draw 9,580. It has no restart, save handshake, death camera, terminal fall,
+transition request, VM fault or execution error. The Boulders checkpoint, end warp/completion and
+browser playthrough remain outside this native prefix claim.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

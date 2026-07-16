@@ -28,8 +28,9 @@ use crust_formats::{
     binary::{Eid, PageIndex},
     disc::{DiscImage, SectorLayout},
     stream::{
-        KNOWN_LEVELS, LevelId, Nsd, Nsf, RetailPathId, RetailZoneGraph, StreamKind, StreamName,
-        ZoneEntity, ZoneHeader, load_gool_state_program, parse_nsd, parse_nsf,
+        KNOWN_LEVELS, LevelId, Nsd, Nsf, PBAK_ENTRY_TYPE, RetailPathId, RetailZoneGraph,
+        StreamKind, StreamName, ZoneEntity, ZoneHeader, load_gool_state_program, load_pbak_entry,
+        parse_nsd, parse_nsf,
     },
 };
 use crust_sim::{
@@ -104,6 +105,7 @@ enum SurveyInputProfile {
     JunglePhaseRobust,
     GreatGateExactCarry,
     GreatGateYellowGemExactCarry,
+    LocalPbakPrefix,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,6 +125,7 @@ impl SurveyInputProfile {
             Self::JunglePhaseRobust => "jungle-phase-robust",
             Self::GreatGateExactCarry => "great-gate-exact-carry",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
+            Self::LocalPbakPrefix => "legally-local-pbak-prefix",
         }
     }
 
@@ -1813,6 +1816,7 @@ impl SurveyInputController {
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         checkpoint_id: i32,
+        local_pbak_held: Option<u32>,
     ) -> u32 {
         match self.profile {
             SurveyInputProfile::Idle => 0,
@@ -1832,6 +1836,8 @@ impl SurveyInputController {
             | SurveyInputProfile::GreatGateYellowGemExactCarry => {
                 self.great_gate.held(camera, player)
             }
+            SurveyInputProfile::LocalPbakPrefix => local_pbak_held
+                .expect("the legally local PBAK prefix is loaded before frame execution"),
         }
     }
 }
@@ -3107,6 +3113,46 @@ fn fault_context(
     )
 }
 
+/// Reads a bounded controller prefix from the mounted, legally local NSF.
+///
+/// The source PBAK remains outside the repository: this helper neither
+/// installs its restart snapshot nor serializes its bytes or pad words.
+fn load_local_pbak_pad_prefix(
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    frame_count: u32,
+) -> Result<Box<[u32]>, String> {
+    let mut entries = nsf
+        .entries()
+        .filter(|entry| entry.entry_type == PBAK_ENTRY_TYPE);
+    let entry = entries
+        .next()
+        .ok_or_else(|| "mounted NSF has no PBAK entry".to_owned())?;
+    if let Some(extra) = entries.next() {
+        return Err(format!(
+            "mounted NSF has more than one PBAK entry ({} and {})",
+            entry.eid, extra.eid
+        ));
+    }
+    let header = load_pbak_entry(entry, nsf_bytes)
+        .map_err(|error| format!("legally local PBAK {}: {error}", entry.eid))?;
+    let frame_count = usize::try_from(frame_count)
+        .map_err(|_| "PBAK prefix frame count does not fit usize".to_owned())?;
+    if header.frames.len() < frame_count {
+        return Err(format!(
+            "PBAK {} has {} frames; requested prefix has {frame_count}",
+            entry.eid,
+            header.frames.len()
+        ));
+    }
+    Ok(header
+        .frames
+        .into_iter()
+        .take(frame_count)
+        .map(|frame| frame.held)
+        .collect())
+}
+
 fn survey_pair_with_runtime(
     name: &'static str,
     level: LevelId,
@@ -3147,6 +3193,9 @@ fn survey_pair_with_runtime(
     runtime
         .create_retail_level_misc_object(camera.location().path.zone, &mut host)
         .map_err(|error| format!("level-misc object creation: {error:?}"))?;
+    let local_pbak_prefix = (input_profile == SurveyInputProfile::LocalPbakPrefix)
+        .then(|| load_local_pbak_pad_prefix(nsf, nsf_bytes, survey_frames))
+        .transpose()?;
     let mut survey = LevelSurvey::new(level, name, input_profile);
     let mut input_controller = SurveyInputController::new(input_profile);
     let mut empty_frames = 0_u32;
@@ -3168,6 +3217,10 @@ fn survey_pair_with_runtime(
             camera.location(),
             player_trace(&runtime)?,
             checkpoint_id_before_frame,
+            local_pbak_prefix
+                .as_deref()
+                .and_then(|frames| frames.get(usize::try_from(frame - 1).ok()?))
+                .copied(),
         );
         let tapped = held & !held_previous;
         runtime
@@ -6108,6 +6161,18 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
     assert_eq!(boulders_carry.draw_count, 8_680);
     let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
         parse_local_pair(&root, boulders).expect("Boulders pair must parse");
+    let boulders_pbak_entry = boulders_nsf
+        .entries()
+        .find(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
+        .expect("legally local Boulders pair must contain its authored PBAK");
+    assert_eq!(
+        boulders_pbak_entry.eid,
+        Eid::from_name("pb0eB").expect("fixed Boulders PBAK EID is valid")
+    );
+    let boulders_pbak = load_pbak_entry(boulders_pbak_entry, &boulders_nsf_bytes)
+        .expect("legally local Boulders PBAK must parse");
+    assert_eq!(boulders_pbak.frames.len(), 990);
+    assert_eq!(boulders_pbak.ticks_per_frame, 34);
     let boulders_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
         .expect("Boulders must import the third-completion map carry");
     let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
@@ -6118,45 +6183,85 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         &boulders_nsf_bytes,
         boulders_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::Idle,
-        1,
+        SurveyInputProfile::LocalPbakPrefix,
+        900,
     )
-    .expect("Boulders must execute its first carried frame");
-    assert_eq!(boulders_survey.frames, 1);
-    assert_eq!(boulders_survey.successful_spawns, 15);
-    assert_eq!(boulders_survey.executions, 23);
-    assert_eq!(boulders_survey.zone_transitions, 0);
+    .expect("Boulders must execute the legally local authored pad prefix");
+    assert_eq!(boulders_survey.frames, 900);
+    assert!(boulders_survey.terminal.is_none());
+    assert_eq!(boulders_survey.successful_spawns, 37);
+    assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
+    assert_eq!(boulders_survey.executions, 13_709);
+    assert_eq!(boulders_survey.zone_transitions, 10);
+    assert_eq!(boulders_survey.camera_ranges.len(), 16);
+    assert_eq!(boulders_survey.camera_path_changes, 21);
+    assert_eq!(boulders_survey.last_camera_path_change, 884);
     assert_eq!(boulders_survey.restarts, 0);
     assert!(boulders_survey.restart_frames.is_empty());
+    assert_eq!(boulders_survey.save_handshakes, 0);
     assert_eq!(boulders_survey.death_camera_frames, 0);
+    assert!(boulders_survey.first_below_zero.is_none());
     assert!(boulders_survey.first_terminal_fall.is_none());
     assert!(boulders_survey.next_lid.is_none());
     assert_eq!(boulders_survey.faulted_objects, 0);
     assert_eq!(boulders_survey.execution_errors, 0);
+    assert!(!boulders_survey.effect_counts.contains_key("transition"));
+    assert!(!boulders_survey.effect_counts.contains_key("save-state"));
+    assert!(boulders_survey.issue_counts.is_empty());
+    assert_eq!(
+        boulders_survey.box_count_samples,
+        [
+            (1, 0),
+            (71, 0x100),
+            (173, 0x200),
+            (174, 0x300),
+            (197, 0x400),
+            (232, 0x500),
+            (633, 0x600),
+            (636, 0x700),
+            (695, 0x800),
+        ]
+    );
+    assert_eq!(
+        boulders_survey.checkpoint_samples,
+        [(1, -1, [20_991_488, -8_397_312, 127_744])]
+    );
+    assert!(boulders_survey.saved_box_count_samples.is_empty());
     assert!(
         boulders_survey.is_clean(),
-        "Boulders first carried frame must remain clean: {}",
+        "Boulders carried authored prefix must remain clean: {}",
         boulders_survey.summary()
     );
-    let boulders_camera = boulders_survey
-        .final_camera
-        .expect("Boulders first carried frame retains a camera location");
+    let boulders_initial_camera = boulders_survey
+        .initial_camera
+        .expect("Boulders authored prefix starts with a camera location");
     assert_eq!(
-        boulders_camera.path,
+        boulders_initial_camera.path,
         RetailPathId {
             zone: Eid::from_name("0Q_eZ").expect("fixed Boulders spawn-zone EID is valid"),
             index: 0,
         }
     );
-    assert_eq!(boulders_camera.progress.raw(), 0);
+    assert_eq!(boulders_initial_camera.progress.raw(), 0);
+    let boulders_camera = boulders_survey
+        .final_camera
+        .expect("Boulders authored prefix retains a camera location");
+    assert_eq!(
+        boulders_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0I_eZ").expect("fixed Boulders route-zone EID is valid"),
+            index: 1,
+        }
+    );
+    assert_eq!(boulders_camera.progress.raw(), 7_168);
     assert_eq!(
         boulders_survey.final_player_translation,
-        Some([2_303_744, 9_011_200, -23_501_312])
+        Some([2_377_472, 7_550_502, -12_167_680])
     );
-    assert_eq!(boulders_runtime.machine().random_seed(), 0x82f8_4399);
-    assert_eq!(boulders_runtime.draw_count(), 8_681);
+    assert_eq!(boulders_runtime.machine().random_seed(), 0x53e2_1381);
+    assert_eq!(boulders_runtime.draw_count(), 9_580);
     eprintln!(
-        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders first frame draw {}",
+        "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete at frame {} (draw {}); first Level Complete -> Title at frame {} (draw {}); Map -> Jungle Rollers at frame 253 (draw {}); Jungle Rollers -> Level Complete at frame {} (draw {}); second Level Complete -> Title at frame {} (draw {}); Map -> The Great Gate at frame 253 (draw {}); Great Gate -> Level Complete at frame {} (draw {}); third Level Complete -> Title at frame {} (draw {}); Map -> Boulders at frame 253 (draw {}); Boulders legally local authored prefix: 900 frames, 0Q_eZ:0@0 -> 0I_eZ:1@7168, 16 paths/21 changes, 10 zone transitions, 8 boxes, RNG {:#010x}, draw {}",
         n_sanity_survey.next_lid.unwrap().0,
         n_sanity_draw_count,
         completion_survey.next_lid.unwrap().0,
@@ -6172,6 +6277,7 @@ fn authored_first_three_completions_reach_boulders_with_session_carry() {
         great_gate_completion_survey.frames,
         great_gate_completion_runtime.draw_count(),
         post_great_gate_map.runtime.draw_count(),
+        boulders_runtime.machine().random_seed(),
         boulders_runtime.draw_count(),
     );
 }

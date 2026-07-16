@@ -474,9 +474,13 @@ gameplay path.
   following Level Complete screen at frame 273 and returns to Title with RNG `0xa9067f4f`/draw
   8,427. The remounted Map takes Up/Cross to Boulders `0x0e` at frame 253 on `1c_pZ` path
   zero/progress `0x0f00`, retaining RNG `0xf2b6db12` and draw 8,680. Boulders imports that carry and
-  executes one clean mounted frame with 15 successful spawns, 23 clean executions, zero
-  restart/fault/error, RNG `0x82f84399`, and draw 8,681. This proves the next handoff, not Boulders
-  gameplay.
+  consumes a 900-frame pad prefix directly from the legally local `pb0eB` PBAK at test runtime;
+  neither PBAK bytes, a derived pad trace nor its restart snapshot enter the repository/runtime
+  session. The live route moves from `0Q_eZ:0@0` to `0I_eZ:1@7168` through 16 camera paths, 21 path
+  changes and 10 lifecycle zone transitions, breaks eight counted boxes, and ends at RNG
+  `0x53e21381`/draw 9,580. It records no restart, save handshake, death camera, terminal fall,
+  transition request, VM fault or execution error. The Boulders checkpoint, normal end warp/Level
+  Complete and browser execution remain open.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

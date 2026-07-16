@@ -10760,21 +10760,27 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             };
             let (rolling_stones_nsd, rolling_stones_nsf, rolling_stones_nsf_bytes) =
                 parse_local_pair(root, rolling_stones).expect("Rolling Stones pair must parse");
-            let rolling_stones_runtime =
-                RetailRuntime::new_from_session(GLOBAL_WORDS, rolling_stones, rolling_stones_carry)
-                    .expect("Rolling Stones must import the post-Papu Map carry");
-            let (rolling_stones_survey, rolling_stones_runtime) = survey_pair_with_runtime(
-                known_name(rolling_stones),
-                rolling_stones,
-                &rolling_stones_nsd,
-                &rolling_stones_nsf,
-                &rolling_stones_nsf_bytes,
-                rolling_stones_runtime,
-                LevelContextSource::SessionGlobals,
-                SurveyInputProfile::RollingStonesCheckpoint,
-                2_000,
-            )
-            .expect("Rolling Stones' carried ordinary-pad route must execute");
+            let rolling_stones_result = Box::new(
+                survey_pair_with_runtime(
+                    known_name(rolling_stones),
+                    rolling_stones,
+                    &rolling_stones_nsd,
+                    &rolling_stones_nsf,
+                    &rolling_stones_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        rolling_stones,
+                        rolling_stones_carry,
+                    )
+                    .expect("Rolling Stones must import the post-Papu Map carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::RollingStonesCheckpoint,
+                    2_000,
+                )
+                .expect("Rolling Stones' carried ordinary-pad route must execute"),
+            );
+            let rolling_stones_survey = &rolling_stones_result.0;
+            let rolling_stones_runtime = &rolling_stones_result.1;
             assert_eq!(rolling_stones_survey.frames, 2_000);
             assert!(rolling_stones_survey.terminal.is_none());
             assert_eq!(rolling_stones_survey.final_live_objects, 18);
@@ -10833,7 +10839,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 Some([2_706_176, 4_623_368, 6_061_312])
             );
             assert_eq!(
-                player_trace(&rolling_stones_runtime)
+                player_trace(rolling_stones_runtime)
                     .expect("carried Rolling Stones final player trace must resolve")
                     .expect("carried Rolling Stones keeps Crash alive")
                     .state,
@@ -10889,7 +10895,22 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 rolling_stones_survey.summary()
             );
         }
-        assert_carried_rolling_stones_route(&root, rolling_stones_carry);
+        // This final retail interpreter run otherwise inherits the already
+        // deep stack frame for the complete five-level vertical chain. Keep
+        // the characterization in one test while giving its noncapturing
+        // phase a fixed stack independent of the test harness environment.
+        let rolling_stones_root = root.clone();
+        let rolling_stones_result = std::thread::Builder::new()
+            .name("carried-rolling-stones-route".to_owned())
+            .stack_size(4 * 1024 * 1024)
+            .spawn(move || {
+                assert_carried_rolling_stones_route(&rolling_stones_root, rolling_stones_carry);
+            })
+            .expect("the carried Rolling Stones route worker must start")
+            .join();
+        if let Err(panic) = rolling_stones_result {
+            std::panic::resume_unwind(panic);
+        }
         eprintln!(
             concat!(
                 "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",

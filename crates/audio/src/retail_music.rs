@@ -12,6 +12,7 @@ use crust_formats::{
 };
 
 use crate::{
+    adpcm::BLOCK_BYTES,
     mixer::Sample,
     sequencer::{EventKind, SampleBank, SampleProgram, SampleTone, Sequence, SequenceEvent},
 };
@@ -179,7 +180,7 @@ pub fn decode_sample_bank(
                 available: encoded.len(),
             });
         };
-        let Some(bytes) = encoded.get(wave_offset..end) else {
+        let Some(bytes) = adpcm_wave_bytes(&encoded, wave_offset, end) else {
             return Err(RetailMusicError::WaveRange {
                 index,
                 offset: wave_offset,
@@ -257,6 +258,21 @@ pub fn decode_sample_bank(
         }
     }
     Ok(bank)
+}
+
+/// VAB waveforms occupy one contiguous SPU-RAM body. Most waves terminate
+/// within their size-table range, but a missing end flag deliberately falls
+/// through into the following waveform exactly as the hardware address does.
+fn adpcm_wave_bytes(encoded: &[u8], start: usize, nominal_end: usize) -> Option<&[u8]> {
+    let nominal = encoded.get(start..nominal_end)?;
+    if nominal
+        .chunks_exact(BLOCK_BYTES)
+        .any(|block| block[1] & 1 != 0)
+    {
+        Some(nominal)
+    } else {
+        encoded.get(start..)
+    }
 }
 
 /// Converts one endian-neutral SEP sequence to the deterministic event model.
@@ -542,6 +558,20 @@ mod tests {
         };
         let error = decode_sample_bank(&one_wave_vab(), &[fragment]).unwrap_err();
         assert!(matches!(error, RetailMusicError::Format(_)));
+    }
+
+    #[test]
+    fn a_vab_wave_without_an_end_flag_continues_into_the_next_wave() {
+        let mut body = [0_u8; 2 * BLOCK_BYTES];
+        body[BLOCK_BYTES + 1] = 1;
+        let continued = adpcm_wave_bytes(&body, 0, BLOCK_BYTES).unwrap();
+        assert_eq!(continued.len(), 2 * BLOCK_BYTES);
+        assert_eq!(Sample::from_adpcm(continued).len(), 2 * 28);
+
+        body[1] = 1;
+        let stopped = adpcm_wave_bytes(&body, 0, BLOCK_BYTES).unwrap();
+        assert_eq!(stopped.len(), BLOCK_BYTES);
+        assert_eq!(Sample::from_adpcm(stopped).len(), 28);
     }
 
     #[test]

@@ -387,7 +387,8 @@ gameplay path.
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
   the projection and command list are still regenerated every presented gameplay frame. No
   low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.
-- `crust-audio` implements SPU ADPCM, loop semantics, caching, the retail 24-voice allocation and
+- `crust-audio` implements SPU ADPCM, per-key-on predictor and Gaussian histories, loop semantics,
+  caching, the retail 24-voice allocation and
   control state machine, sequence events and a software synth. GOOL SFX now resolve type-12 ADIO
   entries from the mounted local NSF and reach WebAudio with owner cleanup. Retail INST/VAB/SEP/MIDI
   music is connected, including volume, pan, expression, sustain, pitch bend, program selection,
@@ -396,13 +397,17 @@ gameplay path.
   the exact `MidiInit` level/volume partition between music and SFX slots and restores the native
   full-scale inactive master fade before destination audio starts. Both ADIO SFX and sampled VAB
   music use the SPU's fixed four-point Gaussian coefficient ROM, phase indexing, per-product signed
-  shifts, zero key-on history, loop history, and maximum pitch step. Sony SEQ NRPN 20/controller-6/
-  NRPN 30 regions now repeat with their source count and finite-delay semantics without resetting
-  live voices or channel controls. The 44-pair legally local census found 42 MIDI entries, 64 sequences, 98,067
-  events and 778 tones. Exactly four sequences contain six loop starts and four loop ends; all six
-  data entries use the indefinite value 127. It found no nonzero vibrato/portamento tone fields and
-  no polyphonic/channel-pressure events. Generic handling for those unobserved forms remains
-  absent. Other gaps are marking/VAB-mutation NRPNs, spatial reverb/effects, SPU noise/FM, and
+  shifts, zero key-on history, continuous predictor/Gaussian history across repeat-address jumps,
+  and maximum pitch step. End+Mute finishes its block and forces the voice off immediately; only an
+  explicit key-off follows the programmed ADSR release. A missing VAB end flag falls through the
+  contiguous bank. Sony SEQ NRPN 20/controller-6/NRPN 30 regions repeat with their source count and
+  finite-delay semantics without resetting live voices or channel controls. The 44-pair legally
+  local census found 42 MIDI entries, 64 sequences, 98,067 events and 778 tones. Exactly four
+  sequences contain six loop starts and four loop ends; all six data entries use the indefinite
+  value 127. It found no nonzero vibrato/portamento tone fields and no polyphonic/channel-pressure
+  events. Generic handling for those unobserved forms remains absent. Other gaps are
+  marking/VAB-mutation NRPNs, spatial reverb/effects, SPU noise/FM,
+  SPU-RAM IRQ/manual-repeat-register timing, and
   hardware-identical priority/arbitration across a shared 24-voice SFX/music pool. The music
   sequencer currently has a separate 64-voice software limit. The newest music path was compile-,
   model- and legally-local-disc tested but not yet manually auditioned.

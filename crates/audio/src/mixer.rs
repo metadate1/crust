@@ -17,6 +17,7 @@ const MIX_DIVISOR: f64 = 12.0;
 pub struct Sample {
     pcm: Arc<[i16]>,
     loop_start: Option<usize>,
+    adpcm: Option<Arc<adpcm::AdpcmSample>>,
 }
 
 impl Sample {
@@ -24,13 +25,22 @@ impl Sample {
     pub fn new(pcm: impl Into<Arc<[i16]>>, loop_start: Option<usize>) -> Self {
         let pcm = pcm.into();
         let loop_start = loop_start.filter(|index| *index < pcm.len());
-        Self { pcm, loop_start }
+        Self {
+            pcm,
+            loop_start,
+            adpcm: None,
+        }
     }
 
     #[must_use]
     pub fn from_adpcm(bytes: &[u8]) -> Self {
-        let decoded = adpcm::decode(bytes);
-        Self::new(decoded.samples, decoded.loop_start)
+        let adpcm = Arc::new(adpcm::AdpcmSample::parse(bytes));
+        let decoded = adpcm.decode_first_pass();
+        Self {
+            pcm: decoded.samples.into(),
+            loop_start: decoded.loop_start,
+            adpcm: Some(adpcm),
+        }
     }
 
     #[must_use]
@@ -49,6 +59,19 @@ impl Sample {
 
     pub(crate) const fn loop_start(&self) -> Option<usize> {
         self.loop_start
+    }
+
+    pub(crate) fn adpcm(&self) -> Option<&adpcm::AdpcmSample> {
+        self.adpcm.as_deref()
+    }
+
+    fn resident_bytes(&self) -> Option<usize> {
+        let pcm = self.pcm.len().checked_mul(size_of::<i16>())?;
+        let encoded = self
+            .adpcm
+            .as_deref()
+            .map_or(Some(0), adpcm::AdpcmSample::encoded_len)?;
+        pcm.checked_add(encoded)
     }
 }
 
@@ -162,7 +185,7 @@ impl Mixer {
         }
         self.metrics.cache_misses = self.metrics.cache_misses.saturating_add(1);
         let sample = Sample::from_adpcm(bytes);
-        let byte_len = sample.len().checked_mul(size_of::<i16>())?;
+        let byte_len = sample.resident_bytes()?;
         if sample.is_empty() || byte_len > SAMPLE_CACHE_BYTES {
             return None;
         }
@@ -446,6 +469,7 @@ mod tests {
         assert_eq!(first, second);
         assert_eq!(mixer.metrics().cache_misses, 1);
         assert_eq!(mixer.metrics().cache_hits, 1);
+        assert_eq!(mixer.metrics().cache_bytes, 28 * size_of::<i16>() + 16);
     }
 
     #[test]

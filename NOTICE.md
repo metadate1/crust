@@ -12,12 +12,17 @@ Behavioral and format references were taken from these unlicensed upstream snaps
 - local browser-port reference `c1-browser-runtime` at
   `7f05e5febd63e603f243c089c8b9918211c7b991`
 
-PS1 SPU Gaussian interpolation behavior and the fixed 512-word coefficient ROM were validated
-against the PSX-SPX hardware notes at
-<https://psx-spx.consoledev.net/soundprocessingunitspu/#4-point-gaussian-interpolation>. The
-PSX-SPX repository itself states that it has no acquired license and is not a clean-room work; this
-project therefore makes no clean-room claim for that hardware reference. The same formula and
-coefficient sequence were independently cross-checked against `howprice/hopstation` at
+PS1 SPU ADPCM loop/end behavior, Gaussian interpolation, and the fixed 512-word coefficient ROM were
+validated against the PSX-SPX hardware notes at
+<https://psx-spx.consoledev.net/soundprocessingunitspu/#spu-adpcm-samples> and
+<https://psx-spx.consoledev.net/soundprocessingunitspu/#4-point-gaussian-interpolation>. The PSX-SPX
+repository itself states that it has no acquired license and is not a clean-room work; this project
+therefore makes no clean-room claim for that hardware reference. Continuous predictor history over
+repeat-address jumps and immediate End+Mute behavior were independently cross-checked, without
+copying implementation code, against DuckStation at
+`e39033c4480cfbb9106e32beb844b0649ad9c2db` (`src/core/spu.cpp`) and the MiSTer PSX FPGA core at
+`bcaa0bbc5b1b68a8e9c2c376251c7ce63a53c0a2` (`rtl/spu.vhd`). The Gaussian formula and coefficient
+sequence were independently cross-checked against `howprice/hopstation` at
 `974653fe77e30493e7dc6043cccdbaa69820175c`, `psx/SPU.cpp`, which is distributed under the MIT
 License:
 

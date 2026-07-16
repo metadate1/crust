@@ -6,31 +6,43 @@
 //! avoids accidentally replacing the SPU's integer rounding with a host
 //! floating-point approximation.
 
-use crate::mixer::Sample;
+use crate::{adpcm::AdpcmPlayback, mixer::Sample};
 
 pub(crate) const PITCH_UNITS: u64 = 0x1000;
 const MAX_PITCH_STEP: u64 = 0x4000;
 
-/// Playback state needed by the SPU interpolator in addition to its pitch
-/// counter. `looped` distinguishes the first pass through a sample's loop
-/// start from later passes whose three older samples wrap from the loop end.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Per-key-on sample decoder, interpolation history, and pitch counter.
+/// Repeating ADPCM changes only the source block address: both predictor and
+/// Gaussian history continue across that jump until the voice is re-keyed.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SpuSampleCursor {
-    position: u64,
-    looped: bool,
+    fraction: u16,
+    history: [i16; 4],
+    pcm_index: usize,
+    adpcm: AdpcmPlayback,
+    initialized: bool,
+    finished: bool,
 }
 
 impl SpuSampleCursor {
-    pub(crate) const fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            position: 0,
-            looped: false,
+            fraction: 0,
+            history: [0; 4],
+            pcm_index: 0,
+            adpcm: AdpcmPlayback::default(),
+            initialized: false,
+            finished: false,
         }
     }
 
-    pub(crate) const fn reset(&mut self) {
-        self.position = 0;
-        self.looped = false;
+    pub(crate) fn reset(&mut self) {
+        self.fraction = 0;
+        self.history = [0; 4];
+        self.pcm_index = 0;
+        self.adpcm.reset();
+        self.initialized = false;
+        self.finished = false;
     }
 
     /// Produces one 44.1 kHz sample and advances by one SPU pitch step.
@@ -38,69 +50,46 @@ impl SpuSampleCursor {
     /// Hardware clamps unmodulated pitch steps above `0x3fff` to `0x4000`.
     /// A zero step intentionally keeps returning the same interpolated value.
     pub(crate) fn next(&mut self, sample: &Sample, step: u64) -> Option<i16> {
-        let index = self.normalize_position(sample)?;
-        let history = [
-            self.history_sample(sample, index, 0),
-            self.history_sample(sample, index, 1),
-            self.history_sample(sample, index, 2),
-            self.history_sample(sample, index, 3),
-        ];
-        let fraction = u16::try_from(self.position % PITCH_UNITS)
-            .expect("an SPU pitch-counter fraction fits u16");
-        let output = interpolate(history, fraction);
-        self.position = self.position.saturating_add(step.min(MAX_PITCH_STEP));
+        if self.finished {
+            return None;
+        }
+        if !self.initialized {
+            self.history[0] = self.next_source_sample(sample)?;
+            self.initialized = true;
+        }
+
+        let output = interpolate(self.history, self.fraction);
+        let counter = u64::from(self.fraction) + step.min(MAX_PITCH_STEP);
+        self.fraction =
+            u16::try_from(counter % PITCH_UNITS).expect("an SPU pitch-counter fraction fits u16");
+        let advance = usize::try_from(counter / PITCH_UNITS)
+            .expect("the clamped SPU pitch step advances at most four samples");
+        for _ in 0..advance {
+            let Some(next) = self.next_source_sample(sample) else {
+                self.finished = true;
+                break;
+            };
+            self.history[3] = self.history[2];
+            self.history[2] = self.history[1];
+            self.history[1] = self.history[0];
+            self.history[0] = next;
+        }
         Some(output)
     }
 
-    fn normalize_position(&mut self, sample: &Sample) -> Option<usize> {
-        if sample.is_empty() {
-            return None;
+    fn next_source_sample(&mut self, sample: &Sample) -> Option<i16> {
+        if let Some(adpcm) = sample.adpcm() {
+            return self.adpcm.next(adpcm);
         }
-        let mut index = usize::try_from(self.position / PITCH_UNITS).ok()?;
-        if index < sample.len() {
-            return Some(index);
-        }
-
-        let start = sample.loop_start()?;
-        let loop_samples = sample.len().checked_sub(start)?;
-        let start_units = u64::try_from(start).ok()?.checked_mul(PITCH_UNITS)?;
-        let loop_units = u64::try_from(loop_samples).ok()?.checked_mul(PITCH_UNITS)?;
-        self.position =
-            start_units.checked_add(self.position.checked_sub(start_units)? % loop_units)?;
-        self.looped = true;
-        index = usize::try_from(self.position / PITCH_UNITS).ok()?;
-        Some(index)
-    }
-
-    fn history_sample(&self, sample: &Sample, index: usize, age: usize) -> i16 {
-        let first_pass = || {
-            index
-                .checked_sub(age)
-                .and_then(|history_index| sample.sample(history_index))
-                .unwrap_or(0)
-        };
-        let Some(start) = sample.loop_start() else {
-            return first_pass();
-        };
-        if !self.looped || index < start {
-            return first_pass();
-        }
-
-        let loop_samples = sample.len() - start;
-        debug_assert!(index >= start && index < sample.len() && loop_samples > 0);
-        let current = index - start;
-        let age = age % loop_samples;
-        let history = if age <= current {
-            current - age
+        if self.initialized {
+            self.pcm_index = match self.pcm_index.checked_add(1) {
+                Some(next) if next < sample.len() => next,
+                _ => sample.loop_start()?,
+            };
         } else {
-            loop_samples - (age - current)
-        };
-        sample.sample(start + history).unwrap_or(0)
-    }
-
-    #[cfg(test)]
-    const fn position(&self) -> u64 {
-        self.position
+            self.pcm_index = 0;
+        }
+        sample.sample(self.pcm_index)
     }
 }
 
@@ -192,6 +181,14 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn adpcm_block(header: u8, flags: u8, packed: u8) -> [u8; 16] {
+        let mut block = [0_u8; 16];
+        block[0] = header;
+        block[1] = flags;
+        block[2..].fill(packed);
+        block
+    }
+
     #[test]
     fn coefficient_rom_and_phase_sums_match_the_spu() {
         assert_eq!(GAUSSIAN_COEFFICIENTS.len(), 512);
@@ -243,33 +240,36 @@ mod tests {
         let sample = Sample::new(vec![1_000, 2_000, 3_000, 4_000], None);
         let mut cursor = SpuSampleCursor::new();
         assert_eq!(cursor.next(&sample, u64::MAX), Some(-1));
-        assert_eq!(cursor.position(), MAX_PITCH_STEP);
+        assert_eq!(cursor.fraction, 0);
+        assert!(cursor.finished);
         assert_eq!(cursor.next(&sample, PITCH_UNITS), None);
     }
 
     #[test]
     fn loop_history_wraps_to_the_end_only_after_the_first_pass() {
         let sample = Sample::new(vec![1_000, 2_000, 3_000, 4_000], Some(1));
-        let mut cursor = SpuSampleCursor {
-            position: 3 * PITCH_UNITS + PITCH_UNITS / 2,
-            looped: false,
-        };
+        let mut cursor = SpuSampleCursor::new();
+        assert_eq!(
+            cursor.next(&sample, 3 * PITCH_UNITS + PITCH_UNITS / 2),
+            Some(-1)
+        );
         let output = [
             cursor.next(&sample, PITCH_UNITS),
             cursor.next(&sample, PITCH_UNITS),
             cursor.next(&sample, PITCH_UNITS),
         ];
         assert_eq!(output, [Some(2_490), Some(3_447), Some(2_983)]);
-        assert!(cursor.looped);
+        assert!(!cursor.finished);
     }
 
     #[test]
     fn one_shot_finishes_after_its_last_fractional_sample() {
         let sample = Sample::new(vec![1_000, 2_000, 3_000, 4_000], None);
-        let mut cursor = SpuSampleCursor {
-            position: 3 * PITCH_UNITS + PITCH_UNITS / 2,
-            looped: false,
-        };
+        let mut cursor = SpuSampleCursor::new();
+        assert_eq!(
+            cursor.next(&sample, 3 * PITCH_UNITS + PITCH_UNITS / 2),
+            Some(-1)
+        );
         assert_eq!(cursor.next(&sample, PITCH_UNITS), Some(2_490));
         assert_eq!(cursor.next(&sample, PITCH_UNITS), None);
     }
@@ -277,17 +277,36 @@ mod tests {
     #[test]
     fn reset_discards_loop_and_interpolation_history() {
         let sample = Sample::new(vec![1_000, 2_000], Some(0));
-        let mut cursor = SpuSampleCursor {
-            position: 2 * PITCH_UNITS,
-            looped: false,
-        };
-        assert_eq!(cursor.next(&sample, PITCH_UNITS), Some(1_289));
-        assert!(cursor.looped);
+        let mut cursor = SpuSampleCursor::new();
+        assert_eq!(cursor.next(&sample, 2 * PITCH_UNITS), Some(-1));
+        assert_eq!(cursor.next(&sample, PITCH_UNITS), Some(996));
         cursor.reset();
         assert_eq!(cursor.next(&sample, 0), Some(-1));
         assert_eq!(cursor.next(&sample, 0), Some(-1));
-        assert_eq!(cursor.position(), 0);
-        assert!(!cursor.looped);
+        assert_eq!(cursor.fraction, 0);
+        assert_eq!(cursor.history, [1_000, 0, 0, 0]);
+    }
+
+    #[test]
+    fn gaussian_cursor_uses_redecoded_predictor_samples_after_repeat() {
+        let mut encoded = Vec::new();
+        encoded.extend(adpcm_block(0x00, 0, 0x11));
+        encoded.extend(adpcm_block(0x10, 4, 0x00));
+        encoded.extend(adpcm_block(0x10, 3, 0x00));
+        let sample = Sample::from_adpcm(&encoded);
+        let mut cursor = SpuSampleCursor::new();
+        let output = (0..92)
+            .map(|_| {
+                cursor
+                    .next(&sample, PITCH_UNITS)
+                    .expect("the sample repeats")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            &output[80..92],
+            &[150, 140, 130, 123, 115, 108, 101, 95, 89, 84, 78, 73]
+        );
+        assert_ne!(output[84], output[28]);
     }
 
     proptest! {
@@ -295,16 +314,14 @@ mod tests {
         fn arbitrary_pcm_cursors_are_bounded_and_deterministic(
             pcm in proptest::collection::vec(any::<i16>(), 0..128),
             requested_loop in any::<Option<usize>>(),
-            position in any::<u64>(),
-            looped in any::<bool>(),
-            step in any::<u64>(),
+            steps in proptest::collection::vec(any::<u64>(), 0..128),
         ) {
             let sample = Sample::new(pcm, requested_loop);
-            let mut first = SpuSampleCursor { position, looped };
-            let mut second = first;
-            let first_output = first.next(&sample, step);
-            let second_output = second.next(&sample, step);
-            prop_assert_eq!(first_output, second_output);
+            let mut first = SpuSampleCursor::new();
+            let mut second = first.clone();
+            for step in steps {
+                prop_assert_eq!(first.next(&sample, step), second.next(&sample, step));
+            }
             prop_assert_eq!(first, second);
         }
     }

@@ -519,12 +519,20 @@ The focused checks below were also completed:
   phase coefficient sums, ignored low counter bits, signed extreme inputs, zero-filled key-on
   history, retained loop-edge history, one-shot completion, repeat reset, the `0x4000` pitch cap,
   and positive/negative final mixer samples. An arbitrary PCM/cursor property test keeps malformed
-  states deterministic and bounded. Sony NRPN region-loop tests cover finite total-pass counts,
-  indefinite value 127, retained live voices/controllers, rewind, and an empty-region no-spin
-  boundary. The legally local 44-pair census pins 42 MIDI entries, 64 sequences, 98,067 events and
-  778 tones; conversion produces all six loop starts and four loop ends. It also confirms zero
-  nonzero vibrato/portamento fields and zero pressure events. This is not proof of reverb,
-  unobserved modulation, or shared 24-voice SFX/music arbitration.
+  states deterministic and bounded. Filtered-ADPCM goldens additionally prove that a repeating
+  block is re-decoded from the preceding loop-end predictor pair and that re-keying clears that
+  pair; a one-shot End+Mute stops after its final block without an ADSR-release tail. The legally
+  local 44-pair census found 194 unique ADIO payloads: 14 repeat, including 13 nonzero-filter loops
+  whose second pass differs from decode-once PCM. It found 296 unique VAB waves: four repeating
+  waves, all four nonzero-filter and second-pass divergent. One referenced wave (present in two
+  banks) has no end flag and was verified to reach an end flag in the following contiguous wave.
+  Sony NRPN region-loop tests cover finite total-pass/delay semantics, indefinite value 127,
+  retained live voices/controllers, rewind, and an empty-region no-spin boundary. The sequence
+  census pins 42 MIDI entries, 64 sequences, 98,067 events and 778 tones; conversion produces all
+  six loop starts and four loop ends. It also confirms zero nonzero vibrato/portamento fields and
+  zero pressure events. No corpus bytes enter the repository. This is not proof of reverb,
+  unobserved modulation, SPU-RAM IRQ/manual-repeat-register timing, or shared 24-voice SFX/music
+  arbitration.
 - Process-local animation tests passed for complete bounded type-one through type-five payloads in
   same-object internal and register storage, plus type-zero/unknown native no-draw
   behavior. Truncation cases and a 256-case arbitrary-word property test produced checked results

@@ -168,9 +168,11 @@ An external `git archive` copy produced these results:
   Camera crossings apply checked zone
   teardown/paging/activation, and typed
   ADIO requests feed the retail SFX voice engine. Zone MIDI/INST/VAB/SEP assets decode to owned
-  PCM/sequencer data, with source-timed fades and typed GOOL track toggles. Both paths share exact
-  fixed-point SPU four-point Gaussian interpolation across key-on, pitch and loop boundaries. The
-  browser has no procedural sine fallback. Effects remain data rather than unchecked host pointers;
+  typed ADPCM/sequencer data, with source-timed fades and typed GOOL track toggles. Both paths share
+  fixed-point SPU predictor recurrence and four-point Gaussian interpolation across key-on, pitch
+  and repeat-address boundaries; the source desktop fallback's decode-once PCM loop is no longer the
+  retail runtime model. The browser has no procedural sine fallback. Effects remain data rather
+  than unchecked host pointers;
   exact SPU reverb/modulation, every collision edge, pixel-level rendering equivalence and full
   progression are not implied. World Lightning, combined Dark and Dark2 state/rendering are now
   connected with their process-lifetime shader scratch, shared RNG-B ordering, thunder ADIO

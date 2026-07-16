@@ -111,6 +111,7 @@ enum SurveyInputProfile {
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
+    UpTheCreekRoute,
     PapuPapuCompletionRoute,
 }
 
@@ -137,6 +138,7 @@ impl SurveyInputProfile {
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
+            Self::UpTheCreekRoute => "up-the-creek-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
         }
     }
@@ -154,6 +156,7 @@ impl SurveyInputProfile {
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
+                | Self::UpTheCreekRoute
                 | Self::PapuPapuCompletionRoute
         )
     }
@@ -605,6 +608,211 @@ struct HogWildCompletionRouteController {
     stage: u8,
     active: Option<RouteAction>,
     action_tick: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+/// Ordinary 30 Hz inputs for the authored Up the Creek opening. The route
+/// clears the opening boxes, crosses the first four small platforms, lands on
+/// moving log 30, waits for its forward arc, and transfers to moving log 31.
+struct UpTheCreekRouteController {
+    stage: u8,
+    tick: u16,
+}
+
+impl UpTheCreekRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        let opening = Eid::from_name("0a_oZ").expect("fixed Up the Creek opening EID is valid");
+        match self.stage {
+            0 => {
+                if camera.path.zone == opening
+                    && camera.path.index == 0
+                    && camera.progress.raw() == 7_168
+                    && player.is_some_and(|player| player.state == 2 && player.status_a & 1 != 0)
+                {
+                    self.stage = 1;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            1 => {
+                // Break both opening boxes without walking off their bank.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 15 {
+                    self.stage = 2;
+                    self.tick = 0;
+                }
+                if tick < 8 { PAD_SQUARE } else { 0 }
+            }
+            2 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 17 {
+                    self.stage = 3;
+                    self.tick = 0;
+                }
+                PAD_UP | PAD_CROSS
+            }
+            3 => {
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2) && player.translation[2] <= 31_450_000
+                }) {
+                    self.stage = 4;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            4 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 23 {
+                    self.stage = 5;
+                    self.tick = 0;
+                }
+                PAD_UP | PAD_CROSS
+            }
+            5 => {
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && (30_750_000..=30_950_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 6;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            6 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 23 {
+                    self.stage = 7;
+                    self.tick = 0;
+                }
+                PAD_UP | PAD_CROSS
+            }
+            7 => {
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && (30_200_000..=30_500_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 8;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            8 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 23 {
+                    self.stage = 9;
+                    self.tick = 0;
+                }
+                PAD_UP | PAD_CROSS
+            }
+            9 => {
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && (29_700_000..=30_000_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 10;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            10 => {
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 27 {
+                    self.stage = 11;
+                    self.tick = 0;
+                }
+                PAD_UP | PAD_CROSS
+            }
+            11 => {
+                if self.tick < 2 {
+                    self.tick += 1;
+                    return PAD_UP;
+                }
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && (29_200_000..=29_500_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 12;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                PAD_UP
+            }
+            12 => {
+                // Brake after the long fourth jump so Crash settles on log 30
+                // instead of carrying his run velocity into the river.
+                if self.tick >= 14
+                    && player.is_some_and(|player| {
+                        matches!(player.state, 1 | 2)
+                            && player.status_a & 1 != 0
+                            && (28_800_000..=29_200_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 13;
+                    self.tick = 0;
+                    return 0;
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 45 {
+                    self.stage = 13;
+                    self.tick = 0;
+                }
+                if tick < 14 {
+                    PAD_UP | PAD_CROSS
+                } else {
+                    PAD_DOWN
+                }
+            }
+            13 => {
+                // The two logs are only within jump range near log 30's
+                // forward turn. Wait on its authored path for that window.
+                if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && player.status_a & 1 != 0
+                        && player.translation[2] <= 28_280_000
+                }) {
+                    self.stage = 14;
+                    self.tick = 0;
+                    return self.held(camera, player);
+                }
+                0
+            }
+            14 => {
+                // Build speed while still supported, then jump straight along
+                // the river. Starting Cross immediately cannot span the gap.
+                if self.tick >= 10
+                    && player.is_some_and(|player| {
+                        matches!(player.state, 1 | 2)
+                            && player.status_a & 1 != 0
+                            && (27_400_000..=27_950_000).contains(&player.translation[2])
+                    })
+                {
+                    self.stage = 15;
+                    self.tick = 0;
+                    return 0;
+                }
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick >= 50 {
+                    self.stage = 15;
+                    self.tick = 0;
+                }
+                if tick < 8 { PAD_UP } else { PAD_UP | PAD_CROSS }
+            }
+            _ => 0,
+        }
+    }
 }
 
 impl HogWildCompletionRouteController {
@@ -4438,6 +4646,7 @@ struct SurveyInputController {
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
     hog_wild: HogWildCompletionRouteController,
+    up_the_creek: UpTheCreekRouteController,
     papu_papu: PapuPapuCompletionRouteController,
 }
 
@@ -4496,6 +4705,7 @@ impl SurveyInputController {
                 active: None,
                 action_tick: 0,
             },
+            up_the_creek: UpTheCreekRouteController { stage: 0, tick: 0 },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
                 action_tick: 0,
@@ -4555,6 +4765,7 @@ impl SurveyInputController {
             SurveyInputProfile::HogWildCompletionRoute => {
                 self.hog_wild.held(camera, player, checkpoint_id)
             }
+            SurveyInputProfile::UpTheCreekRoute => self.up_the_creek.held(camera, player),
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, papu_boss_state)
             }
@@ -7138,6 +7349,77 @@ fn hog_wild_idle_restarts_on_the_authored_surface_cadence() {
     assert!(
         survey.is_clean(),
         "Hog Wild's idle cadence must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_direct_route_reaches_second_moving_log() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Up the Creek");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::UpTheCreekRoute,
+        370,
+    )
+    .expect("Up the Creek must execute through its opening moving-log route");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 370);
+    assert_eq!(survey.successful_spawns, 26);
+    assert_eq!(survey.spawn_attempts, 5_325);
+    assert_eq!(survey.expected_spawn_rejections, 5_299);
+    assert_eq!(survey.executions, 12_348);
+    assert_eq!(survey.zone_transitions, 3);
+    assert_eq!(survey.camera_ranges.len(), 7);
+    assert_eq!(survey.camera_path_changes, 8);
+    assert_eq!(survey.last_camera_path_change, 349);
+    assert_eq!(survey.last_camera_progress_change, 370);
+    let final_camera = survey
+        .final_camera
+        .expect("Up the Creek must retain its second-log camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0d_oZ").expect("fixed Up the Creek log-zone EID is valid"),
+            index: 1,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 7_046);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_047_648, 1_166_978, 27_486_512])
+    );
+    let player = player_trace(&runtime)
+        .expect("Up the Creek player trace must resolve")
+        .expect("the second moving log must keep Crash alive");
+    assert_eq!(player.zone, final_camera.path.zone);
+    assert!(matches!(player.state, 1 | 2));
+    assert_ne!(player.status_a & 1, 0);
+    assert_eq!(survey.final_live_objects, 32);
+    assert_eq!(survey.max_live_objects, 53);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert!(
+        survey.is_clean(),
+        "Up the Creek's supported second-log route crossed a checked runtime boundary: {}",
         survey.summary()
     );
 }

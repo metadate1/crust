@@ -237,6 +237,199 @@ fn ripper_roo_mount_creates_authored_root_controller_before_zone_scan() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn ripper_roo_idle_matches_source_hop_loop_and_pool_boundary() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::new_const(0x17);
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let zone = graph.spawn_path().zone;
+    let entry = nsf.resolve_entry(&nsd, zone).unwrap();
+    let header = ZoneHeader::parse(entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let entities = (0..header.entity_count)
+        .map(|entity_index| {
+            let item_index =
+                usize::try_from(header.entity_item_index(entity_index).unwrap()).unwrap();
+            ZoneEntity::parse(entry.item(item_index).unwrap().bytes(&nsf_bytes).unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let neighbors = [NeighborZone {
+        eid: zone,
+        display_flags: header.display_flags | 7,
+        entities: &entities,
+    }];
+
+    let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+    let mut runtime = RetailRuntime::new_for_level(256, level);
+    runtime.set_level_state_context(RetailLevelStateContext {
+        location: camera.location(),
+        graphics_flags: graph.zone(zone).unwrap().graphics_flags,
+        box_count: 0,
+        checkpoint_id: -1,
+        checkpoint_translation: [0; 3],
+        first_spawn: false,
+        active_neighbor_zones: vec![zone],
+    });
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    runtime.create_retail_core_objects(zone, &mut host).unwrap();
+    runtime
+        .create_retail_level_misc_object(zone, &mut host)
+        .unwrap();
+
+    let boss_sample = |runtime: &RetailRuntime| {
+        runtime
+            .arena()
+            .postorder_snapshot()
+            .unwrap()
+            .into_iter()
+            .find_map(|arena| {
+                let spawned = runtime.arena().get(arena)?;
+                if spawned.entity_descriptor()?.id != 8 {
+                    return None;
+                }
+                let object = runtime.object_for_arena(arena)?;
+                let vm = runtime.machine().object(object.vm()).ok()?;
+                Some((
+                    vm.state(),
+                    [
+                        vm.register(process_register::TRANSLATION_X)
+                            .ok()?
+                            .cast_signed(),
+                        vm.register(process_register::TRANSLATION_Y)
+                            .ok()?
+                            .cast_signed(),
+                        vm.register(process_register::TRANSLATION_Z)
+                            .ok()?
+                            .cast_signed(),
+                    ],
+                ))
+            })
+            .expect("Ripper Roo entity 8 must remain live")
+    };
+
+    let mut materialized_waterfall_children = 0_usize;
+    let mut waterfall_materialization_frames = Vec::new();
+    let mut requested_waterfall_children = 0_usize;
+    let mut boss_samples = Vec::new();
+    for frame in 1_u32..=300 {
+        runtime.set_frame_timing(34, 34);
+        let _ = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        runtime.advance_level_shader().unwrap();
+        let camera_step = if runtime.current_display_mask() & 2 == 0 {
+            camera.stationary_step()
+        } else {
+            camera.update(&graph, RetailCameraInput::default()).unwrap()
+        };
+        let location = camera_step.after;
+        runtime.set_level_state_context(RetailLevelStateContext {
+            location,
+            graphics_flags: graph.zone(location.path.zone).unwrap().graphics_flags,
+            box_count: 0,
+            checkpoint_id: -1,
+            checkpoint_translation: [0; 3],
+            first_spawn: false,
+            active_neighbor_zones: vec![zone],
+        });
+        let pose = camera.pose(&graph).unwrap();
+        runtime.set_frame_context(camera_step.game_state, camera.rotation_xz(&graph).unwrap());
+        runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
+            pose.translation,
+            pose.rotation_yxz,
+            288,
+        ));
+        let report = runtime.run_frame(&mut host, 67).unwrap();
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "Ripper Roo frame {frame} crossed a checked VM boundary: {:?}",
+            report
+                .executions
+                .iter()
+                .filter(|execution| execution.result.is_err())
+                .collect::<Vec<_>>()
+        );
+
+        let frame_waterfall_children = report
+            .spawned_children
+            .iter()
+            .filter(|child| {
+                runtime.arena().get(child.arena()).is_some_and(|spawned| {
+                    spawned.origin()
+                        == (ObjectOrigin::Runtime {
+                            executable: 39,
+                            subtype: 1,
+                        })
+                })
+            })
+            .count();
+        materialized_waterfall_children += frame_waterfall_children;
+        if frame_waterfall_children != 0 {
+            waterfall_materialization_frames.push(frame);
+        }
+        requested_waterfall_children += report
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                VmEffect::SpawnChildren {
+                    executable: 39,
+                    subtype: 1,
+                    count,
+                    allow_reclaim: false,
+                    ..
+                } => Some(usize::try_from(*count).unwrap()),
+                _ => None,
+            })
+            .sum::<usize>();
+
+        if matches!(frame, 1 | 80 | 151 | 200 | 230 | 270 | 300) {
+            boss_samples.push((frame, boss_sample(&runtime)));
+        }
+    }
+
+    // RooOC state two requests one ordinary 0x8a child every enabled draw.
+    // Its state-four/five children are neither terminated nor marked with the
+    // 0x80000 reclaim flag in the current C source, so the exact 96-slot pool
+    // first saturates on frame 80. RRooC's intro releases one slot on frame
+    // 152 and the next waterfall request consumes it immediately; all other
+    // saturated requests correctly produce native's null misc_child result.
+    assert_eq!(requested_waterfall_children, 300);
+    assert_eq!(
+        materialized_waterfall_children, 81,
+        "materialized on frames {waterfall_materialization_frames:?}"
+    );
+    assert_eq!(
+        waterfall_materialization_frames,
+        (1_u32..=80).chain([152]).collect::<Vec<_>>()
+    );
+    assert_eq!(runtime.arena().remaining_pool_capacity(), 0);
+    assert_eq!(runtime.arena().len(), 97);
+    assert_eq!(runtime.faulted_object_count(), 0);
+    assert_eq!(
+        boss_samples,
+        [
+            (1, (0, [485_888, -25_600, -397_312])),
+            (80, (0, [485_888, -25_600, -397_312])),
+            (151, (1, [485_888, 0, -397_312])),
+            (200, (1, [-512, 0, -397_312])),
+            (230, (1, [-486_912, 0, 114_688])),
+            (270, (1, [-512, 0, -397_312])),
+            (300, (1, [323_754, 0, -55_979])),
+        ],
+        "the supported idle path must enter RRooC state one and traverse its authored pad loop"
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn brio_boxsc_creator_link_survives_brioc_pool_reclaim() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")

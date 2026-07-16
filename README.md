@@ -427,13 +427,15 @@ The `crust-sim` library has 553 passing tests; the locked workspace inventory ha
 tests plus 95 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
-A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,
-recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab), and exercised the publisher
-screen, main menu, island map, and a direct N. Sanity Beach boot. The level rendered and ran at the
-reported 30.00 Hz with synthesized audio active; keyboard movement/jump, pause/resume, mute/unmute,
-and fullscreen were visibly exercised. This remains bounded verification, not a full-playthrough
-or retail-parity claim; gamepad, touch, card persistence, and later progression were not repeated
-manually in that pass.
+A final Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN through a
+loopback-only test bridge, recognized all 88 streams and 44/44 pairs (219 MiB retained in the tab),
+and directly booted N. Sanity Beach. The level rendered with zero WebGL errors at the reported
+30.00 Hz and produced nonzero synthesized-audio output. Keyboard-code, touch-pointer, and standard
+Gamepad API input reached the live retail pad; pause/resume, mute/unmute, and fullscreen were also
+exercised. At 390x844 the touch surface was visible with no horizontal overflow. A page-hide/reload
+cycle persisted and reopened the version-one 15-slot virtual-card envelope. Earlier foreground
+coverage exercised the publisher screen, main menu, island map, and direct level boot. These remain
+bounded checks, not a full playthrough, physical-controller certification, or retail-parity claim.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 

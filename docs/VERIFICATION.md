@@ -1272,17 +1272,24 @@ is 1,322,866 bytes with SHA-256
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
 - The locked workspace currently enumerates 1,004 tests: 909 default-active and 95 legally-local
   ignored tests. The complete 909-test default gate and the complete 95-test owned-data sweep pass
-  with zero failures, including the final Native Fortress and Up the Creek route goldens. Rustfmt, warnings-denied
-  native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm release builds, and
-  all eight Node distribution tests pass. The final `npm run build`, distribution verification,
-  and fresh browser pass remain to be repeated after this documentation checkpoint.
-- The checkpoint-specific in-app-browser pass loaded the release picker at 1,280 pixels wide,
-  exposed the matching build identity in the DOM, reported 43 playable pairs, 30 Hz standby and all
-  15 virtual-card slots, showed no horizontal overflow, and produced no warning/error diagnostics.
-  It did not inject local game bytes into this exact artifact: the browser automation API cannot
-  operate the native file chooser, so the authored completion route above is native legal-data
-  evidence rather than a new browser gameplay claim. The user can select the local BIN or S0-S3
-  streams directly in the visible page; those bytes remain local to the tab.
+  with zero failures, including the final Native Fortress and Up the Creek route goldens. Rustfmt,
+  warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
+  release builds, all eight Node distribution tests, `npm run build`, and the distribution verifier
+  pass on the delivery tree.
+- The final Chrome-compatible pass used a loopback-only bridge to populate the native file input
+  with the user's legally local 632,083,536-byte raw BIN. The app extracted 88 streams, reported all
+  44 known pairs and 43 playable pairs, retained 219 MiB in the tab, and directly booted N. Sanity
+  Beach. Its first measured gameplay interval mounted 80 pages and 231 entries, built 77 entity
+  descriptors, drew without a WebGL error, ran two retail audio voices, completed 97 final-mix
+  callbacks, and reported a nonzero final-mix peak of 3,953. A code-bearing keyboard event, touch
+  pointer, and standards-shaped Gamepad API fixture each reached the live retail pad; the touch and
+  gamepad Up samples both produced held value `0x1000`. Pause/resume, mute/unmute, and fullscreen
+  state changes succeeded. At 390x844 the touch controls were visible, the game surface was 348x261,
+  and horizontal overflow was zero. Page-hide followed by reload wrote and reopened a 146-byte
+  `c1-virtual-memory-card` version-one envelope containing exactly 15 slots. The Wasm runtime and
+  browser error collectors stayed empty, the checked runtime error remained null, and WebGL error
+  remained zero. The pass used synthesized browser events/API fixtures where physical automation
+  was unavailable; it is not physical-device certification or a full playthrough.
 
 ## Reproducible commands
 

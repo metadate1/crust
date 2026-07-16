@@ -1182,7 +1182,18 @@ is 1,322,866 bytes with SHA-256
   and uses an ordinary Up/Cross selection to boot newly unlocked Native Fortress (`0x1a`) on map
   frame 253. The checked carry retains exact title/map/unlock globals, RNG and draw count, with no
   restart, VM fault, or execution error. This proves the post-Hog unlock handoff, not completion of
-  Native Fortress; its first rotating-platform gap remains an active route boundary.
+  Native Fortress. A separate fresh-boot route reaches the first greasy-platform boundary below;
+  crossing that segment remains open.
+- Native Fortress (`0x1a`) has a bounded 550-frame ordinary-pad direct route through its opening to
+  the first subtype-two greasy `WalOC`. The final camera is `a6_qZ` path one/progress 5,548; Crash
+  is alive, grounded in state one, and positioned at `[6522624, -11086492, 118784]`. `WalOC` state
+  11 executes during the route. The survey records 17 successful spawns from 3,381 attempts with
+  3,364 source-expected rejections, 8,988 clean executions, five lifecycle transitions, eight
+  camera ranges and seven path changes. It has no restart, death camera, terminal fall, transition,
+  VM fault, or execution error. The route's brake and three-frame leftward hop retain the last
+  stable contact; a fourth left sample enters the authored fall/restart handshake. Crossing this
+  first greasy segment into `a7_qZ` remains an active gap, so this is not a level-completion or
+  browser-playthrough claim.
 - Up the Creek (`0x18`) has an exact ordinary-pad opening route beyond its first two authored
   moving logs. It clears the opening boxes and four small-platform jumps, brakes onto executable-28
   entity 30, waits for the log's forward arc, builds speed while supported, and transfers to entity
@@ -1215,12 +1226,12 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked workspace currently enumerates 972 tests: 885 default-active and 87 ignored
+- The locked workspace currently enumerates 973 tests: 885 default-active and 88 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
-  Rolling Stones completion test, the Ripper Roo pool characterization, the Up the Creek
-  log-transfer/static-island/`0g` tests, and the full carried completion regression pass
-  independently on the current tree.
+  Rolling Stones completion test, the Ripper Roo pool characterization, the Native Fortress first-
+  grease test, the Up the Creek log-transfer/static-island/`0g` tests, and the full carried
+  completion regression pass independently on the current tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
@@ -1284,6 +1295,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   hog_wild_completion_unlocks_native_fortress_through_authored_map \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  native_fortress_ordinary_pad_route_reaches_first_greasy_platform_boundary \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

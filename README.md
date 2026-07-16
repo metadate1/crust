@@ -307,6 +307,12 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
+Native Fortress now has a bounded direct-boot ordinary-pad route to its first greasy-platform
+boundary. At frame 550 the camera is `a6_qZ` path one/progress 5,548, Crash is grounded at
+`[6522624, -11086492, 118784]`, and the first subtype-two `WalOC` has executed state 11. The run
+performs 17 successful spawns and 8,988 clean executions with no restart, death camera, terminal
+fall, VM fault, or execution error. It stops at the last stable contact after a three-frame leftward
+hop; crossing that greasy `WalOC` segment into `a7_qZ` remains an active route gap.
 Up the Creek now has a bounded direct-boot ordinary-pad route beyond its first two moving logs. At
 the 500-frame boundary Crash stands on `0f_oZ`'s static raw `0x0003` cell at
 `[2075548, 1414590, 26064412]`; the cell top is `Y=1414592`, the player has no entity reference,
@@ -405,7 +411,7 @@ The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
 The `crust-sim` library has 546 passing tests; the locked workspace inventory has 885 default-active
-tests plus 87 ignored-by-default legally local tests. Native
+tests plus 88 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A fresh foreground Chrome pass mounted the user's legally local raw BIN through the native picker,

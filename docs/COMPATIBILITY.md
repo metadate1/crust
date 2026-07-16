@@ -589,6 +589,13 @@ gameplay path.
   queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
+  Native Fortress has a separate 550-frame ordinary-pad direct route to the first subtype-two
+  greasy `WalOC` boundary. It ends with camera `a6_qZ` path one/progress 5,548 and Crash grounded at
+  `[6522624, -11086492, 118784]`; the platform has executed state 11. The route performs 17
+  successful spawns and 8,988 checked executions without a restart, death camera, terminal fall,
+  VM fault, or execution error. A final brake and three-frame leftward hop pin the last stable
+  contact. The next left sample enters the authored fall/restart handshake, so traversing that first
+  greasy segment into `a7_qZ` remains open. This does not establish Native Fortress completion.
   Up the Creek has a separate bounded ordinary-pad direct route through its two opening moving logs,
   the first `0f_oZ` island, the raised stepping stone, and the first `0g_oZ` platform. At the
   500-frame boundary, Crash is supported at `[2075548, 1414590, 26064412]` on static ZDAT cell raw

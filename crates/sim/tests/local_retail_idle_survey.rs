@@ -670,11 +670,16 @@ impl RollingStonesRouteController {
                 | 349..=356
                 | 371..=378
                 | 415..=422
-                | 443..=450 => PAD_UP | PAD_CROSS,
+                | 443..=450
+                | 497..=504
+                | 579..=586
+                | 605..=612
+                | 631..=638 => PAD_UP | PAD_CROSS,
                 184..=195 => PAD_UP | PAD_LEFT,
                 223..=238 | 295..=302 | 331..=338 | 389..=394 => 0,
                 265..=270 | 339..=348 => PAD_UP | PAD_RIGHT,
-                271..=274 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                271..=274 | 461..=468 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                517..=524 => PAD_UP | PAD_LEFT | PAD_CROSS,
                 _ => PAD_UP,
             };
         }
@@ -6213,7 +6218,7 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn rolling_stones_direct_boot_reaches_zero_b_bank() {
+fn rolling_stones_direct_boot_reaches_zero_f_bank() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -6232,34 +6237,34 @@ fn rolling_stones_direct_boot_reaches_zero_b_bank() {
         &nsf,
         &nsf_bytes,
         SurveyInputProfile::RollingStonesCheckpoint,
-        1_630,
+        1_860,
     )
-    .expect("Rolling Stones must execute through its first moving-stone gauntlet");
+    .expect("Rolling Stones must execute through its post-checkpoint moving-stone gauntlet");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_630);
-    assert_eq!(survey.successful_spawns, 85);
-    assert_eq!(survey.spawn_attempts, 19_901);
-    assert_eq!(survey.expected_spawn_rejections, 19_816);
-    assert_eq!(survey.executions, 35_923);
-    assert_eq!(survey.zone_transitions, 23);
-    assert_eq!(survey.camera_ranges.len(), 30);
-    assert_eq!(survey.camera_path_changes, 31);
-    assert_eq!(survey.last_camera_path_change, 1_615);
+    assert_eq!(survey.frames, 1_860);
+    assert_eq!(survey.successful_spawns, 92);
+    assert_eq!(survey.spawn_attempts, 22_677);
+    assert_eq!(survey.expected_spawn_rejections, 22_585);
+    assert_eq!(survey.executions, 41_202);
+    assert_eq!(survey.zone_transitions, 26);
+    assert_eq!(survey.camera_ranges.len(), 34);
+    assert_eq!(survey.camera_path_changes, 35);
+    assert_eq!(survey.last_camera_path_change, 1_827);
     let final_camera = survey
         .final_camera
         .expect("the Rolling Stones survey must retain its final camera");
     assert_eq!(
         final_camera.path.zone,
-        Eid::from_name("0B_lZ").expect("fixed Rolling Stones bank-zone EID is valid")
+        Eid::from_name("0F_lZ").expect("fixed Rolling Stones bank-zone EID is valid")
     );
     assert_eq!(final_camera.path.index, 0);
-    assert_eq!(final_camera.progress.raw(), 7_353);
+    assert_eq!(final_camera.progress.raw(), 11_745);
     assert_eq!(
         survey.final_player_translation,
-        Some([3_226_784, 3_852_293, 9_936_128])
+        Some([2_705_920, 4_623_365, 6_061_312])
     );
-    assert_eq!(survey.final_live_objects, 24);
+    assert_eq!(survey.final_live_objects, 19);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -6305,6 +6310,7 @@ fn rolling_stones_direct_boot_reaches_zero_b_bank() {
         (846, 57, 3),
         (1_118, 72, 3),
         (1_160, 8, 9),
+        (1_697, 86, 3),
     ] {
         assert!(
             survey.spawn_flag_samples.contains(&defeated),
@@ -6313,12 +6319,12 @@ fn rolling_stones_direct_boot_reaches_zero_b_bank() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&81));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&161));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&87));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&178));
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(
         survey.is_clean(),
-        "Rolling Stones 0B-bank route reached a checked runtime boundary: {}",
+        "Rolling Stones 0F-bank route reached a checked runtime boundary: {}",
         survey.summary()
     );
 }

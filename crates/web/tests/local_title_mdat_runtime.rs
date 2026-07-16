@@ -8,7 +8,7 @@ use crust_formats::stream::{
     LevelId, Nsd, Nsf, ObjectVertexKind, RetailPathId, RetailZoneGraph, StreamKind, StreamName,
     ZoneEntity, ZoneEntityPathPoint, ZoneHeader, load_title_mdat, parse_nsd, parse_nsf,
 };
-use crust_platform::input::PadState;
+use crust_platform::input::{PAD_CROSS, PAD_DOWN, PAD_START, PadState};
 use crust_sim::camera::{
     RetailCameraEffect, RetailCameraInput, RetailCameraLocation, RetailCameraOutcome,
     RetailCameraRuntime, RetailIslandCameraInput,
@@ -23,7 +23,6 @@ use crust_sim::gool::{
 use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_arena::SpawnError;
 use crust_sim::object_bounds::AnimationBoundSource;
-use crust_sim::player::{PAD_CROSS, PAD_DOWN, PAD_START};
 use crust_sim::retail_frame::PathProgress;
 use crust_sim::retail_runtime::{
     AnimationBoundBinding, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
@@ -564,7 +563,7 @@ fn authored_main_menu_map_to_n_sanity_handoff_preserves_session_carry() {
 
     // CoreFrame consumes the request before another title GOOL frame. Do not
     // execute a synthetic release frame after the authored write.
-    title.step(u16::try_from(PAD_CROSS).unwrap());
+    title.step(PAD_CROSS);
     assert_eq!(
         title.transitions,
         [(31, 0x09)],
@@ -1013,8 +1012,8 @@ impl<'assets> AuthoredTitleHarness<'assets> {
         );
     }
 
-    fn tap(&mut self, button: u32) {
-        self.step(u16::try_from(button).unwrap());
+    fn tap(&mut self, button: u16) {
+        self.step(button);
         self.step(0);
     }
 
@@ -1235,10 +1234,10 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
                     .set_pad_snapshot(
                         0,
                         RetailPadSnapshot {
-                            tapped: u32::from(start_pressed) * PAD_START,
-                            held: u32::from(start_pressed) * PAD_START,
-                            held_previous: u32::from(frame == 64) * PAD_START,
-                            tapped_previous: u32::from(frame == 64) * PAD_START,
+                            tapped: u32::from(start_pressed) * u32::from(PAD_START),
+                            held: u32::from(start_pressed) * u32::from(PAD_START),
+                            held_previous: u32::from(frame == 64) * u32::from(PAD_START),
+                            tapped_previous: u32::from(frame == 64) * u32::from(PAD_START),
                             ..RetailPadSnapshot::default()
                         },
                     )

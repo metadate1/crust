@@ -97,7 +97,7 @@ An external `git archive` copy produced these results:
   those objects visible to current-header neighbor TERM traversal. The mounted retail object graph
   owns title/menu/gameplay progression. Browser title frames preserve
   `GOOL → TitleUpdate → TitleLoadState → GLUpdate`; `RetailRuntime` owns the fade and screen swap,
-  while `GameFlow` passively mirrors the loaded screen. When the authored graph cannot present a
+  while `RetailFlowMirror` passively mirrors the loaded screen. When the authored graph cannot present a
   screen, the browser shows loading/error diagnostics and does not run a data-independent fallback
   flow.
 - Misc 12/7 retains the source's distinct forward current-header walk with no display filter,

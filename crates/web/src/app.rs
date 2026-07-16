@@ -40,7 +40,7 @@ use crust_sim::card::{
 };
 use crust_sim::demo::DemoEnd;
 use crust_sim::flow::{
-    FlowCommand, FlowEvent, FlowState, GameFlow, GameOptions, LevelId, TitleScreen,
+    FlowState, GameOptions, LevelId, RetailFlowEvent, RetailFlowMirror, TitleScreen,
 };
 use crust_sim::gool::{
     AudioHostRequest, AudioHostResponse, CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest,
@@ -759,7 +759,7 @@ struct RetailPairMount {
 }
 
 struct Runtime {
-    flow: GameFlow,
+    flow: RetailFlowMirror,
     scheduler: FrameScheduler,
     previous_step_us: Option<u64>,
     previous_shader_wall_ticks: Option<u32>,
@@ -796,7 +796,7 @@ struct Runtime {
     resume: ResumeManager,
     /// Last payload successfully read from retail GOOL globals. This is the
     /// only persistence fallback used if an impossible fixed-allocation VM
-    /// read fails; legacy `GameFlow::player` state is never serialized.
+    /// read fails; no high-level mirror state is serialized.
     last_authoritative_save: SaveData,
     last_title_state: Option<u8>,
     pending_buttons: u16,
@@ -820,8 +820,8 @@ impl Runtime {
             .map_err(|_| JsValue::from_str("selected level does not fit the retail id"))?;
         let boot_level = LevelId::new(raw_level)
             .ok_or_else(|| JsValue::from_str("selected level is not in the retail catalog"))?;
-        let mut flow = GameFlow::new();
-        flow.command(FlowCommand::Boot(boot_level))
+        let mut flow = RetailFlowMirror::new();
+        flow.boot(boot_level)
             .map_err(|error| JsValue::from_str(&format!("could not boot level: {error:?}")))?;
         let mut save = default_save();
         let card = storage
@@ -1589,7 +1589,7 @@ impl Runtime {
         {
             return Ok(());
         }
-        let screen = self.flow.title().screen();
+        let screen = self.flow.title_screen();
         self.retail_objects
             .configure_retail_title(screen, first_boot)
             .map_err(|error| {
@@ -2102,9 +2102,9 @@ impl Runtime {
             }
 
             if !transition_queued {
-                self.handle_events(dom)?;
+                self.handle_events(dom);
                 if self.pending_mount.is_none() {
-                    self.handle_events(dom)?;
+                    self.handle_events(dom);
                 }
                 if let Some(audio) = &mut self.audio {
                     audio.tick_30_hz();
@@ -3573,7 +3573,7 @@ impl Runtime {
         if is_retail_runtime_state(self.flow.state()) {
             self.retail_runtime_error.is_some() || self.retail_objects.retail_pause_state().paused()
         } else {
-            self.flow.paused()
+            false
         }
     }
 
@@ -3878,70 +3878,12 @@ impl Runtime {
         Ok(())
     }
 
-    fn handle_events(&mut self, dom: &Dom) -> Result<(), JsValue> {
+    fn handle_events(&mut self, dom: &Dom) {
         for event in self.flow.take_events() {
             dom.log(&format!("flow: {event:?}"), false);
-            match &event {
-                FlowEvent::OptionsChanged(options) => {
-                    self.retail_audio.set_sfx_volume(options.sfx_volume);
-                    if let Some(audio) = &mut self.audio {
-                        audio.set_output_options(output_options(*options));
-                    }
-                }
-                FlowEvent::ProgressLoaded => {
-                    self.retail_audio
-                        .set_sfx_volume(self.flow.options.sfx_volume);
-                    if let Some(audio) = &mut self.audio {
-                        audio.set_output_options(output_options(self.flow.options));
-                    }
-                }
-                _ => {}
-            }
-            let asset_level = match &event {
-                FlowEvent::LevelChanged(level)
-                | FlowEvent::Booted(level)
-                | FlowEvent::BonusReturned(level) => Some(*level),
-                _ => None,
-            };
-            if let Some(level) = asset_level {
-                self.queue_asset_level(level);
-            }
-            if matches!(event, FlowEvent::Completed(_)) && self.retail_objects.arena().is_empty() {
-                let operation = if self.card.current_slot().is_some() {
-                    CardOperation::SaveCurrent
-                } else {
-                    CardOperation::SaveSelected
-                };
-                let current = self.save_data();
-                let before = self.card.clone();
-                let mut candidate = before.clone();
-                candidate.set_storage_available(self.storage.is_some());
-                if let Err(error) = candidate.control(operation, 0, Some(current)) {
-                    self.card = candidate;
-                    return Err(JsValue::from_str(&format!(
-                        "could not update the virtual-card completion slot: {error:?}"
-                    )));
-                }
-                let intent = candidate
-                    .current_slot()
-                    .map_or(CardPersistIntent::Snapshot, CardPersistIntent::WriteSlot);
-                let persisted = self
-                    .storage
-                    .as_mut()
-                    .is_some_and(|storage| storage.persist_card(&candidate, intent).is_ok());
-                if !persisted {
-                    let mut failed = before;
-                    failed.set_storage_available(false);
-                    let _ = failed.control(operation, 0, Some(current));
-                    self.card = failed;
-                    return Err(JsValue::from_str(
-                        "could not persist the virtual-card completion slot",
-                    ));
-                }
-                self.card = candidate;
-            }
+            let RetailFlowEvent::Booted(level) = event;
+            self.queue_asset_level(level);
         }
-        Ok(())
     }
 
     fn render_ui(&self, dom: &Dom) -> Result<(), JsValue> {
@@ -4696,7 +4638,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         .retail_title_presentation()
         .ok()
         .flatten()
-        .map_or(runtime.flow.title().screen(), |title| title.screen);
+        .map_or(runtime.flow.title_screen(), |title| title.screen);
     Reflect::set(
         debug,
         &JsValue::from_str("frame"),
@@ -5064,7 +5006,7 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
     Ok(())
 }
 
-fn current_level(flow: &GameFlow) -> LevelId {
+fn current_level(flow: &RetailFlowMirror) -> LevelId {
     match flow.state() {
         FlowState::Gameplay(level) | FlowState::Bonus(level) | FlowState::Boss(level) => *level,
         FlowState::LevelComplete { .. } => LevelId::LEVEL_COMPLETE,
@@ -5098,7 +5040,7 @@ const fn title_state_uses_image(screen: TitleScreen) -> bool {
     retail_title_screen_profile(screen, 0).uses_image()
 }
 
-fn apply_save(flow: &mut GameFlow, save: SaveData) {
+fn apply_save(flow: &mut RetailFlowMirror, save: SaveData) {
     flow.progress.level_count = save.level_count;
     flow.progress.levels_unlocked = save.level_count;
     flow.progress.current_map_level = save.level_count;

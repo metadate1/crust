@@ -196,7 +196,7 @@ order `card/pause → PBAK → pending level transition → spawn → shader →
 snapshot → GOOL plus ordered display-record capture → combined world/object scene → presentation`
 plus draw-skip and draw-count
 timing. Title frames insert the authoritative `TitleUpdate → TitleLoadState → GLUpdate` boundary
-after GOOL; the high-level `GameFlow` value only mirrors the screen loaded there. `RetailCameraRuntime`
+after GOOL; the high-level `RetailFlowMirror` value only mirrors the screen loaded there. `RetailCameraRuntime`
 owns the live path handle, signed-8.8 progress and persistent follow offsets/zoom/speed. Its follow
 input reads GOOL global 65 directly for the source `frames_elapsed - gem_stamp <= 15` neighbor gate.
 Island-map camera modes seven/eight receive title globals 66 (`island_cam_state`) and 64

@@ -46,9 +46,9 @@ pub(crate) fn initial_presented_path_point(
 
 /// Retail's first mount starts without any checkpoint or collected boxes.
 ///
-/// Keep this seed independent from the legacy `GameFlow::player` mirror: the
-/// mounted GOOL globals and level-state snapshot become authoritative as soon
-/// as the runtime is constructed.
+/// The mounted GOOL globals and level-state snapshot are authoritative as soon
+/// as the runtime is constructed; the high-level flow mirror has no player
+/// state of its own.
 #[cfg(any(target_arch = "wasm32", test))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct InitialRetailLevelState {
@@ -70,7 +70,7 @@ pub(crate) const fn initial_retail_level_state() -> InitialRetailLevelState {
 /// the most recent payload that was read successfully from the same globals.
 ///
 /// The fallback is deliberately exact save data rather than a reconstruction
-/// from the legacy high-level flow mirror.
+/// from the high-level display mirror.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn authoritative_save_or_last<E>(
     current: Result<SaveData, E>,
@@ -181,7 +181,7 @@ mod tests {
     }
 
     #[test]
-    fn first_retail_mount_does_not_inherit_synthetic_player_state() {
+    fn first_retail_mount_uses_the_authored_empty_level_state_seed() {
         assert_eq!(
             initial_retail_level_state(),
             InitialRetailLevelState {

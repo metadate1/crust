@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use crust_formats::binary::FormatError;
 use crust_formats::stream::{RetailPathId, RetailZoneGraph, ZonePath};
 
-use crate::math::{Angle12, Angles, Vec3, integer_sqrt, seek};
+use crate::math::{Angle12, Vec3, integer_sqrt, seek};
 use crate::retail_frame::{PATH_POINT_STEP, PathProgress};
 use crate::retail_physics::rotate_toward;
 
@@ -34,51 +34,6 @@ const PAD_LEFT: u32 = 0x8000;
 const DEFAULT_OFFSET_Z: i32 = -0x12c00;
 const DEFAULT_ZOOM: i32 = 0x6a400;
 const DEFAULT_OFFSET_Y: i32 = 0x3e800;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CameraMode {
-    Follow,
-    Path,
-    Fixed,
-    Orbit,
-    Death,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CameraState {
-    pub translation: Vec3,
-    pub rotation: Angles,
-    pub mode: CameraMode,
-    pub offset: Vec3,
-    pub zoom: i32,
-}
-
-impl Default for CameraState {
-    fn default() -> Self {
-        Self {
-            translation: Vec3::ZERO,
-            rotation: Angles::default(),
-            mode: CameraMode::Follow,
-            offset: Vec3 {
-                x: 0,
-                y: 0x3e800,
-                z: -0x12c00,
-            },
-            zoom: 0x6a400,
-        }
-    }
-}
-
-impl CameraState {
-    /// Deterministically follows a target using per-axis seek limits.
-    pub fn follow(&mut self, target: Vec3, speed: i32) {
-        self.mode = CameraMode::Follow;
-        let desired = target.wrapping_add(self.offset);
-        self.translation.x = seek(self.translation.x, desired.x, speed);
-        self.translation.y = seek(self.translation.y, desired.y, speed);
-        self.translation.z = seek(self.translation.z, desired.z, speed);
-    }
-}
 
 /// Per-frame input consumed by the retail camera-path state machine.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

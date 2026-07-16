@@ -118,7 +118,7 @@ gameplay path.
   `title_state` word drives publisher, menu, options, password/load, map and game-over changes
   through the native fade boundary. Each browser frame preserves
   `GOOL → TitleUpdate → TitleLoadState → GLUpdate`; the runtime performs any screen load before
-  the final authored title-state comparison, and the browser `GameFlow` is only a passive screen
+  the final authored title-state comparison, and the browser `RetailFlowMirror` is only a passive screen
   mirror. A swap-frame latch retains native's opaque `GLDrawOverlay(255)` if newly loaded GOOL
   synchronously requests another fade. The final WebGL pass uses the source's 16-level nonlinear
   black-overlay alpha table and exact pre-quantization counter step; blank and state-swap phases

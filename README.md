@@ -21,7 +21,7 @@ images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, a
 renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
 latches display/animate through the source `GOOL → TitleUpdate → TitleLoadState → GLUpdate`
 transaction and draws the native 16-level nonlinear black overlay. `RetailRuntime` owns that
-transition; `GameFlow` is a passive screen mirror and cannot advance a second fade clock. The 4:3
+transition; `RetailFlowMirror` is a passive screen mirror and cannot advance a second fade clock. The 4:3
 output is authored-scene only: until mounted retail objects produce a scene, it
 shows a loading/error diagnostic with no synthetic menu, password/options UI, or gameplay geometry.
 For the 40 world-bearing playable starts, gameplay presents bounds-checked

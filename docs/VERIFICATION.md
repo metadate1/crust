@@ -1036,30 +1036,41 @@ is 1,322,866 bytes with SHA-256
   Great Gate `0x12` on Map frame 253 at `1c_pZ` path zero/progress `0x0200`. Its checked Map
   `LEVEL_END` carry has current map level three, level count one, three unlocked levels, island state
   one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes an exact carried
-  retail-pad main route with 97 successful spawns, 39,979 clean executions, 34 lifecycle zone
-  transitions, 15 counted boxes, and no restart, death camera, terminal fall, VM error, faulted
-  object, or checked issue. It traverses `a1_iZ`-`a9_iZ`, crosses the wide pit, observes `WalOC`
-  state two, waits through the later rising-log phase, and chains the first three arrow-crate
+  retail-pad main route with 111 successful spawns, 47,371 clean executions, 38 lifecycle zone
+  transitions, 14 counted boxes (`0xe00`), and no restart, death camera, terminal fall, VM error,
+  faulted object, or checked issue. It traverses `a1_iZ`-`a9_iZ`, crosses the wide pit, observes
+  `WalOC` state two, waits through the later rising-log phase, and chains the first three arrow-crate
   bounces. Checkpoint crate 76 emits one `SaveState` at frame 1,152 with pre-increment box count
   `0x900` and checkpoint translation `[20991488, -8397312, 127744]`; the live count advances to
-  `0xa00`. It then traverses `b3_iZ`-`c7_iZ`, clears the snake and later hazards, breaks five more
-  boxes, and enters the normal end `WarpC`. That warp emits `Transition(0x2d)` at frame 2,372 with
-  Crash at `[3483392, -4780693, 83712]`, live count `0xf00`, four unlocked levels, RNG `0x9ada2711`,
-  and draw count 8,154. Its Level Complete screen emits Title at frame 273 with RNG `0xa9067f4f`
-  and draw count 8,427. The next Map takes the same 120-idle/Up/120-idle/Cross schedule to Boulders
-  `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00`, with current map four, four unlocked
-  levels, RNG `0xf2b6db12`, and draw count 8,680. Boulders imports that exact carry and consumes the
-  first 900 pad frames directly from the legally local `pb0eB` PBAK. The test never installs its
-  restart snapshot and never writes PBAK bytes or a derived pad trace. The independently live
-  session moves from `0Q_eZ:0@0` to `0I_eZ:1@7168`, visiting 16 distinct camera paths through 21
-  path changes and 10 lifecycle zone transitions. It performs 37 successful spawns and 13,709
-  clean executions; the exact box timeline is frames 71/173/174/197/232/633/636/695, ending at
-  `0x800`. The final Crash translation is `[2377472, 7550502, -12167680]`, RNG is `0x53e21381`, and
-  draw count is 9,580. There is no restart, save handshake, death camera, below-zero or terminal
-  fall, transition request, VM fault, execution error or checked issue. All ten outgoing
-  `LEVEL_END` broadcasts in the preceding chain have no checked handler failure. The yellow-gem
-  alternate branch, box-complete gem evaluation, Boulders checkpoint/end warp/Level Complete, and
-  browser execution are not covered by this native golden.
+  `0xa00`. It then traverses `b3_iZ`-`c7_iZ`, clears the snake and later hazards, and enters the
+  normal end `WarpC`. That warp emits `Transition(0x2d)` at frame 2,471 with Crash at
+  `[3593984, -4780682, 83712]`, four unlocked levels, RNG `0x6a219f2c`, and draw count 8,396. Its
+  Level Complete screen emits Title at frame 225 with RNG `0x2875d290` and draw count 8,621. The next
+  Map takes the same 120-idle/Up/120-idle/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ`
+  path zero/progress `0x0f00`, with current map four, four unlocked levels, RNG `0x419695fd`, and draw
+  count 8,874.
+
+  Boulders imports that exact carry and consumes all 990 34-tick frames directly from the user's
+  legally local `pb0eB` PBAK. The test never installs its restart snapshot and never writes PBAK
+  bytes or a derived pad trace. The independently live prefix moves from `0Q_eZ:0@0` to
+  `0I_eZ:1@3840`, visiting 16 distinct camera paths through 21 path changes and 10 lifecycle zone
+  transitions. It performs 37 successful spawns and 20,692 clean executions; the exact box timeline
+  is frames 71/173/174/197/232/633/636/695, ending at `0x800`. The final Crash translation is
+  `[2377472, 7550502, -12157440]`, RNG is `0xb4e70e26`, and draw count is 9,864. There is no restart,
+  save handshake, death camera, below-zero or terminal fall, transition request, VM fault, execution
+  error or checked issue.
+
+  A separate deterministic completion route starts from the same carry, replays the legally local
+  PBAK opening through frame 895, and then continues with path/state-relative input. Checkpoint ID
+  `0x3b00` emits `SaveState` at frame 1,277 with translation `[2303232, 6860544, -5172480]` and saved
+  pre-increment box count `0xc00`; the live count reaches `0xf00` (15 boxes). The normal end `WarpC`
+  emits `Transition(0x2d)` at frame 2,210. The run records 97 successful spawns, 28,426 spawn
+  attempts with 28,329 source-expected rejections, 53,886 clean executions, 26 lifecycle zone
+  transitions, 48 observed camera paths and 53 path changes. It ends on `0s_eZ` path one/progress
+  12,799 with RNG `0x5def7434` and draw count 11,084, without a restart, death camera, below-zero or
+  terminal fall, VM error, faulted object, execution error, or checked issue. This is deterministic
+  native integration over user-supplied local data, not a browser playthrough or full-game parity
+  claim. The yellow-gem alternate branch and box-complete gem evaluation remain outside this golden.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

@@ -464,23 +464,32 @@ gameplay path.
   `a1_iZ`-`a9_iZ`, the wide pit, the `WalOC` rotating-log phases, and the first three arrow-crate
   bounces. Checkpoint crate 76 emits `SaveState` at frame 1,152 with the exact `0x900` pre-increment
   count and translation `[20991488, -8397312, 127744]`; the live count advances to `0xa00`. The same
-  route proceeds through `b3_iZ`-`c7_iZ`, the snake, later logs and gaps, and five more boxes. It
-  enters the normal end `WarpC` and emits `Transition(0x2d)` at frame 2,372 with live count `0xf00`,
-  RNG `0x9ada2711`, and draw count 8,154. Across the Great Gate leg it records 97 successful spawns,
-  39,979 clean executions, and 34 lifecycle zone transitions without a restart, death camera,
+  route proceeds through `b3_iZ`-`c7_iZ`, the snake, later logs and gaps, and enters the normal end
+  `WarpC`. It emits `Transition(0x2d)` at frame 2,471 with 14 counted boxes (`0xe00`), RNG
+  `0x6a219f2c`, and draw count 8,396. Across the Great Gate leg it records 111 successful spawns,
+  47,371 clean executions, and 38 lifecycle zone transitions without a restart, death camera,
   terminal fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch,
   box-complete gem evaluation, and browser playthrough remain open; this is exact native main-route
   integration coverage rather than a full player-facing claim. The ordinary carry completes the
-  following Level Complete screen at frame 273 and returns to Title with RNG `0xa9067f4f`/draw
-  8,427. The remounted Map takes Up/Cross to Boulders `0x0e` at frame 253 on `1c_pZ` path
-  zero/progress `0x0f00`, retaining RNG `0xf2b6db12` and draw 8,680. Boulders imports that carry and
-  consumes a 900-frame pad prefix directly from the legally local `pb0eB` PBAK at test runtime;
-  neither PBAK bytes, a derived pad trace nor its restart snapshot enter the repository/runtime
-  session. The live route moves from `0Q_eZ:0@0` to `0I_eZ:1@7168` through 16 camera paths, 21 path
-  changes and 10 lifecycle zone transitions, breaks eight counted boxes, and ends at RNG
-  `0x53e21381`/draw 9,580. It records no restart, save handshake, death camera, terminal fall,
-  transition request, VM fault or execution error. The Boulders checkpoint, normal end warp/Level
-  Complete and browser execution remain open.
+  following Level Complete screen at frame 225 and returns to Title with RNG `0x2875d290`/draw
+  8,621. The remounted Map takes Up/Cross to Boulders `0x0e` at frame 253 on `1c_pZ` path
+  zero/progress `0x0f00`, retaining RNG `0x419695fd` and draw 8,874.
+
+  Boulders imports that carry and consumes all 990 34-tick frames directly from the user's legally
+  local `pb0eB` PBAK at test runtime; neither PBAK bytes, a derived pad trace nor its restart
+  snapshot enter the repository/runtime session. The exact PBAK run moves from `0Q_eZ:0@0` to
+  `0I_eZ:1@3840` through 16 camera paths, 21 path changes and 10 lifecycle zone transitions, breaks
+  eight counted boxes, performs 37 successful spawns and 20,692 clean executions, and ends at
+  Crash translation `[2377472, 7550502, -12157440]`, RNG `0xb4e70e26`, and draw count 9,864 with no
+  restart, save handshake, death camera, terminal fall, transition request, VM fault or execution
+  error. A separate route from the same carry uses the legally local PBAK opening and continues to
+  completion: checkpoint ID `0x3b00` emits `SaveState` at frame 1,277 with translation
+  `[2303232, 6860544, -5172480]` and saved pre-increment box count `0xc00`; the live count reaches
+  15 boxes (`0xf00`) before the normal `WarpC` emits `Transition(0x2d)` at frame 2,210. That golden
+  records 97 successful spawns, 53,886 clean executions, 26 lifecycle zone transitions, 48 camera
+  paths and 53 path changes, and ends at RNG `0x5def7434`/draw 11,084 with no restart, death camera,
+  terminal fall, VM error, faulted object, or checked issue. This is deterministic native
+  integration over user-supplied local data, not a browser execution or full-game parity claim.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC

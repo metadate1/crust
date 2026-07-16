@@ -193,22 +193,31 @@ route to completion: it clears the horizontal `a1_iZ`-through-`a9_iZ` opening, c
 cycles the `WalOC` logs through their safe phases, and chains the first three arrow-crate bounces.
 Checkpoint crate 76 emits its exact `SaveState` at frame 1,152 with pre-increment box count `0x900`,
 checkpoint translation `[20991488, -8397312, 127744]`, and live count `0xa00`. The route continues
-through `b3_iZ`-`c7_iZ`, clears the snake and later hazards, breaks five more boxes, enters the normal
-end `WarpC`, and emits `Transition(0x2d)` at frame 2,372 with 15 counted boxes. The terminal boundary
-retains the exact carried phase at RNG `0x9ada2711`/draw count 8,154, after 97 successful spawns,
-39,979 clean executions, and 34 lifecycle zone transitions, with no restart, death camera, terminal
-fall, VM error, faulted object, or checked issue. The yellow-gem alternate branch, box-complete gem
-evaluation, and browser playthrough remain outside this native integration claim. The ordinary
-completion carry continues through Level Complete to Title at frame 273 (RNG `0xa9067f4f`, draw
-8,427), then takes the same Map Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path
-zero/progress `0x0f00` (RNG `0xf2b6db12`, draw 8,680). Boulders imports that exact carry, reads the
-first 900 ordinary pad words directly from its legally local `pb0eB` recording, and feeds them to
-the live carried session without installing the recording snapshot or committing recording bytes
-or a derived pad trace. The clean prefix moves from `0Q_eZ:0@0` to `0I_eZ:1@7168` across 16 camera
-paths, 21 path changes and 10 lifecycle zone transitions, breaks eight counted boxes, and ends at
-RNG `0x53e21381`/draw 9,580. It has no restart, save handshake, death camera, terminal fall,
-transition request, VM fault or execution error. The Boulders checkpoint, end warp/completion and
-browser playthrough remain outside this native prefix claim.
+through `b3_iZ`-`c7_iZ`, clears the snake and later hazards, enters the normal end `WarpC`, and emits
+`Transition(0x2d)` at frame 2,471 with 14 counted boxes (`0xe00`). The terminal boundary retains RNG
+`0x6a219f2c` and draw count 8,396 after 111 successful spawns, 47,371 clean executions, and 38
+lifecycle zone transitions, with no restart, death camera, terminal fall, VM error, faulted object,
+or checked issue. The yellow-gem alternate branch, box-complete gem evaluation, and browser
+playthrough remain outside this native integration claim. The ordinary completion carry continues
+through Level Complete to Title at frame 225 (RNG `0x2875d290`, draw 8,621), then takes the same Map
+Up/Cross schedule to Boulders `0x0e` at frame 253 on `1c_pZ` path zero/progress `0x0f00` (RNG
+`0x419695fd`, draw 8,874).
+
+Boulders imports that exact carry and reads all 990 34-tick pad frames from the user's legally local
+`pb0eB` PBAK without installing its recording snapshot or committing recording bytes or a derived
+pad trace. The exact prefix moves from `0Q_eZ:0@0` to `0I_eZ:1@3840` across 16 camera paths, 21 path
+changes and 10 lifecycle zone transitions, breaks eight counted boxes, performs 37 successful
+spawns and 20,692 clean executions, and ends at Crash translation
+`[2377472, 7550502, -12157440]`, RNG `0xb4e70e26`, and draw count 9,864. A separate deterministic
+completion route from the same carry uses that local PBAK opening before continuing under
+path/state-relative input. Checkpoint ID `0x3b00` emits `SaveState` at frame 1,277 with translation
+`[2303232, 6860544, -5172480]` and saved pre-increment box count `0xc00`; the live route reaches 15
+counted boxes (`0xf00`) and the normal end `WarpC`, which emits `Transition(0x2d)` at frame 2,210.
+That completion golden records 97 successful spawns, 53,886 clean executions, 26 lifecycle zone
+transitions, 48 observed camera paths and 53 path changes, ending at RNG `0x5def7434` and draw count
+11,084 with no restart, death camera, terminal fall, VM error, faulted object, or checked issue.
+These are deterministic native integration goldens over user-supplied local data, not a browser
+playthrough or full-game parity claim.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint

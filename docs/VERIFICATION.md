@@ -1206,18 +1206,20 @@ is 1,322,866 bytes with SHA-256
   and uses an ordinary Up/Cross selection to boot newly unlocked Native Fortress (`0x1a`) on map
   frame 253. The checked carry retains exact title/map/unlock globals, RNG and draw count, with no
   restart, VM fault, or execution error. This proves the post-Hog unlock handoff, not completion of
-  Native Fortress. A separate fresh-boot route reaches the first greasy-platform boundary below;
-  crossing that segment remains open.
-- Native Fortress (`0x1a`) has a bounded 550-frame ordinary-pad direct route through its opening to
-  the first subtype-two greasy `WalOC`. The final camera is `a6_qZ` path one/progress 5,548; Crash
-  is alive, grounded in state one, and positioned at `[6522624, -11086492, 118784]`. `WalOC` state
-  11 executes during the route. The survey records 17 successful spawns from 3,381 attempts with
-  3,364 source-expected rejections, 8,988 clean executions, five lifecycle transitions, eight
-  camera ranges and seven path changes. It has no restart, death camera, terminal fall, transition,
-  VM fault, or execution error. The route's brake and three-frame leftward hop retain the last
-  stable contact; a fourth left sample enters the authored fall/restart handshake. Crossing this
-  first greasy segment into `a7_qZ` remains an active gap, so this is not a level-completion or
-  browser-playthrough claim.
+  Native Fortress. Separate fresh-boot goldens characterize both the first greasy-platform
+  boundary and the ordinary-pad crossing into `a7_qZ` below.
+- Native Fortress (`0x1a`) retains its bounded 550-frame ordinary-pad direct route through the
+  opening to the first subtype-two greasy `WalOC`. The final camera is `a6_qZ` path one/progress
+  5,548; Crash is alive, grounded in state one, and positioned at
+  `[6522624, -11086492, 118784]`. A separate extended profile hops right to the preceding shelf,
+  reverses left for four grounded samples, and carries the running jump across that first grease
+  segment. At frame 650 its camera is `a7_qZ` path zero/progress 6,240 and Crash is alive, grounded
+  in state one, and positioned at `[5885696, -10880527, 118784]`; the next subtype-two `WalOC`
+  entity 33 remains live in state 11. The extension records 19 successful spawns from 4,109
+  attempts with 4,090 source-expected rejections, 10,880 clean executions, six lifecycle
+  transitions, nine camera ranges and eight path changes. It has no restart, death camera,
+  terminal fall, level transition, VM fault, execution error, or checked issue. This establishes
+  the authored handoff into `a7_qZ`, not a level-completion or browser-playthrough claim.
 - Up the Creek (`0x18`) has an exact ordinary-pad opening route beyond its first two authored
   moving logs. It clears the opening boxes and four small-platform jumps, brakes onto executable-28
   entity 30, waits for the log's forward arc, builds speed while supported, and transfers to entity
@@ -1243,11 +1245,14 @@ is 1,322,866 bytes with SHA-256
   fields resolving exactly. After one complete platform cycle, a four-sample Up+Right run-up and
   Cross transfer lands on authored entity 80. At frame 1,450 Crash is grounded in `0m_oZ` at
   `[2372776, 1719394, 17903224]`; entity 80 is at `[2252032, 1661440, 17816832]`, the collider tag
-  resolves to 80, and the camera is `0l_oZ` path one/progress 6,912. The complete bounded run
-  records 89 successful spawns from 21,446 attempts, 21,357 source-expected rejections, 46,331
-  clean executions, 15 lifecycle transitions, 20 camera ranges and 25 path changes. It has no
-  restart, LoadState, fall, VM fault, execution error, or checked issue. This is not an Up the
-  Creek completion or browser-playthrough claim.
+  resolves to 80, and the camera is `0l_oZ` path one/progress 6,912. The controller then waits 39
+  neutral samples and uses four Up samples plus Up/Cross to land on vertical platform entity 88.
+  At frame 1,520 Crash is grounded at `[2372776, 1720258, 17415800]`; entity 88 is in state 13 at
+  `[2252032, 1683968, 17305600]`, the collider tag resolves to 88, and the camera is `0m_oZ` path
+  zero/progress 4,288. The complete bounded run records 94 successful spawns from 22,566 attempts,
+  22,472 source-expected rejections, 48,147 clean executions, 16 lifecycle transitions, 21 camera
+  ranges and 26 path changes. It has no restart, LoadState, fall, VM fault, execution error, or
+  checked issue. This is not an Up the Creek completion or browser-playthrough claim.
 - Ripper Roo's legally local 300-frame idle characterization matches the source project's current
   allocator behavior. RooOC requests one ordinary executable-39/subtype-one child on every enabled
   draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately
@@ -1269,9 +1274,9 @@ is 1,322,866 bytes with SHA-256
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
   Rolling Stones completion test, the Ripper Roo pool characterization, the Native Fortress first-
-  grease test, the Up the Creek log-transfer/static-island/`0g` tests, and the full carried
-  completion regression pass independently on the current tree. The three alias-lifetime tests and
-  the complete current 553-test simulation library plus default simulation integration suite also
+  grease and `a7_qZ` tests, the Up the Creek log-transfer/static-island/`0g` tests, and the full
+  carried completion regression pass independently on the current tree. The three alias-lifetime tests
+  and the complete current 553-test simulation library plus default simulation integration suite also
   pass on this tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
@@ -1340,6 +1345,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   native_fortress_ordinary_pad_route_reaches_first_greasy_platform_boundary \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7 \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

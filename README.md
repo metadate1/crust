@@ -312,22 +312,24 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
-Native Fortress now has a bounded direct-boot ordinary-pad route to its first greasy-platform
-boundary. At frame 550 the camera is `a6_qZ` path one/progress 5,548, Crash is grounded at
-`[6522624, -11086492, 118784]`, and the first subtype-two `WalOC` has executed state 11. The run
-performs 17 successful spawns and 8,988 clean executions with no restart, death camera, terminal
-fall, VM fault, or execution error. It stops at the last stable contact after a three-frame leftward
-hop; crossing that greasy `WalOC` segment into `a7_qZ` remains an active route gap.
+Native Fortress retains its exact 550-frame direct-boot ordinary-pad golden at the first
+greasy-platform boundary, and a separate extended route now crosses that segment. The extension
+hops back to the preceding shelf for runway, reverses left, and carries the running jump across the
+first subtype-two `WalOC`. At frame 650 the camera is `a7_qZ` path zero/progress 6,240 and Crash is
+grounded at `[5885696, -10880527, 118784]`, with the next subtype-two `WalOC` live in state 11. It
+performs 19 successful spawns from 4,109 attempts, 10,880 clean executions and six lifecycle
+transitions with no restart, death camera, terminal fall, VM fault, execution error, or checked
+issue. This establishes the authored handoff into `a7_qZ`, not Native Fortress completion.
 Up the Creek now has a bounded direct-boot ordinary-pad route through its opening logs, first
-checkpoint, and the next two post-checkpoint platforms. The route activates checkpoint entity 76
-on frame 1,057, retaining the source-ordered saved box count `0x200` before the live count becomes
-`0x300`. It rides entity 75 into `0l_oZ`, waits through a complete platform cycle, and transfers
-onto entity 80. At frame 1,450 Crash is alive and grounded in `0m_oZ` at
-`[2372776, 1719394, 17903224]`, with a validated collider reference to entity 80 and camera
-`0l_oZ` path one/progress 6,912. The run records 89 successful spawns, 46,331 clean executions,
-15 lifecycle transitions, 20 camera ranges and 25 path changes with no restart, LoadState,
-terminal fall, VM fault, or execution error. This is not an Up the Creek completion or browser
-playthrough claim.
+checkpoint, and three post-checkpoint platforms. The route activates checkpoint entity 76 on
+frame 1,057, retaining saved box count `0x200` before the live count becomes `0x300`. It rides
+entity 75 into `0l_oZ`, waits through a complete cycle, transfers onto entity 80, then uses a
+39-sample neutral wait and four-sample run-up to land on vertical platform entity 88. At frame
+1,520 Crash is grounded in `0m_oZ` at `[2372776, 1720258, 17415800]`, with a validated collider
+reference to entity 88 and camera `0m_oZ` path zero/progress 4,288. The run records 94 successful
+spawns, 48,147 clean executions, 16 lifecycle transitions, 21 camera ranges and 26 path changes
+with no restart, LoadState, terminal fall, VM fault, or execution error. This is not an Up the
+Creek completion or browser playthrough claim.
 The current native schedule therefore includes seven deterministic normal-level completions, the
 complete carried Upstream route, Papu Papu's authored completion, and both direct and carried
 Rolling Stones completion; this is not a full retail playthrough or a browser-playthrough claim.

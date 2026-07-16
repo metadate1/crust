@@ -608,24 +608,25 @@ gameplay path.
   queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
-  Native Fortress has a separate 550-frame ordinary-pad direct route to the first subtype-two
-  greasy `WalOC` boundary. It ends with camera `a6_qZ` path one/progress 5,548 and Crash grounded at
-  `[6522624, -11086492, 118784]`; the platform has executed state 11. The route performs 17
-  successful spawns and 8,988 checked executions without a restart, death camera, terminal fall,
-  VM fault, or execution error. A final brake and three-frame leftward hop pin the last stable
-  contact. The next left sample enters the authored fall/restart handshake, so traversing that first
-  greasy segment into `a7_qZ` remains open. This does not establish Native Fortress completion.
-  Up the Creek has a separate bounded ordinary-pad direct route through its two opening moving
-  logs, the first `0f_oZ` static island, the raised stepping stone, the `0g`/`0h` orbiters, and the
-  first checkpoint. Entity 76 emits `SaveState` on frame 1,057 with checkpoint translation
-  `[2048000, 1738240, 19455744]` and saved box count `0x200`; the live count then becomes `0x300`.
-  The same controller rides entity 75 into `0l_oZ`, observes a complete platform cycle, and uses a
-  four-sample Up+Right run-up plus Cross transfer onto entity 80. At frame 1,450 Crash is grounded
-  in `0m_oZ` at `[2372776, 1719394, 17903224]`, with the tagged collider resolving to entity 80;
-  the camera is `0l_oZ` path one/progress 6,912. The run performs 89 successful spawns and 46,331
-  clean executions across 15 lifecycle transitions, 20 camera ranges and 25 path changes, with no
-  restart, LoadState, terminal fall, VM fault, or execution error. This does not establish Up the
-  Creek's bonus, later hazards, normal end, or browser playthrough.
+  Native Fortress retains a separate 550-frame ordinary-pad golden at the first subtype-two greasy
+  `WalOC` boundary. An extended route hops back to the preceding shelf, reverses for four grounded
+  samples, and carries a running jump across the segment. At frame 650 the camera is `a7_qZ` path
+  zero/progress 6,240 and Crash is alive and grounded at `[5885696, -10880527, 118784]`; the next
+  subtype-two `WalOC` is live in state 11. The extension performs 19 successful spawns from 4,109
+  attempts and 10,880 checked executions across six lifecycle transitions, without a restart,
+  death camera, terminal fall, VM fault, execution error, or checked issue. This establishes the
+  authored `a7_qZ` handoff, not Native Fortress completion.
+  Up the Creek has a separate bounded ordinary-pad direct route through its opening moving logs,
+  the first `0f_oZ` static island, the `0g`/`0h` orbiters, and checkpoint entity 76. The checkpoint
+  emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box
+  count `0x200`; the live count then becomes `0x300`. The controller rides entity 75 into `0l_oZ`,
+  observes a complete cycle, transfers onto entity 80, waits 39 neutral samples, and uses a
+  four-sample run-up plus Cross to land on vertical platform entity 88. At frame 1,520 Crash is
+  grounded in `0m_oZ` at `[2372776, 1720258, 17415800]`, with the tagged collider resolving to
+  entity 88; the camera is `0m_oZ` path zero/progress 4,288. The run performs 94 successful spawns
+  and 48,147 clean executions across 16 lifecycle transitions, 21 camera ranges and 26 path
+  changes, with no restart, LoadState, terminal fall, VM fault, or execution error. This does not
+  establish Up the Creek's bonus, later hazards, normal end, or browser playthrough.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
   authored graph cannot be spawned, the browser remains on its loading/error presentation rather

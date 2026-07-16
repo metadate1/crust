@@ -163,7 +163,17 @@ impl Dom {
     pub fn enable_runtime_controls(&self, enabled: bool) {
         self.pause.set_disabled(!enabled);
         self.mute.set_disabled(!enabled);
-        self.fullscreen.set_disabled(!enabled);
+        let fullscreen_capable = self.document.fullscreen_enabled();
+        self.fullscreen
+            .set_disabled(!enabled || !fullscreen_capable);
+        let fullscreen_hint = if !fullscreen_capable {
+            "Fullscreen is unavailable in this browser context"
+        } else if enabled {
+            "Enter fullscreen"
+        } else {
+            "Fullscreen is available after launch"
+        };
+        let _ = self.fullscreen.set_attribute("title", fullscreen_hint);
     }
 }
 

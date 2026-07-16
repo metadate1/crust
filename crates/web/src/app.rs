@@ -70,13 +70,13 @@ use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, ZONE_OBJECTS_ACTIVE, ZoneLifecycle, ZoneLifecycleZone,
     ZoneTransitionAction,
 };
-use js_sys::{Object, Reflect};
+use js_sys::{Function, Object, Promise, Reflect};
 use wasm_bindgen::JsCast as _;
 use wasm_bindgen::JsValue;
 use wasm_bindgen::closure::Closure;
-use wasm_bindgen_futures::spawn_local;
+use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
-    DragEvent, Event, FileList, Gamepad, HtmlElement, HtmlOptionElement, KeyboardEvent,
+    DragEvent, Element, Event, FileList, Gamepad, HtmlElement, HtmlOptionElement, KeyboardEvent,
     PointerEvent,
 };
 
@@ -104,6 +104,16 @@ use crate::{
     RetailIslandWritebackPhase, authoritative_save_or_last, core_objects_pad_update,
     initial_retail_level_state, require_render_object_snapshot, retail_island_state_writeback,
 };
+
+// `web-sys` 0.3 exposes `Element::request_fullscreen` as a caught void
+// method, even though current browsers return a Promise. Read that return
+// value explicitly so a platform or readiness rejection is observed instead
+// of surfacing as an unhandled browser-console failure.
+fn request_fullscreen_promise(element: &Element) -> Result<Promise, JsValue> {
+    let method = Reflect::get(element.as_ref(), &JsValue::from_str("requestFullscreen"))?
+        .dyn_into::<Function>()?;
+    method.call0(element.as_ref())?.dyn_into::<Promise>()
+}
 
 const ZDAT_ENTRY_TYPE: u32 = 7;
 const ADIO_ENTRY_TYPE: u32 = 12;
@@ -4299,9 +4309,17 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
         })?;
     }
     {
-        let screen = dom.screen.clone();
+        let document = dom.document.clone();
+        let screen: Element = dom.screen.clone().into();
         bind_click(&dom.fullscreen, move || {
-            let _ = screen.request_fullscreen();
+            if document.fullscreen_enabled() {
+                let Ok(promise) = request_fullscreen_promise(&screen) else {
+                    return;
+                };
+                spawn_local(async move {
+                    let _ = JsFuture::from(promise).await;
+                });
+            }
         })?;
     }
 

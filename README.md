@@ -318,15 +318,16 @@ boundary. At frame 550 the camera is `a6_qZ` path one/progress 5,548, Crash is g
 performs 17 successful spawns and 8,988 clean executions with no restart, death camera, terminal
 fall, VM fault, or execution error. It stops at the last stable contact after a three-frame leftward
 hop; crossing that greasy `WalOC` segment into `a7_qZ` remains an active route gap.
-Up the Creek now has a bounded direct-boot ordinary-pad route beyond its first two moving logs. At
-the 500-frame boundary Crash stands on `0f_oZ`'s static raw `0x0003` cell at
-`[2075548, 1414590, 26064412]`; the cell top is `Y=1414592`, the player has no entity reference,
-and the recorded floor-impact registers distinguish it from the preceding carried log contact. The
-route then crosses the raised stepping stone and reaches `0g_oZ`, where contact advances platform
-entity 44 from state 11 to 12. At frame 580 Crash remains alive and supported at
-`[2074052, 1647954, 25003356]` after 18,922 clean executions and no restart, LoadState, terminal
-fall, VM fault, or execution error. This is opening-route characterization through the first `0g`
-platform, not an Up the Creek completion or browser-playthrough claim.
+Up the Creek now has a bounded direct-boot ordinary-pad route through its opening logs, first
+checkpoint, and the next two post-checkpoint platforms. The route activates checkpoint entity 76
+on frame 1,057, retaining the source-ordered saved box count `0x200` before the live count becomes
+`0x300`. It rides entity 75 into `0l_oZ`, waits through a complete platform cycle, and transfers
+onto entity 80. At frame 1,450 Crash is alive and grounded in `0m_oZ` at
+`[2372776, 1719394, 17903224]`, with a validated collider reference to entity 80 and camera
+`0l_oZ` path one/progress 6,912. The run records 89 successful spawns, 46,331 clean executions,
+15 lifecycle transitions, 20 camera ranges and 25 path changes with no restart, LoadState,
+terminal fall, VM fault, or execution error. This is not an Up the Creek completion or browser
+playthrough claim.
 The current native schedule therefore includes seven deterministic normal-level completions, the
 complete carried Upstream route, Papu Papu's authored completion, and both direct and carried
 Rolling Stones completion; this is not a full retail playthrough or a browser-playthrough claim.

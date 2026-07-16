@@ -1232,13 +1232,22 @@ is 1,322,866 bytes with SHA-256
   `0xffff`. Those values distinguish static floor contact from the preceding entity-59 carried
   bounce. The 500-frame run records 42 successful spawns and 16,673 clean executions with no
   restart, LoadState, fall, VM fault, or execution error.
-  The same controller then crosses the raised stepping stone and reaches `0g_oZ`. Its contact with
-  platform entity 44 advances that object from state 11 to 12; at frame 580 Crash remains alive and
-  supported at `[2074052, 1647954, 25003356]`, and entity 44 is in state 12. This run records 50
-  successful spawns, 18,922 clean executions, seven lifecycle transitions, ten camera ranges and
-  thirteen path changes, with no restart, LoadState, fall, VM fault, or execution error. It is a
-  bounded route through the first `0g` platform, not a level-completion or browser-playthrough
-  claim.
+  The same controller crosses the raised stepping stone and reaches `0g_oZ`, where contact advances
+  platform entity 44 from state 11 to 12. It then crosses the `0g`/`0h` orbiters, the `0i` sinking
+  platform handoff and two counted crates, defeats hazard entity 72, crosses entity 71, and
+  activates checkpoint entity 76 on frame 1,057. `SaveState` retains translation
+  `[2048000, 1738240, 19455744]`, camera progress 249 and the source-ordered pre-increment box count
+  `0x200`; the live count becomes `0x300`.
+  The continued route catches and rides entity 75 into `0l_oZ`. At frame 1,200 Crash is grounded
+  on that entity at `[1924752, 1779842, 18337744]`, with its tagged collider and floor-impact
+  fields resolving exactly. After one complete platform cycle, a four-sample Up+Right run-up and
+  Cross transfer lands on authored entity 80. At frame 1,450 Crash is grounded in `0m_oZ` at
+  `[2372776, 1719394, 17903224]`; entity 80 is at `[2252032, 1661440, 17816832]`, the collider tag
+  resolves to 80, and the camera is `0l_oZ` path one/progress 6,912. The complete bounded run
+  records 89 successful spawns from 21,446 attempts, 21,357 source-expected rejections, 46,331
+  clean executions, 15 lifecycle transitions, 20 camera ranges and 25 path changes. It has no
+  restart, LoadState, fall, VM fault, execution error, or checked issue. This is not an Up the
+  Creek completion or browser-playthrough claim.
 - Ripper Roo's legally local 300-frame idle characterization matches the source project's current
   allocator behavior. RooOC requests one ordinary executable-39/subtype-one child on every enabled
   draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately

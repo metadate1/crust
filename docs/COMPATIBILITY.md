@@ -615,15 +615,17 @@ gameplay path.
   VM fault, or execution error. A final brake and three-frame leftward hop pin the last stable
   contact. The next left sample enters the authored fall/restart handshake, so traversing that first
   greasy segment into `a7_qZ` remains open. This does not establish Native Fortress completion.
-  Up the Creek has a separate bounded ordinary-pad direct route through its two opening moving logs,
-  the first `0f_oZ` island, the raised stepping stone, and the first `0g_oZ` platform. At the
-  500-frame boundary, Crash is supported at `[2075548, 1414590, 26064412]` on static ZDAT cell raw
-  `0x0003`, whose top is `Y=1414592`; the floor-impact registers are populated and the entity
-  reference is zero, distinguishing that floor from the preceding entity-59 carried contact. By
-  frame 580 the route has contacted platform entity 44 and observed its state move from 11 to 12,
-  while Crash remains alive and supported at `[2074052, 1647954, 25003356]`. This establishes a
-  clean opening-route handoff into `0g_oZ`; it does not establish Up the Creek's checkpoint, bonus,
-  later hazards, normal end, or browser playthrough.
+  Up the Creek has a separate bounded ordinary-pad direct route through its two opening moving
+  logs, the first `0f_oZ` static island, the raised stepping stone, the `0g`/`0h` orbiters, and the
+  first checkpoint. Entity 76 emits `SaveState` on frame 1,057 with checkpoint translation
+  `[2048000, 1738240, 19455744]` and saved box count `0x200`; the live count then becomes `0x300`.
+  The same controller rides entity 75 into `0l_oZ`, observes a complete platform cycle, and uses a
+  four-sample Up+Right run-up plus Cross transfer onto entity 80. At frame 1,450 Crash is grounded
+  in `0m_oZ` at `[2372776, 1719394, 17903224]`, with the tagged collider resolving to entity 80;
+  the camera is `0l_oZ` path one/progress 6,912. The run performs 89 successful spawns and 46,331
+  clean executions across 15 lifecycle transitions, 20 camera ranges and 25 path changes, with no
+  restart, LoadState, terminal fall, VM fault, or execution error. This does not establish Up the
+  Creek's bonus, later hazards, normal end, or browser playthrough.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
   authored graph cannot be spawned, the browser remains on its loading/error presentation rather

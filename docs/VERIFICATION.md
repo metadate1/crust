@@ -1172,16 +1172,37 @@ is 1,322,866 bytes with SHA-256
   1,950 draws. It has no restart, LoadState, fatal-surface state 39, death camera, below-zero or
   terminal fall, VM fault, execution error, or checked issue. A separate 360-frame idle route pins
   its authored restart frames at 178 and 355.
+- A separate card-to-map regression restores the retail 128-byte payload at level count eight,
+  mounts Hog Wild's `1e_pZ` node, and boots `0x11` through the authored Cross transition. It then
+  carries the complete Hog Wild route into Level Complete, returns to Title/Map after 273 frames,
+  and uses an ordinary Up/Cross selection to boot newly unlocked Native Fortress (`0x1a`) on map
+  frame 253. The checked carry retains exact title/map/unlock globals, RNG and draw count, with no
+  restart, VM fault, or execution error. This proves the post-Hog unlock handoff, not completion of
+  Native Fortress; its first rotating-platform gap remains an active route boundary.
+- Up the Creek (`0x18`) has an exact ordinary-pad opening route through its first two authored
+  moving logs. It clears the opening boxes and four small-platform jumps, brakes onto executable-28
+  entity 30, waits for the log's forward arc, builds speed while supported, and transfers to entity
+  31. At frame 370 Crash remains alive and supported at `[2047648, 1166978, 27486512]`; the camera
+  is `0d_oZ` path one/progress 7,046. The run performs 26 successful spawns and 12,348 clean
+  executions across three lifecycle transitions, seven camera ranges and eight path changes, with
+  no restart, death/fall, VM fault, execution error, or LoadState. Local collision characterization
+  also established that entity 54 sends `HIT` and is a hazard, not the intended handoff surface.
+- Ripper Roo's legally local 300-frame idle characterization matches the source project's current
+  allocator behavior. RooOC requests one ordinary executable-39/subtype-one child on every enabled
+  draw; non-reclaiming children fill the 96-slot pool on frame 80, RRooC releases and immediately
+  reuses one slot on frame 152, and subsequent saturated requests correctly return null. RRooC
+  still enters state one and traverses its deterministic pad loop without a fault. This narrows an
+  inherited source boundary; it is not evidence for a Big TNT completion path.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked workspace currently enumerates 967 tests: 885 default-active and 82 ignored
+- The locked workspace currently enumerates 970 tests: 885 default-active and 85 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
-  Rolling Stones `0K`-to-`0M` boundary test, and the full carried regression pass independently on
-  the current tree.
+  Rolling Stones `0K`-to-`0M` boundary test, the Ripper Roo pool characterization, the Up the Creek
+  log-transfer test, and the full carried regression pass independently on the current tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.
@@ -1241,6 +1262,18 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   hog_wild_idle_restarts_on_the_authored_surface_cadence \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  hog_wild_completion_unlocks_native_fortress_through_authored_map \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  up_the_creek_direct_route_reaches_second_moving_log \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_runtime --locked \
+  ripper_roo_idle_matches_source_hop_loop_and_pool_boundary \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

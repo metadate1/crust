@@ -538,11 +538,16 @@ The focused checks below were also completed:
   behavior. Truncation cases and a 256-case arbitrary-word property test produced checked results
   without panics. The legally local corpus preserved one descriptor of each defined type through a
   register alias. Its direct-LEA census found 31 authored writes to `anim_seq`: 18 static type
-  `0x73`, 12 static type `0xef`, and Toxic Waste's one dynamic type-zero `BaraC` source. It found no
-  naturally selected process-local type-one-through-five route, so their browser render wiring is
-  compile- and model-covered rather than claimed as an observed playthrough. External-state-table,
-  rotating-constant, and foreign-object aliases are checked failures instead of being retargeted
-  across an unrepresented backing lifetime.
+  `0x73`, 12 static type `0xef`, and Toxic Waste's one dynamic type-zero `BaraC` source. Operand
+  classification pins those as 30 internal and one frame-relative source, with zero external,
+  immediate, linked-register, object-register, stack, or null sources. It found no naturally
+  selected process-local type-one-through-five route, so their browser render wiring is compile-
+  and model-covered rather than claimed as an observed playthrough. Focused lifetime tests prove an
+  immediate alias observes later writes to its exact shared rotating-constant slot and a linked
+  alias preserves its descriptor while the physical pool slot is free before following same-slot
+  reuse. External-state and unbound logical foreign-object aliases still fail without mutation;
+  never-used indeterminate free-slot cells and truncated known-type constant payloads fail at the
+  same checked boundary.
 - The ripple-state test matched an iterative source model for all 16 signed cells over 2,048
   advances at each of the three speed/period combinations and proved no-advance calls preserve the
   exact state. The legally local Upstream regression confirmed its initial world carries graphics
@@ -1242,12 +1247,14 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked workspace currently enumerates 973 tests: 885 default-active and 88 ignored
+- The locked workspace currently enumerates 976 tests: 888 default-active and 88 ignored
   legally-local tests. The complete 885-test default gate and the complete then-current 80-test
   owned-data sweep passed before the two Hog Wild tests were added; both new Hog tests, the direct
   Rolling Stones completion test, the Ripper Roo pool characterization, the Native Fortress first-
   grease test, the Up the Creek log-transfer/static-island/`0g` tests, and the full carried
-  completion regression pass independently on the current tree.
+  completion regression pass independently on the current tree. The three alias-lifetime tests and
+  the complete current 553-test simulation library plus default simulation integration suite also
+  pass on this tree.
   Rustfmt and warnings-denied simulation Clippy also pass. The last complete browser/release gate
   remains the earlier documented Rustfmt, native/Wasm Clippy, Node, native release, Wasm release,
   `npm run build`, and distribution-verifier run; those gates must be repeated before delivery.

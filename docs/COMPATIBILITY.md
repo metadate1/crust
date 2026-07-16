@@ -77,14 +77,18 @@ gameplay path.
   checked-error and quarantined-object counts are exposed through the engineering log/debug
   surface. Opcode `0x14` (LEA) keeps native input-before-output address translation and represents
   logical storage with checked object handles and linked registers with physical-pool handles.
-  Process-local animations use the same-object subset. Internal and register aliases support
+  Process-local animations support same-object internal/register storage, the shared rotating
+  constant buffer, and linked physical-pool register storage. Internal and register aliases support
   complete bounded descriptors for type-one vertex models, type-two sprites,
   type-four local text terms, and type-five fragments; type one also supplies its model to the local
   collision-bound path. Type-three font selections, type zero, and unknown type bytes retain their
   native no-draw behavior, with non-vertex bounds where applicable. Process text still resolves its
-  font offset against global animation item five. Foreign-object aliases, external-state-table
-  aliases, and the rotating constant region are rejected because their backing identity/lifetime is
-  not represented by the current checked token. Opcode `0x81` is the native one-cycle no-op.
+  font offset against global animation item five. A constant alias follows later writes to its
+  exact slot in the source's shared two-word buffer. A linked alias reads initialized free-slot
+  process words after reclaim and follows only reuse of that exact physical pool slot. External
+  state-table aliases and bare foreign logical-object aliases remain checked failures because the
+  current token cannot preserve their backing identity across state or compact-handle reuse. Opcode
+  `0x81` is the native one-cycle no-op.
   Transform selector `0x85/0` treats a declared one-point entity path as stationary before indexing.
   This is the intentional safe meaning of the source's later one-point return: Title's island
   controller reaches progress `0x110`, where the original C has already indexed into the next
@@ -310,13 +314,14 @@ gameplay path.
   animation descriptors
   of all five defined types are now parsed: vertex, sprite, text, and fragment descriptors use the
   ordinary checked bound/render paths, while font selections remain resource-only no-draw objects.
-  Only same-object internal and register aliases have representable lifetimes. External-state,
-  immediate-constant, and foreign-object aliases remain checked failures. The all-pair direct-LEA
-  census found 30 static no-draw data aliases (18 type `0x73`, 12 type `0xef`) and one dynamic
-  type-zero `BaraC` alias; it
-  found no naturally selected process-local type-one-through-five descriptor. Those five paths are
-  therefore covered with copied retail descriptors and malformed-input tests, not claimed as an
-  observed retail progression route.
+  Same-object internal/register aliases, immediate-constant slots, and physically backed linked
+  register aliases now have explicit lifetimes. External-state aliases and unbound logical
+  foreign-object aliases remain checked failures. The all-pair direct-LEA census found exactly 30
+  internal static no-draw data aliases (18 type `0x73`, 12 type `0xef`) and one frame-relative
+  dynamic type-zero `BaraC` alias; it found zero external, immediate, linked-register,
+  object-register, stack, or null animation sources. It found no naturally selected process-local
+  type-one-through-five descriptor. Those five paths are therefore covered with copied retail
+  descriptors and malformed-input tests, not claimed as an observed retail progression route.
 - Misc 12/7 requester continuation is guarded by both the arena generation and the VM machine's
   monotonic object incarnation. If a TERM handler kills the active requester and synchronously
   reuses either slot, the old invocation unwinds as terminated and cannot advance, mutate, or

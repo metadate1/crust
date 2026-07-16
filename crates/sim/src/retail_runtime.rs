@@ -2404,21 +2404,35 @@ struct RetailDisplaySnapshot {
     colors: [u16; COLOR_COUNT],
 }
 
+#[derive(Clone, Copy)]
+struct RetailDisplayCapture {
+    display_mask: u32,
+    texture_frame_snapshot: Option<TextureFrameSnapshot>,
+    enabled: bool,
+    dark_reference_translation: Option<[i32; 3]>,
+    dark_distance: i32,
+    effective_colors: Option<[u16; COLOR_COUNT]>,
+}
+
 impl RetailDisplaySnapshot {
     fn capture(
         vm_object: &VmObject,
-        display_mask: u32,
-        texture_frame_snapshot: Option<TextureFrameSnapshot>,
-        enabled: bool,
-        dark_reference_translation: Option<[i32; 3]>,
-        dark_distance: i32,
-        effective_colors: Option<[u16; COLOR_COUNT]>,
+        animation_source: Result<Option<AnimationSource>, VmError>,
+        capture: RetailDisplayCapture,
     ) -> Result<Self, VmError> {
+        let RetailDisplayCapture {
+            display_mask,
+            texture_frame_snapshot,
+            enabled,
+            dark_reference_translation,
+            dark_distance,
+            effective_colors,
+        } = capture;
         Ok(Self {
             display_mask,
             texture_frame_snapshot,
             enabled,
-            animation_source: vm_object.animation_source(),
+            animation_source,
             animation_frame: vm_object.animation_frame(),
             transform: vm_object.retail_transform()?,
             status_a: vm_object.register(process_register::STATUS_A)?,
@@ -4330,8 +4344,9 @@ impl RetailRuntime {
             .arena
             .get(object.arena)
             .ok_or(SpinDeathCameraResolveError::StaleObjectReference(reference))?;
-        let animation = vm_object
-            .animation_source()
+        let animation = self
+            .machine
+            .animation_source(object.vm)
             .map_err(SpinDeathCameraResolveError::Vm)?
             .ok_or(SpinDeathCameraResolveError::MissingAnimation(object))?;
         let (model_eid, frame_count, bound_reference) = match &animation {
@@ -4885,14 +4900,18 @@ impl RetailRuntime {
                 let current_dark_reference_translation = self
                     .current_dark_reference_translation()
                     .map_err(RenderObjectsError::Vm)?;
+                let animation_source = self.machine.animation_source(object.vm);
                 let display_snapshot = RetailDisplaySnapshot::capture(
                     vm_object,
-                    display_mask,
-                    None,
-                    display_eligible,
-                    current_dark_reference_translation,
-                    self.level_shader.distance,
-                    None,
+                    animation_source,
+                    RetailDisplayCapture {
+                        display_mask,
+                        texture_frame_snapshot: None,
+                        enabled: display_eligible,
+                        dark_reference_translation: current_dark_reference_translation,
+                        dark_distance: self.level_shader.distance,
+                        effective_colors: None,
+                    },
                 )
                 .map_err(RenderObjectsError::Vm)?;
                 let animation_source = display_snapshot
@@ -5451,14 +5470,18 @@ impl RetailRuntime {
                 dark_reference_translation,
                 host,
             )?;
+            let animation_source = self.machine.animation_source(object.vm);
             let display_snapshot = RetailDisplaySnapshot::capture(
                 self.machine.object(object.vm).map_err(RuntimeError::Vm)?,
-                display_mask,
-                texture_frame_snapshot,
-                displayed,
-                dark_reference_translation,
-                self.level_shader.distance,
-                effective_colors,
+                animation_source,
+                RetailDisplayCapture {
+                    display_mask,
+                    texture_frame_snapshot,
+                    enabled: displayed,
+                    dark_reference_translation,
+                    dark_distance: self.level_shader.distance,
+                    effective_colors,
+                },
             )
             .map_err(RuntimeError::Vm)?;
             let (zone, origin) = {
@@ -5659,10 +5682,14 @@ impl RetailRuntime {
             (spawned.zone(), spawned.origin().executable())
         };
         let (reference, frame_index, status_b, transform, original_colors) = {
-            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
-            let Some(source) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
+            let Some(source) = self
+                .machine
+                .animation_source(object.vm)
+                .map_err(RuntimeError::Vm)?
+            else {
                 return Ok(None);
             };
+            let vm_object = self.machine.object(object.vm).map_err(RuntimeError::Vm)?;
             let Some(reference) = animation_vertex_reference(&source) else {
                 // Non-vertex and native no-draw process descriptors have no
                 // vertex color or geometry side effects.
@@ -5783,7 +5810,7 @@ impl RetailRuntime {
             vm_object
                 .program_identity()
                 .map(GoolProgramIdentity::category),
-            vm_object.animation_source()?.is_some(),
+            self.machine.animation_source(object.vm)?.is_some(),
         ))
     }
 
@@ -6326,7 +6353,11 @@ impl RetailRuntime {
             if status_b & COLLIDABLE_STATUS_B == 0 {
                 return Ok(false);
             }
-            let Some(animation) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
+            let Some(animation) = self
+                .machine
+                .animation_source(object.vm)
+                .map_err(RuntimeError::Vm)?
+            else {
                 return Ok(false);
             };
             (
@@ -8394,10 +8425,10 @@ impl RetailRuntime {
         }
 
         let (animation, frame_index, transform) = {
-            let vm_object = machine.object(vm).map_err(RuntimeError::Vm)?;
-            let Some(animation) = vm_object.animation_source().map_err(RuntimeError::Vm)? else {
+            let Some(animation) = machine.animation_source(vm).map_err(RuntimeError::Vm)? else {
                 return Ok(());
             };
+            let vm_object = machine.object(vm).map_err(RuntimeError::Vm)?;
             (
                 animation,
                 vm_object.animation_frame() >> 8,

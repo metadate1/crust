@@ -76,14 +76,19 @@ five-word pad history, camera-relative movement, gravity, rotation, every source
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
 GOOL `0x14` (LEA) preserves input-before-output address translation and represents process-local
-animations as checked same-object handles. Descriptors in internal or register storage are
+animations as checked storage identities. Descriptors in internal or register storage are
 revalidated from the live aliased words: type one supplies its model to both bounds and vertex
 rendering, types two/four/five use the sprite, text, and fragment paths, and type three remains a
 resource-only no-draw selection. Type zero and unknown type bytes follow the native switch default
 with no draw and the standard non-vertex collision bound, including Toxic Waste's observed `BaraC`
-case. Foreign-object, external-state-table, and rotating-constant-buffer aliases are rejected
-because their backing lifetimes cannot yet be represented without silently retargeting a native
-pointer. Opcode `0x81` retains the native interpreter's intentional one-cycle no-op behavior.
+case. Immediate aliases follow the source's shared two-word rotating constant buffer, including
+later input/output-cursor overwrites. Linked aliases carry a physical object-pool slot, remain
+readable through retained free-slot words, and retarget only when that exact native slot is reused.
+External-state-table aliases and unbound logical foreign-object aliases remain checked failures
+because accepting either would silently retarget a native pointer. The retail direct-LEA census
+contains 30 internal sources and one frame-relative source; no authored animation LEA currently
+selects external, immediate, or linked storage. Opcode `0x81` retains the native interpreter's
+intentional one-cycle no-op behavior.
 `GoolObjectColors` now delivers Crash's category-`0x300` invincibility-hit event `0x0a00`
 synchronously before the same object's physics, so authored enemy handlers can change that frame's
 motion or state. The source's `argc=1`/null-argument quirk is represented by one checked zero word
@@ -413,7 +418,7 @@ does not certify the complete ending flow.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 546 passing tests; the locked workspace inventory has 885 default-active
+The `crust-sim` library has 553 passing tests; the locked workspace inventory has 888 default-active
 tests plus 88 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.

@@ -284,17 +284,23 @@ paths retain strict checked indexing. The complete `0x8e` family covers static/o
 response, all directional surface variants, entity-color scaling and source no-op case seven.
 Opcode `0x14` (LEA) translates its input address before its output address, preserves null and stack
 side effects, and stores a checked logical-object or physical-pool handle rather than a pointer.
-Same-object internal and register aliases are decoded from their live words on each VM read, then
-copied as a fully owned, bounded descriptor into the display snapshot. Type one carries its model
+Same-object internal and register aliases are decoded from their live words on each VM read. The
+machine-owned resolver also models two source-defined nonlocal lifetimes. Immediate GOPs select one
+of the shared `consts[2]` words through independent input/output cursors, so an installed alias
+observes later writes to that same rotating slot. Linked GOPs select `&link->regs[index]` inside the
+physical object pool; the checked reference therefore reads retained initialized words while the
+slot is free and retargets only when that exact slot is reused. The resolved descriptor is then
+copied into a fully owned, bounded display snapshot. Type one carries its model
 EID into the pair-scoped vertex/bound resolver; types two, four, and five use the existing sprite,
 text, and fragment paths; type three consumes its header but remains a resource-only no-draw selection.
 Process text retains local NUL-delimited terms while resolving its font word offset against global
 item five. Type zero and unknown bytes follow the native transform-switch default with no draw and
-the standard non-vertex bound, including the observed Toxic Waste `BaraC` use. A foreign-object
-storage reference, an external-state-table alias, and the VM's rotating constant region are rejected
-because their backing identity/lifetimes cannot yet be represented without retargeting the native
-pointer. Opcode `0x81` follows the native switch's missing-case behavior as an intentional one-cycle
-no-op.
+the standard non-vertex bound, including the observed Toxic Waste `BaraC` use. External-state-table
+references remain rejected: a state rebind replaces the object's compact external vector, while the
+native pointer keeps the previous entry identity. Bare foreign logical-object references are also
+rejected because compact VM-handle reuse is not physical-pool reuse. Malformed spans fail before a
+snapshot is published and do not mutate the machine. Opcode `0x81` follows the native switch's
+missing-case behavior as an intentional one-cycle no-op.
 
 The standalone VM retains a bounded effect buffer for checked host handshakes. A retail frame drains
 that buffer after each visited object's update and display boundary, before descending to children,

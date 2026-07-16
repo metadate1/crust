@@ -428,9 +428,10 @@ pub enum ProcessAnimationKind {
     Fragment(GoolFragmentAnimation),
 }
 
-/// One live, bounds-checked animation descriptor in an object's process
-/// words. The storage token preserves the exact same-object internal/register
-/// alias selected by LEA without exposing a native pointer.
+/// One live, bounds-checked animation descriptor selected through GOOL
+/// storage. The token preserves a same-object internal/register alias, a
+/// process-global rotating-constant slot, or a physical retail-pool register
+/// address without exposing a native pointer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessAnimationReference {
     storage: StorageReference,
@@ -452,9 +453,9 @@ impl ProcessAnimationReference {
 /// Checked replacement for retail's `gool_anim *` union of pointer sources.
 ///
 /// Item-five descriptors retain their compact byte offset. LEA-created
-/// process descriptors retain a same-object [`StorageReference`] plus the
-/// source words needed by downstream simulation. Both variants fit in owned
-/// render snapshots and neither can outlive or dereference native memory.
+/// process descriptors retain a checked [`StorageReference`] plus the source
+/// words needed by downstream simulation. Both variants fit in owned render
+/// snapshots and neither can outlive or dereference native memory.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AnimationSource {
     ItemFive(AnimationReference),
@@ -502,6 +503,48 @@ fn parse_process_text_animation(words: &[u32]) -> Result<ProcessTextAnimation, (
         font_word_offset,
         terms,
     })
+}
+
+fn parse_process_animation_reference(
+    storage: StorageReference,
+    words: &[u32],
+) -> Result<ProcessAnimationReference, VmError> {
+    let word = storage.to_word();
+    let header_word = words
+        .first()
+        .copied()
+        .ok_or(VmError::InvalidAnimationReference(word))?;
+    let raw_type = header_word.to_le_bytes()[0];
+    let kind = match raw_type {
+        1 | 2 | 5 => {
+            let bytes = animation_words_as_bytes(words);
+            match parse_gool_animation_descriptor(&bytes, 0)
+                .map_err(|_| VmError::InvalidAnimationReference(word))?
+            {
+                GoolAnimationDescriptor::Vertex(value) => ProcessAnimationKind::Vertex(value),
+                GoolAnimationDescriptor::Sprite(value) => ProcessAnimationKind::Sprite(value),
+                GoolAnimationDescriptor::Fragment(value) => ProcessAnimationKind::Fragment(value),
+                GoolAnimationDescriptor::Font(_) | GoolAnimationDescriptor::Text(_) => {
+                    return Err(VmError::InvalidAnimationReference(word));
+                }
+            }
+        }
+        3 => {
+            let bytes = header_word.to_le_bytes();
+            let header = parse_gool_animation_header(&bytes, 0)
+                .map_err(|_| VmError::InvalidAnimationReference(word))?;
+            ProcessAnimationKind::Font(header)
+        }
+        4 => ProcessAnimationKind::Text(
+            parse_process_text_animation(words)
+                .map_err(|()| VmError::InvalidAnimationReference(word))?,
+        ),
+        // Native's transform switch has no default body. Its local-bound
+        // path tests only `type == 1`, so every other byte is a live,
+        // non-vertex, no-draw animation rather than malformed input.
+        _ => ProcessAnimationKind::NoDraw,
+    };
+    Ok(ProcessAnimationReference { storage, kind })
 }
 
 /// Immutable identity of the global GOOL program that owns an object's
@@ -4016,10 +4059,10 @@ impl VmObject {
     /// Current checked replacement for retail's `gool_anim *`.
     ///
     /// Opcode `0x27` and animation opcodes select a descriptor in global item
-    /// five. Opcode `0x14` may instead install a same-object process-word
-    /// address. The latter is decoded from the live aliased words on every
-    /// call, matching native's pointer semantics when GOOL mutates the local
-    /// descriptor after installing it.
+    /// five. Opcode `0x14` may instead install a process-word address. This
+    /// object-local view resolves the same-object internal/register subset;
+    /// [`Machine::animation_source`] additionally owns the rotating-constant
+    /// and physical-pool lifetimes needed by cross-object aliases.
     pub fn animation_source(&self) -> Result<Option<AnimationSource>, VmError> {
         let word = self.register(process_register::ANIMATION_SEQUENCE)?;
         if word == 0 {
@@ -4036,46 +4079,8 @@ impl VmObject {
         let words = self
             .animation_storage_words(storage)
             .ok_or(VmError::InvalidAnimationReference(word))?;
-        let header_word = words
-            .first()
-            .copied()
-            .ok_or(VmError::InvalidAnimationReference(word))?;
-        let raw_type = header_word.to_le_bytes()[0];
-        let kind = match raw_type {
-            1 | 2 | 5 => {
-                let bytes = animation_words_as_bytes(words);
-                match parse_gool_animation_descriptor(&bytes, 0)
-                    .map_err(|_| VmError::InvalidAnimationReference(word))?
-                {
-                    GoolAnimationDescriptor::Vertex(value) => ProcessAnimationKind::Vertex(value),
-                    GoolAnimationDescriptor::Sprite(value) => ProcessAnimationKind::Sprite(value),
-                    GoolAnimationDescriptor::Fragment(value) => {
-                        ProcessAnimationKind::Fragment(value)
-                    }
-                    GoolAnimationDescriptor::Font(_) | GoolAnimationDescriptor::Text(_) => {
-                        return Err(VmError::InvalidAnimationReference(word));
-                    }
-                }
-            }
-            3 => {
-                let bytes = header_word.to_le_bytes();
-                let header = parse_gool_animation_header(&bytes, 0)
-                    .map_err(|_| VmError::InvalidAnimationReference(word))?;
-                ProcessAnimationKind::Font(header)
-            }
-            4 => ProcessAnimationKind::Text(
-                parse_process_text_animation(words)
-                    .map_err(|()| VmError::InvalidAnimationReference(word))?,
-            ),
-            // Native's transform switch has no default body. Its local-bound
-            // path tests only `type == 1`, so every other byte is a live,
-            // non-vertex, no-draw animation rather than malformed input.
-            _ => ProcessAnimationKind::NoDraw,
-        };
-        Ok(Some(AnimationSource::Process(ProcessAnimationReference {
-            storage,
-            kind,
-        })))
+        parse_process_animation_reference(storage, words)
+            .map(|source| Some(AnimationSource::Process(source)))
     }
 
     fn animation_storage_words(&self, storage: StorageReference) -> Option<&[u32]> {
@@ -4086,9 +4091,9 @@ impl VmObject {
             // State changes replace the current external entry while a native
             // LEA pointer retains the prior entry's identity. The serialized
             // token has no generation for that backing, so retargeting it to
-            // the new external table would be wrong. Immediate operands have
-            // the analogous problem with Machine's rotating constant buffer.
-            // Reject both until their distinct lifetimes are represented.
+            // the new external table would be wrong. Rotating constants are
+            // process-global Machine storage and therefore require the
+            // machine-owned resolver rather than this object-local view.
             StorageRegion::External | StorageRegion::Constant => None,
         }
     }
@@ -6214,6 +6219,62 @@ impl Machine {
             .ok_or(VmError::UnknownObject(handle))
     }
 
+    /// Resolves the live animation pointer with every represented native
+    /// storage lifetime in scope.
+    ///
+    /// Same-object internal/register references stay on the logical object.
+    /// Immediate GOPs point into native's shared two-word rotating buffers, so
+    /// their checked token deliberately follows later input/output cursor
+    /// overwrites. Linked GOPs point into the static retail object pool; that
+    /// token keeps reading retained free-slot words and retargets only when
+    /// the same physical slot is reused. Bare foreign logical-object tokens
+    /// remain rejected because compact handle reuse is not a native lifetime.
+    /// External-state tokens also remain rejected because a state rebind
+    /// replaces the current vector without preserving the prior entry's
+    /// identity in the 32-bit token.
+    pub fn animation_source(
+        &self,
+        handle: ObjectHandle,
+    ) -> Result<Option<AnimationSource>, VmError> {
+        let object = self.object(handle)?;
+        let word = object.register(process_register::ANIMATION_SEQUENCE)?;
+        if word == 0 {
+            return Ok(None);
+        }
+        if let Some(reference) = AnimationReference::from_word(word) {
+            let _validated_data = object.animation_data(reference)?;
+            return Ok(Some(AnimationSource::ItemFive(reference)));
+        }
+
+        let storage =
+            StorageReference::from_word(word).ok_or(VmError::InvalidAnimationReference(word))?;
+        let index = usize::from(storage.index());
+        let words = match storage.backing {
+            StorageBacking::RetailPool(pool_slot) => self
+                .retail_pool_animation_words(pool_slot, index)
+                .map_err(|_| VmError::InvalidAnimationReference(word))?,
+            StorageBacking::Object(owner) => match storage.region() {
+                StorageRegion::Internal if owner == handle => object
+                    .internal
+                    .get(index..)
+                    .ok_or(VmError::InvalidAnimationReference(word))?,
+                StorageRegion::Register if owner == handle => object
+                    .registers
+                    .get(index..)
+                    .ok_or(VmError::InvalidAnimationReference(word))?,
+                StorageRegion::Constant => self
+                    .operand_constants
+                    .get(index..)
+                    .ok_or(VmError::InvalidAnimationReference(word))?,
+                StorageRegion::External | StorageRegion::Internal | StorageRegion::Register => {
+                    return Err(VmError::InvalidAnimationReference(word));
+                }
+            },
+        };
+        parse_process_animation_reference(storage, words)
+            .map(|source| Some(AnimationSource::Process(source)))
+    }
+
     /// Validates a proposed physical-pool association without requiring the
     /// replacement VM object to be installed first.
     pub(crate) fn preflight_retail_pool_slot_binding(
@@ -6413,6 +6474,41 @@ impl Machine {
             .copied()
             .ok_or(VmError::InvalidRegister(register))?;
         Ok((value, self.live_pool_slot_for_word(value, provenance)))
+    }
+
+    /// Returns only process words with defined native contents for animation
+    /// decoding. A reclaimed object initializes its complete register block;
+    /// a never-used free slot contains only allocator-written cells and must
+    /// not turn indeterminate malloc bytes into deterministic descriptors.
+    fn retail_pool_animation_words(
+        &self,
+        pool_slot: u8,
+        register: usize,
+    ) -> Result<&[u32], VmError> {
+        if let Some(handle) = self.live_object_in_retail_pool_slot(pool_slot) {
+            return self
+                .object(handle)?
+                .registers
+                .get(register..)
+                .ok_or(VmError::InvalidRegister(register));
+        }
+        let storage = self
+            .retired_retail_pool_registers
+            .get(usize::from(pool_slot))
+            .and_then(Option::as_ref)
+            .ok_or(VmError::InvalidRetailPoolSlot(pool_slot))?;
+        let registers = storage
+            .registers
+            .get(register..)
+            .ok_or(VmError::InvalidRegister(register))?;
+        let initialized = storage
+            .initialized_registers
+            .get(register..)
+            .ok_or(VmError::InvalidRegister(register))?;
+        let initialized_len = initialized.iter().take_while(|value| **value).count();
+        registers
+            .get(..initialized_len)
+            .ok_or(VmError::InvalidRegister(register))
     }
 
     /// Writes one register through a native static-pool pointer. Free slots
@@ -9477,7 +9573,7 @@ impl Machine {
                                 object: handle,
                                 link: link_index,
                             })?;
-                        let Some(source) = self.object(link)?.animation_source()? else {
+                        let Some(source) = self.animation_source(link)? else {
                             return Ok(None);
                         };
                         let model_eid = match source {
@@ -12793,6 +12889,209 @@ mod tests {
                 Err(VmError::InvalidAnimationReference(invalid.to_word()))
             );
         }
+    }
+
+    #[test]
+    fn machine_animation_alias_follows_the_shared_rotating_constant_slot() {
+        let h = handle(0);
+        let mut machine = Machine::new(0);
+        machine
+            .insert_object(
+                VmObject::new(
+                    h,
+                    vec![
+                        // LEA fractional immediate 0x10 into anim_seq. The
+                        // input cursor starts at zero and selects slot one.
+                        Instruction::encode(0x14, 0x0a01, 0x0e2a),
+                        // Solid subop six translates immediate 0x200 through
+                        // input slot zero and then output slot one, replacing
+                        // the exact pointee through the other cursor.
+                        0x8e18_0802,
+                    ],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        machine.run(h, 1).unwrap();
+        let reference = StorageReference::from_word(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::ANIMATION_SEQUENCE)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reference.region(), StorageRegion::Constant);
+        assert_eq!(reference.index(), 1);
+        assert_eq!(machine.read_storage_reference(reference), Ok(0x10));
+        let AnimationSource::Process(first) = machine.animation_source(h).unwrap().unwrap() else {
+            panic!("the immediate alias must remain a process animation source");
+        };
+        assert_eq!(first.storage(), reference);
+        assert_eq!(*first.kind(), ProcessAnimationKind::NoDraw);
+
+        machine.run(h, 1).unwrap();
+        assert_eq!(machine.read_storage_reference(reference), Ok(0x200));
+        let AnimationSource::Process(second) = machine.animation_source(h).unwrap().unwrap() else {
+            panic!("the rotated immediate alias must remain a process animation source");
+        };
+        assert_eq!(second.storage(), reference);
+        assert_eq!(*second.kind(), ProcessAnimationKind::NoDraw);
+    }
+
+    #[test]
+    fn machine_animation_alias_tracks_foreign_physical_pool_storage_lifetime() {
+        let original = handle(0);
+        let actor = handle(1);
+        let replacement = handle(2);
+        let original_header = u32::from_le_bytes([3, 0xaa, 7, 0xbb]);
+        let replacement_header = u32::from_le_bytes([3, 0xcc, 9, 0xdd]);
+
+        let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        original_object.set_register(8, original_header).unwrap();
+        let mut actor_object =
+            VmObject::new(actor, vec![Instruction::encode(0x14, 0x0d08, 0x0e2a)]).unwrap();
+        actor_object.set_link(4, Some(original)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(original_object).unwrap();
+        machine.bind_retail_pool_slot(original, 7).unwrap();
+        machine.insert_object(actor_object).unwrap();
+        machine.run(actor, 1).unwrap();
+
+        let reference = StorageReference::from_word(
+            machine
+                .object(actor)
+                .unwrap()
+                .register(process_register::ANIMATION_SEQUENCE)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reference.retail_pool_slot(), Some(7));
+        let AnimationSource::Process(live) = machine.animation_source(actor).unwrap().unwrap()
+        else {
+            panic!("the linked pool alias must resolve while its object is live");
+        };
+        let ProcessAnimationKind::Font(live_header) = live.kind() else {
+            panic!("the original pool words must decode as a font descriptor");
+        };
+        assert_eq!(live.storage(), reference);
+        assert_eq!(live_header.length, 7);
+        assert_eq!(live_header.reserved_1, 0xaa);
+        assert_eq!(live_header.reserved_3, 0xbb);
+
+        machine
+            .remove_object_from_retail_pool_slot(original, 7)
+            .unwrap();
+        let AnimationSource::Process(retained) = machine.animation_source(actor).unwrap().unwrap()
+        else {
+            panic!("the linked pool alias must resolve retained free-slot storage");
+        };
+        let ProcessAnimationKind::Font(retained_header) = retained.kind() else {
+            panic!("the retained pool words must preserve the descriptor");
+        };
+        assert_eq!(retained.storage(), reference);
+        assert_eq!(retained_header.length, 7);
+        assert_eq!(retained_header.reserved_1, 0xaa);
+        assert_eq!(retained_header.reserved_3, 0xbb);
+
+        let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object
+            .set_register(8, replacement_header)
+            .unwrap();
+        machine.insert_object(replacement_object).unwrap();
+        machine.bind_retail_pool_slot(replacement, 7).unwrap();
+        let AnimationSource::Process(reused) = machine.animation_source(actor).unwrap().unwrap()
+        else {
+            panic!("the linked pool alias must follow exact-slot reuse");
+        };
+        let ProcessAnimationKind::Font(reused_header) = reused.kind() else {
+            panic!("the replacement pool words must decode as a font descriptor");
+        };
+        assert_eq!(reused.storage(), reference);
+        assert_eq!(reused_header.length, 9);
+        assert_eq!(reused_header.reserved_1, 0xcc);
+        assert_eq!(reused_header.reserved_3, 0xdd);
+    }
+
+    #[test]
+    fn unrepresented_and_malformed_animation_aliases_fail_without_mutation() {
+        let actor = handle(0);
+        let foreign = handle(1);
+
+        let external = StorageReference::checked(actor, StorageRegion::External, 8).unwrap();
+        let mut external_object = VmObject::new(actor, vec![0]).unwrap();
+        external_object.set_external(8, 0x0007_aa03).unwrap();
+        external_object
+            .set_register(process_register::ANIMATION_SEQUENCE, external.to_word())
+            .unwrap();
+        let mut external_machine = Machine::new(0);
+        external_machine.insert_object(external_object).unwrap();
+        let external_snapshot = external_machine.clone();
+        assert_eq!(
+            external_machine.animation_source(actor),
+            Err(VmError::InvalidAnimationReference(external.to_word()))
+        );
+        assert_eq!(external_machine, external_snapshot);
+
+        let foreign_reference =
+            StorageReference::checked(foreign, StorageRegion::Register, 8).unwrap();
+        let mut foreign_object = VmObject::new(foreign, vec![0]).unwrap();
+        foreign_object.set_register(8, 0x0007_aa03).unwrap();
+        let mut actor_object = VmObject::new(actor, vec![0]).unwrap();
+        actor_object
+            .set_register(
+                process_register::ANIMATION_SEQUENCE,
+                foreign_reference.to_word(),
+            )
+            .unwrap();
+        let mut foreign_machine = Machine::new(0);
+        foreign_machine.insert_object(foreign_object).unwrap();
+        foreign_machine.insert_object(actor_object).unwrap();
+        let foreign_snapshot = foreign_machine.clone();
+        assert_eq!(
+            foreign_machine.animation_source(actor),
+            Err(VmError::InvalidAnimationReference(
+                foreign_reference.to_word()
+            ))
+        );
+        assert_eq!(foreign_machine, foreign_snapshot);
+
+        let uninitialized_pool = StorageReference::retail_pool_register(7, 8).unwrap();
+        let mut uninitialized_object = VmObject::new(actor, vec![0]).unwrap();
+        uninitialized_object
+            .set_register(
+                process_register::ANIMATION_SEQUENCE,
+                uninitialized_pool.to_word(),
+            )
+            .unwrap();
+        let mut uninitialized_machine = Machine::new(0);
+        uninitialized_machine
+            .insert_object(uninitialized_object)
+            .unwrap();
+        let uninitialized_snapshot = uninitialized_machine.clone();
+        assert_eq!(
+            uninitialized_machine.animation_source(actor),
+            Err(VmError::InvalidAnimationReference(
+                uninitialized_pool.to_word()
+            ))
+        );
+        assert_eq!(uninitialized_machine, uninitialized_snapshot);
+
+        let constant = StorageReference::checked(actor, StorageRegion::Constant, 1).unwrap();
+        let mut malformed_object = VmObject::new(actor, vec![0]).unwrap();
+        malformed_object
+            .set_register(process_register::ANIMATION_SEQUENCE, constant.to_word())
+            .unwrap();
+        let mut malformed_machine = Machine::new(0);
+        malformed_machine.insert_object(malformed_object).unwrap();
+        malformed_machine.operand_constants[1] = 1;
+        let malformed_snapshot = malformed_machine.clone();
+        assert_eq!(
+            malformed_machine.animation_source(actor),
+            Err(VmError::InvalidAnimationReference(constant.to_word()))
+        );
+        assert_eq!(malformed_machine, malformed_snapshot);
     }
 
     #[test]

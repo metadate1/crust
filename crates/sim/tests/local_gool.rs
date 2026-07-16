@@ -12,9 +12,9 @@ use crust_formats::stream::{
 };
 use crust_sim::gool::{
     AnimationReference, AnimationSource, CURRENT_LEVEL_GLOBAL, CodeAddress, CodeSegment, Execution,
-    HaltReason, Machine, ObjectHandle, ProcessAnimationKind, REGISTER_COUNT, SendEventTarget,
-    StorageReference, StorageRegion, VmEffect, VmHostRequest, VmObject, VmStateProgram,
-    process_register,
+    HaltReason, Machine, ObjectHandle, Operand, ProcessAnimationKind, REGISTER_COUNT,
+    SendEventTarget, StorageReference, StorageRegion, VmEffect, VmHostRequest, VmObject,
+    VmStateProgram, process_register,
 };
 
 fn words(bytes: &[u8]) -> Vec<u32> {
@@ -48,6 +48,7 @@ fn every_retail_direct_animation_lea_has_the_characterized_safe_source_kind() {
     let mut static_header_types = BTreeMap::new();
     let mut static_program_names = BTreeSet::new();
     let mut dynamic_sources = BTreeSet::new();
+    let mut source_kinds = BTreeMap::new();
     let mut destinations = BTreeSet::new();
     for known in KNOWN_LEVELS {
         let nsd_bytes = std::fs::read(root.join(known.nsd_filename())).unwrap();
@@ -83,6 +84,18 @@ fn every_retail_direct_animation_lea_has_the_characterized_safe_source_kind() {
             source_count += sources.len();
             for (source, destination) in sources {
                 destinations.insert(destination);
+                let source_kind = match Operand::decode(source) {
+                    Operand::Internal(_) => "internal",
+                    Operand::External(_) => "external",
+                    Operand::Immediate(_) => "immediate",
+                    Operand::FrameRelative(_) => "frame-relative",
+                    Operand::LinkRegister { .. } => "linked-register",
+                    Operand::ObjectRegister(_) => "object-register",
+                    Operand::Null => "null",
+                    Operand::StackDouble => "stack-double",
+                    Operand::Stack => "stack",
+                };
+                *source_kinds.entry(source_kind).or_insert(0_usize) += 1;
                 if source < 0x0400 {
                     let raw_type = internal[usize::from(source)].to_le_bytes()[0];
                     *static_header_types.entry(raw_type).or_insert(0_usize) += 1;
@@ -100,6 +113,10 @@ fn every_retail_direct_animation_lea_has_the_characterized_safe_source_kind() {
         }
     }
     assert_eq!(source_count, 31);
+    assert_eq!(
+        source_kinds,
+        BTreeMap::from([("frame-relative", 1), ("internal", 30)])
+    );
     assert_eq!(destinations, BTreeSet::from([0x0e2a]));
     assert_eq!(
         static_header_types,

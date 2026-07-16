@@ -113,6 +113,7 @@ enum SurveyInputProfile {
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
     UpTheCreekRoute,
+    NativeFortressRoute,
     PapuPapuCompletionRoute,
 }
 
@@ -140,6 +141,7 @@ impl SurveyInputProfile {
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
             Self::UpTheCreekRoute => "up-the-creek-route",
+            Self::NativeFortressRoute => "native-fortress-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
         }
     }
@@ -158,6 +160,7 @@ impl SurveyInputProfile {
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
                 | Self::UpTheCreekRoute
+                | Self::NativeFortressRoute
                 | Self::PapuPapuCompletionRoute
         )
     }
@@ -964,6 +967,140 @@ impl UpTheCreekRouteController {
             }
             _ => 0,
         }
+    }
+}
+
+/// Ordinary 30 Hz pad route through Native Fortress's opening arrow crates.
+///
+/// The final brake and three-frame leftward hop pin the last stable contact at
+/// the first subtype-2 `WalOC` greasy-platform boundary. Holding Left for a
+/// fourth sample currently enters the authored fall/restart handshake, so the
+/// controller intentionally goes neutral after the characterized boundary.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct NativeFortressRouteController {
+    stage: u8,
+    jump_frames: u8,
+    grounded_frames: u8,
+    route_tick: u32,
+}
+
+impl NativeFortressRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let grounded = player.status_a & 1 != 0;
+        self.grounded_frames = if grounded {
+            self.grounded_frames.saturating_add(1)
+        } else {
+            0
+        };
+
+        if self.stage == 2
+            && player.translation[0] < 11_350_000
+            && player.translation[1] > -10_900_000
+        {
+            self.stage = 3;
+            self.route_tick = 0;
+            self.jump_frames = 0;
+        }
+        if self.stage >= 3 {
+            let a6 = Eid::from_name("a6_qZ").expect("fixed Native Fortress route EID is valid");
+            if self.stage == 3
+                && camera.path.zone == a6
+                && camera.path.index == 1
+                && camera.progress.raw() >= 4_000
+                && grounded
+            {
+                self.stage = 4;
+                self.route_tick = 0;
+                return PAD_RIGHT;
+            }
+            self.route_tick = self.route_tick.saturating_add(1);
+            if self.stage == 4 {
+                let mut held = 0;
+                if self.route_tick <= 3 {
+                    held |= PAD_LEFT;
+                }
+                if self.route_tick <= 16 {
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+
+            let mut held = PAD_LEFT;
+            if self.route_tick % 42 < 18 {
+                held |= PAD_CROSS;
+            }
+            if self.route_tick % 20 < 8 {
+                held |= PAD_SQUARE;
+            }
+            if player.translation[2] > 150_000 {
+                held |= PAD_UP;
+            } else if player.translation[2] < 80_000 {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+
+        if self.stage == 0
+            && grounded
+            && (-12_750_000..=-12_650_000).contains(&player.translation[1])
+            && player.translation[2] < 120_000
+        {
+            self.stage = 1;
+            self.jump_frames = 32;
+        }
+        if self.stage == 1
+            && grounded
+            && (-11_850_000..=-11_700_000).contains(&player.translation[1])
+            && player.translation[2] < 120_000
+        {
+            self.stage = 2;
+            self.jump_frames = 32;
+        }
+        let target = match self.stage {
+            0 => [11_622_144, 76_800],
+            1 => [11_826_944, 76_800],
+            _ => [11_150_000, 128_000],
+        };
+        if self.grounded_frames >= 20 && self.jump_frames == 0 {
+            self.jump_frames = 16;
+        }
+        if self.stage == 0
+            && !grounded
+            && player.velocity[1] < 0
+            && player.translation[1] < -12_650_000
+            && self.jump_frames == 0
+        {
+            self.jump_frames = 16;
+        }
+        if self.stage == 1
+            && !grounded
+            && player.velocity[1] < 0
+            && player.translation[1] < -11_700_000
+            && self.jump_frames == 0
+        {
+            self.jump_frames = 24;
+        }
+        let predicted_x = player.translation[0] + player.velocity[0].saturating_mul(6) / 34;
+        let predicted_z = player.translation[2] + player.velocity[2].saturating_mul(6) / 34;
+        let mut held = 0;
+        if predicted_x > target[0] + 12_000 {
+            held |= PAD_LEFT;
+        } else if predicted_x < target[0] - 12_000 {
+            held |= PAD_RIGHT;
+        }
+        if predicted_z > target[1] + 12_000 {
+            held |= PAD_UP;
+        } else if predicted_z < target[1] - 12_000 {
+            held |= PAD_DOWN;
+        }
+        if self.jump_frames > 0 {
+            held |= PAD_CROSS;
+            self.jump_frames -= 1;
+        }
+        held
     }
 }
 
@@ -4802,6 +4939,7 @@ struct SurveyInputController {
     rolling_stones: RollingStonesRouteController,
     hog_wild: HogWildCompletionRouteController,
     up_the_creek: UpTheCreekRouteController,
+    native_fortress: NativeFortressRouteController,
     papu_papu: PapuPapuCompletionRouteController,
 }
 
@@ -4861,6 +4999,12 @@ impl SurveyInputController {
                 action_tick: 0,
             },
             up_the_creek: UpTheCreekRouteController { stage: 0, tick: 0 },
+            native_fortress: NativeFortressRouteController {
+                stage: 0,
+                jump_frames: 0,
+                grounded_frames: 0,
+                route_tick: 0,
+            },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
                 action_tick: 0,
@@ -4921,6 +5065,7 @@ impl SurveyInputController {
                 self.hog_wild.held(camera, player, checkpoint_id)
             }
             SurveyInputProfile::UpTheCreekRoute => self.up_the_creek.held(camera, player),
+            SurveyInputProfile::NativeFortressRoute => self.native_fortress.held(camera, player),
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, papu_boss_state)
             }
@@ -7205,6 +7350,88 @@ fn hog_wild_direct_boot_reaches_level_complete() {
     assert!(
         survey.is_clean(),
         "Hog Wild completion must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_ordinary_pad_route_reaches_first_greasy_platform_boundary() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Native Fortress",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NativeFortressRoute,
+        550,
+    )
+    .expect("Native Fortress's ordinary-pad route must execute");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 550);
+    assert!(survey.terminal.is_none());
+    assert_eq!(survey.successful_spawns, 17);
+    assert_eq!(survey.spawn_attempts, 3_381);
+    assert_eq!(survey.expected_spawn_rejections, 3_364);
+    assert_eq!(survey.executions, 8_988);
+    assert_eq!(survey.zone_transitions, 5);
+    assert_eq!(survey.camera_ranges.len(), 8);
+    assert_eq!(survey.camera_path_changes, 7);
+    assert_eq!(survey.last_camera_path_change, 395);
+    assert_eq!(survey.last_camera_progress_change, 413);
+    let final_camera = survey
+        .final_camera
+        .expect("Native Fortress's route must retain its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a6_qZ").expect("fixed Native Fortress grease-zone EID is valid"),
+            index: 1,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 5_548);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([6_522_624, -11_086_492, 118_784])
+    );
+    let final_player = player_trace(&runtime)
+        .expect("Native Fortress's final player trace must resolve")
+        .expect("Native Fortress's route must retain the player");
+    assert_eq!(final_player.translation, [6_522_624, -11_086_492, 118_784]);
+    assert_eq!(final_player.state, 1);
+    assert_ne!(final_player.status_a & 1, 0);
+    assert_eq!(survey.final_live_objects, 14);
+    assert_eq!(survey.max_live_objects, 23);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.effect_counts.get("solid"), Some(&24));
+    assert!(
+        survey.observed_program_states.contains(&(
+            Eid::from_name("WalOC").expect("fixed Native Fortress grease-platform EID is valid"),
+            11,
+        )),
+        "the first authored greasy platform must execute its retail state"
+    );
+    assert_eq!(runtime.machine().random_seed(), 0x50b3_4dac);
+    assert_eq!(runtime.draw_count(), 550);
+    assert!(
+        survey.is_clean(),
+        "Native Fortress's grease-platform boundary must remain clean: {}",
         survey.summary()
     );
 }

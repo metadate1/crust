@@ -7,8 +7,8 @@
 //! camera/player-state route using only retail directional, jump, and spin pad
 //! input for a default 18,000-frame window selected by `C1_PROGRESSION_FRAMES`.
 //! A separate vertical-flow test retains the authored session carry across
-//! N. Sanity Beach, Jungle Rollers, both Level Complete screens, the Title map,
-//! and The Great Gate's normal main route through its end `WarpC` transition
+//! N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, their
+//! Level Complete screens, the Title map, and the initial Papu Papu mount
 //! without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
@@ -7676,7 +7676,7 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_four_levels_reach_upstream_with_session_carry() {
+fn authored_first_five_levels_reach_papu_papu_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -9681,7 +9681,7 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
         let upstream_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, upstream, upstream_carry)
                 .expect("Upstream must import the fourth-completion map carry");
-        let (upstream_survey, upstream_runtime) = survey_pair_with_runtime(
+        let (upstream_survey, mut upstream_runtime) = survey_pair_with_runtime(
             known_name(upstream),
             upstream,
             &upstream_nsd,
@@ -9825,6 +9825,343 @@ fn authored_first_four_levels_reach_upstream_with_session_carry() {
             upstream_survey.is_clean(),
             "Upstream carried-spawn recovery must remain clean: {}",
             upstream_survey.summary()
+        );
+
+        let upstream_completion_carry: RetailSessionCarry = {
+            let mut host = NsfProgramHost::new(&upstream_nsd, &upstream_nsf, &upstream_nsf_bytes);
+            let report = upstream_runtime
+                .finish_level_transition(
+                    &mut host,
+                    i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+                )
+                .expect("Upstream LEVEL_END must export a Level Complete carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "Upstream LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, 0x2d);
+            assert_eq!(report.next_lid_after_event, report.requested_lid);
+            assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(upstream_completion_carry.random_seed, 0xa7ef_4deb);
+        assert_eq!(upstream_completion_carry.draw_count, 2_975);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| upstream_completion_carry.globals[index]),
+            [
+                0x500,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                5,
+                1,
+                6,
+                0,
+            ]
+        );
+
+        let upstream_completion_runtime = RetailRuntime::new_from_session(
+            GLOBAL_WORDS,
+            LevelId::LEVEL_COMPLETE,
+            upstream_completion_carry,
+        )
+        .expect("Level Complete must import Upstream's session carry");
+        let (upstream_completion_survey, mut upstream_completion_runtime) =
+            survey_pair_with_runtime(
+                known_name(LevelId::LEVEL_COMPLETE),
+                LevelId::LEVEL_COMPLETE,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                upstream_completion_runtime,
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                COMPLETION_FRAMES,
+            )
+            .expect("Upstream's Level Complete runtime must execute");
+        assert_eq!(upstream_completion_survey.frames, 225);
+        assert_eq!(upstream_completion_survey.final_live_objects, 5);
+        assert_eq!(upstream_completion_survey.max_live_objects, 8);
+        assert_eq!(upstream_completion_survey.successful_spawns, 2);
+        assert_eq!(upstream_completion_survey.spawn_attempts, 450);
+        assert_eq!(upstream_completion_survey.expected_spawn_rejections, 448);
+        assert_eq!(upstream_completion_survey.unexpected_spawn_errors, 0);
+        assert_eq!(upstream_completion_survey.executions, 1_212);
+        assert_eq!(upstream_completion_survey.zone_transitions, 0);
+        assert_eq!(upstream_completion_survey.restarts, 0);
+        assert!(upstream_completion_survey.restart_frames.is_empty());
+        assert_eq!(upstream_completion_survey.death_camera_frames, 0);
+        assert!(upstream_completion_survey.first_below_zero.is_none());
+        assert!(upstream_completion_survey.first_terminal_fall.is_none());
+        assert_eq!(upstream_completion_survey.faulted_objects, 0);
+        assert_eq!(upstream_completion_survey.execution_errors, 0);
+        assert_eq!(
+            upstream_completion_survey.next_lid,
+            Some((225, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        );
+        assert_eq!(
+            upstream_completion_survey.terminal.as_deref(),
+            Some("frame 225 requested level transition to 0x19")
+        );
+        assert_eq!(
+            upstream_completion_survey
+                .effect_counts
+                .get("transition")
+                .copied(),
+            Some(1)
+        );
+        assert!(upstream_completion_survey.issue_counts.is_empty());
+        assert!(
+            upstream_completion_survey.is_clean(),
+            "Upstream's Level Complete screen must remain clean: {}",
+            upstream_completion_survey.summary()
+        );
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| upstream_completion_runtime.global_word(index).unwrap()),
+            [
+                0x300,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                5,
+                1,
+                6,
+                0,
+            ]
+        );
+        assert_eq!(
+            upstream_completion_runtime.machine().random_seed(),
+            0xbe52_13fd
+        );
+        assert_eq!(upstream_completion_runtime.draw_count(), 3_200);
+
+        let post_upstream_title_carry: RetailSessionCarry = {
+            let mut host =
+                NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+            let report = upstream_completion_runtime
+                .finish_level_transition(&mut host, i32::try_from(LevelId::TITLE.get()).unwrap())
+                .expect("fifth Level Complete LEVEL_END must export a Title carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "fifth Level Complete LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, 0x19);
+            assert_eq!(report.next_lid_after_event, report.requested_lid);
+            assert_eq!(report.resolved.level, LevelId::TITLE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(post_upstream_title_carry.random_seed, 0xbe52_13fd);
+        assert_eq!(post_upstream_title_carry.draw_count, 3_200);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| post_upstream_title_carry.globals[index]),
+            [
+                0x300,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                5,
+                1,
+                6,
+                0,
+            ]
+        );
+
+        let mut post_upstream_map = AuthoredTitleMapHarness::from_session(
+            &title_nsd,
+            &title_nsf,
+            &title_nsf_bytes,
+            post_upstream_title_carry,
+        );
+        post_upstream_map.wait_until_ready(64);
+        assert_eq!(post_upstream_map.frame, 10);
+        for _ in 0..120 {
+            post_upstream_map.step(0);
+        }
+        post_upstream_map.tap(PAD_UP);
+        for _ in 0..120 {
+            post_upstream_map.step(0);
+        }
+        post_upstream_map.step(PAD_CROSS);
+        let papu_papu = LevelId::new_const(0x0a);
+        let papu_papu_lid = i32::try_from(papu_papu.get()).unwrap();
+        assert_eq!(post_upstream_map.frame, 253);
+        assert_eq!(post_upstream_map.transitions, [(253, papu_papu_lid)]);
+        assert_eq!(
+            post_upstream_map.camera.location().path,
+            RetailPathId {
+                zone: Eid::from_name("1d_pZ").expect("fixed sixth map-zone EID is valid"),
+                index: 0,
+            }
+        );
+        assert_eq!(post_upstream_map.camera.location().progress.raw(), 0x0400);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| post_upstream_map.runtime.global_word(index).unwrap()),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                6,
+                1,
+                6,
+                1,
+            ]
+        );
+        assert_eq!(post_upstream_map.runtime.faulted_object_count(), 0);
+        assert_eq!(
+            post_upstream_map.runtime.machine().random_seed(),
+            0xa984_c5b5
+        );
+        assert_eq!(post_upstream_map.runtime.draw_count(), 3_453);
+
+        let papu_papu_carry: RetailSessionCarry = {
+            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+            let report = post_upstream_map
+                .runtime
+                .finish_level_transition(&mut host, papu_papu_lid)
+                .expect("post-Upstream Map must export the Papu Papu carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "post-Upstream Map LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, papu_papu_lid);
+            assert_eq!(report.next_lid_after_event, papu_papu_lid);
+            assert_eq!(report.resolved.level, papu_papu);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            report.carry
+        };
+        assert_eq!(papu_papu_carry.random_seed, 0xa984_c5b5);
+        assert_eq!(papu_papu_carry.draw_count, 3_453);
+        assert_eq!(
+            [
+                GAME_STATE_GLOBAL,
+                TITLE_STATE_GLOBAL,
+                SAVED_TITLE_STATE_GLOBAL,
+                CURRENT_MAP_LEVEL_GLOBAL,
+                LEVEL_COUNT_GLOBAL,
+                LEVELS_UNLOCKED_GLOBAL,
+                ISLAND_CAMERA_STATE_GLOBAL,
+            ]
+            .map(|index| papu_papu_carry.globals[index]),
+            [
+                0,
+                TitleScreen::Map.raw(),
+                TitleScreen::Map.raw(),
+                6,
+                1,
+                6,
+                1,
+            ]
+        );
+
+        let (papu_papu_nsd, papu_papu_nsf, papu_papu_nsf_bytes) =
+            parse_local_pair(&root, papu_papu).expect("Papu Papu pair must parse");
+        let papu_papu_runtime =
+            RetailRuntime::new_from_session(GLOBAL_WORDS, papu_papu, papu_papu_carry)
+                .expect("Papu Papu must import the fifth-completion map carry");
+        let (papu_papu_survey, papu_papu_runtime) = survey_pair_with_runtime(
+            known_name(papu_papu),
+            papu_papu,
+            &papu_papu_nsd,
+            &papu_papu_nsf,
+            &papu_papu_nsf_bytes,
+            papu_papu_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::Idle,
+            120,
+        )
+        .expect("Papu Papu's carried initial window must execute");
+        assert_eq!(papu_papu_survey.frames, 120);
+        assert!(papu_papu_survey.terminal.is_none());
+        assert_eq!(papu_papu_survey.final_live_objects, 17);
+        assert_eq!(papu_papu_survey.max_live_objects, 21);
+        assert_eq!(papu_papu_survey.successful_spawns, 6);
+        assert_eq!(papu_papu_survey.spawn_attempts, 840);
+        assert_eq!(papu_papu_survey.expected_spawn_rejections, 834);
+        assert_eq!(papu_papu_survey.unexpected_spawn_errors, 0);
+        assert_eq!(papu_papu_survey.executions, 2_097);
+        assert_eq!(papu_papu_survey.zone_transitions, 0);
+        assert_eq!(papu_papu_survey.camera_ranges.len(), 1);
+        assert_eq!(papu_papu_survey.camera_path_changes, 0);
+        assert_eq!(papu_papu_survey.restarts, 0);
+        assert!(papu_papu_survey.restart_frames.is_empty());
+        assert_eq!(papu_papu_survey.death_camera_frames, 0);
+        assert!(papu_papu_survey.first_below_zero.is_none());
+        assert!(papu_papu_survey.first_terminal_fall.is_none());
+        assert!(papu_papu_survey.next_lid.is_none());
+        assert_eq!(papu_papu_survey.faulted_objects, 0);
+        assert_eq!(papu_papu_survey.execution_errors, 0);
+        assert!(papu_papu_survey.issue_counts.is_empty());
+        let papu_papu_initial_camera = papu_papu_survey
+            .initial_camera
+            .expect("Papu Papu begins on its authored camera path");
+        let papu_papu_final_camera = papu_papu_survey
+            .final_camera
+            .expect("Papu Papu retains its authored camera path");
+        assert_eq!(
+            papu_papu_initial_camera.path,
+            RetailPathId {
+                zone: Eid::from_name("bc_aZ").expect("fixed Papu Papu arena EID is valid"),
+                index: 0,
+            }
+        );
+        assert_eq!(papu_papu_initial_camera.progress.raw(), 0x0100);
+        assert_eq!(papu_papu_final_camera.path, papu_papu_initial_camera.path);
+        assert_eq!(papu_papu_final_camera.progress.raw(), 0x7800);
+        assert_eq!(
+            papu_papu_survey.initial_player_translation,
+            Some([177_152, 0, -139_264])
+        );
+        assert_eq!(
+            papu_papu_survey.final_player_translation,
+            Some([177_152, 23_998, -139_264])
+        );
+        assert_eq!(papu_papu_runtime.machine().random_seed(), 0xdf8a_5cc9);
+        assert_eq!(papu_papu_runtime.draw_count(), 3_573);
+        assert!(
+            papu_papu_survey.is_clean(),
+            "Papu Papu's carried initial window must remain clean: {}",
+            papu_papu_survey.summary()
         );
         eprintln!(
             concat!(

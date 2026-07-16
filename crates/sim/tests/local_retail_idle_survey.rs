@@ -101,7 +101,7 @@ enum SurveyInputProfile {
     ForwardWithActions,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
-    GreatGatePhaseRobust,
+    GreatGateExactCarry,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -119,7 +119,7 @@ impl SurveyInputProfile {
             Self::ForwardWithActions => "forward-with-actions",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
-            Self::GreatGatePhaseRobust => "great-gate-phase-robust",
+            Self::GreatGateExactCarry => "great-gate-exact-carry",
         }
     }
 
@@ -129,7 +129,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweepToTransition
                 | Self::ForwardWithActions
                 | Self::JunglePhaseRobust
-                | Self::GreatGatePhaseRobust
+                | Self::GreatGateExactCarry
         )
     }
 }
@@ -1781,7 +1781,7 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::JunglePhaseRobust => self.jungle.held(camera, player),
-            SurveyInputProfile::GreatGatePhaseRobust => self.great_gate.held(camera, player),
+            SurveyInputProfile::GreatGateExactCarry => self.great_gate.held(camera, player),
         }
     }
 }
@@ -3314,9 +3314,9 @@ fn survey_pair_with_runtime(
         if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
             && matches!(
                 input_profile,
-                SurveyInputProfile::ForwardWithActions | SurveyInputProfile::GreatGatePhaseRobust
+                SurveyInputProfile::ForwardWithActions | SurveyInputProfile::GreatGateExactCarry
             )
-            && (input_profile == SurveyInputProfile::GreatGatePhaseRobust
+            && (input_profile == SurveyInputProfile::GreatGateExactCarry
                 || frame >= 300
                 || frame <= 120)
         {
@@ -5664,7 +5664,7 @@ fn authored_first_two_completions_reach_great_gate_with_session_carry() {
         &great_gate_nsf_bytes,
         great_gate_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::GreatGatePhaseRobust,
+        SurveyInputProfile::GreatGateExactCarry,
         2_600,
     )
     .expect("The Great Gate must execute through its end WarpC transition");

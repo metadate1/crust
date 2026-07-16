@@ -1035,7 +1035,7 @@ is 1,322,866 bytes with SHA-256
   and draw count 5,529. After Title remount, the same 120-idle/Up/120-idle/Cross schedule selects The
   Great Gate `0x12` on Map frame 253 at `1c_pZ` path zero/progress `0x0200`. Its checked Map
   `LEVEL_END` carry has current map level three, level count one, three unlocked levels, island state
-  one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes a phase-robust
+  one, RNG `0x4a04f4bf`, and draw count 5,782. The Great Gate imports it and executes an exact carried
   retail-pad main route with 97 successful spawns, 39,979 clean executions, 34 lifecycle zone
   transitions, 15 counted boxes, and no restart, death camera, terminal fall, VM error, faulted
   object, or checked issue. It traverses `a1_iZ`-`a9_iZ`, crosses the wide pit, observes `WalOC`

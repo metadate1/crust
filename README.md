@@ -188,7 +188,7 @@ frame 306, and the remounted Map takes Up/Cross to select The Great Gate `0x12` 
 `1c_pZ` path zero
 and progress `0x0200`. Current map level three, level count one, three unlocked levels, RNG and draw
 state survive the final checked Map handoff. All seven outgoing `LEVEL_END` broadcasts in this chain
-complete without a checked handler failure. The Great Gate then runs a phase-robust retail-pad
+complete without a checked handler failure. The Great Gate then runs an exact carried retail-pad
 route to completion: it clears the horizontal `a1_iZ`-through-`a9_iZ` opening, crosses the wide pit,
 cycles the `WalOC` logs through their safe phases, and chains the first three arrow-crate bounces.
 Checkpoint crate 76 emits its exact `SaveState` at frame 1,152 with pre-increment box count `0x900`,

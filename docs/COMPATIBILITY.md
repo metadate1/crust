@@ -460,7 +460,7 @@ gameplay path.
   The same carry completes the following Level Complete screen at frame 306, returns to Title, and
   takes the Map's Up/Cross route to The Great Gate `0x12` at frame 253. Map `LEVEL_END` preserves
   current level three, level count one, three unlocked levels, RNG `0x4a04f4bf`, and draw count
-  5,782. The Great Gate accepts that carry and follows a phase-robust retail-pad route through
+  5,782. The Great Gate accepts that carry and follows an exact carried retail-pad route through
   `a1_iZ`-`a9_iZ`, the wide pit, the `WalOC` rotating-log phases, and the first three arrow-crate
   bounces. Checkpoint crate 76 emits `SaveState` at frame 1,152 with the exact `0x900` pre-increment
   count and translation `[20991488, -8397312, 127744]`; the live count advances to `0xa00`. The same

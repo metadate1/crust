@@ -620,7 +620,7 @@ struct HogWildCompletionRouteController {
 /// checkpoint. After the opening logs and island/platform chain, the route
 /// clears the checkpoint crate, preserves its isolated save handshake, and
 /// catches moving platform 75 for the `0k_oZ`-to-`0l_oZ` handoff before
-/// transferring to entity 80's next authored river platform.
+/// transferring through entity 80 to `0m_oZ`'s vertical platform 88.
 struct UpTheCreekRouteController {
     stage: u8,
     tick: u16,
@@ -632,6 +632,7 @@ impl UpTheCreekRouteController {
         let checkpoint =
             Eid::from_name("0k_oZ").expect("fixed Up the Creek checkpoint EID is valid");
         let zero_l = Eid::from_name("0l_oZ").expect("fixed Up the Creek 0l EID is valid");
+        let zero_m = Eid::from_name("0m_oZ").expect("fixed Up the Creek 0m EID is valid");
         match self.stage {
             0 => {
                 if camera.path.zone == opening
@@ -1267,6 +1268,49 @@ impl UpTheCreekRouteController {
                     PAD_UP | PAD_RIGHT | PAD_CROSS
                 } else {
                     self.stage = 52;
+                    self.tick = 0;
+                    0
+                }
+            }
+            52 => {
+                // Entity 80 is the first grounded 0m contact after the long
+                // diagonal transfer. Begin a neutral settle window from that
+                // authored platform rather than from an absolute frame.
+                if player.is_some_and(|player| {
+                    player.zone == zero_m
+                        && player.status_a & 1 != 0
+                        && player.translation[0] >= 2_300_000
+                        && (17_850_000..=17_950_000).contains(&player.translation[2])
+                }) {
+                    self.stage = 53;
+                    self.tick = 0;
+                }
+                0
+            }
+            53 => {
+                // Keep f1450 as an isolated entity-80 boundary. The first
+                // grounded contact enters this stage at f1411, so 39 neutral
+                // samples make the next ordinary-pad edge begin at f1451.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 39 {
+                    return 0;
+                }
+                self.stage = 54;
+                self.tick = 0;
+                self.held(camera, player)
+            }
+            54 => {
+                // A short straight run-up is required; jumping immediately
+                // or adding lateral input misses the vertical platform.
+                let tick = self.tick;
+                self.tick = self.tick.saturating_add(1);
+                if tick < 4 {
+                    PAD_UP
+                } else if tick < 24 {
+                    PAD_UP | PAD_CROSS
+                } else {
+                    self.stage = 55;
                     self.tick = 0;
                     0
                 }
@@ -8784,6 +8828,140 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     assert!(
         survey.is_clean(),
         "Up the Creek's entity-80 transfer crossed a checked runtime boundary: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Up the Creek");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::UpTheCreekRoute,
+        1_520,
+    )
+    .expect("Up the Creek must execute through its 0m vertical-platform transfer");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 1_520);
+    assert_eq!(survey.successful_spawns, 94);
+    assert_eq!(survey.spawn_attempts, 22_566);
+    assert_eq!(survey.expected_spawn_rejections, 22_472);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 48_147);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 16);
+    assert_eq!(survey.camera_ranges.len(), 21);
+    assert_eq!(survey.camera_path_changes, 26);
+    assert_eq!(survey.last_camera_path_change, 1_473);
+    assert_eq!(survey.last_camera_progress_change, 1_482);
+    let final_camera = survey
+        .final_camera
+        .expect("Up the Creek must retain entity 88's 0m camera bank");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0m_oZ")
+                .expect("fixed Up the Creek vertical-platform zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 4_288);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_372_776, 1_720_258, 17_415_800])
+    );
+    let trace = player_trace(&runtime)
+        .expect("Up the Creek player trace must resolve")
+        .expect("vertical platform 88 must keep Crash alive");
+    assert_eq!(trace.zone, final_camera.path.zone);
+    assert_eq!(trace.translation, [2_372_776, 1_720_258, 17_415_800]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 2_230_273);
+
+    assert_eq!(
+        spawned_entity_trace(&runtime, 88),
+        Ok(Some(SpawnedEntityTrace {
+            translation: [2_252_032, 1_683_968, 17_305_600],
+            state: 13,
+            path_progress: 0,
+            status_a: 131_072,
+        }))
+    );
+    let player_arena = runtime.arena().main_object().expect("player arena handle");
+    let player_object = runtime
+        .object_for_arena(player_arena)
+        .expect("player VM binding");
+    let player_vm = runtime
+        .machine()
+        .object(player_object.vm())
+        .expect("player VM object");
+    let collider_reference = player_vm
+        .register(PROCESS_LINK_COLLIDER)
+        .expect("player collider link is readable");
+    assert_eq!(
+        referenced_entity_id(&runtime, collider_reference),
+        Ok(Some(88))
+    );
+    assert_eq!(
+        player_vm.register(process_register::FLOOR_IMPACT_STAMP),
+        Ok(1_519)
+    );
+    assert_eq!(
+        player_vm
+            .register(process_register::FLOOR_IMPACT_VELOCITY)
+            .map(u32::cast_signed),
+        Ok(-136_000)
+    );
+
+    assert_eq!(survey.final_live_objects, 26);
+    assert_eq!(survey.max_live_objects, 63);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&63));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&796));
+    for boundary in [(1_262, 71, 5), (1_330, 86, 5), (1_330, 88, 5)] {
+        assert!(
+            survey.spawn_flag_samples.contains(&boundary),
+            "the 0m platform route must retain authored boundary {boundary:?}: {}",
+            survey.summary()
+        );
+    }
+    assert_eq!(
+        survey.box_count_samples,
+        [(1, 0), (895, 0x100), (906, 0x200), (1_057, 0x300)]
+    );
+    assert_eq!(
+        survey.checkpoint_samples.last(),
+        Some(&(1_057, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_057, 0x200)]);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert!(survey.next_lid.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(
+        survey.is_clean(),
+        "Up the Creek's entity-88 transfer crossed a checked runtime boundary: {}",
         survey.summary()
     );
 }

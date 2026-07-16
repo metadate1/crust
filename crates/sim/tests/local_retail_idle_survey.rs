@@ -471,10 +471,17 @@ struct RollingStonesRouteController {
     opening_started: bool,
     opening_tick: u16,
     post_tick: u16,
+    checkpoint_route_started: bool,
+    checkpoint_tick: u16,
 }
 
 impl RollingStonesRouteController {
-    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        checkpoint_id: i32,
+    ) -> u32 {
         let zero_a = Eid::from_name("0a_lZ").expect("fixed Rolling Stones route EID is valid");
         if !self.opening_started
             && let Some(player) = player
@@ -485,7 +492,7 @@ impl RollingStonesRouteController {
             && player.animation_frame == 256
         {
             self.opening_started = true;
-            return self.held(camera, Some(player));
+            return self.held(camera, Some(player), checkpoint_id);
         }
 
         if !self.opening_started {
@@ -508,6 +515,47 @@ impl RollingStonesRouteController {
             };
             self.opening_tick = self.opening_tick.saturating_add(1);
             return held;
+        }
+
+        let checkpoint_zone =
+            Eid::from_name("0s_lZ").expect("fixed Rolling Stones checkpoint-zone EID is valid");
+        if !self.checkpoint_route_started
+            && checkpoint_id == 8 << 8
+            && camera.path.zone == checkpoint_zone
+            && camera.path.index == 0
+            && player
+                .is_some_and(|player| matches!(player.state, 17 | 19) && player.status_a & 1 != 0)
+        {
+            self.checkpoint_route_started = true;
+        }
+        if self.checkpoint_route_started {
+            let tick = self.checkpoint_tick;
+            self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+            // These are ordinary 30 Hz retail pad samples. Each jump window
+            // starts from an observed terrain or PoPlC support contact. The
+            // neutral windows let JunOC's authored moving-stone cycles clear
+            // Crash's path before the next committed jump.
+            return match tick {
+                5..=12
+                | 27..=34
+                | 49..=56
+                | 75..=82
+                | 107..=114
+                | 129..=136
+                | 201..=208
+                | 249..=256
+                | 275..=278
+                | 311..=318
+                | 349..=356
+                | 371..=378
+                | 415..=422
+                | 443..=450 => PAD_UP | PAD_CROSS,
+                184..=195 => PAD_UP | PAD_LEFT,
+                223..=238 | 295..=302 | 331..=338 | 389..=394 => 0,
+                265..=270 | 339..=348 => PAD_UP | PAD_RIGHT,
+                271..=274 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                _ => PAD_UP,
+            };
         }
 
         // Each offset is one 30 Hz retail pad sample after the anchored opening.
@@ -4069,6 +4117,8 @@ impl SurveyInputController {
                 opening_started: false,
                 opening_tick: 0,
                 post_tick: 0,
+                checkpoint_route_started: false,
+                checkpoint_tick: 0,
             },
         }
     }
@@ -4115,7 +4165,9 @@ impl SurveyInputController {
                         .held(camera, player, upstream_platforms, checkpoint_id)
                 }
             }
-            SurveyInputProfile::RollingStonesCheckpoint => self.rolling_stones.held(camera, player),
+            SurveyInputProfile::RollingStonesCheckpoint => {
+                self.rolling_stones.held(camera, player, checkpoint_id)
+            }
         }
     }
 }
@@ -4216,6 +4268,7 @@ struct LevelSurvey {
     saved_box_count_samples: Vec<(u32, i32)>,
     spawn_flag_samples: Vec<(u32, u16, u32)>,
     observed_program_states: BTreeSet<(Eid, u16)>,
+    observed_player_states: BTreeSet<u16>,
     early_direct_send_samples: Vec<(u32, u32)>,
     next_lid: Option<(u32, i32)>,
 }
@@ -4271,6 +4324,7 @@ impl LevelSurvey {
             saved_box_count_samples: Vec::new(),
             spawn_flag_samples: Vec::new(),
             observed_program_states: BTreeSet::new(),
+            observed_player_states: BTreeSet::new(),
             early_direct_send_samples: Vec::new(),
             next_lid: None,
         }
@@ -4307,6 +4361,7 @@ impl LevelSurvey {
         }
 
         if let Some(player) = player {
+            self.observed_player_states.insert(player.state);
             if player.translation[1] < 0 {
                 self.first_below_zero.get_or_insert((frame, player));
             }
@@ -5948,7 +6003,7 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn rolling_stones_direct_boot_reaches_first_checkpoint() {
+fn rolling_stones_direct_boot_reaches_zero_b_bank() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -5967,18 +6022,35 @@ fn rolling_stones_direct_boot_reaches_first_checkpoint() {
         &nsf,
         &nsf_bytes,
         SurveyInputProfile::RollingStonesCheckpoint,
-        1_160,
+        1_630,
     )
-    .expect("Rolling Stones must execute to its first checkpoint");
+    .expect("Rolling Stones must execute through its first moving-stone gauntlet");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_160);
-    assert_eq!(survey.successful_spawns, 61);
-    assert_eq!(survey.executions, 26_887);
-    assert_eq!(survey.zone_transitions, 16);
-    assert_eq!(survey.camera_ranges.len(), 19);
-    assert_eq!(survey.camera_path_changes, 20);
-    assert_eq!(survey.last_camera_path_change, 1_108);
+    assert_eq!(survey.frames, 1_630);
+    assert_eq!(survey.successful_spawns, 85);
+    assert_eq!(survey.spawn_attempts, 19_901);
+    assert_eq!(survey.expected_spawn_rejections, 19_816);
+    assert_eq!(survey.executions, 35_923);
+    assert_eq!(survey.zone_transitions, 23);
+    assert_eq!(survey.camera_ranges.len(), 30);
+    assert_eq!(survey.camera_path_changes, 31);
+    assert_eq!(survey.last_camera_path_change, 1_615);
+    let final_camera = survey
+        .final_camera
+        .expect("the Rolling Stones survey must retain its final camera");
+    assert_eq!(
+        final_camera.path.zone,
+        Eid::from_name("0B_lZ").expect("fixed Rolling Stones bank-zone EID is valid")
+    );
+    assert_eq!(final_camera.path.index, 0);
+    assert_eq!(final_camera.progress.raw(), 7_353);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([3_226_784, 3_852_293, 9_936_128])
+    );
+    assert_eq!(survey.final_live_objects, 24);
+    assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
@@ -5987,6 +6059,10 @@ fn rolling_stones_direct_boot_reaches_first_checkpoint() {
     assert!(survey.next_lid.is_none());
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(survey.execution_errors, 0);
+    assert!(
+        !survey.observed_player_states.contains(&31),
+        "the route must avoid JunOC 75, 77, and 52's 0x1900 squash state"
+    );
     assert_eq!(
         survey.box_count_samples,
         [
@@ -6027,10 +6103,12 @@ fn rolling_stones_direct_boot_reaches_first_checkpoint() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&81));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&161));
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(
         survey.is_clean(),
-        "Rolling Stones checkpoint route reached a checked runtime boundary: {}",
+        "Rolling Stones 0B-bank route reached a checked runtime boundary: {}",
         survey.summary()
     );
 }

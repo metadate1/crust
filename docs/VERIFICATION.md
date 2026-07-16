@@ -1090,21 +1090,25 @@ is 1,322,866 bytes with SHA-256
   `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
   11,442.
 
-  Upstream imports that carried normal-spawn session and feeds it every one of the 934 34-tick pad
-  frames in the user's legally local `pb0fB`. The test does not install the recording's mid-level
-  snapshot and commits neither recording bytes nor a derived pad trace. This deliberately
-  characterizes the carried session rather than claiming authentic demo playback; the separate
-  browser PBAK fixture installs the snapshot. Across the carried run it performs 52 successful
-  spawns, 11,840 attempts, 11,788 source-expected rejections, and 30,551 clean executions. It
-  observes three lifecycle zone transitions, two camera ranges, six path changes, and three
-  deterministic phase-mismatch `LoadState` restarts at frames 104, 231, and 816. It emits three
-  load-state effects and no transition. The initial camera is path zero/progress 256; the final
-  camera is the same path at progress 7,059. Crash ends at `[2150400, 1747085, 25025792]`, RNG at
-  `0x78109dff`, and draw count at 118. There is no death camera, below-zero or terminal fall, VM
-  fault, execution error, unexpected spawn error, or checked issue. This is deterministic native
-  integration over user-supplied local data, not a browser playthrough or full-game parity claim.
-  Upstream's checkpoint and normal end remain open, and the full carried chain has not been
-  exercised in a browser.
+  Upstream imports that carried normal-spawn session and first feeds it every one of the 934
+  34-tick pad frames in the user's legally local `pb0fB`. The test does not install the recording's
+  mid-level snapshot and commits neither recording bytes nor a derived pad trace. This prefix
+  characterizes a phase-mismatched carried session rather than claiming authentic demo playback;
+  the separate browser PBAK fixture installs the snapshot. It produces three deterministic
+  `LoadState` restarts at frames 104, 231, and 816. A state-driven continuation releases Cross
+  between every action, boards the live entity-23 orbital leaf, crosses platform entities 47, 46,
+  and 54, and uses fresh Square taps every 18 frames to suppress repeated lethal contact from
+  entity 55. BoxsC subtype-four entity 57 activates on frame 1,935. Its synchronous SaveState
+  captures checkpoint `0x3900`, translation `[2252800, 2350080, 15564288]`, and pre-increment box
+  count zero; the live count then becomes `0x100` and spawn flags become nine. Across 2,300 frames
+  the carried run performs 90 successful spawns, 30,585 attempts, 30,495 source-expected
+  rejections, and 89,957 clean executions. It observes 11 lifecycle zone transitions, 14 camera
+  ranges, and 19 path changes. The final camera is `0n_fZ` path zero/progress 16,371; Crash is
+  `[2236476, 2380788, 15601332]`, RNG `0x526e3d90`, and draw count 1,484. There is no post-prefix
+  restart, death camera, below-zero or terminal fall, transition, VM fault, execution error,
+  unexpected spawn error, or checked issue. This is deterministic native integration over
+  user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
+  end remains open, and the full carried chain has not been exercised in a browser.
 - The full browser-scene PBAK test separately selected all nine recordings (`0x0a`, `0x0c`, `0x0e`,
   `0x0f`, `0x12`, `0x1c`, `0x1d`, `0x20`, and `0x29`) and passed every complete recording: 10,966
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input

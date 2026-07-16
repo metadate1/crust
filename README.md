@@ -228,20 +228,24 @@ draw count 11,189. After the checked Title handoff, the Map waits 10 frames, fol
 2,304. Its carry has `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG
 `0xae2dd893`, and draw count 11,442.
 
-Upstream feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
+Upstream first feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
 post-Boulders normal-spawn session, without installing the recording's mid-level snapshot or
-committing recording bytes or a derived pad trace. This is deliberately a carried-session stress
-run, not authentic demo playback; separate browser PBAK coverage installs the recording snapshot.
-The run performs 52 successful spawns from 11,840 attempts with 11,788 source-expected rejections,
-30,551 clean executions, three lifecycle zone transitions, two camera ranges and six path changes.
-Its phase-mismatched input produces deterministic same-level `LoadState` restarts at frames 104,
-231, and 816. It moves the camera from path zero/progress 256 to that same path at progress 7,059
-and ends with Crash
-at `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw count 118, with no death camera,
-below-zero or terminal fall, transition request, VM fault, execution error, or checked issue. These
-are deterministic native integration goldens over user-supplied local data, not a browser
-playthrough or full-game parity claim. Upstream's checkpoint and normal end remain open, as does a
-browser exercise of this complete carried chain.
+committing recording bytes or a derived pad trace. This prefix is deliberately a carried-session
+stress run, not authentic demo playback; separate browser PBAK coverage installs the recording
+snapshot. Its phase-mismatched input produces deterministic same-level `LoadState` restarts at
+frames 104, 231, and 816. A state-driven controller then releases every Cross interval, boards the
+live entity-23 orbital leaf, crosses the entity-47/46/54 platform chain, and uses fresh Square edges
+every 18 frames to suppress the lethal entity-55 fish contact. It activates authentic BoxsC
+subtype-four entity 57 on frame 1,935: checkpoint `0x3900`, saved pre-increment box count zero,
+saved player translation `[2252800, 2350080, 15564288]`, then live box count `0x100` and native
+spawn flags nine. Across 2,300 frames the carried run performs 90 successful spawns from 30,585
+attempts with 30,495 source-expected rejections, 89,957 clean executions, 11 lifecycle zone
+transitions, 14 camera ranges and 19 path changes. It ends stable on `0n_fZ` path zero/progress
+16,371 with Crash at `[2236476, 2380788, 15601332]`, RNG `0x526e3d90`, and draw count 1,484, with
+no post-prefix restart, death camera, below-zero or terminal fall, transition request, VM fault,
+execution error, or checked issue. These are deterministic native integration goldens over
+user-supplied local data, not a browser playthrough or full-game parity claim. Upstream's normal
+end remains open, as does a browser exercise of this complete carried chain.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -255,8 +259,8 @@ The previously recorded strict 360-frame Hog Wild idle characterization delivere
 `0x900` fall-kill event, advanced the native signed display fade through `-2`/`-1`, performed two
 same-level load-state restarts, and retained no terminal fall or checked runtime issue.
 The current native schedule includes this deterministic carried sequence through four authored
-normal-level completions and the complete Upstream PBAK; this is not a full retail playthrough or a
-browser-playthrough claim. Broader progression, several GOOL host
+normal-level completions, the complete Upstream PBAK input, and Upstream's first checkpoint; this
+is not a full retail playthrough or a browser-playthrough claim. Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.

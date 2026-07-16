@@ -500,20 +500,23 @@ gameplay path.
   `game=0, title=15, saved-title=15, map=5, count=1, unlocked=5, island=1`, RNG `0xae2dd893`, and draw
   11,442.
 
-  Upstream feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the exact
-  post-Boulders normal-spawn session; no recording bytes or derived pad trace enter the repository,
-  and the runtime does not install the recording's mid-level snapshot. This deliberately
-  characterizes the carried session rather than claiming authentic demo playback; separate browser
-  PBAK coverage installs the snapshot. The run records 52 successful spawns from 11,840 attempts
-  with 11,788 source-expected rejections, 30,551 clean executions, three lifecycle zone transitions,
-  two camera ranges and six path changes. Its phase-mismatched input produces deterministic
-  same-level `LoadState` restarts at frames 104, 231, and 816. The camera starts on path
-  zero/progress 256 and ends on that same path at progress 7,059; Crash ends at
-  `[2150400, 1747085, 25025792]`, RNG `0x78109dff`, and draw 118. It records no death camera,
-  below-zero or terminal fall, transition request, VM fault, execution error, or checked issue.
-  This is deterministic native integration over user-supplied local data, not browser execution or
-  full-game parity. Upstream's checkpoint and normal end remain open, as does a browser exercise of
-  the complete carried chain.
+  Upstream first feeds all 934 34-tick pad frames from the user's legally local `pb0fB` into the
+  exact post-Boulders normal-spawn session; no recording bytes or derived pad trace enter the
+  repository, and the runtime does not install the recording's mid-level snapshot. This
+  characterizes a phase-mismatched carried session rather than claiming authentic demo playback;
+  separate browser PBAK coverage installs the snapshot. The prefix produces deterministic
+  same-level `LoadState` restarts at frames 104, 231, and 816. A state-driven continuation then
+  crosses the live orbital/platform chain, defeats the repeatedly lethal entity-55 fish with fresh
+  18-frame Square edges, and activates BoxsC subtype-four entity 57 on frame 1,935. The native
+  SaveState captures checkpoint `0x3900`, translation `[2252800, 2350080, 15564288]`, and box count
+  zero before the live count becomes `0x100`; spawn flags become nine. Across 2,300 frames the run
+  records 90 successful spawns from 30,585 attempts with 30,495 source-expected rejections, 89,957
+  clean executions, 11 lifecycle zone transitions, 14 camera ranges and 19 path changes. It ends
+  stable on `0n_fZ` path zero/progress 16,371 at `[2236476, 2380788, 15601332]`, RNG `0x526e3d90`,
+  and draw 1,484. It records no post-prefix restart, death camera, below-zero or terminal fall,
+  transition request, VM fault, execution error, or checked issue. This is deterministic native
+  integration over user-supplied local data, not browser execution or full-game parity. Upstream's
+  normal end remains open, as does a browser exercise of the complete carried chain.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -556,8 +559,9 @@ gameplay path.
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
 - Four deterministic retail-authored normal-level routes now reach their real end warps and request
-  Level Complete, and their carried chain executes the complete legally local Upstream PBAK.
-  Upstream's checkpoint and normal end remain open. The Tawna bonus control path is covered at
+  Level Complete, and their carried chain executes the complete legally local Upstream PBAK input
+  before reaching Upstream's first authentic checkpoint. Upstream's normal end remains open. The
+  Tawna bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser
   bonus round trip has been completed.
   No boss, complete ending, broad death/checkpoint

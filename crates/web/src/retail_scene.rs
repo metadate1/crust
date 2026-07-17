@@ -2868,7 +2868,8 @@ mod tests {
         RetailCameraRuntime, RetailCameraStep,
     };
     use crust_sim::gool::{
-        CollisionObjectReference, RetailPadSnapshot, RetailTransformVectorsCamera, process_register,
+        CollisionObjectReference, GAME_STATE_GLOBAL, RetailPadSnapshot,
+        RetailTransformVectorsCamera, process_register,
     };
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
@@ -2924,6 +2925,9 @@ mod tests {
     ) -> Result<(), String> {
         for effect in &step.effects {
             match *effect {
+                RetailCameraEffect::GameStateWrite { value } => runtime
+                    .set_global_word(GAME_STATE_GLOBAL, value.cast_unsigned())
+                    .map_err(|error| format!("camera game-state write: {error:?}"))?,
                 RetailCameraEffect::LevelUpdate {
                     before,
                     after,
@@ -4573,43 +4577,20 @@ mod tests {
             .transition_with_marker(camera.location().path.zone, true)
             .unwrap();
 
-        // Mirror the browser's initial pager registration/open order so the
-        // scene sees the real eight-slot TPAG snapshot for this mounted pair.
-        let mut pager = crust_sim::paging::Pager::new();
-        for page in &nsf.pages {
-            let entry_handles = match page {
-                NsfPage::Texture(_) => Vec::new(),
-                NsfPage::Entries(page) => page
-                    .entries
-                    .iter()
-                    .map(|entry| entry.handle)
-                    .collect::<Vec<_>>(),
-            };
-            pager.register_page(page.index(), entry_handles).unwrap();
-            if let NsfPage::Entries(page) = page {
-                for entry in &page.entries {
-                    pager.bind_eid(entry.eid, entry.handle).unwrap();
-                }
-            }
-        }
-        for pte in &nsd.page_table {
-            let page_index = pte.page_index();
-            if matches!(
-                nsf.pages.get(usize::try_from(page_index.get()).unwrap()),
-                Some(NsfPage::Texture(_))
-            ) {
-                pager.bind_page_eid(pte.eid, page_index).unwrap();
-            }
-        }
+        // Mirror the browser's native mount order, including virtual load-list
+        // opens, the heap-derived physical pool, and core-object preloads, so
+        // the scene sees the real eight-slot TPAG snapshot for this pair.
         let initial_zone = lifecycle.current_zone().unwrap();
         let load_list = lifecycle.zone(initial_zone).unwrap().load_list();
-        pager.set_current_texture_load_eids(load_list.entries().iter().copied());
-        for eid in load_list.entries() {
-            pager.open_eid(*eid).unwrap();
-        }
-        for page in load_list.pages() {
-            pager.open_page(*page).unwrap();
-        }
+        let pager = crust_sim::paging::Pager::mount_retail_level(
+            &nsd,
+            &nsf,
+            level,
+            initial_zone,
+            load_list.entries().iter().copied(),
+            load_list.pages().iter().copied(),
+        )
+        .unwrap();
 
         let mut runtime = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, level);
         runtime.set_level_state_context(RetailLevelStateContext {
@@ -4625,10 +4606,12 @@ mod tests {
             active_neighbor_zones: lifecycle.active_neighbor_zones(),
         });
         runtime
-            .seed_platform_paging_state(
+            .seed_platform_paging_state_with_capacity(
                 u32::try_from(pager.page_count()).unwrap(),
+                u32::try_from(pager.physical_slot_count()).unwrap(),
                 pager.resolved_pages(),
                 pager.page_reference_counts(),
+                pager.uncounted_pages(),
             )
             .unwrap();
         let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
@@ -4677,6 +4660,12 @@ mod tests {
             let frame_stamp = runtime.next_frame_stamp();
             runtime.advance_level_shader().unwrap();
             let location_before = camera.location();
+            camera.synchronize_game_state(
+                runtime
+                    .global_word(GAME_STATE_GLOBAL)
+                    .unwrap()
+                    .cast_signed(),
+            );
             let camera_mode = graph.path(location_before.path).unwrap().camera_mode;
             let main_before = runtime
                 .arena()
@@ -4720,7 +4709,12 @@ mod tests {
             refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, camera_step.after)
                 .unwrap();
             let pose = camera.pose(&graph).unwrap();
-            runtime.set_frame_context(camera_step.game_state, camera.rotation_xz(&graph).unwrap());
+            let live_game_state = runtime
+                .global_word(GAME_STATE_GLOBAL)
+                .unwrap()
+                .cast_signed();
+            camera.synchronize_game_state(live_game_state);
+            runtime.latch_frame_context(live_game_state, camera.rotation_xz(&graph).unwrap());
             runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
                 pose.translation,
                 pose.rotation_yxz,
@@ -5054,11 +5048,13 @@ mod tests {
                 gem_stamp: 0,
             }
         };
-        let publish_camera = |runtime: &mut RetailRuntime,
-                              camera: &RetailCameraRuntime,
-                              game_state: i32| {
+        let publish_camera = |runtime: &mut RetailRuntime, camera: &RetailCameraRuntime| {
             let pose = camera.pose(&graph).unwrap();
-            runtime.set_frame_context(game_state, camera.rotation_xz(&graph).unwrap());
+            let live_game_state = runtime
+                .global_word(GAME_STATE_GLOBAL)
+                .unwrap()
+                .cast_signed();
+            runtime.latch_frame_context(live_game_state, camera.rotation_xz(&graph).unwrap());
             runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
                 pose.translation,
                 pose.rotation_yxz,
@@ -5068,6 +5064,12 @@ mod tests {
         let update_camera = |camera: &mut RetailCameraRuntime,
                              runtime: &RetailRuntime,
                              held_buttons: u32| {
+            camera.synchronize_game_state(
+                runtime
+                    .global_word(GAME_STATE_GLOBAL)
+                    .unwrap()
+                    .cast_signed(),
+            );
             let mode = graph.path(camera.location().path).unwrap().camera_mode;
             let display_mask = runtime.current_display_mask();
             if runtime.arena().main_object().is_none() || display_mask & (0x2 | 0x1_0000) != 0x2 {
@@ -5090,7 +5092,13 @@ mod tests {
         .unwrap();
         refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, initial_camera_step.after)
             .unwrap();
-        publish_camera(&mut runtime, &camera, initial_camera_step.game_state);
+        camera.synchronize_game_state(
+            runtime
+                .global_word(GAME_STATE_GLOBAL)
+                .unwrap()
+                .cast_signed(),
+        );
+        publish_camera(&mut runtime, &camera);
         runtime.set_frame_timing(34, 34);
         runtime
             .set_pad_snapshot(0, RetailPadSnapshot::default())
@@ -5194,7 +5202,13 @@ mod tests {
             });
             refresh_pbak_level_context(&graph, &lifecycle, &mut runtime, camera_step.after)
                 .unwrap();
-            publish_camera(&mut runtime, &camera, camera_step.game_state);
+            camera.synchronize_game_state(
+                runtime
+                    .global_word(GAME_STATE_GLOBAL)
+                    .unwrap()
+                    .cast_signed(),
+            );
+            publish_camera(&mut runtime, &camera);
             let runtime_frame = runtime
                 .run_frame_with_traversal_hook(&mut host, 67, |runtime, host, _point| {
                     pad_boundaries += 1;

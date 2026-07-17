@@ -8,13 +8,16 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   const html = await readFile(new URL("web/index.html", root), "utf8");
 
   const insert = html.indexOf('id="dropzone"');
+  const eject = html.indexOf('id="clearData"');
   const launch = html.indexOf('id="launch"');
   const level = html.indexOf('id="bootLevel"');
 
   assert.notEqual(insert, -1, "the local BIN/ISO action must remain present");
+  assert.notEqual(eject, -1, "the local-data eject action must remain present");
   assert.notEqual(launch, -1, "the launch action must remain present");
   assert.notEqual(level, -1, "the optional direct-level selector must remain present");
   assert.ok(insert < launch, "Insert BIN/ISO must precede Launch game");
+  assert.ok(eject < launch, "the secondary eject action must stay out of launch step two");
   assert.ok(launch < level, "the optional level selector must stay below Launch game");
   assert.match(html, /Insert BIN \/ ISO/);
   assert.match(html, />\s*Launch game\s*</);

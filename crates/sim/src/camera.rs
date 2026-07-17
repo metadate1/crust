@@ -356,12 +356,20 @@ pub enum RetailCameraOutcome {
 /// A side-effect handshake requested by the retail camera state machine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RetailCameraEffect {
+    /// One source-ordered write to the shared native `game_state` global.
+    ///
+    /// This cannot be reconstructed from [`RetailCameraStep::game_state`]
+    /// after the fact: automatic-camera writes precede their synchronous
+    /// `LevelUpdate`, whose TERM handlers may replace the same global, and a
+    /// skipped chain may write it again before a later `LevelUpdate`.
+    GameStateWrite { value: i32 },
     /// One exact `LevelUpdate` call produced by camera traversal.
     ///
-    /// Automatic skip can cross several paths/zones in a single frame. The
-    /// ordered trace is therefore required; comparing only a step's aggregate
-    /// `before`/`after` locations would skip intermediate termination and
-    /// paging work.
+    /// Follow and automatic cameras call `LevelUpdate` for same-path progress
+    /// as well as path crossings. Automatic skip can cross several paths/zones
+    /// in a single frame, so the ordered trace is required; comparing only a
+    /// step's aggregate `before`/`after` locations would skip camera sampling,
+    /// display-list deltas, intermediate termination, and paging work.
     LevelUpdate {
         before: RetailCameraLocation,
         after: RetailCameraLocation,
@@ -563,6 +571,17 @@ impl RetailCameraRuntime {
     #[must_use]
     pub const fn game_state(&self) -> i32 {
         self.game_state
+    }
+
+    /// Imports the live shared GOOL game-state immediately before `CamUpdate`.
+    ///
+    /// The native engine stores this value in one global word shared by GOOL
+    /// and the camera. A GOOL object can therefore change it after the previous
+    /// camera update. Hosts must synchronize that word before the next update
+    /// so camera modes which deliberately preserve it do not restore a stale
+    /// private copy.
+    pub const fn synchronize_game_state(&mut self, game_state: i32) {
+        self.game_state = game_state;
     }
 
     /// Returns the no-op result used when current display bit two disables
@@ -829,14 +848,22 @@ impl RetailCameraRuntime {
         match initial_path.camera_mode {
             0 => {
                 self.game_state = GAME_STATE_PLAYING;
-                Ok(self.step(before, RetailCameraOutcome::Stationary, Vec::new()))
+                Ok(self.step(
+                    before,
+                    RetailCameraOutcome::Stationary,
+                    vec![RetailCameraEffect::GameStateWrite {
+                        value: GAME_STATE_PLAYING,
+                    }],
+                ))
             }
             mode @ (5 | 6) => {
                 self.game_state = GAME_STATE_PLAYING;
                 Ok(self.step(
                     before,
                     RetailCameraOutcome::FollowBoundary { mode },
-                    Vec::new(),
+                    vec![RetailCameraEffect::GameStateWrite {
+                        value: GAME_STATE_PLAYING,
+                    }],
                 ))
             }
             1 | 3 => self.update_automatic(graph, input, before),
@@ -1282,6 +1309,9 @@ impl RetailCameraRuntime {
         }
 
         self.game_state = GAME_STATE_PLAYING;
+        let game_state_write = RetailCameraEffect::GameStateWrite {
+            value: GAME_STATE_PLAYING,
+        };
         let candidate_count =
             u8::try_from(candidates.len()).map_err(|_| RetailCameraError::FollowArithmetic {
                 path: before.path,
@@ -1296,7 +1326,7 @@ impl RetailCameraRuntime {
                     moved: false,
                     crossed_path: false,
                 },
-                Vec::new(),
+                vec![game_state_write],
             ));
         };
         let selected = candidates[selected_index];
@@ -1309,7 +1339,7 @@ impl RetailCameraRuntime {
                     moved: false,
                     crossed_path: false,
                 },
-                Vec::new(),
+                vec![game_state_write],
             ));
         }
 
@@ -1338,15 +1368,14 @@ impl RetailCameraRuntime {
         }
         let crossed_path = self.location.path != before.path;
         let moved = self.location != before;
-        let effects = if crossed_path {
-            vec![RetailCameraEffect::LevelUpdate {
+        let effects = vec![
+            game_state_write,
+            RetailCameraEffect::LevelUpdate {
                 before,
                 after: self.location,
                 flags: 0,
-            }]
-        } else {
-            Vec::new()
-        };
+            },
+        ];
         Ok(self.step(
             before,
             RetailCameraOutcome::FollowEvaluated {
@@ -1393,12 +1422,21 @@ impl RetailCameraRuntime {
             }
             if initial_flags & SAVE_STATE_DISABLE_FLAG == 0 {
                 game_state = GAME_STATE_CUTSCENE;
+                effects.push(RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                });
             }
 
             let point_count = retail_point_count(graph, location.path)?;
             let next_point = u32::from(location.progress.point_index()) + 1;
             if next_point < u32::from(point_count.get()) && !skipped {
+                let movement_before = location;
                 location.progress = location.progress.advance(PATH_POINT_STEP, point_count);
+                effects.push(RetailCameraEffect::LevelUpdate {
+                    before: movement_before,
+                    after: location,
+                    flags: 0,
+                });
                 self.location = location;
                 self.game_state = game_state;
                 return Ok(self.step(
@@ -2761,7 +2799,36 @@ mod tests {
         assert_eq!(step.after, before);
         assert_eq!(step.outcome, RetailCameraOutcome::Stationary);
         assert_eq!(step.game_state, GAME_STATE_PLAYING);
-        assert!(step.effects.is_empty());
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::GameStateWrite {
+                value: GAME_STATE_PLAYING,
+            }]
+        );
+    }
+
+    #[test]
+    fn gool_game_state_survives_next_mode_one_update_when_zone_disables_cutscene_write() {
+        let graph = single_zone_graph(0x1000, vec![retail_path(1, 3, None)]);
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+
+        // CortC and other authored GOOL programs write the shared global
+        // between CamUpdate calls. Zone flag 0x1000 makes source mode one
+        // preserve that write rather than forcing cutscene state.
+        camera.synchronize_game_state(GAME_STATE_PLAYING);
+        let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+
+        assert_eq!(step.game_state, GAME_STATE_PLAYING);
+        assert_eq!(camera.game_state(), GAME_STATE_PLAYING);
+        assert_eq!(step.after.progress.raw(), PATH_POINT_STEP);
+        assert_eq!(
+            step.effects,
+            [RetailCameraEffect::LevelUpdate {
+                before: step.before,
+                after: step.after,
+                flags: 0,
+            }]
+        );
     }
 
     #[test]
@@ -2902,7 +2969,19 @@ mod tests {
                 }
             );
             assert_eq!(second.game_state, GAME_STATE_CUTSCENE);
-            assert!(second.effects.is_empty());
+            assert_eq!(
+                second.effects,
+                [
+                    RetailCameraEffect::GameStateWrite {
+                        value: GAME_STATE_CUTSCENE,
+                    },
+                    RetailCameraEffect::LevelUpdate {
+                        before: second.before,
+                        after: second.after,
+                        flags: 0,
+                    },
+                ]
+            );
         }
     }
 
@@ -2927,6 +3006,9 @@ mod tests {
         assert_eq!(
             crossing.effects,
             [
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                },
                 RetailCameraEffect::LevelUpdate {
                     before: crossing.before,
                     after: crossing.after,
@@ -2946,6 +3028,38 @@ mod tests {
         );
         assert_eq!(follow.after, crossing.after);
         assert_eq!(follow.game_state, GAME_STATE_PLAYING);
+        assert_eq!(
+            follow.effects,
+            [RetailCameraEffect::GameStateWrite {
+                value: GAME_STATE_PLAYING,
+            }]
+        );
+    }
+
+    #[test]
+    fn automatic_camera_write_precedes_level_update_so_departing_term_wins() {
+        const TERM_GAME_STATE: i32 = 0x500;
+        let graph = single_zone_graph(
+            0,
+            vec![retail_path(1, 1, Some((0, 1, 0))), retail_path(5, 3, None)],
+        );
+        let mut camera = RetailCameraRuntime::new(&graph).unwrap();
+        let step = camera.update(&graph, RetailCameraInput::default()).unwrap();
+        let mut live_game_state = GAME_STATE_PLAYING;
+
+        for effect in step.effects {
+            match effect {
+                RetailCameraEffect::GameStateWrite { value } => live_game_state = value,
+                RetailCameraEffect::LevelUpdate { .. } => {
+                    // Models ZoneTerminateDifference running the departing
+                    // zone's TERM program synchronously inside LevelUpdate.
+                    live_game_state = TERM_GAME_STATE;
+                }
+                RetailCameraEffect::SaveStateHandshake { .. } => {}
+            }
+        }
+
+        assert_eq!(live_game_state, TERM_GAME_STATE);
     }
 
     #[test]
@@ -3090,6 +3204,19 @@ mod tests {
                 crossed_path: false,
             }
         );
+        assert_eq!(
+            step.effects,
+            [
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_PLAYING,
+                },
+                RetailCameraEffect::LevelUpdate {
+                    before: step.before,
+                    after: step.after,
+                    flags: 0,
+                },
+            ]
+        );
     }
 
     #[test]
@@ -3137,11 +3264,16 @@ mod tests {
         );
         assert_eq!(
             step.effects,
-            [RetailCameraEffect::LevelUpdate {
-                before: step.before,
-                after: step.after,
-                flags: 0,
-            }]
+            [
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_PLAYING,
+                },
+                RetailCameraEffect::LevelUpdate {
+                    before: step.before,
+                    after: step.after,
+                    flags: 0,
+                },
+            ]
         );
     }
 
@@ -3278,12 +3410,18 @@ mod tests {
         assert_eq!(
             step.effects,
             [
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                },
                 RetailCameraEffect::LevelUpdate {
                     before: step.before,
                     after: middle,
                     flags: 0,
                 },
                 RetailCameraEffect::SaveStateHandshake { location: middle },
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                },
                 RetailCameraEffect::LevelUpdate {
                     before: middle,
                     after: step.after,
@@ -3349,11 +3487,16 @@ mod tests {
         assert_eq!(step.after.path.zone, target_zone);
         assert_eq!(
             step.effects,
-            [RetailCameraEffect::LevelUpdate {
-                before: step.before,
-                after: step.after,
-                flags: 0,
-            }]
+            [
+                RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                },
+                RetailCameraEffect::LevelUpdate {
+                    before: step.before,
+                    after: step.after,
+                    flags: 0,
+                },
+            ]
         );
     }
 
@@ -3395,7 +3538,12 @@ mod tests {
                     path_crossings: 0,
                 }
             );
-            assert!(step.effects.is_empty());
+            assert_eq!(
+                step.effects,
+                [RetailCameraEffect::GameStateWrite {
+                    value: GAME_STATE_CUTSCENE,
+                }]
+            );
         }
     }
 }

@@ -23,7 +23,8 @@ use crust_sim::{
         RetailCameraRuntime,
     },
     gool::{
-        CodeSegment, RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect, process_register,
+        CodeSegment, GAME_STATE_GLOBAL, RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect,
+        process_register,
     },
     object_arena::{NeighborZone, ObjectOrigin},
     retail_runtime::{
@@ -198,6 +199,11 @@ fn update_camera(
     camera: &mut RetailCameraRuntime,
     lifecycle: &mut ZoneLifecycle,
 ) {
+    let shared_game_state = runtime
+        .global_word(GAME_STATE_GLOBAL)
+        .expect("Ending game state remains readable")
+        .cast_signed();
+    camera.synchronize_game_state(shared_game_state);
     let location = camera.location();
     let mode = graph
         .path(location.path)
@@ -219,6 +225,9 @@ fn update_camera(
 
     for effect in &step.effects {
         match *effect {
+            RetailCameraEffect::GameStateWrite { value } => runtime
+                .set_global_word(GAME_STATE_GLOBAL, value.cast_unsigned())
+                .expect("Ending camera game-state write succeeds"),
             RetailCameraEffect::LevelUpdate {
                 before,
                 after,
@@ -272,7 +281,12 @@ fn update_camera(
         .expect("Ending camera rotation is valid");
     let pose = camera.pose(graph).expect("Ending camera pose is valid");
     let field_of_view = nsd.ldat().expect("Ending has LDAT").field_of_view;
-    runtime.set_frame_context(step.game_state, rotation_xz);
+    let live_game_state = runtime
+        .global_word(GAME_STATE_GLOBAL)
+        .expect("Ending post-camera game state remains readable")
+        .cast_signed();
+    camera.synchronize_game_state(live_game_state);
+    runtime.latch_frame_context(live_game_state, rotation_xz);
     runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
         pose.translation,
         pose.rotation_yxz,

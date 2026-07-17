@@ -24,6 +24,7 @@ use crate::object_bounds::{
     BoundTransform, FrameBound, FrameBounds, FrameBoundsError, bounds_intersect_asymmetric,
     point_in_bound, retail_yxy_transform,
 };
+use crate::paging::{PHYSICAL_SLOT_COUNT, PageInvalidations};
 use crate::retail_physics::{
     RetailAngles, RetailPhysicsContext, RetailPhysicsPlan, RetailPhysicsResult, RetailPhysicsState,
     RetailTranslationMode, apply_free_movement, apply_path_orientation, begin_retail_physics,
@@ -2415,6 +2416,9 @@ pub enum VmEffect {
     Paging {
         object: ObjectHandle,
         operation: PagingHostOperation,
+        /// Native `NSOpen` allocation flag: opcode case six physically pins
+        /// an ordinary page, while case one uses the releasable virtual path.
+        physical: bool,
         reference: u32,
         eid: Eid,
         page: PageIndex,
@@ -2751,6 +2755,9 @@ pub enum PagingHostOperation {
 pub struct PagingHostRequest {
     pub object: ObjectHandle,
     pub operation: PagingHostOperation,
+    /// Selects native `NSOpen(..., flag = 1)` for an open request. False is
+    /// the virtual type-zero path; close/probe requests always carry false.
+    pub physical: bool,
     pub reference: u32,
     pub eid: Eid,
     pub page: PageIndex,
@@ -2763,11 +2770,14 @@ pub struct PagingHostRequest {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PagingHostResponse {
     Applied {
-        /// Resident texture page whose PTE was re-armed while the requested
-        /// page replaced its physical slot. Only an `Open` may evict, and the
-        /// displaced page must be distinct from the newly resolved page.
-        evicted: Option<PageIndex>,
+        /// Complete fixed-capacity set of PTEs re-armed by this operation. A
+        /// texture `Open` may displace one ordinary page and one texture page;
+        /// a queued virtual `Close` may report the requested page itself.
+        invalidated: PageInvalidations,
     },
+    /// A flag-zero open retained its reference in native's state-two virtual
+    /// queue and will be promoted by a later `NSUpdate(-1)` frame boundary.
+    Queued,
     /// Native `NSOpen` returned null because no physical/texture slot could be
     /// materialized. This is an authored branch result, not a VM fault.
     Unavailable,
@@ -2883,6 +2893,7 @@ pub enum VmError {
     MismatchedAudioHostResponse,
     MismatchedPagingHostResponse,
     InvalidPlatformPagingPage(PageIndex),
+    InvalidPlatformPagingCapacity(u32),
     UnsupportedReferenceOperand(u16),
     AnimationDataUnbound,
     InvalidStateProgramCounter {
@@ -4560,6 +4571,13 @@ fn initial_retail_pool_registers() -> Vec<Option<RetiredRetailProcessStorage>> {
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PagingCapacityAuthority {
+    #[default]
+    ProgramMetadata,
+    PlatformHeap,
+}
+
 /// Re-entrant GOOL machine. Branch state belongs to each invocation, never a
 /// process-global static as in the C interpreter.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4662,11 +4680,21 @@ pub struct Machine {
     camera_translation: [i32; 3],
     transform_vectors_camera: Option<RetailTransformVectorsCamera>,
     paging_page_capacity: u32,
+    /// Whether the browser pager has replaced the nominal NSF-derived page
+    /// capacity with the physical pool size obtained from retail's heap
+    /// probe. Later object/state metadata may extend the catalog, but cannot
+    /// change this authoritative allocator capacity.
+    paging_page_capacity_authority: PagingCapacityAuthority,
     entry_pages: BTreeMap<Eid, PageIndex>,
     paging_page_references: BTreeMap<PageIndex, u32>,
     paging_baseline_pages: BTreeSet<PageIndex>,
     paging_loaded_pages: BTreeSet<PageIndex>,
     paging_resolved_pages: BTreeSet<PageIndex>,
+    /// State-two flag-zero opens awaiting a platform `NSUpdate(-1)` retry.
+    paging_pending_pages: BTreeSet<PageIndex>,
+    /// Texture-cache pages are not members of native's twenty-two-slot
+    /// ordinary/virtual page accounting pool.
+    paging_uncounted_pages: BTreeSet<PageIndex>,
     paging_entry_references: Vec<(Eid, PageIndex)>,
 }
 
@@ -4719,11 +4747,14 @@ impl Machine {
             camera_translation: [0; 3],
             transform_vectors_camera: None,
             paging_page_capacity: 0,
+            paging_page_capacity_authority: PagingCapacityAuthority::ProgramMetadata,
             entry_pages: BTreeMap::new(),
             paging_page_references: BTreeMap::new(),
             paging_baseline_pages: BTreeSet::new(),
             paging_loaded_pages: BTreeSet::new(),
             paging_resolved_pages: BTreeSet::new(),
+            paging_pending_pages: BTreeSet::new(),
+            paging_uncounted_pages: BTreeSet::new(),
             paging_entry_references: Vec::new(),
         }
     }
@@ -5194,13 +5225,24 @@ impl Machine {
     /// Supplies the exact retail game-state word and camera-relative heading
     /// frozen for one source-ordered object traversal.
     pub fn set_retail_frame_context(&mut self, game_state: i32, camera_rotation_xz: i32) {
+        if let Some(global) = self.globals.get_mut(GAME_STATE_GLOBAL) {
+            *global = game_state as u32;
+        }
+        self.latch_retail_frame_context(game_state, camera_rotation_xz);
+    }
+
+    /// Freezes the live post-camera-effect context for object physics without
+    /// rewriting the shared `game_state` global.
+    ///
+    /// `CamUpdate` writes that global before a synchronous `LevelUpdate`.
+    /// Departing TERM handlers may then replace it, so browser-ordered hosts
+    /// must read the final live word and latch it here rather than replaying a
+    /// precomputed camera result after those handlers return.
+    pub fn latch_retail_frame_context(&mut self, game_state: i32, camera_rotation_xz: i32) {
         self.retail_game_state_playing = game_state == 0x100;
         self.camera_rotation_xz = i32::from(Angle12::new(camera_rotation_xz).raw());
         if let Some(global) = self.globals.get_mut(CAMERA_ROTATION_GLOBAL) {
             *global = self.camera_rotation_xz as u32;
-        }
-        if let Some(global) = self.globals.get_mut(GAME_STATE_GLOBAL) {
-            *global = game_state as u32;
         }
     }
 
@@ -6304,7 +6346,11 @@ impl Machine {
                 });
             }
         }
-        self.paging_page_capacity = self.paging_page_capacity.max(page_count);
+        if self.paging_page_capacity_authority == PagingCapacityAuthority::ProgramMetadata {
+            self.paging_page_capacity = self
+                .paging_page_capacity
+                .max(page_count.min(PHYSICAL_SLOT_COUNT as u32));
+        }
         for (eid, page) in entry_pages {
             self.entry_pages.insert(*eid, *page);
         }
@@ -8442,23 +8488,43 @@ impl Machine {
         response: PagingHostResponse,
     ) -> Result<(), VmError> {
         match response {
-            PagingHostResponse::Applied { evicted } => {
-                if let Some(evicted) = evicted {
-                    if request.operation != PagingHostOperation::Open
-                        || evicted == request.page
-                        || !self.paging_loaded_pages.contains(&evicted)
-                    {
+            PagingHostResponse::Applied { invalidated } => {
+                for page in invalidated.iter() {
+                    let valid = match request.operation {
+                        PagingHostOperation::Open => page != request.page,
+                        PagingHostOperation::Close => page == request.page,
+                        PagingHostOperation::Probe => false,
+                    };
+                    if !valid || !self.paging_loaded_pages.contains(&page) {
                         return Err(VmError::MismatchedPagingHostResponse);
                     }
-                    self.paging_resolved_pages.remove(&evicted);
+                }
+                for page in invalidated.iter() {
+                    self.paging_resolved_pages.remove(&page);
                 }
                 if request.operation == PagingHostOperation::Open {
                     // The VM resolves an entry optimistically before yielding
                     // to the host. Reassert it after removing the displaced
                     // page so a successful open can never invalidate itself.
                     self.paging_resolved_pages.insert(request.page);
+                    self.paging_pending_pages.remove(&request.page);
                 }
                 Ok(())
+            }
+            PagingHostResponse::Queued => {
+                if request.operation != PagingHostOperation::Open
+                    || request.physical
+                    || request.was_resolved
+                {
+                    return Err(VmError::MismatchedPagingHostResponse);
+                }
+                // The optimistic open already acquired the page reference.
+                // Native returns null until NSUpdate promotes the state-two
+                // virtual record, so retain ownership but re-arm the PTE view.
+                self.paging_resolved_pages.remove(&request.page);
+                self.paging_pending_pages.insert(request.page);
+                self.object_mut(request.object)?
+                    .set_register(process_register::MISC_VALUE, 0)
             }
             PagingHostResponse::Unavailable => {
                 if request.operation != PagingHostOperation::Open {
@@ -8492,24 +8558,72 @@ impl Machine {
         resolved_pages: impl IntoIterator<Item = PageIndex>,
         page_references: impl IntoIterator<Item = (PageIndex, u32)>,
     ) -> Result<(), VmError> {
-        self.paging_page_capacity = self.paging_page_capacity.max(page_count);
-        for index in 0..page_count {
-            let page = PageIndex::new(index);
-            self.paging_baseline_pages.insert(page);
-            self.paging_loaded_pages.insert(page);
+        self.seed_platform_paging_state_with_uncounted_pages(
+            page_count,
+            resolved_pages,
+            page_references,
+            std::iter::empty(),
+        )
+    }
+
+    /// Seeds platform paging state while excluding texture-cache pages from
+    /// retail's `NSCountAvailablePages` result.
+    pub fn seed_platform_paging_state_with_uncounted_pages(
+        &mut self,
+        page_count: u32,
+        resolved_pages: impl IntoIterator<Item = PageIndex>,
+        page_references: impl IntoIterator<Item = (PageIndex, u32)>,
+        uncounted_pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        self.seed_platform_paging_state_with_capacity(
+            page_count,
+            page_count.min(PHYSICAL_SLOT_COUNT as u32),
+            resolved_pages,
+            page_references,
+            uncounted_pages,
+        )
+    }
+
+    /// Seeds the catalog separately from the heap-derived PS1 physical pool.
+    ///
+    /// Retail catalogs up to 128 NSF pages, but its descending 64 KiB malloc
+    /// probe can expose fewer than the nominal twenty-two ordinary slots.
+    pub fn seed_platform_paging_state_with_capacity(
+        &mut self,
+        page_count: u32,
+        physical_page_capacity: u32,
+        resolved_pages: impl IntoIterator<Item = PageIndex>,
+        page_references: impl IntoIterator<Item = (PageIndex, u32)>,
+        uncounted_pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        if physical_page_capacity == 0 || physical_page_capacity > PHYSICAL_SLOT_COUNT as u32 {
+            return Err(VmError::InvalidPlatformPagingCapacity(
+                physical_page_capacity,
+            ));
         }
         let resolved_pages = resolved_pages.into_iter().collect::<BTreeSet<_>>();
         let page_references = page_references.into_iter().collect::<BTreeMap<_, _>>();
+        let uncounted_pages = uncounted_pages.into_iter().collect::<BTreeSet<_>>();
         for page in resolved_pages
             .iter()
             .copied()
             .chain(page_references.keys().copied())
+            .chain(uncounted_pages.iter().copied())
         {
             if page.get() >= page_count {
                 return Err(VmError::InvalidPlatformPagingPage(page));
             }
         }
+        self.paging_page_capacity = physical_page_capacity;
+        self.paging_page_capacity_authority = PagingCapacityAuthority::PlatformHeap;
+        for index in 0..page_count {
+            let page = PageIndex::new(index);
+            self.paging_baseline_pages.insert(page);
+            self.paging_loaded_pages.insert(page);
+        }
         self.paging_resolved_pages.extend(resolved_pages);
+        self.paging_pending_pages.clear();
+        self.paging_uncounted_pages = uncounted_pages;
         self.paging_page_references = page_references
             .into_iter()
             .filter(|(_, references)| *references != 0)
@@ -8517,28 +8631,140 @@ impl Machine {
         Ok(())
     }
 
+    /// Seeds state-two virtual requests retained by the mounted platform
+    /// pager before the first browser frame runs.
+    pub fn seed_platform_pending_pages(
+        &mut self,
+        pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        let pages = pages.into_iter().collect::<BTreeSet<_>>();
+        for page in &pages {
+            if !self.paging_loaded_pages.contains(page)
+                || self.paging_resolved_pages.contains(page)
+                || self
+                    .paging_page_references
+                    .get(page)
+                    .copied()
+                    .unwrap_or_default()
+                    == 0
+            {
+                return Err(VmError::InvalidPlatformPagingPage(*page));
+            }
+        }
+        self.paging_pending_pages = pages;
+        Ok(())
+    }
+
     /// Applies one browser lifecycle page open outside a GOOL instruction.
     pub fn apply_platform_paging_open(
         &mut self,
         page: PageIndex,
-        evicted: Option<PageIndex>,
+        invalidated: PageInvalidations,
     ) -> Result<(), VmError> {
         if !self.paging_loaded_pages.contains(&page) {
             return Err(VmError::InvalidPlatformPagingPage(page));
         }
-        if let Some(evicted) = evicted
-            && (evicted == page || !self.paging_loaded_pages.contains(&evicted))
-        {
-            return Err(VmError::InvalidPlatformPagingPage(evicted));
+        for invalidated_page in invalidated.iter() {
+            if invalidated_page == page || !self.paging_loaded_pages.contains(&invalidated_page) {
+                return Err(VmError::InvalidPlatformPagingPage(invalidated_page));
+            }
         }
-        if let Some(evicted) = evicted {
-            self.paging_resolved_pages.remove(&evicted);
+        for invalidated_page in invalidated.iter() {
+            self.paging_resolved_pages.remove(&invalidated_page);
         }
         self.paging_resolved_pages.insert(page);
+        self.paging_pending_pages.remove(&page);
         let references = self.paging_page_references.entry(page).or_default();
         *references = references
             .checked_add(1)
             .ok_or(VmError::MismatchedPagingHostResponse)?;
+        Ok(())
+    }
+
+    /// Retains one browser lifecycle reference in native's virtual queue.
+    pub fn apply_platform_paging_queued_open(&mut self, page: PageIndex) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page) || self.paging_resolved_pages.contains(&page) {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        self.paging_pending_pages.insert(page);
+        let references = self.paging_page_references.entry(page).or_default();
+        *references = references
+            .checked_add(1)
+            .ok_or(VmError::MismatchedPagingHostResponse)?;
+        Ok(())
+    }
+
+    /// Publishes one successful platform `NSUpdate(-1)` promotion without
+    /// acquiring another reference for the already-owned virtual request.
+    pub fn apply_platform_paging_resolution(
+        &mut self,
+        page: PageIndex,
+        invalidated: PageInvalidations,
+    ) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page) || !self.paging_pending_pages.contains(&page) {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        for invalidated_page in invalidated.iter() {
+            if invalidated_page == page || !self.paging_loaded_pages.contains(&invalidated_page) {
+                return Err(VmError::InvalidPlatformPagingPage(invalidated_page));
+            }
+        }
+        for invalidated_page in invalidated.iter() {
+            self.paging_resolved_pages.remove(&invalidated_page);
+        }
+        self.paging_pending_pages.remove(&page);
+        self.paging_resolved_pages.insert(page);
+        Ok(())
+    }
+
+    /// Publishes a count-zero global-program materialization.
+    ///
+    /// Program binding registers the target's catalog metadata separately
+    /// from the pager allocation that made its PTE usable. This operation
+    /// reconciles those views without acquiring another reference: an
+    /// already-owned queued request keeps its count, while any displaced
+    /// zero-reference PTEs become unresolved.
+    pub fn apply_platform_program_materialization(
+        &mut self,
+        page: PageIndex,
+        invalidated: PageInvalidations,
+    ) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page) {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        for invalidated_page in invalidated.iter() {
+            if invalidated_page == page
+                || !self.paging_loaded_pages.contains(&invalidated_page)
+                || self
+                    .paging_page_references
+                    .get(&invalidated_page)
+                    .is_some_and(|references| *references != 0)
+            {
+                return Err(VmError::InvalidPlatformPagingPage(invalidated_page));
+            }
+        }
+        for invalidated_page in invalidated.iter() {
+            self.paging_resolved_pages.remove(&invalidated_page);
+            self.paging_pending_pages.remove(&invalidated_page);
+        }
+        self.paging_resolved_pages.insert(page);
+        self.paging_pending_pages.remove(&page);
+        Ok(())
+    }
+
+    /// Invalidates a zero-reference page displaced by a count-zero global
+    /// program materialization. No reference is acquired for the new global
+    /// page; its program metadata marks that page resolved during insertion.
+    pub fn apply_platform_paging_eviction(&mut self, page: PageIndex) -> Result<(), VmError> {
+        if !self.paging_loaded_pages.contains(&page)
+            || self
+                .paging_page_references
+                .get(&page)
+                .is_some_and(|references| *references != 0)
+        {
+            return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        self.paging_resolved_pages.remove(&page);
         Ok(())
     }
 
@@ -8547,15 +8773,32 @@ impl Machine {
         &mut self,
         page: PageIndex,
         decremented: bool,
+        unresolved: bool,
     ) -> Result<(), VmError> {
         if !self.paging_loaded_pages.contains(&page) {
             return Err(VmError::InvalidPlatformPagingPage(page));
+        }
+        if unresolved && !decremented {
+            return Err(VmError::MismatchedPagingHostResponse);
         }
         if decremented {
             let references = self.paging_page_references.entry(page).or_default();
             *references = references
                 .checked_sub(1)
                 .ok_or(VmError::MismatchedPagingHostResponse)?;
+        }
+        if unresolved {
+            self.paging_resolved_pages.remove(&page);
+            let references = self
+                .paging_page_references
+                .get(&page)
+                .copied()
+                .unwrap_or_default();
+            if references == 0 {
+                self.paging_pending_pages.remove(&page);
+            } else {
+                self.paging_pending_pages.insert(page);
+            }
         }
         Ok(())
     }
@@ -9336,7 +9579,13 @@ impl Machine {
                 if register == 0x1f {
                     self.push(handle, reference)?;
                 } else {
-                    self.object_mut(handle)?.set_register(register, reference)?;
+                    // `MOVC` writes through the process-register union. Code
+                    // pointer aliases such as `tp` and `pc` must therefore
+                    // update their validated typed counterparts as well as
+                    // retaining the exact raw retail word.
+                    self.write_aliased_process_register_with_pool_slot(
+                        handle, register, reference, None,
+                    )?;
                 }
             }
             0x19 => {
@@ -10453,6 +10702,7 @@ impl Machine {
                 self.emit(VmEffect::Paging {
                     object: handle,
                     operation: PagingHostOperation::Open,
+                    physical: operation == 6,
                     reference: entry.to_word(),
                     eid,
                     page,
@@ -10471,6 +10721,7 @@ impl Machine {
                 self.emit(VmEffect::Paging {
                     object: handle,
                     operation: PagingHostOperation::Close,
+                    physical: false,
                     reference: entry.to_word(),
                     eid,
                     page,
@@ -10486,6 +10737,7 @@ impl Machine {
                 self.emit(VmEffect::Paging {
                     object: handle,
                     operation: PagingHostOperation::Probe,
+                    physical: false,
                     reference: entry.to_word(),
                     eid,
                     page,
@@ -10496,8 +10748,6 @@ impl Machine {
                 // decrement the count.
                 let result = self.close_paging_page(page, false);
                 self.push(handle, result)?;
-                // Retail case three deliberately falls through to case four.
-                self.push(handle, self.available_page_count())?;
                 return Ok(true);
             }
             4 => self.push(handle, self.available_page_count())?,
@@ -10549,7 +10799,30 @@ impl Machine {
     }
 
     fn close_paging_page(&mut self, page: PageIndex, decrement: bool) -> u32 {
-        if !self.paging_loaded_pages.contains(&page) {
+        if self.paging_pending_pages.contains(&page) {
+            if decrement {
+                let count = self.paging_page_references.entry(page).or_default();
+                if *count != 0 {
+                    *count -= 1;
+                }
+                if *count == 0 {
+                    self.paging_pending_pages.remove(&page);
+                }
+            }
+            // A state-two virtual page still presents an unresolved odd pgid.
+            return 0;
+        }
+        // `NSClose(ref, 0)` observes the PTE, not the immutable stream bytes.
+        // A catalog page may be known/loaded by the browser while its entry
+        // offsets are re-armed after physical eviction; that unresolved PTE
+        // must return zero until another `NSOpen` translates it.
+        if !self.paging_resolved_pages.contains(&page) {
+            return 0;
+        }
+        // Copied texture/audio PTEs carry native bit two. Count-zero probes
+        // return one before the tag test, but a positive close returns zero and
+        // must not consume the copied page's stranded reference count.
+        if decrement && self.paging_uncounted_pages.contains(&page) {
             return 0;
         }
         let count = self.paging_page_references.entry(page).or_default();
@@ -10564,8 +10837,10 @@ impl Machine {
     fn available_page_count(&self) -> u32 {
         let referenced = self
             .paging_page_references
-            .values()
-            .filter(|references| **references != 0)
+            .iter()
+            .filter(|(page, references)| {
+                **references != 0 && !self.paging_uncounted_pages.contains(page)
+            })
             .count() as u32;
         self.paging_page_capacity.saturating_sub(referenced)
     }
@@ -12222,6 +12497,7 @@ impl Machine {
 mod tests {
     use super::*;
     use crate::math::Vec3;
+    use crate::paging::Pager;
     use proptest::prelude::*;
 
     const REG0: u16 = 0x0e00;
@@ -13507,6 +13783,29 @@ mod tests {
                 .unwrap()),
             [0x111, (-0x222_i32) as u32, 0x333]
         );
+    }
+
+    #[test]
+    fn retail_frame_latch_preserves_a_term_game_state_write_for_physics() {
+        const TERM_GAME_STATE: i32 = 0x500;
+        let mut machine = Machine::new(256);
+        machine.set_retail_frame_context(0, 0x123);
+
+        // CamUpdate's ordered LevelUpdate may synchronously run a departing
+        // TERM program after the camera has written the cutscene state.
+        machine
+            .set_global_word(GAME_STATE_GLOBAL, TERM_GAME_STATE as u32)
+            .unwrap();
+        machine.latch_retail_frame_context(TERM_GAME_STATE, 0x1456);
+
+        assert_eq!(
+            machine.global_word(GAME_STATE_GLOBAL),
+            Ok(TERM_GAME_STATE as u32),
+            "latching post-camera physics context must not replay the earlier camera write"
+        );
+        assert!(!machine.retail_game_state_playing);
+        assert_eq!(machine.camera_rotation_xz, 0x456);
+        assert_eq!(machine.global_word(CAMERA_ROTATION_GLOBAL), Ok(0x456));
     }
 
     #[test]
@@ -16411,15 +16710,32 @@ mod tests {
     fn movc_writes_checked_global_code_references_to_register_or_stack() {
         let h = handle(0);
         let register_reference = (0x18_u32 << 24) | (3 << 14) | 2;
+        let transition_reference =
+            (0x18_u32 << 24) | ((process_register::TRANSITION_POINTER as u32) << 14) | 2;
         let stack_reference = (0x18_u32 << 24) | (0x1f << 14) | 1;
-        let mut object = VmObject::new(h, vec![register_reference, stack_reference]).unwrap();
+        let mut object = VmObject::new(
+            h,
+            vec![register_reference, transition_reference, stack_reference],
+        )
+        .unwrap();
         object.global_code = vec![0; 3];
         let mut machine = Machine::new(0);
         machine.insert_object(object).unwrap();
 
-        machine.run(h, 2).unwrap();
+        machine.run(h, 3).unwrap();
         assert_eq!(
             machine.object(h).unwrap().register(3),
+            Ok(encode_code_reference(CodeAddress {
+                segment: CodeSegment::Global,
+                pc: 2,
+            }))
+        );
+        assert_eq!(machine.object(h).unwrap().transition_pc(), Some(2));
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::TRANSITION_POINTER),
             Ok(encode_code_reference(CodeAddress {
                 segment: CodeSegment::Global,
                 pc: 2,
@@ -19121,7 +19437,7 @@ mod tests {
     }
 
     #[test]
-    fn paging_open_misc_close_query_and_zero_close_follow_source_counts() {
+    fn paging_open_misc_probe_and_explicit_available_follow_retail_counts() {
         let h = handle(0);
         let eid = Eid::from_raw(0x7500_2055);
         let other_eid = Eid::from_raw(0x7500_2073);
@@ -19180,11 +19496,12 @@ mod tests {
         );
         assert_eq!(machine.paging_page_references.get(&PageIndex::new(3)), None);
 
-        // Case 3 uses source PC NSClose(count=0): a resolved type-1 page
-        // returns literal one, then deliberately falls through to available
-        // pages. Only one distinct page has a nonzero reference count.
+        // Case 3 uses retail NSClose(count=0): a resolved type-1 page returns
+        // literal one. The retail binary then jumps to the common one-word
+        // push and cannot fall through to case four; the decompiled C source
+        // omitted that control-flow edge.
         machine.run(h, 1).unwrap();
-        assert_eq!(machine.object(h).unwrap().stack(), &[1, 3]);
+        assert_eq!(machine.object(h).unwrap().stack(), &[1]);
 
         // B points at misc_entry, which contains the logical token written by
         // open. The first close decrements two references to one and writes
@@ -19216,7 +19533,160 @@ mod tests {
             Ok(1)
         );
         machine.run(h, 3).unwrap();
-        assert_eq!(machine.object(h).unwrap().stack(), &[1, 3, 1, 4]);
+        // Case five replaces the tagged EID list with its required-page
+        // count; the final explicit case four pushes the available count.
+        assert_eq!(machine.object(h).unwrap().stack(), &[1, 1, 4]);
+    }
+
+    #[test]
+    fn copied_texture_audio_close_returns_zero_but_count_zero_probe_returns_one() {
+        let pages = [PageIndex::new(2), PageIndex::new(3)];
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state_with_uncounted_pages(
+                4,
+                pages,
+                pages.into_iter().map(|page| (page, 1)),
+                pages,
+            )
+            .unwrap();
+
+        for page in pages {
+            assert_eq!(machine.close_paging_page(page, true), 0);
+            assert_eq!(machine.paging_page_references[&page], 1);
+            assert_eq!(machine.close_paging_page(page, false), 1);
+            assert_eq!(machine.paging_page_references[&page], 1);
+        }
+    }
+
+    #[test]
+    fn queued_virtual_host_response_retains_reference_until_async_resolution() {
+        let h = handle(0);
+        let eid = Eid::from_raw(0x7500_2055);
+        let page = PageIndex::new(2);
+        let mut object = VmObject::new(h, vec![Instruction::encode(0x8b, 1, 0)]).unwrap();
+        object.internal[0] = eid.raw();
+        object.internal[1] = 1;
+        object.page_count = 3;
+        object.entry_pages = vec![(eid, page)];
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(3, std::iter::empty(), std::iter::empty())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+
+        machine
+            .run_with_host_requests(h, 1, |machine, request| {
+                let VmHostRequest::Effect(VmEffect::Paging {
+                    object,
+                    operation,
+                    physical,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                }) = request
+                else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                machine.complete_paging_host_request(
+                    PagingHostRequest {
+                        object,
+                        operation,
+                        physical,
+                        reference,
+                        eid,
+                        page,
+                        was_resolved,
+                    },
+                    PagingHostResponse::Queued,
+                )
+            })
+            .unwrap();
+
+        assert!(machine.paging_pending_pages.contains(&page));
+        assert!(!machine.paging_resolved_pages.contains(&page));
+        assert_eq!(machine.paging_page_references[&page], 1);
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0)
+        );
+
+        machine
+            .apply_platform_paging_resolution(page, PageInvalidations::NONE)
+            .unwrap();
+        assert!(!machine.paging_pending_pages.contains(&page));
+        assert!(machine.paging_resolved_pages.contains(&page));
+        assert_eq!(machine.paging_page_references[&page], 1);
+    }
+
+    #[test]
+    fn brio_page_probe_gate_preserves_the_zero_sentinel_and_takes_retail_branch() {
+        let h = handle(0);
+        let eids = [
+            Eid::from_raw(0x7500_2055),
+            Eid::from_raw(0x7500_2073),
+            Eid::from_raw(0x7500_2091),
+            Eid::from_raw(0x7500_20af),
+            Eid::from_raw(0x7500_20cd),
+            Eid::from_raw(0x7500_20eb),
+        ];
+        let pages = [
+            PageIndex::new(2),
+            PageIndex::new(3),
+            PageIndex::new(4),
+            PageIndex::new(5),
+            PageIndex::new(6),
+            PageIndex::new(7),
+        ];
+        let mut code = Vec::new();
+        for eid_index in 0..eids.len() {
+            code.push(Instruction::encode(0x8b, 6, eid_index as u16));
+        }
+        for _ in 0..7 {
+            code.push(Instruction::encode(0x05, STACK, STACK));
+        }
+        // Mirrors Brio PC 80: operation zero, condition type two (`!pop()`),
+        // no arguments, relative target +22. PC is post-fetch, so local PC
+        // 14 branches to 36 exactly when the zero sentinel survives all six
+        // one-word probes and seven logical-AND reductions.
+        code.push(control_flow(0, 2, 0x1f, 0, 22));
+        code.resize(37, Instruction::encode(0xff, 0, 0));
+
+        let mut object = VmObject::new(h, code).unwrap();
+        for (index, eid) in eids.into_iter().enumerate() {
+            object.internal[index] = eid.raw();
+        }
+        object.internal[6] = 3;
+        object.page_count = 8;
+        object.resident_pages = vec![PageIndex::new(0)];
+        object.entry_pages = eids.into_iter().zip(pages).collect();
+
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(8, pages, std::iter::empty())
+            .unwrap();
+        machine.insert_object(object).unwrap();
+        machine.push(h, 0).unwrap();
+        machine.push(h, 1).unwrap();
+
+        for probe_index in 0..6 {
+            assert_eq!(machine.run(h, 1).unwrap().reason, HaltReason::HostEffect);
+            let expected = [0, 1]
+                .into_iter()
+                .chain(std::iter::repeat_n(1, probe_index + 1))
+                .collect::<Vec<_>>();
+            assert_eq!(machine.object(h).unwrap().stack(), expected);
+        }
+        assert_eq!(
+            machine.run(h, 8).unwrap().reason,
+            HaltReason::BudgetExhausted
+        );
+        assert_eq!(machine.object(h).unwrap().pc(), 36);
+        assert!(machine.object(h).unwrap().stack().is_empty());
     }
 
     #[test]
@@ -19246,6 +19716,7 @@ mod tests {
                 let VmHostRequest::Effect(VmEffect::Paging {
                     object,
                     operation,
+                    physical,
                     reference,
                     eid,
                     page,
@@ -19257,6 +19728,7 @@ mod tests {
                 let request = PagingHostRequest {
                     object,
                     operation,
+                    physical,
                     reference,
                     eid,
                     page,
@@ -19287,6 +19759,133 @@ mod tests {
             machine.object(h).unwrap().stack(),
             &[4],
             "case four must observe the rolled-back count in the next instruction"
+        );
+    }
+
+    #[test]
+    fn paging_host_close_keeps_vm_and_pager_counts_after_texture_pte_eviction() {
+        const TEXTURE_SLOT_COUNT: usize = 8;
+        let mut pager = Pager::new();
+        let texture_eids = (0..=TEXTURE_SLOT_COUNT)
+            .map(|index| {
+                let page = PageIndex::new(index as u32);
+                let eid = Eid::from_raw(0x7500_2055 + (index as u32 * 0x1e));
+                pager.register_page(page, []).unwrap();
+                pager.bind_page_eid(eid, page).unwrap();
+                eid
+            })
+            .collect::<Vec<_>>();
+        let evicted_eid = texture_eids[0];
+        let evicted_page = PageIndex::new(0);
+
+        pager.set_current_texture_load_eids(texture_eids.iter().take(TEXTURE_SLOT_COUNT).copied());
+        pager.open_eid(evicted_eid).unwrap();
+        pager.open_eid(evicted_eid).unwrap();
+        for eid in texture_eids
+            .iter()
+            .take(TEXTURE_SLOT_COUNT)
+            .skip(1)
+            .copied()
+        {
+            pager.open_eid(eid).unwrap();
+        }
+
+        let resolved_pages = pager.resolved_pages().collect::<Vec<_>>();
+        let page_references = pager.page_reference_counts().collect::<Vec<_>>();
+        let uncounted_pages = pager.uncounted_pages().collect::<Vec<_>>();
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state_with_uncounted_pages(
+                (TEXTURE_SLOT_COUNT + 1) as u32,
+                resolved_pages,
+                page_references,
+                uncounted_pages,
+            )
+            .unwrap();
+
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![Instruction::encode(0x8b, 1, 0)]).unwrap();
+        object.internal[0] = evicted_eid.raw();
+        object.internal[1] = 2;
+        object.page_count = (TEXTURE_SLOT_COUNT + 1) as u32;
+        object.entry_pages = vec![(evicted_eid, evicted_page)];
+        machine.insert_object(object).unwrap();
+
+        pager.set_current_texture_load_eids(
+            texture_eids
+                .iter()
+                .skip(1)
+                .take(TEXTURE_SLOT_COUNT - 1)
+                .copied(),
+        );
+        let replacement = pager
+            .open_eid_with_outcome(texture_eids[TEXTURE_SLOT_COUNT])
+            .unwrap();
+        assert!(
+            replacement
+                .invalidated
+                .iter()
+                .any(|page| page == evicted_page)
+        );
+        machine
+            .apply_platform_paging_open(replacement.page, replacement.invalidated)
+            .unwrap();
+        assert!(!machine.paging_resolved_pages.contains(&evicted_page));
+        assert_eq!(machine.paging_page_references[&evicted_page], 2);
+
+        let execution = machine
+            .run_with_host_requests(h, 1, |machine, request| {
+                let VmHostRequest::Effect(VmEffect::Paging {
+                    object,
+                    operation,
+                    physical,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                }) = request
+                else {
+                    return Err(VmError::MissingHostEffect);
+                };
+                let request = PagingHostRequest {
+                    object,
+                    operation,
+                    physical,
+                    reference,
+                    eid,
+                    page,
+                    was_resolved,
+                };
+                assert_eq!(request.operation, PagingHostOperation::Close);
+                assert_eq!(request.eid, evicted_eid);
+                assert_eq!(request.page, evicted_page);
+                assert!(!request.was_resolved);
+                assert_eq!(machine.paging_page_references[&evicted_page], 2);
+
+                let outcome = pager.close_eid_retail_with_outcome(request.eid).unwrap();
+                assert_eq!(outcome.page, evicted_page);
+                assert!(!outcome.decremented);
+                assert!(!outcome.unresolved);
+                machine.complete_paging_host_request(
+                    request,
+                    PagingHostResponse::Applied {
+                        invalidated: PageInvalidations::NONE,
+                    },
+                )
+            })
+            .unwrap();
+
+        assert_eq!(execution.reason, HaltReason::BudgetExhausted);
+        assert_eq!(execution.steps, 1);
+        assert_eq!(pager.page(evicted_page).unwrap().references, 2);
+        assert_eq!(machine.paging_page_references[&evicted_page], 2);
+        assert!(!machine.paging_resolved_pages.contains(&evicted_page));
+        assert_eq!(
+            machine
+                .object(h)
+                .unwrap()
+                .register(process_register::MISC_VALUE),
+            Ok(0)
         );
     }
 
@@ -19325,6 +19924,7 @@ mod tests {
                 let VmHostRequest::Effect(VmEffect::Paging {
                     object,
                     operation,
+                    physical,
                     reference,
                     eid,
                     page,
@@ -19336,6 +19936,7 @@ mod tests {
                 let request = PagingHostRequest {
                     object,
                     operation,
+                    physical,
                     reference,
                     eid,
                     page,
@@ -19348,13 +19949,15 @@ mod tests {
                         let entry_b = machine.object(h)?.register(process_register::MISC_VALUE)?;
                         machine.object_mut(h)?.internal[7] = entry_b;
                         machine.push(h, retained_b.to_word())?;
-                        PagingHostResponse::Applied { evicted: None }
+                        PagingHostResponse::Applied {
+                            invalidated: PageInvalidations::NONE,
+                        }
                     }
                     1 => {
                         assert_eq!(request.eid, eid_a);
                         assert_eq!(request.page, PageIndex::new(2));
                         PagingHostResponse::Applied {
-                            evicted: Some(PageIndex::new(3)),
+                            invalidated: PageInvalidations::one(PageIndex::new(3)),
                         }
                     }
                     _ => return Err(VmError::MismatchedPagingHostResponse),
@@ -19390,6 +19993,7 @@ mod tests {
         let mut request = PagingHostRequest {
             object: h,
             operation: PagingHostOperation::Close,
+            physical: false,
             reference: 0,
             eid,
             page: PageIndex::new(2),
@@ -19400,7 +20004,7 @@ mod tests {
             machine.complete_paging_host_request(
                 request,
                 PagingHostResponse::Applied {
-                    evicted: Some(PageIndex::new(3)),
+                    invalidated: PageInvalidations::one(PageIndex::new(3)),
                 },
             ),
             Err(VmError::MismatchedPagingHostResponse)
@@ -19412,7 +20016,7 @@ mod tests {
             machine.complete_paging_host_request(
                 request,
                 PagingHostResponse::Applied {
-                    evicted: Some(request.page),
+                    invalidated: PageInvalidations::one(request.page),
                 },
             ),
             Err(VmError::MismatchedPagingHostResponse)
@@ -19423,7 +20027,7 @@ mod tests {
             machine.complete_paging_host_request(
                 request,
                 PagingHostResponse::Applied {
-                    evicted: Some(PageIndex::new(9)),
+                    invalidated: PageInvalidations::one(PageIndex::new(9)),
                 },
             ),
             Err(VmError::MismatchedPagingHostResponse)
@@ -19461,7 +20065,10 @@ mod tests {
         assert_eq!(machine.object(h).unwrap().stack(), &[3]);
 
         machine
-            .apply_platform_paging_open(PageIndex::new(3), Some(PageIndex::new(2)))
+            .apply_platform_paging_open(
+                PageIndex::new(3),
+                PageInvalidations::one(PageIndex::new(2)),
+            )
             .unwrap();
         assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(2)));
         assert!(machine.paging_resolved_pages.contains(&PageIndex::new(3)));
@@ -19469,12 +20076,127 @@ mod tests {
         assert_eq!(machine.paging_page_references[&PageIndex::new(3)], 1);
 
         machine
-            .apply_platform_paging_close(PageIndex::new(2), true)
+            .apply_platform_paging_close(PageIndex::new(2), true, false)
             .unwrap();
         machine.run(h, 1).unwrap();
         assert_eq!(machine.object(h).unwrap().stack(), &[3, 3]);
         assert_eq!(machine.paging_page_references[&PageIndex::new(2)], 0);
         assert_eq!(machine.paging_page_references[&PageIndex::new(3)], 1);
+    }
+
+    #[test]
+    fn platform_open_applies_both_pager_invalidations_atomically() {
+        let first = PageIndex::new(1);
+        let second = PageIndex::new(2);
+        let requested = PageIndex::new(3);
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(4, [first, second], [])
+            .unwrap();
+
+        machine
+            .apply_platform_paging_open(
+                requested,
+                PageInvalidations::new(Some(first), Some(second)),
+            )
+            .unwrap();
+
+        assert!(!machine.paging_resolved_pages.contains(&first));
+        assert!(!machine.paging_resolved_pages.contains(&second));
+        assert!(machine.paging_resolved_pages.contains(&requested));
+        assert_eq!(machine.paging_page_references[&requested], 1);
+
+        machine.paging_resolved_pages.insert(first);
+        assert_eq!(
+            machine.apply_platform_paging_open(
+                requested,
+                PageInvalidations::new(Some(first), Some(PageIndex::new(9))),
+            ),
+            Err(VmError::InvalidPlatformPagingPage(PageIndex::new(9)))
+        );
+        assert!(
+            machine.paging_resolved_pages.contains(&first),
+            "validation must finish before either invalidation is committed"
+        );
+    }
+
+    #[test]
+    fn program_materialization_resolves_a_queued_page_without_changing_references() {
+        let target = PageIndex::new(2);
+        let victim = PageIndex::new(3);
+        let referenced_victim = PageIndex::new(4);
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(
+                5,
+                [victim, referenced_victim],
+                [(target, 1), (referenced_victim, 1)],
+            )
+            .unwrap();
+        machine.seed_platform_pending_pages([target]).unwrap();
+
+        let before_rejected_materialization = machine.clone();
+        assert_eq!(
+            machine.apply_platform_program_materialization(
+                target,
+                PageInvalidations::one(referenced_victim),
+            ),
+            Err(VmError::InvalidPlatformPagingPage(referenced_victim))
+        );
+        assert_eq!(machine, before_rejected_materialization);
+
+        // A stale pending marker on an evicted count-zero PTE must not survive
+        // the platform's authoritative materialization result.
+        machine.paging_pending_pages.insert(victim);
+        machine
+            .apply_platform_program_materialization(target, PageInvalidations::one(victim))
+            .unwrap();
+
+        assert!(machine.paging_resolved_pages.contains(&target));
+        assert!(!machine.paging_pending_pages.contains(&target));
+        assert!(!machine.paging_resolved_pages.contains(&victim));
+        assert!(!machine.paging_pending_pages.contains(&victim));
+        assert_eq!(machine.paging_page_references.get(&target), Some(&1));
+        assert_eq!(
+            machine.paging_page_references.get(&referenced_victim),
+            Some(&1)
+        );
+        assert_eq!(machine.paging_page_references.get(&victim), None);
+        assert_eq!(machine.close_paging_page(target, false), 1);
+        assert_eq!(machine.paging_page_references.get(&target), Some(&1));
+    }
+
+    #[test]
+    fn gool_open_response_applies_both_pager_invalidations() {
+        let first = PageIndex::new(1);
+        let second = PageIndex::new(2);
+        let requested = PageIndex::new(3);
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(4, [first, second], [])
+            .unwrap();
+        let request = PagingHostRequest {
+            object: handle(0),
+            operation: PagingHostOperation::Open,
+            physical: false,
+            reference: 0,
+            eid: Eid::from_raw(0x7500_2055),
+            page: requested,
+            was_resolved: false,
+        };
+
+        machine
+            .complete_paging_host_request(
+                request,
+                PagingHostResponse::Applied {
+                    invalidated: PageInvalidations::new(Some(first), Some(second)),
+                },
+            )
+            .unwrap();
+
+        assert!(!machine.paging_resolved_pages.contains(&first));
+        assert!(!machine.paging_resolved_pages.contains(&second));
+        assert!(machine.paging_resolved_pages.contains(&requested));
     }
 
     #[test]
@@ -19516,6 +20238,97 @@ mod tests {
         assert!(machine.paging_resolved_pages.contains(&PageIndex::new(1)));
         assert!(!machine.paging_resolved_pages.contains(&PageIndex::new(3)));
         assert_eq!(machine.available_page_count(), 7);
+    }
+
+    #[test]
+    fn platform_heap_capacity_survives_later_object_and_state_metadata_binds() {
+        for physical_page_capacity in [20, 21] {
+            let h = handle(0);
+            let mut machine = Machine::new(0);
+            machine
+                .seed_platform_paging_state_with_capacity(
+                    PHYSICAL_SLOT_COUNT as u32,
+                    physical_page_capacity,
+                    std::iter::empty(),
+                    std::iter::empty(),
+                    std::iter::empty(),
+                )
+                .unwrap();
+
+            let mut object = VmObject::new(h, vec![control_flow(2, 0, 0, 0, 0)]).unwrap();
+            object.page_count = PHYSICAL_SLOT_COUNT as u32;
+            object.resident_pages = vec![PageIndex::new(0)];
+            machine.insert_object(object).unwrap();
+            assert_eq!(machine.paging_page_capacity, physical_page_capacity);
+
+            let state = VmStateProgram::new(
+                0,
+                GoolState {
+                    flags: 0,
+                    status_c: 0,
+                    external_index: 0,
+                    event_pc: GOOL_PC_NONE,
+                    transition_pc: GOOL_PC_NONE,
+                    code_pc: 0,
+                },
+                vec![control_flow(2, 0, 0, 0, 0)],
+                Vec::new(),
+            )
+            .unwrap()
+            .with_paging_metadata(
+                PHYSICAL_SLOT_COUNT as u32,
+                [PageIndex::new(1)],
+                std::iter::empty(),
+            );
+            machine.rebind_state_program(h, &state, &[]).unwrap();
+
+            assert_eq!(machine.paging_page_capacity, physical_page_capacity);
+            assert_eq!(
+                machine.paging_page_capacity_authority,
+                PagingCapacityAuthority::PlatformHeap
+            );
+        }
+    }
+
+    #[test]
+    fn unseeded_metadata_grows_nominal_capacity_to_physical_slot_limit() {
+        let h = handle(0);
+        let mut object = VmObject::new(h, vec![control_flow(2, 0, 0, 0, 0)]).unwrap();
+        object.page_count = 7;
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+        assert_eq!(machine.paging_page_capacity, 7);
+        assert_eq!(
+            machine.paging_page_capacity_authority,
+            PagingCapacityAuthority::ProgramMetadata
+        );
+
+        let state = VmStateProgram::new(
+            0,
+            GoolState {
+                flags: 0,
+                status_c: 0,
+                external_index: 0,
+                event_pc: GOOL_PC_NONE,
+                transition_pc: GOOL_PC_NONE,
+                code_pc: 0,
+            },
+            vec![control_flow(2, 0, 0, 0, 0)],
+            Vec::new(),
+        )
+        .unwrap()
+        .with_paging_metadata(
+            PHYSICAL_SLOT_COUNT as u32 + 4,
+            std::iter::empty(),
+            std::iter::empty(),
+        );
+        machine.rebind_state_program(h, &state, &[]).unwrap();
+
+        assert_eq!(machine.paging_page_capacity, PHYSICAL_SLOT_COUNT as u32);
+        assert_eq!(
+            machine.paging_page_capacity_authority,
+            PagingCapacityAuthority::ProgramMetadata
+        );
     }
 
     #[test]

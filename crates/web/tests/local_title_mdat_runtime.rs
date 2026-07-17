@@ -16,9 +16,9 @@ use crust_sim::camera::{
 use crust_sim::card::{CardOperation, CardOutcome, SaveData, VirtualCard};
 use crust_sim::flow::{TitlePhase, TitleScreen};
 use crust_sim::gool::{
-    CardHostRequest, LEVELS_UNLOCKED_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL,
-    RetailPadSnapshot, RetailSolidEnvironment, TITLE_STATE_GLOBAL, VmEffect, VmObject,
-    VmStateProgram,
+    CardHostRequest, GAME_STATE_GLOBAL, LEVELS_UNLOCKED_GLOBAL, ModelVertexSource,
+    NEXT_DISPLAY_GLOBAL, RetailPadSnapshot, RetailSolidEnvironment, TITLE_STATE_GLOBAL, VmEffect,
+    VmObject, VmStateProgram,
 };
 use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_arena::SpawnError;
@@ -899,6 +899,12 @@ impl<'assets> AuthoredTitleHarness<'assets> {
             return;
         }
         let snapshot = self.pad.snapshot();
+        self.camera.synchronize_game_state(
+            self.runtime
+                .global_word(GAME_STATE_GLOBAL)
+                .unwrap()
+                .cast_signed(),
+        );
         let island_cam_state = self
             .runtime
             .global_word(ISLAND_CAMERA_STATE_GLOBAL)
@@ -987,8 +993,14 @@ impl<'assets> AuthoredTitleHarness<'assets> {
                 .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
                 .unwrap();
         }
-        self.runtime.set_frame_context(
-            step.game_state,
+        let live_game_state = self
+            .runtime
+            .global_word(GAME_STATE_GLOBAL)
+            .expect("title game-state global must remain readable")
+            .cast_signed();
+        self.camera.synchronize_game_state(live_game_state);
+        self.runtime.latch_frame_context(
+            live_game_state,
             self.camera.rotation_xz(&self.graph).unwrap(),
         );
     }
@@ -1224,9 +1236,9 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
                 "TitleUpdate must add display/animate before GLUpdate latches the word"
             );
 
-            // State ten opens its authored skip gate on frame 64. Opcode
-            // 0x1a's two-frame tapped mode must therefore retain the coherent
-            // Start edge from frame 63 for that exact transition frame.
+            // MOVC arms the authored global transition routine in process.tp.
+            // Its time gate opens on frame 64, where opcode 0x1a's two-frame
+            // tapped mode must retain the coherent Start edge from frame 63.
             let mut transition_frame = None;
             for frame in 1..=64 {
                 let start_pressed = frame == 63;
@@ -1269,7 +1281,7 @@ fn image_title_mdat_objects_use_current_zdat_zone_colors_and_neighbor_terminatio
             assert_eq!(
                 transition_frame,
                 Some(64),
-                "the authored state-ten controller must consume the preceding Start edge through its two-frame tapped-button gate"
+                "the authored state-ten controller must retain MOVC's transition pointer and consume the preceding Start edge through its two-frame gate"
             );
             assert_eq!(
                 runtime.retail_title_presentation().unwrap().unwrap(),

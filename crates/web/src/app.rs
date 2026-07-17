@@ -19,7 +19,7 @@ use crust_audio::retail_music::RetailMusic;
 use crust_audio::retail_player::RetailMusicChange;
 use crust_formats::binary::{Eid, FormatError, PageIndex};
 use crust_formats::stream::{
-    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, NsfPage, ObjectVertexKind, RetailPathId,
+    KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, ObjectVertexKind, RetailPathId,
     RetailZoneGraph, ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry,
     parse_retail_midi, title_mdat_eid,
 };
@@ -53,7 +53,8 @@ use crust_sim::gool::{
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::paging::{
-    Pager, PagerCloseOutcome, PagerOpenOutcome, PagingError, TextureFrameSnapshot,
+    PageInvalidations, Pager, PagerCloseOutcome, PagerOpenOutcome, PagingError,
+    TextureFrameSnapshot,
 };
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
 use crust_sim::retail_runtime::{
@@ -550,6 +551,20 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
             .map_err(BrowserProgramError::Program)
     }
 
+    fn materialize_program_page(
+        &mut self,
+        binding: ProgramBinding<'_>,
+    ) -> Result<Option<PagerOpenOutcome>, Self::Error> {
+        let global = self
+            .program
+            .global_eid(binding.executable)
+            .map_err(BrowserProgramError::Program)?;
+        self.pager
+            .materialize_eid_with_outcome(global)
+            .map(Some)
+            .map_err(BrowserProgramError::Paging)
+    }
+
     fn bind_state_program(
         &mut self,
         binding: StateProgramBinding,
@@ -648,7 +663,11 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
         request: PagingHostRequest,
     ) -> Result<PagingHostResponse, Self::Error> {
         match request.operation {
-            PagingHostOperation::Open => match self.pager.open_eid_with_outcome(request.eid) {
+            PagingHostOperation::Open => match if request.physical {
+                self.pager.open_eid_with_outcome(request.eid)
+            } else {
+                self.pager.open_eid_virtual_with_outcome(request.eid)
+            } {
                 Ok(outcome) => {
                     if outcome.page != request.page {
                         return Err(BrowserProgramError::PagingPageMismatch {
@@ -656,11 +675,17 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
                             resolved: outcome.page,
                         });
                     }
-                    Ok(PagingHostResponse::Applied {
-                        evicted: outcome.evicted.map(|binding| binding.page),
-                    })
+                    if outcome.resolved {
+                        Ok(PagingHostResponse::Applied {
+                            invalidated: outcome.invalidated,
+                        })
+                    } else {
+                        Ok(PagingHostResponse::Queued)
+                    }
                 }
-                Err(PagingError::NoFreeTextureSlot(_)) => Ok(PagingHostResponse::Unavailable),
+                Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                    Ok(PagingHostResponse::Unavailable)
+                }
                 Err(error) => Err(BrowserProgramError::Paging(error)),
             },
             PagingHostOperation::Close => {
@@ -674,12 +699,20 @@ impl ProgramHost for BrowserProgramHost<'_, '_> {
                         resolved: outcome.page,
                     });
                 }
-                Ok(PagingHostResponse::Applied { evicted: None })
+                Ok(PagingHostResponse::Applied {
+                    invalidated: if outcome.unresolved {
+                        PageInvalidations::one(outcome.page)
+                    } else {
+                        PageInvalidations::NONE
+                    },
+                })
             }
             // `NSClose(ref, 0)` only observes the already-resolved reference.
-            // The VM owns its exact return value and deliberate case-four
-            // fallthrough; the platform pager must remain unchanged.
-            PagingHostOperation::Probe => Ok(PagingHostResponse::Applied { evicted: None }),
+            // The VM owns the native binary's exact one-word result; the
+            // platform pager must remain unchanged.
+            PagingHostOperation::Probe => Ok(PagingHostResponse::Applied {
+                invalidated: PageInvalidations::NONE,
+            }),
         }
     }
 
@@ -1009,14 +1042,25 @@ impl Runtime {
         let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
             .map_err(|_| JsValue::from_str("initial retail pager page count exceeds u32"))?;
         retail_objects
-            .seed_platform_paging_state(
+            .seed_platform_paging_state_with_capacity(
                 retail_pager_page_count,
+                u32::try_from(retail_zone_pager.physical_slot_count()).map_err(|_| {
+                    JsValue::from_str("initial retail physical page count exceeds u32")
+                })?,
                 retail_zone_pager.resolved_pages(),
                 retail_zone_pager.page_reference_counts(),
+                retail_zone_pager.uncounted_pages(),
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
                     "could not seed initial retail page resolutions: {error:?}"
+                ))
+            })?;
+        retail_objects
+            .seed_platform_pending_pages(retail_zone_pager.pending_virtual_pages())
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not seed initial virtual page requests: {error:?}"
                 ))
             })?;
         let title_seen = pair.level == FormatLevelId::TITLE;
@@ -1324,14 +1368,25 @@ impl Runtime {
         let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
             .map_err(|_| JsValue::from_str("destination retail pager page count exceeds u32"))?;
         retail_objects
-            .seed_platform_paging_state(
+            .seed_platform_paging_state_with_capacity(
                 retail_pager_page_count,
+                u32::try_from(retail_zone_pager.physical_slot_count()).map_err(|_| {
+                    JsValue::from_str("destination retail physical page count exceeds u32")
+                })?,
                 retail_zone_pager.resolved_pages(),
                 retail_zone_pager.page_reference_counts(),
+                retail_zone_pager.uncounted_pages(),
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(
                     "could not seed destination retail page resolutions: {error:?}"
+                ))
+            })?;
+        retail_objects
+            .seed_platform_pending_pages(retail_zone_pager.pending_virtual_pages())
+            .map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not seed destination virtual page requests: {error:?}"
                 ))
             })?;
         let destination_authoritative_save = retail_objects.card_save_data().map_err(|error| {
@@ -1935,6 +1990,17 @@ impl Runtime {
                 && self.retail_runtime_error.is_none()
                 && self.process_retail_level_transition(dom)?;
 
+            if retail_state
+                && !transition_queued
+                && self.retail_runtime_error.is_none()
+                && let Err(error) = self.update_pending_retail_page()
+            {
+                let message = format!("retail NSUpdate paging retry failed: {error}");
+                dom.log(&message, true);
+                self.retail_runtime_error = Some(message);
+                self.retail_tick_state = RetailTickState::Paused;
+            }
+
             if retail_state && !transition_queued && self.retail_runtime_error.is_none() {
                 let log_spawn_scan = matches!(
                     self.retail_tick_state,
@@ -2497,6 +2563,20 @@ impl Runtime {
         }
     }
 
+    fn update_pending_retail_page(&mut self) -> Result<(), String> {
+        let Some(outcome) = self
+            .retail_zone_pager
+            .update_pending_virtual_page()
+            .map_err(|error| format!("pager update failed: {error:?}"))?
+        else {
+            return Ok(());
+        };
+        debug_assert!(outcome.resolved);
+        self.retail_objects
+            .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+            .map_err(|error| format!("could not publish promoted page: {error:?}"))
+    }
+
     fn complete_retail_source_frame(
         &mut self,
         dom: &Dom,
@@ -2985,18 +3065,25 @@ impl Runtime {
                 destination_selected = true;
             }
             match apply_retail_zone_paging_action(&mut pager_commit, action)? {
-                RetailZonePagingOutcome::Open(outcome) => self
-                    .retail_objects
-                    .apply_platform_paging_open(
-                        outcome.page,
-                        outcome.evicted.map(|binding| binding.page),
-                    )
-                    .map_err(|error| {
+                RetailZonePagingOutcome::Open(outcome) => {
+                    let published = if outcome.resolved {
+                        self.retail_objects
+                            .apply_platform_paging_open(outcome.page, outcome.invalidated)
+                    } else {
+                        self.retail_objects
+                            .apply_platform_paging_queued_open(outcome.page)
+                    };
+                    published.map_err(|error| {
                         format!("could not publish hard-restart page resolution: {error:?}")
-                    })?,
+                    })?;
+                }
                 RetailZonePagingOutcome::Close(outcome) => self
                     .retail_objects
-                    .apply_platform_paging_close(outcome.page, outcome.decremented)
+                    .apply_platform_paging_close(
+                        outcome.page,
+                        outcome.decremented,
+                        outcome.unresolved,
+                    )
                     .map_err(|error| {
                         format!("could not publish hard-restart page close: {error:?}")
                     })?,
@@ -3134,6 +3221,12 @@ impl Runtime {
         snapshot: PlatformPadSnapshot,
         dom: &Dom,
     ) -> Result<RetailCameraStep, String> {
+        let shared_game_state = self
+            .retail_objects
+            .global_word(GAME_STATE_GLOBAL)
+            .map_err(|error| format!("retail camera game-state synchronization failed: {error:?}"))?
+            .cast_signed();
+        self.retail_camera.synchronize_game_state(shared_game_state);
         let location = self.retail_camera.location();
         let display_mask = self.effective_retail_display_mask();
         let spin_death = display_mask & 0x1_0000 != 0;
@@ -3279,8 +3372,14 @@ impl Runtime {
         let screen_projection = retail_screen_projection(field_of_view).ok_or_else(|| {
             format!("retail field of view {field_of_view} has no projection constant")
         })?;
+        let live_game_state = self
+            .retail_objects
+            .global_word(GAME_STATE_GLOBAL)
+            .map_err(|error| format!("retail post-camera game state is unavailable: {error:?}"))?
+            .cast_signed();
+        self.retail_camera.synchronize_game_state(live_game_state);
         self.retail_objects
-            .set_frame_context(step.game_state, rotation_xz);
+            .latch_frame_context(live_game_state, rotation_xz);
         self.retail_objects.set_transform_vectors_camera(
             RetailTransformVectorsCamera::from_retail_pose(
                 pose.translation,
@@ -3304,6 +3403,10 @@ impl Runtime {
     ) -> Result<(), String> {
         for effect in &step.effects {
             match *effect {
+                RetailCameraEffect::GameStateWrite { value } => self
+                    .retail_objects
+                    .set_global_word(GAME_STATE_GLOBAL, value.cast_unsigned())
+                    .map_err(|error| format!("retail camera game-state write failed: {error:?}"))?,
                 RetailCameraEffect::LevelUpdate {
                     before,
                     after,
@@ -3474,20 +3577,27 @@ impl Runtime {
                         destination_selected = true;
                     }
                     match apply_retail_zone_paging_action(&mut pager_commit, action)? {
-                        RetailZonePagingOutcome::Open(outcome) => self
-                            .retail_objects
-                            .apply_platform_paging_open(
-                                outcome.page,
-                                outcome.evicted.map(|binding| binding.page),
-                            )
-                            .map_err(|error| {
+                        RetailZonePagingOutcome::Open(outcome) => {
+                            let published = if outcome.resolved {
+                                self.retail_objects
+                                    .apply_platform_paging_open(outcome.page, outcome.invalidated)
+                            } else {
+                                self.retail_objects
+                                    .apply_platform_paging_queued_open(outcome.page)
+                            };
+                            published.map_err(|error| {
                                 format!(
                                     "could not publish zone-transition page resolution: {error:?}"
                                 )
-                            })?,
+                            })?;
+                        }
                         RetailZonePagingOutcome::Close(outcome) => self
                             .retail_objects
-                            .apply_platform_paging_close(outcome.page, outcome.decremented)
+                            .apply_platform_paging_close(
+                                outcome.page,
+                                outcome.decremented,
+                                outcome.unresolved,
+                            )
                             .map_err(|error| {
                                 format!("could not publish zone-transition page close: {error:?}")
                             })?,
@@ -5172,55 +5282,6 @@ fn build_retail_zone_pager(
     pair: &ValidatedPair,
     lifecycle: &ZoneLifecycle,
 ) -> Result<Pager, JsValue> {
-    let mut pager = Pager::new();
-    for page in &pair.nsf.pages {
-        let entry_handles = match page {
-            NsfPage::Texture(_) => Vec::new(),
-            NsfPage::Entries(page) => page
-                .entries
-                .iter()
-                .map(|entry| entry.handle)
-                .collect::<Vec<_>>(),
-        };
-        pager
-            .register_page(page.index(), entry_handles)
-            .map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not register retail NSF page {}: {error:?}",
-                    page.index().get()
-                ))
-            })?;
-        if let NsfPage::Entries(page) = page {
-            for entry in &page.entries {
-                pager.bind_eid(entry.eid, entry.handle).map_err(|error| {
-                    JsValue::from_str(&format!(
-                        "could not bind retail entry {} on page {}: {error:?}",
-                        entry.eid,
-                        page.index.get()
-                    ))
-                })?;
-            }
-        }
-    }
-    // NSD load-list EIDs can name either an entry-bearing page member or a
-    // complete type-one TPAG page. Bind the latter through its typed page
-    // target so native `NSOpen` semantics do not invent an EntryHandle.
-    for pte in &pair.nsd.page_table {
-        let page_index = pte.page_index();
-        if matches!(
-            pair.nsf.pages.get(page_index.get() as usize),
-            Some(NsfPage::Texture(_))
-        ) {
-            pager.bind_page_eid(pte.eid, page_index).map_err(|error| {
-                JsValue::from_str(&format!(
-                    "could not bind texture-page EID {} on page {}: {error:?}",
-                    pte.eid,
-                    page_index.get()
-                ))
-            })?;
-        }
-    }
-
     let current_zone = lifecycle
         .current_zone()
         .ok_or_else(|| JsValue::from_str("retail zone lifecycle has no initial current zone"))?;
@@ -5228,23 +5289,19 @@ fn build_retail_zone_pager(
         .zone(current_zone)
         .ok_or_else(|| JsValue::from_str("retail lifecycle current zone is absent"))?
         .load_list();
-    pager.set_current_texture_load_eids(load_list.entries().iter().copied());
-    for eid in load_list.entries() {
-        pager.open_eid(*eid).map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not open initial retail load EID {eid}: {error:?}"
-            ))
-        })?;
-    }
-    for page in load_list.pages() {
-        pager.open_page(*page).map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not open initial retail load page {}: {error:?}",
-                page.get()
-            ))
-        })?;
-    }
-    Ok(pager)
+    Pager::mount_retail_level(
+        &pair.nsd,
+        &pair.nsf,
+        pair.level,
+        current_zone,
+        load_list.entries().iter().copied(),
+        load_list.pages().iter().copied(),
+    )
+    .map_err(|error| {
+        JsValue::from_str(&format!(
+            "could not mount initial retail page ownership: {error:?}"
+        ))
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5273,16 +5330,20 @@ fn apply_retail_zone_paging_action(
                     page.get()
                 )
             }),
-        ZoneTransitionAction::OpenEntry(eid) => match pager.open_eid_with_outcome(eid) {
+        ZoneTransitionAction::OpenEntry(eid) => match pager.open_eid_virtual_with_outcome(eid) {
             Ok(outcome) => Ok(RetailZonePagingOutcome::Open(outcome)),
-            Err(PagingError::NoFreeTextureSlot(_)) => Ok(RetailZonePagingOutcome::OpenUnavailable),
+            Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                Ok(RetailZonePagingOutcome::OpenUnavailable)
+            }
             Err(error) => Err(format!(
                 "could not open retail transition EID {eid}: {error:?}"
             )),
         },
-        ZoneTransitionAction::OpenPage(page) => match pager.open_page_with_outcome(page) {
+        ZoneTransitionAction::OpenPage(page) => match pager.open_page_virtual_with_outcome(page) {
             Ok(outcome) => Ok(RetailZonePagingOutcome::Open(outcome)),
-            Err(PagingError::NoFreeTextureSlot(_)) => Ok(RetailZonePagingOutcome::OpenUnavailable),
+            Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                Ok(RetailZonePagingOutcome::OpenUnavailable)
+            }
             Err(error) => Err(format!(
                 "could not open retail transition page {}: {error:?}",
                 page.get()

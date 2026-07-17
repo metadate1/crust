@@ -40,8 +40,10 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    and drops excessive lag instead of replaying an unbounded catch-up burst. Its high-level flow
    value is a passive mount/presentation mirror; gameplay, title, completion, bonus, boss, intro and
    ending progression remain owned by mounted retail GOOL. Each tick publishes card and pad state,
-   consumes any prior-frame level request, then performs spawn, camera, a frame-start texture-page
-   snapshot, and GOOL in source order. A
+   consumes any prior-frame level request, retries one lowest-PGID queued virtual page, then performs
+   spawn, camera, a frame-start texture-page snapshot, and GOOL in source order. A queued request
+   keeps its VM reference until promotion or its final close, so physical saturation cannot silently
+   discard a flag-zero open. A
    title tick continues through `TitleUpdate`, any synchronous `TitleLoadState`, and `GLUpdate`
    before the passive mirror observes the loaded screen. A one-frame swap latch preserves native's
    immediate opaque overlay even when the loaded GOOL requests another fade in that same update.
@@ -50,8 +52,10 @@ generation, mixing, input mapping and storage schemas remain native-testable.
    post-update/pre-child boundary in retail preorder, and atomically builds one pair-scoped
    world/object command stream.
    Automatic camera modes use pad taps; follow modes consume the hosted main object's typed
-   transform, zoom, held pad and prior frame stamp. Camera LevelUpdate effects apply ordered
-   zone/pager transitions before the following spawn scan. When authored display bit `0x10000`
+   transform, zoom, held pad and prior frame stamp. Follow and automatic movement emits the
+   applicable shared game-state write and then a `LevelUpdate` for every successful same-path or
+   crossing movement. Those effects apply ordered zone/pager transitions before the following
+   spawn scan. When authored display bit `0x10000`
    selects `CamDeath`, the runtime resolves global 36's live generation-paired object, its current
    vertex animation/frame and global 49's vertex through the mounted asset host, transforms that
    vertex in fixed point, and advances the six persistent death-camera words plus global 10's
@@ -192,7 +196,7 @@ synthetic title, menu or gameplay scene.
 Initial boot and every committed pair remount first perform the `CoreObjectsCreate` `PadUpdate`,
 including state-three PBAK suppression, so the next frame sees the source-shifted held/tapped
 history even across asynchronous validation. The hosted presentation path then records the 30 Hz
-order `card/pause → PBAK → pending level transition → spawn → shader → camera → frame-start texture
+order `card/pause → PBAK → pending level transition → NSUpdate → spawn → shader → camera → frame-start texture
 snapshot → GOOL plus ordered display-record capture → combined world/object scene → presentation`
 plus draw-skip and draw-count
 timing. Title frames insert the authoritative `TitleUpdate → TitleLoadState → GLUpdate` boundary
@@ -228,7 +232,10 @@ stack, table, event-argument and retained-pool copies preserve its identity with
 route. Dereferencing the tag for path orientation is bounds checked, and the owned table outlives
 the GOOL object that first received the authored entity. This is required by Ripper Roo's generic
 RooOC state-three code: each runtime-created Big TNT copies its parent entity reference, then uses
-that copied path in states four and five.
+that copied path in states four and five. RooOC state two also demonstrates why typed code pointers
+are live process aliases rather than inert register snapshots: its transition word 41 moves the
+post-fetch PC into `process.tp`, advancing subsequent transition draws past the one-time spawn
+prefix.
 
 The 96 ordinary slots begin as native's ascending `free_objects` chain. Binding preflights handle,
 slot, occupancy, and free-list membership before installation is committed; unlinking an arbitrary
@@ -415,8 +422,14 @@ children (including bounded `0x91` reclaim selection). A state-change halt is re
 stream host; rebind, once and transition code complete at that same host boundary, and normal code
 continues in the same native update. Paging, event services, interrupts and audio calls use the
 same typed synchronous request boundary. The browser's paging host validates requested EID/page
-identity against its Pager, returns any resident eviction to the VM, and leaves an unavailable open
-unapplied. The browser creates this runtime
+identity against its Pager, returns the complete fixed-capacity invalidation set to the VM, and
+leaves an unavailable open unapplied. A texture open can invalidate one ordinary transfer-RAM page
+and one resident texture page in the same operation; both PTEs are removed atomically before the
+requested page is published. Mount seeding latches the heap-derived physical capacity (20 pages
+for Title, 21 for Intro, 22 for every other stream), independently of the larger catalog metadata
+registered by later object/state binds. A count-zero global-program materialization returns its
+resolved page plus invalidations; the VM clears a pre-existing queued marker, preserves references,
+and publishes that result atomically. The browser creates this runtime
 when a pair is mounted and runs it at 30 Hz in title, gameplay, bonus, boss, level-complete, intro
 and ending flow states. The host initializes the characterized ZDAT
 zone/path transform, rotation/mode flags, scale, colors and scalar process defaults. Register 44

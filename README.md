@@ -69,15 +69,27 @@ share the bounded
 process word array at `init_sp`, state links apply target-state guards, and checked failures
 quarantine only the affected object. GOOL `0x8b` open cases one/six, close case two, and probe case
 three cross a typed synchronous pager boundary; cases four/five remain VM-local. An unavailable
-open rolls back its optimistic VM reference, a resident replacement re-arms the displaced page,
-and mismatched EID/page acknowledgements are rejected. Checked aligned code/storage/entry/entity tags,
+physical open rolls back its optimistic VM reference. A flag-zero open that cannot acquire ordinary
+RAM instead retains a referenced state-two virtual request; the 30 Hz `NSUpdate` boundary promotes
+the lowest queued page when a slot becomes replaceable, and a final close cancels an unpromoted
+request. A successful promotion remains translated at reference count zero, and a texture transfer
+reports both its ordinary-RAM and texture-slot evictions when both occur. Resolved copied
+texture/audio PTEs retain their counts and return zero for `NSClose(ref, 1)`, while count-zero probes
+still return one. The VM re-arms every displaced page and rejects mismatched EID/page
+acknowledgements. The heap-derived ordinary-page capacity remains authoritative after mount—20
+slots for Title, 21 for Intro, and 22 elsewhere—so later object/state metadata cannot silently
+raise it. Count-zero program materialization atomically resolves the requested PTE, clears any
+queued marker without changing its reference count, and invalidates every zero-reference victim.
+Checked aligned code/storage/entry/entity tags,
 five-word pad history, camera-relative movement, gravity, rotation, every source selector in the
 `0x85` transform-vector and `0x8e` solid/color families, and `SZON`'s reverse current-header
 neighbor search are implemented without native pointers or C undefined behavior. Misc 12/7 also
 performs the distinct forward current-header neighbor TERM sweep through the typed object host.
 Entity tags resolve through a machine-owned validated path table and survive ordinary GOOL copies;
-Ripper Roo's runtime-created Big TNTs therefore retain entity seven's authored waterfall path after
-copying register 44 from their parent.
+Ripper Roo's runtime-created Big TNTs therefore retain each authored waterfall controller's path
+after copying register 44 from their parent. RooOC's state-two transition also writes the live
+post-fetch program counter into `process.tp`, so each controller creates one child and resumes after
+the spawn prefix on later draws instead of filling the object pool with duplicate TNTs.
 GOOL `0x14` (LEA) preserves input-before-output address translation and represents process-local
 animations as checked storage identities. Descriptors in internal or register storage are
 revalidated from the live aliased words: type one supplies its model to both bounds and vertex
@@ -273,13 +285,13 @@ The post-boss Map becomes ready on frame 10, waits for its authored current-node
 taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
 Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. A session-gated
 ordinary-pad continuation now completes carried Rolling Stones and requests Level Complete `0x2d`
-on frame 2,450. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
-the end `WarpC`, and ends at camera `0O_lZ:0@12199` with Crash in warp state 32 at
-`[2101120, 9256238, -1866496]`. It activates checkpoint `0x0800` on frame 1,160, retains saved box
+on frame 2,449. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
+the end `WarpC`, and ends at camera `0O_lZ:0@10496` with Crash in warp state 32 at
+`[2219008, 9256242, -1833728]`. It activates checkpoint `0x0800` on frame 1,160, retains saved box
 count `0x0a00`, and advances the live count to `0x0c00`. The route records 117 successful spawns
-from 29,236 attempts with 29,119 source-expected rejections, 55,106 clean executions, 32 lifecycle
+from 29,224 attempts with 29,107 source-expected rejections, 54,526 clean executions, 32 lifecycle
 zone transitions, 45 camera ranges and 46 path changes. It has no restart, state-31 squash, death
-camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x96bb47ac` at draw 6,781.
+camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x9dbf3415` at draw 6,780.
 These are deterministic native integration goldens over user-supplied local data, not a browser
 playthrough or full-game parity claim; a browser exercise of this complete carried chain remains
 open.
@@ -293,12 +305,13 @@ entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths fro
 count then becomes `0x0b00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
 1,860, advancing the live count to `0x0c00`. Three ordinary terrain jumps carry Crash from `0M`
 into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
-WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,448. The
-route records 117 successful spawns from 29,223 attempts with 29,106 source-expected rejections,
-55,226 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
-final camera is `0O_lZ:0@12199`, RNG is `0x9e602d68` at draw 2,448, and it has no restart,
-state-31 squash, death camera, terminal fall, VM fault, execution error, or LoadState. The carried
-route above independently reaches the same authored end two frames later.
+WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,447. The
+route records 117 successful spawns from 29,211 attempts with 29,094 source-expected rejections,
+54,508 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
+final camera is `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x87bd5fc1`
+at draw 2,447. It has no restart, state-31 squash, death camera, terminal fall, VM fault, execution
+error, or LoadState. The carried route above independently reaches the same authored end two
+frames later.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
 checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
@@ -315,33 +328,33 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
-Native Fortress retains its exact 550-frame direct-boot ordinary-pad golden at the first
-greasy-platform boundary, and a separate extended route now crosses that segment. The extension
-hops back to the preceding shelf for runway, reverses left, and carries the running jump across the
-first subtype-two `WalOC`. At frame 650 the camera is `a7_qZ` path zero/progress 6,240 and Crash is
-grounded at `[5885696, -10880527, 118784]`, with the next subtype-two `WalOC` live in state 11. It
-performs 19 successful spawns from 4,109 attempts, 10,880 clean executions and six lifecycle
-transitions with no restart, death camera, terminal fall, VM fault, execution error, or checked
-issue. A second extension continues with ordinary left/right/Cross pad samples over the authored
-falling-platform series. The camera enters `a8_qZ` on frame 749, settles at path zero/progress
-4,883 on frame 761, and Crash remains grounded there through frame 800 at
-`[4685568, -10782730, 118784]`. That run performs 22 successful spawns from 5,009 attempts and
-13,428 clean executions across seven lifecycle transitions, again with no restart, death camera,
-terminal fall, VM fault, execution error, or checked issue. This establishes the authored handoff
-into `a8_qZ`, not Native Fortress completion.
-Up the Creek now has a bounded direct-boot ordinary-pad route through its opening logs, first
-checkpoint, and three post-checkpoint platforms. The route activates checkpoint entity 76 on
-frame 1,057, retaining saved box count `0x200` before the live count becomes `0x300`. It rides
-entity 75 into `0l_oZ`, waits through a complete cycle, transfers onto entity 80, then uses a
-39-sample neutral wait and four-sample run-up to land on vertical platform entity 88. At frame
-1,520 Crash is grounded in `0m_oZ` at `[2372776, 1720258, 17415800]`, with a validated collider
-reference to entity 88 and camera `0m_oZ` path zero/progress 4,288. The run records 94 successful
-spawns, 48,147 clean executions, 16 lifecycle transitions, 21 camera ranges and 26 path changes
-with no restart, LoadState, terminal fall, VM fault, or execution error. This is not an Up the
-Creek completion or browser playthrough claim.
-The current native schedule therefore includes seven deterministic normal-level completions, the
-complete carried Upstream route, Papu Papu's authored completion, and both direct and carried
-Rolling Stones completion; this is not a full retail playthrough or a browser-playthrough claim.
+Native Fortress now has cumulative exact ordinary-pad goldens from the first greasy-platform
+boundary through `a7_qZ`/`a8_qZ`, the `b0` rotating-log climb, the upper `b2`
+launcher-and-turtle chain, each subsequent bank through `b9_qZ`, and the two-plant/falling-log
+handoff into `c0_qZ`. The latest route runs 2,600 frames, performs 104 successful spawns and 25
+lifecycle transitions, and finishes at camera progress 17,593 with Crash at
+`[11308800, -7618863, 133120]`; player movement settles on frame 2,090. It records no restart,
+death camera, terminal fall, VM fault, faulted object, execution error, or checked issue. This
+establishes the authored handoff into `c0_qZ`, not Native Fortress completion.
+
+Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
+checkpoint entity 76 on frame 1,057, preserving saved box count `0x200` before the live count
+advances, then traverses the complete authored `RivOC` chain through `0F_oZ` platforms 12 and 11.
+The final running jump enters `0G_oZ`'s authored `WarpC`; states zero through four execute and
+request Level Complete `0x2d` on frame 4,035. The route performs 191 successful spawns and 119,408
+clean executions across 36 lifecycle transitions, 53 camera ranges and 60 path changes, with no
+restart, LoadState, death camera, terminal fall, VM fault, faulted object, execution error, or
+checked issue. Bonus-path coverage and a browser-driven completion remain separate gaps.
+A separate carried-session golden starts from the authored island-two map, selects Up the Creek,
+completes the same route, crosses the 225-frame Level Complete graph, returns to the map, and uses
+ordinary Up/Cross input to boot Ripper Roo (`0x17`). Its first arena frame mounts cleanly while
+preserving the exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map
+globals across every `LEVEL_END` handoff.
+
+The current native schedule therefore includes deterministic normal-route completions for
+N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild, and
+Up the Creek, plus authored Papu Papu and later boss completions. These are not a full retail
+playthrough or a browser-playthrough claim.
 Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
 CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
@@ -371,8 +384,10 @@ direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream cha
 real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
 Rollers, and reproduces the protected parent remount while checking Crash's transform, camera
 path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
-substitute for one uninterrupted pad-driven route or browser full-playthrough. Every LevelUpdate
-also republishes the destination zone's graphics flags in GOOL
+substitute for one uninterrupted pad-driven route or browser full-playthrough. Follow and automatic
+camera movement now calls `LevelUpdate` after every successful same-path or crossing movement, in
+source order after the applicable shared game-state write. Every `LevelUpdate` also republishes the
+destination zone's graphics flags in GOOL
 global 30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch
 instead of falling through to the ordinary Title transition. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX
@@ -432,8 +447,8 @@ with the exact draw phase; the subsequent browser graph remount is not part of t
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 553 passing tests; the locked workspace inventory has 909 default-active
-tests plus 95 ignored-by-default legally local tests. Native
+The `crust-sim` library has 583 passing tests; the locked workspace inventory has 940 default-active
+tests plus 130 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A final Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN through a

@@ -13,8 +13,8 @@ use crust_formats::{
     },
 };
 use crust_sim::{
-    camera::{GAME_STATE_CUTSCENE, RetailCameraInput, RetailCameraRuntime},
-    gool::{RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect},
+    camera::{GAME_STATE_CUTSCENE, RetailCameraEffect, RetailCameraInput, RetailCameraRuntime},
+    gool::{GAME_STATE_GLOBAL, RetailPadSnapshot, RetailTransformVectorsCamera, VmEffect},
     object_arena::NeighborZone,
     player::PAD_START,
     retail_runtime::{NsfProgramHost, RetailLevelStateContext, RetailRuntime},
@@ -96,14 +96,27 @@ fn install_camera_frame(
     assert_eq!(step.before, before);
     assert_eq!(step.after, before, "the authored terminal path must hold");
     assert_eq!(camera.location(), before);
-    assert!(step.effects.is_empty());
+    assert_eq!(
+        step.effects,
+        [RetailCameraEffect::GameStateWrite {
+            value: GAME_STATE_CUTSCENE,
+        }]
+    );
+    runtime
+        .set_global_word(GAME_STATE_GLOBAL, GAME_STATE_CUTSCENE.cast_unsigned())
+        .expect("terminal camera game-state write succeeds");
 
     let pose = camera.pose(graph).expect("terminal camera pose is valid");
     let rotation_xz = camera
         .rotation_xz(graph)
         .expect("terminal camera rotation is valid");
     let field_of_view = nsd.ldat().expect("Intro has LDAT").field_of_view;
-    runtime.set_frame_context(step.game_state, rotation_xz);
+    let live_game_state = runtime
+        .global_word(GAME_STATE_GLOBAL)
+        .expect("terminal game state remains readable")
+        .cast_signed();
+    camera.synchronize_game_state(live_game_state);
+    runtime.latch_frame_context(live_game_state, rotation_xz);
     runtime.set_transform_vectors_camera(RetailTransformVectorsCamera::from_retail_pose(
         pose.translation,
         pose.rotation_yxz,

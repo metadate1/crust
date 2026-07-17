@@ -58,6 +58,16 @@ been reviewed by qualified counsel. Default copyright remains with the respectiv
 rights holders.
 
 The rewrite's CSS/browser shell is original to this repository and contains no copied game imagery.
+The two committed decorative shell images were generated specifically for this private project on
+2026-07-16 with OpenAI's image-generation service from text-only prompts: an original
+jungle/wood/stone game-window surround (`web/assets/crust-game-frame.png`, SHA-256
+`f065de37fe957794b7f477b1e339adeefa5e41851f32dfe39f7971091a594261`) and an original
+`CRUST` wordmark (`web/assets/crust-wordmark.png`, SHA-256
+`220068c73614f4cc55dba334defa810dbd312e5831d1d8bc5f3f85220d44ce5c`). No retail screenshot,
+disc asset, extracted texture, or third-party logo file was supplied as an image reference. These
+original shell assets do not change the repository's restricted-distribution status or imply
+endorsement by the game's rights holders.
+
 The former procedural diagnostic geometry is no longer part of the runtime. Retail loading/title
 images, worlds and textures are decoded transiently from the user's selected local data and are
 never committed. Generated `wasm-bindgen` loader code is build output and is not committed.

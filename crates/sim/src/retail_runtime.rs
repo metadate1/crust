@@ -27,7 +27,7 @@ use crate::{
         CardHostRequest, CollisionObjectReference, EventDispatchOutcome, EventStateChange,
         Execution, GoolProgramIdentity, HaltReason, INITIAL_DISPLAY_MASK, MAX_OBJECTS, Machine,
         ModelVertexSource, NEXT_DISPLAY_GLOBAL, NearestObjectCandidate,
-        ObjectHandle as VmObjectHandle, PagingHostRequest, PagingHostResponse,
+        ObjectHandle as VmObjectHandle, PagingHostOperation, PagingHostRequest, PagingHostResponse,
         ProcessAnimationKind, RETAIL_LEVEL_SPAWN_CAPACITY, RetailPadSnapshot,
         RetailSolidEnvironment, RetailSolidZone, RetailTransform, RetailTransformVectorsCamera,
         SendEventRequest, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmError, VmHostRequest,
@@ -43,7 +43,7 @@ use crate::{
         AnimationBoundSource, BoundTransform, bounds_intersect_asymmetric, calculate_local_bound,
         calculate_world_bound, retail_yxy_transform,
     },
-    paging::TextureFrameSnapshot,
+    paging::{PageInvalidations, Pager, PagerOpenOutcome, PagingError, TextureFrameSnapshot},
     retail_lighting::{
         ObjectDarkShaderInput, RetailObjectZoneShaderError, apply_retail_object_zone_shader,
     },
@@ -667,6 +667,17 @@ pub trait ProgramHost {
 
     fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error>;
 
+    /// Mirrors `GoolObjectInit`'s physical `NSOpen(global, count = 0)` after a
+    /// checked program bind. Stream-only hosts need no separate allocator;
+    /// browser hosts return the resolved program page and every PTE displaced
+    /// while acquiring its ordinary physical slot.
+    fn materialize_program_page(
+        &mut self,
+        _binding: ProgramBinding<'_>,
+    ) -> Result<Option<PagerOpenOutcome>, Self::Error> {
+        Ok(None)
+    }
+
     fn bind_state_program(
         &mut self,
         binding: StateProgramBinding,
@@ -769,7 +780,9 @@ pub trait ProgramHost {
         &mut self,
         _request: PagingHostRequest,
     ) -> Result<PagingHostResponse, Self::Error> {
-        Ok(PagingHostResponse::Applied { evicted: None })
+        Ok(PagingHostResponse::Applied {
+            invalidated: PageInvalidations::NONE,
+        })
     }
 
     /// Returns the platform pager's live eight-slot mapping at the current
@@ -827,8 +840,16 @@ impl<'a> NsfProgramHost<'a> {
 pub enum NsfProgramError {
     MissingLdat,
     ExecutableOutsideLdat(u8),
-    MissingExecutable { executable: u8, eid: Eid },
+    MissingExecutable {
+        executable: u8,
+        eid: Eid,
+    },
     Format(FormatError),
+    Paging(PagingError),
+    PagingPageMismatch {
+        requested: PageIndex,
+        resolved: PageIndex,
+    },
     Vm(VmError),
 }
 
@@ -1260,7 +1281,10 @@ impl ProgramHost for NsfProgramHost<'_> {
 }
 
 impl NsfProgramHost<'_> {
-    fn global_eid(&self, executable: u8) -> Result<Eid, NsfProgramError> {
+    /// Resolves one checked LDAT executable-map slot without exposing stream
+    /// pointers. Platform pagers use this to mirror `GoolObjectInit`'s physical
+    /// count-zero global open before binding the Rust program.
+    pub fn global_eid(&self, executable: u8) -> Result<Eid, NsfProgramError> {
         let ldat = self.metadata.ldat().ok_or(NsfProgramError::MissingLdat)?;
         let global_eid = ldat
             .executable_map
@@ -1274,6 +1298,172 @@ impl NsfProgramHost<'_> {
             });
         }
         Ok(global_eid)
+    }
+}
+
+/// Stream-backed GOOL host coupled to the shared retail page allocator.
+///
+/// This is used by native characterization runs and other non-browser hosts;
+/// the browser layers audio/card ownership on the same [`Pager`] contract.
+#[derive(Debug)]
+pub struct PagedNsfProgramHost<'assets, 'pager> {
+    program: NsfProgramHost<'assets>,
+    pager: &'pager mut Pager,
+}
+
+impl<'assets, 'pager> PagedNsfProgramHost<'assets, 'pager> {
+    #[must_use]
+    pub fn new(
+        metadata: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        pager: &'pager mut Pager,
+    ) -> Self {
+        Self {
+            program: NsfProgramHost::new(metadata, nsf, nsf_bytes),
+            pager,
+        }
+    }
+
+    #[must_use]
+    pub fn pager(&self) -> &Pager {
+        self.pager
+    }
+
+    pub fn pager_mut(&mut self) -> &mut Pager {
+        self.pager
+    }
+}
+
+impl ProgramHost for PagedNsfProgramHost<'_, '_> {
+    type Error = NsfProgramError;
+
+    fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+        self.program.bind_program(binding)
+    }
+
+    fn materialize_program_page(
+        &mut self,
+        binding: ProgramBinding<'_>,
+    ) -> Result<Option<PagerOpenOutcome>, Self::Error> {
+        let global = self.program.global_eid(binding.executable)?;
+        self.pager
+            .materialize_eid_with_outcome(global)
+            .map(Some)
+            .map_err(NsfProgramError::Paging)
+    }
+
+    fn bind_state_program(
+        &mut self,
+        binding: StateProgramBinding,
+    ) -> Result<VmStateProgram, Self::Error> {
+        self.program.bind_state_program(binding)
+    }
+
+    fn zone_environment(
+        &mut self,
+        zone: Eid,
+    ) -> Result<Option<RetailZoneEnvironment>, Self::Error> {
+        self.program.zone_environment(zone)
+    }
+
+    fn solid_environment(
+        &mut self,
+        zone: Eid,
+    ) -> Result<Option<RetailSolidEnvironment>, Self::Error> {
+        self.program.solid_environment(zone)
+    }
+
+    fn find_neighbor_zone(
+        &mut self,
+        current_zone: Eid,
+        point: [i32; 3],
+    ) -> Result<Option<Eid>, Self::Error> {
+        self.program.find_neighbor_zone(current_zone, point)
+    }
+
+    fn current_zone_neighbors(&mut self, current_zone: Eid) -> Result<Vec<Eid>, Self::Error> {
+        self.program.current_zone_neighbors(current_zone)
+    }
+
+    fn animation_bound_source(
+        &mut self,
+        binding: AnimationBoundBinding,
+    ) -> Result<Option<AnimationBoundSource>, Self::Error> {
+        self.program.animation_bound_source(binding)
+    }
+
+    fn animation_display_vertex_kind(
+        &mut self,
+        binding: AnimationBoundBinding,
+    ) -> Result<Option<ObjectVertexKind>, Self::Error> {
+        self.program.animation_display_vertex_kind(binding)
+    }
+
+    fn model_vertex_source(
+        &mut self,
+        binding: ModelVertexBinding,
+    ) -> Result<Option<ModelVertexSource>, Self::Error> {
+        self.program.model_vertex_source(binding)
+    }
+
+    fn handle_paging_request(
+        &mut self,
+        request: PagingHostRequest,
+    ) -> Result<PagingHostResponse, Self::Error> {
+        match request.operation {
+            PagingHostOperation::Open => match if request.physical {
+                self.pager.open_eid_with_outcome(request.eid)
+            } else {
+                self.pager.open_eid_virtual_with_outcome(request.eid)
+            } {
+                Ok(outcome) => {
+                    if outcome.page != request.page {
+                        return Err(NsfProgramError::PagingPageMismatch {
+                            requested: request.page,
+                            resolved: outcome.page,
+                        });
+                    }
+                    if outcome.resolved {
+                        Ok(PagingHostResponse::Applied {
+                            invalidated: outcome.invalidated,
+                        })
+                    } else {
+                        Ok(PagingHostResponse::Queued)
+                    }
+                }
+                Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                    Ok(PagingHostResponse::Unavailable)
+                }
+                Err(error) => Err(NsfProgramError::Paging(error)),
+            },
+            PagingHostOperation::Close => {
+                let outcome = self
+                    .pager
+                    .close_eid_retail_with_outcome(request.eid)
+                    .map_err(NsfProgramError::Paging)?;
+                if outcome.page != request.page {
+                    return Err(NsfProgramError::PagingPageMismatch {
+                        requested: request.page,
+                        resolved: outcome.page,
+                    });
+                }
+                Ok(PagingHostResponse::Applied {
+                    invalidated: if outcome.unresolved {
+                        PageInvalidations::one(outcome.page)
+                    } else {
+                        PageInvalidations::NONE
+                    },
+                })
+            }
+            PagingHostOperation::Probe => Ok(PagingHostResponse::Applied {
+                invalidated: PageInvalidations::NONE,
+            }),
+        }
+    }
+
+    fn texture_frame_snapshot(&self) -> Option<TextureFrameSnapshot> {
+        Some(self.pager.texture_frame_snapshot())
     }
 }
 
@@ -2885,13 +3075,72 @@ impl RetailRuntime {
             .seed_platform_paging_state(page_count, resolved_pages, page_references)
     }
 
+    /// Browser seed that keeps texture-cache references outside native's
+    /// twenty-two ordinary-page availability count.
+    pub fn seed_platform_paging_state_with_uncounted_pages(
+        &mut self,
+        page_count: u32,
+        resolved_pages: impl IntoIterator<Item = PageIndex>,
+        page_references: impl IntoIterator<Item = (PageIndex, u32)>,
+        uncounted_pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        self.machine
+            .seed_platform_paging_state_with_uncounted_pages(
+                page_count,
+                resolved_pages,
+                page_references,
+                uncounted_pages,
+            )
+    }
+
+    /// Seeds both the NSF catalog and the smaller heap-derived PS1 page pool.
+    pub fn seed_platform_paging_state_with_capacity(
+        &mut self,
+        page_count: u32,
+        physical_page_capacity: u32,
+        resolved_pages: impl IntoIterator<Item = PageIndex>,
+        page_references: impl IntoIterator<Item = (PageIndex, u32)>,
+        uncounted_pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        self.machine.seed_platform_paging_state_with_capacity(
+            page_count,
+            physical_page_capacity,
+            resolved_pages,
+            page_references,
+            uncounted_pages,
+        )
+    }
+
+    /// Seeds virtual requests retained by the platform pager at mount time.
+    pub fn seed_platform_pending_pages(
+        &mut self,
+        pages: impl IntoIterator<Item = PageIndex>,
+    ) -> Result<(), VmError> {
+        self.machine.seed_platform_pending_pages(pages)
+    }
+
     /// Applies one browser lifecycle open outside a GOOL instruction.
     pub fn apply_platform_paging_open(
         &mut self,
         page: PageIndex,
-        evicted: Option<PageIndex>,
+        invalidated: PageInvalidations,
     ) -> Result<(), VmError> {
-        self.machine.apply_platform_paging_open(page, evicted)
+        self.machine.apply_platform_paging_open(page, invalidated)
+    }
+
+    /// Retains one lifecycle-owned flag-zero page in the virtual queue.
+    pub fn apply_platform_paging_queued_open(&mut self, page: PageIndex) -> Result<(), VmError> {
+        self.machine.apply_platform_paging_queued_open(page)
+    }
+
+    /// Publishes one successful frame-boundary `NSUpdate(-1)` promotion.
+    pub fn apply_platform_paging_resolution(
+        &mut self,
+        page: PageIndex,
+        invalidated: PageInvalidations,
+    ) -> Result<(), VmError> {
+        self.machine
+            .apply_platform_paging_resolution(page, invalidated)
     }
 
     /// Applies one browser lifecycle close outside a GOOL instruction.
@@ -2899,8 +3148,10 @@ impl RetailRuntime {
         &mut self,
         page: PageIndex,
         decremented: bool,
+        unresolved: bool,
     ) -> Result<(), VmError> {
-        self.machine.apply_platform_paging_close(page, decremented)
+        self.machine
+            .apply_platform_paging_close(page, decremented, unresolved)
     }
 
     /// Advances every source `ShaderParamsUpdate(0)` case at the unpaused
@@ -4298,6 +4549,13 @@ impl RetailRuntime {
     pub fn set_frame_context(&mut self, game_state: i32, camera_rotation_xz: Angle12) {
         self.machine
             .set_retail_frame_context(game_state, i32::from(camera_rotation_xz.raw()));
+    }
+
+    /// Latches a live post-effect game-state word for physics without writing
+    /// that word back over any synchronous camera/TERM handler mutation.
+    pub fn latch_frame_context(&mut self, game_state: i32, camera_rotation_xz: Angle12) {
+        self.machine
+            .latch_retail_frame_context(game_state, i32::from(camera_rotation_xz.raw()));
     }
 
     /// Freezes the camera pose and projection used by GOOL transform-vector
@@ -8485,6 +8743,7 @@ impl RetailRuntime {
         if let VmEffect::Paging {
             object,
             operation,
+            physical,
             reference,
             eid,
             page,
@@ -8498,6 +8757,7 @@ impl RetailRuntime {
             let request = PagingHostRequest {
                 object: runtime_object.vm(),
                 operation: *operation,
+                physical: *physical,
                 reference: *reference,
                 eid: *eid,
                 page: *page,
@@ -9099,6 +9359,15 @@ impl RetailRuntime {
                     actual: vm_object.handle(),
                 });
             }
+            if let Err(error) = Self::apply_program_page_materialization(machine, host, binding) {
+                if is_new_binding {
+                    handles.release(object);
+                    arena
+                        .despawn_subtree(arena_handle)
+                        .map_err(RuntimeError::Tree)?;
+                }
+                return Err(error);
+            }
             let install_result = (|| {
                 machine
                     .seed_retail_pool_slot_storage(object.arena.slot(), &mut vm_object)
@@ -9178,6 +9447,7 @@ impl RetailRuntime {
                 actual: vm_object.handle(),
             });
         }
+        Self::apply_program_page_materialization(&mut self.machine, host, binding)?;
         self.machine
             .seed_retail_pool_slot_storage(binding.object.arena.slot(), &mut vm_object)
             .map_err(RuntimeError::Vm)?;
@@ -9238,6 +9508,22 @@ impl RetailRuntime {
             object: binding.object,
             environment,
         })
+    }
+
+    fn apply_program_page_materialization<H: ProgramHost>(
+        machine: &mut Machine,
+        host: &mut H,
+        binding: ProgramBinding<'_>,
+    ) -> Result<(), RuntimeError<H::Error>> {
+        if let Some(outcome) = host
+            .materialize_program_page(binding)
+            .map_err(RuntimeError::Program)?
+        {
+            machine
+                .apply_platform_program_materialization(outcome.page, outcome.invalidated)
+                .map_err(RuntimeError::Vm)?;
+        }
+        Ok(())
     }
 
     fn initialize_vm_process<E>(

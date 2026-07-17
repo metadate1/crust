@@ -1,12 +1,15 @@
 //! Opt-in end-to-end runtime bridge checks against the user's own retail data.
 
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use crust_formats::binary::{Eid, PageIndex};
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
-    LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect, parse_nsd,
-    parse_nsf,
+    LevelId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity, ZoneHeader, ZoneRect,
+    load_gool_state_program, parse_nsd, parse_nsf,
 };
 use crust_sim::camera::{RetailCameraInput, RetailCameraRuntime};
 use crust_sim::gool::{
@@ -16,8 +19,9 @@ use crust_sim::gool::{
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
+use crust_sim::paging::Pager;
 use crust_sim::retail_runtime::{
-    NsfProgramHost, ProgramHost, RetailLevelStateContext, RetailRuntime,
+    NsfProgramHost, PagedNsfProgramHost, ProgramHost, RetailLevelStateContext, RetailRuntime,
 };
 use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, SpawnScanZone, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction,
@@ -249,6 +253,14 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
         std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
     let nsd = parse_nsd(&nsd_bytes, level).unwrap();
     let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let roo_eid = nsd.ldat().unwrap().executable_map[39];
+    let roo_state_two = load_gool_state_program(&nsd, &nsf, &nsf_bytes, roo_eid, 2).unwrap();
+    assert_eq!(roo_state_two.transition_pc(), Some(26));
+    assert_eq!(
+        roo_state_two.code().get(41),
+        Some(&0x11e2_0e22),
+        "RooOC state two must move the live post-fetch PC into process.tp"
+    );
     let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
     let zone = graph.spawn_path().zone;
     let entry = nsf.resolve_entry(&nsd, zone).unwrap();
@@ -277,11 +289,33 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
         first_spawn: false,
         active_neighbor_zones: vec![zone],
     });
-    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
-    runtime.create_retail_core_objects(zone, &mut host).unwrap();
+    let mut initial_host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
     runtime
-        .create_retail_level_misc_object(zone, &mut host)
+        .create_retail_core_objects(zone, &mut initial_host)
         .unwrap();
+    runtime
+        .create_retail_level_misc_object(zone, &mut initial_host)
+        .unwrap();
+    let initial_load_list = OrderedZoneLoadList::from(&header.load_list);
+    let mut pager = Pager::mount_retail_level(
+        &nsd,
+        &nsf,
+        level,
+        zone,
+        initial_load_list.entries().iter().copied(),
+        initial_load_list.pages().iter().copied(),
+    )
+    .unwrap();
+    runtime
+        .seed_platform_paging_state_with_capacity(
+            u32::try_from(pager.page_count()).unwrap(),
+            u32::try_from(pager.physical_slot_count()).unwrap(),
+            pager.resolved_pages(),
+            pager.page_reference_counts(),
+            pager.uncounted_pages(),
+        )
+        .unwrap();
+    let mut host = PagedNsfProgramHost::new(&nsd, &nsf, &nsf_bytes, &mut pager);
 
     let boss_sample = |runtime: &RetailRuntime| {
         runtime
@@ -321,6 +355,11 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
     let mut first_big_tnt_path_sample = None;
     for frame in 1_u32..=300 {
         runtime.set_frame_timing(34, 34);
+        if let Some(outcome) = host.pager_mut().update_pending_virtual_page().unwrap() {
+            runtime
+                .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+                .unwrap();
+        }
         let _ = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
         runtime.advance_level_shader().unwrap();
         let camera_step = if runtime.current_display_mask() & 2 == 0 {
@@ -444,23 +483,21 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
         }
     }
 
-    // RooOC state two is the Big TNT waterfall controller: it requests one
-    // executable-39/subtype-one child on every enabled draw. State three
-    // copies the parent's native `process.entity` pointer before state four
-    // samples that path. Its non-reclaiming children fill the exact 96-slot
-    // pool on frame 80; RRooC releases one slot on frame 152 and the next
-    // request consumes it immediately.
-    assert_eq!(requested_big_tnts, 300);
+    // RooOC state two creates exactly one Big TNT per authored waterfall
+    // controller. Its transition starts at PC 26 and source word 41 moves the
+    // live post-fetch PC into `process.tp`, advancing future draws to PC 42
+    // instead of repeating the spawn prefix. State three then copies the
+    // parent's native `process.entity` pointer before states four/five sample
+    // that controller's path. The second displayed controller becomes active
+    // at frame 199 in this deterministic idle camera route.
+    assert_eq!(requested_big_tnts, 2);
     assert_eq!(
-        materialized_big_tnts, 81,
+        materialized_big_tnts, 2,
         "materialized on frames {big_tnt_materialization_frames:?}"
     );
-    assert_eq!(
-        big_tnt_materialization_frames,
-        (1_u32..=80).chain([152]).collect::<Vec<_>>()
-    );
-    assert_eq!(runtime.arena().remaining_pool_capacity(), 0);
-    assert_eq!(runtime.arena().len(), 97);
+    assert_eq!(big_tnt_materialization_frames, [1, 199]);
+    assert_eq!(runtime.arena().remaining_pool_capacity(), 76);
+    assert_eq!(runtime.arena().len(), 21);
     assert_eq!(runtime.faulted_object_count(), 0);
 
     let (source_reference, copied_reference, first_xz) =
@@ -469,7 +506,7 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
     assert_eq!(copied_reference, source_reference);
     assert_eq!(first_xz, [-251_392, -1_383_332]);
 
-    let mut live_big_tnts = 0_usize;
+    let mut live_big_tnt_samples = BTreeMap::new();
     for arena in runtime.arena().postorder_snapshot().unwrap() {
         let spawned = runtime.arena().get(arena).unwrap();
         let ObjectOrigin::Runtime {
@@ -480,52 +517,70 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
             continue;
         };
         if (executable, subtype) == (39, 1) {
-            live_big_tnts += 1;
-            let parent_id = match spawned.parent() {
-                TreeParent::Object(parent) => runtime
-                    .arena()
-                    .get(parent)
-                    .and_then(crust_sim::object_arena::SpawnedObject::entity_descriptor)
-                    .map(|descriptor| descriptor.id),
-                TreeParent::Root(_) => None,
+            let TreeParent::Object(parent_arena) = spawned.parent() else {
+                panic!("Big TNT must remain parented to its waterfall controller");
             };
-            assert_eq!(parent_id, Some(7));
+            let parent_id = runtime
+                .arena()
+                .get(parent_arena)
+                .and_then(crust_sim::object_arena::SpawnedObject::entity_descriptor)
+                .map(|descriptor| descriptor.id)
+                .expect("Big TNT parent must be an authored entity");
             let object = runtime.object_for_arena(arena).unwrap();
             let vm = runtime.machine().object(object.vm()).unwrap();
+            let parent = runtime
+                .object_for_arena(parent_arena)
+                .expect("Big TNT parent remains live");
+            let parent_vm = runtime.machine().object(parent.vm()).unwrap();
             assert_eq!(
                 vm.register(process_register::ENTITY_REFERENCE),
-                Ok(source_reference)
+                parent_vm.register(process_register::ENTITY_REFERENCE)
             );
-            assert_eq!(
-                vm.register(process_register::TRANSLATION_X)
-                    .unwrap()
-                    .cast_signed(),
-                -251_392,
-                "Big TNT must be re-anchored to entity 7's waterfall path each update"
-            );
-            let z = vm
-                .register(process_register::TRANSLATION_Z)
-                .unwrap()
-                .cast_signed();
             assert!(
-                (-1_500_000..=0).contains(&z),
-                "Big TNT escaped the authored waterfall: z={z}"
+                live_big_tnt_samples
+                    .insert(
+                        parent_id,
+                        (
+                            vm.state(),
+                            [
+                                vm.register(process_register::TRANSLATION_X)
+                                    .unwrap()
+                                    .cast_signed(),
+                                vm.register(process_register::TRANSLATION_Y)
+                                    .unwrap()
+                                    .cast_signed(),
+                                vm.register(process_register::TRANSLATION_Z)
+                                    .unwrap()
+                                    .cast_signed(),
+                            ],
+                        ),
+                    )
+                    .is_none(),
+                "each authored waterfall controller creates one Big TNT"
             );
         }
     }
-    assert_eq!(live_big_tnts, 81);
+    assert_eq!(
+        live_big_tnt_samples,
+        BTreeMap::from([
+            (7, (5, [-251_392, -47_616, -386_592])),
+            (10, (5, [260_608, -44_544, -911_336])),
+        ])
+    );
     let big_tnt_render = runtime
         .render_objects()
         .unwrap()
         .into_iter()
         .filter(|object| (object.executable, object.subtype) == (39, 1))
         .collect::<Vec<_>>();
-    assert_eq!(big_tnt_render.len(), 81);
-    assert!(
-        big_tnt_render.iter().all(|object| {
-            object.display_eligible && object.transform.translation[0] == -251_392
-        })
-    );
+    assert_eq!(big_tnt_render.len(), 2);
+    assert!(big_tnt_render.iter().all(|object| object.display_eligible));
+    let mut rendered_x = big_tnt_render
+        .iter()
+        .map(|object| object.transform.translation[0])
+        .collect::<Vec<_>>();
+    rendered_x.sort_unstable();
+    assert_eq!(rendered_x, [-251_392, 260_608]);
     assert_eq!(
         boss_samples,
         [
@@ -887,6 +942,73 @@ fn n_sanity_zone_lifecycle_matches_local_retail_band_and_transition_goldens() {
     assert_eq!(lifecycle.zone(a0).unwrap().display_flags(), 3);
     assert_eq!(lifecycle.zone(a1).unwrap().display_flags(), 3);
     assert_eq!(lifecycle.zone(a2).unwrap().display_flags(), 3);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_mount_drains_only_the_initial_level_update_queue() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name a legally local extracted stream directory"),
+    );
+    let level = LevelId::N_SANITY_BEACH;
+    let nsd_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsd).filename())).unwrap();
+    let nsf_bytes =
+        std::fs::read(root.join(StreamName::new(level, StreamKind::Nsf).filename())).unwrap();
+    let nsd = parse_nsd(&nsd_bytes, level).unwrap();
+    let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+    let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
+    let spawn_zone = graph.spawn_path().zone;
+    let spawn_entry = nsf.resolve_entry(&nsd, spawn_zone).unwrap();
+    let spawn_header =
+        ZoneHeader::parse(spawn_entry.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+    let initial_load_list = OrderedZoneLoadList::from(&spawn_header.load_list);
+
+    let pager = Pager::mount_retail_level(
+        &nsd,
+        &nsf,
+        level,
+        spawn_zone,
+        initial_load_list.entries().iter().copied(),
+        initial_load_list.pages().iter().copied(),
+    )
+    .unwrap();
+    let resolved = pager.resolved_pages().collect::<BTreeSet<_>>();
+    let pending = pager.pending_virtual_pages().collect::<BTreeSet<_>>();
+    let initial_pages = initial_load_list
+        .pages()
+        .iter()
+        .copied()
+        .chain(
+            initial_load_list
+                .entries()
+                .iter()
+                .map(|eid| nsd.pte(*eid).unwrap().page_index()),
+        )
+        .collect::<BTreeSet<_>>();
+    assert!(
+        initial_pages.is_subset(&resolved),
+        "LevelUpdate's NSUpdate2 must resolve the complete initial load list"
+    );
+    assert!(
+        initial_pages.is_disjoint(&pending),
+        "no initial LevelUpdate request may survive the NSUpdate2 drain"
+    );
+
+    let ldat = nsd.ldat().unwrap();
+    let core_object_pages = [0, 5, 29, 34, 3, 4]
+        .into_iter()
+        .map(|index| nsd.pte(ldat.executable_map[index]).unwrap().page_index())
+        .collect::<BTreeSet<_>>();
+    assert!(
+        pending.is_subset(&core_object_pages),
+        "only CoreObjectsCreate's flag-zero opens may remain queued after mount"
+    );
+    assert!(
+        core_object_pages.is_subset(&resolved.union(&pending).copied().collect::<BTreeSet<_>>()),
+        "every CoreObjectsCreate preload must be either already resolved or queued"
+    );
 }
 
 #[test]

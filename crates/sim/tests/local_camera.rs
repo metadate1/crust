@@ -9,8 +9,8 @@ use crust_formats::stream::{
 };
 use crust_sim::Vec3;
 use crust_sim::camera::{
-    GAME_STATE_PLAYING, RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput,
-    RetailCameraOutcome, RetailCameraRuntime,
+    GAME_STATE_CUTSCENE, GAME_STATE_PLAYING, RetailCameraEffect, RetailCameraFollowInput,
+    RetailCameraInput, RetailCameraOutcome, RetailCameraRuntime,
 };
 use crust_sim::retail_frame::PathProgress;
 
@@ -68,12 +68,20 @@ fn intro_terminal_automatic_camera_holds_the_authored_final_frame() {
             path_crossings: 0,
         }
     );
-    assert!(step.effects.is_empty());
+    let graphics_flags = graph.zone(location.path.zone).unwrap().graphics_flags;
+    let expected_terminal_effects = if graphics_flags & 0x1000 == 0 {
+        vec![RetailCameraEffect::GameStateWrite {
+            value: GAME_STATE_CUTSCENE,
+        }]
+    } else {
+        Vec::new()
+    };
+    assert_eq!(step.effects, expected_terminal_effects);
 
     let skipped = camera
         .update(&graph, RetailCameraInput { tapped: 0xf0 })
         .unwrap();
-    let skip_is_enabled = graph.zone(location.path.zone).unwrap().graphics_flags & 0x8_1000 == 0;
+    let skip_is_enabled = graphics_flags & 0x8_1000 == 0;
     assert_eq!(skipped.before, location);
     assert_eq!(skipped.after, location);
     assert_eq!(
@@ -83,6 +91,7 @@ fn intro_terminal_automatic_camera_holds_the_authored_final_frame() {
             path_crossings: 0,
         }
     );
+    assert_eq!(skipped.effects, expected_terminal_effects);
 }
 
 #[test]
@@ -141,7 +150,7 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
     );
     assert_eq!(camera.location().progress, PathProgress::ZERO);
     assert_eq!(path_crossings, 4);
-    assert_eq!(level_updates, 4);
+    assert_eq!(level_updates, 192);
     assert_eq!(save_handshakes, 4);
 
     let follow = camera.update(&graph, RetailCameraInput::default()).unwrap();
@@ -150,6 +159,12 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
         RetailCameraOutcome::FollowBoundary { mode: 5 }
     );
     assert_eq!(follow.game_state, GAME_STATE_PLAYING);
+    assert_eq!(
+        follow.effects,
+        [RetailCameraEffect::GameStateWrite {
+            value: GAME_STATE_PLAYING,
+        }]
+    );
 
     let mut skipped_camera = RetailCameraRuntime::new(&graph).unwrap();
     let skipped = skipped_camera
@@ -164,7 +179,7 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
             path_crossings: 4,
         }
     );
-    assert_eq!(skipped.effects.len(), 8);
+    assert_eq!(skipped.effects.len(), 12);
     assert_eq!(
         skipped
             .effects
@@ -181,6 +196,41 @@ fn n_sanity_automatic_camera_matches_tick_and_skip_goldens() {
             .count(),
         4
     );
+    assert_eq!(
+        skipped
+            .effects
+            .iter()
+            .filter(|effect| matches!(effect, RetailCameraEffect::GameStateWrite { .. }))
+            .count(),
+        4
+    );
+    let mut expected_before = skipped.before;
+    for (crossing, effects) in skipped.effects.chunks_exact(3).enumerate() {
+        assert_eq!(
+            effects[0],
+            RetailCameraEffect::GameStateWrite {
+                value: GAME_STATE_CUTSCENE,
+            },
+            "skip crossing {crossing} must publish cutscene state before LevelUpdate"
+        );
+        let RetailCameraEffect::LevelUpdate {
+            before,
+            after,
+            flags,
+        } = effects[1]
+        else {
+            panic!("skip crossing {crossing} lost its ordered LevelUpdate");
+        };
+        assert_eq!(before, expected_before, "skip crossing {crossing}");
+        assert_eq!(flags, 0, "skip crossing {crossing}");
+        assert_eq!(
+            effects[2],
+            RetailCameraEffect::SaveStateHandshake { location: after },
+            "skip crossing {crossing} must save after LevelUpdate"
+        );
+        expected_before = after;
+    }
+    assert_eq!(expected_before, skipped.after);
 }
 
 #[test]

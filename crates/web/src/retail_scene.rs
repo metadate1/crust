@@ -976,13 +976,7 @@ fn build_retail_scene_cached(
     }
     let resident_texture_pages = texture_frame_snapshot.map_or_else(
         || resident_texture_pages(nsd, nsf, &graph.zone_header),
-        |snapshot| {
-            Ok(snapshot
-                .slots()
-                .iter()
-                .filter_map(|binding| binding.map(|binding| binding.eid.raw()))
-                .collect())
-        },
+        |snapshot| Ok(texture_snapshot_page_eids(snapshot)),
     )?;
     page_ids.retain(|page| resident_texture_pages.contains(page));
     if page_ids.len() > RETAIL_TEXTURE_PAGE_SLOTS {
@@ -1251,7 +1245,11 @@ fn build_retail_scene_cached(
     let mut submitted_object_polygons = 0_usize;
     let mut submitted_object_quads = 0_usize;
     for (render_index, render_object) in render_objects.iter().enumerate() {
-        if let Some(frame_snapshot) = texture_frame_snapshot {
+        let object_resident_texture_pages = if let Some(object_snapshot) =
+            effective_object_texture_snapshot(
+                texture_frame_snapshot,
+                render_object.texture_frame_snapshot,
+            ) {
             install_texture_frame_snapshot(
                 &mut builder.texture_cache,
                 &mut builder.texture_pages,
@@ -1259,11 +1257,20 @@ fn build_retail_scene_cached(
                 &mut builder.diagnostics,
                 nsf,
                 nsf_bytes,
-                render_object
-                    .texture_frame_snapshot
-                    .unwrap_or(frame_snapshot),
+                object_snapshot,
             )?;
-        }
+            Some(texture_snapshot_page_eids(object_snapshot))
+        } else {
+            None
+        };
+        // World polygons consume the slots latched by TexturesBeginFrame,
+        // while each object consumes the live slots captured at its own
+        // display boundary. GOOL may synchronously open a TPAG during the
+        // object's update; testing only the frame-opening snapshot would
+        // install those bytes but still discard the object's textured faces.
+        let object_resident_texture_pages = object_resident_texture_pages
+            .as_ref()
+            .unwrap_or(&resident_texture_pages);
         for object in prepared_objects
             .objects
             .iter()
@@ -1286,7 +1293,7 @@ fn build_retail_scene_cached(
                         texture_page,
                         region,
                     } => {
-                        if !resident_texture_pages.contains(&texture_page.raw()) {
+                        if !object_resident_texture_pages.contains(&texture_page.raw()) {
                             skipped_object_textured_polygons =
                                 skipped_object_textured_polygons.saturating_add(1);
                             continue;
@@ -1357,7 +1364,7 @@ fn build_retail_scene_cached(
             .iter()
             .filter(|quad| quad.render_index == render_index)
         {
-            if !resident_texture_pages.contains(&quad.texture_page.raw()) {
+            if !object_resident_texture_pages.contains(&quad.texture_page.raw()) {
                 skipped_object_textured_polygons =
                     skipped_object_textured_polygons.saturating_add(1);
                 continue;
@@ -2458,6 +2465,21 @@ fn install_missing_texture_pages(
     Ok(())
 }
 
+fn texture_snapshot_page_eids(snapshot: TextureFrameSnapshot) -> BTreeSet<u32> {
+    snapshot
+        .slots()
+        .iter()
+        .filter_map(|binding| binding.map(|binding| binding.eid.raw()))
+        .collect()
+}
+
+fn effective_object_texture_snapshot(
+    frame_snapshot: Option<TextureFrameSnapshot>,
+    object_snapshot: Option<TextureFrameSnapshot>,
+) -> Option<TextureFrameSnapshot> {
+    frame_snapshot.map(|frame_snapshot| object_snapshot.unwrap_or(frame_snapshot))
+}
+
 fn install_texture_frame_snapshot(
     texture_cache: &mut TextureCache,
     texture_pages: &mut [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
@@ -2858,6 +2880,7 @@ fn scene_error(message: impl Into<String>) -> RetailSceneError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crust_formats::binary::PageIndex;
     use crust_formats::disc::DiscImage;
     use crust_formats::stream::{
         KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity,
@@ -2873,6 +2896,7 @@ mod tests {
     };
     use crust_sim::math::Vec3;
     use crust_sim::object_arena::NeighborZone;
+    use crust_sim::paging::Pager;
     use crust_sim::retail_lighting::{ObjectDarkShaderInput, apply_retail_object_zone_shader};
     use crust_sim::retail_runtime::{
         ISLAND_CAMERA_ROTATION_GLOBAL, NsfProgramHost, RetailDemoFinishOutcome,
@@ -2885,6 +2909,40 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::pbak_runtime::{RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak};
+
+    #[test]
+    fn object_texture_residency_uses_the_live_display_boundary_snapshot() {
+        let mut pager = Pager::new();
+        let texture_eids = [
+            "Tex0T", "Tex1T", "Tex2T", "Tex3T", "Tex4T", "Tex5T", "Tex6T", "Tex7T", "Tex8T",
+        ]
+        .map(|name| Eid::from_name(name).unwrap());
+        for (index, eid) in texture_eids.iter().copied().enumerate() {
+            let page = PageIndex::new(u32::try_from(index).unwrap());
+            pager.register_page(page, []).unwrap();
+            pager.bind_page_eid(eid, page).unwrap();
+        }
+        for eid in texture_eids.iter().copied().take(8) {
+            pager.materialize_texture_eid(eid).unwrap();
+        }
+        let frame_snapshot = pager.texture_frame_snapshot();
+        assert!(frame_snapshot.find_eid(texture_eids[0]).is_some());
+        assert!(frame_snapshot.find_eid(texture_eids[8]).is_none());
+
+        pager.materialize_texture_eid(texture_eids[8]).unwrap();
+        let object_snapshot = pager.texture_frame_snapshot();
+        assert!(object_snapshot.find_eid(texture_eids[0]).is_none());
+        assert!(object_snapshot.find_eid(texture_eids[8]).is_some());
+
+        let effective =
+            effective_object_texture_snapshot(Some(frame_snapshot), Some(object_snapshot)).unwrap();
+        assert!(effective.find_eid(texture_eids[0]).is_none());
+        assert!(effective.find_eid(texture_eids[8]).is_some());
+        assert_eq!(
+            effective_object_texture_snapshot(Some(frame_snapshot), None),
+            Some(frame_snapshot),
+        );
+    }
 
     fn refresh_pbak_level_context(
         graph: &RetailZoneGraph,

@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import test from "node:test";
 
 const root = new URL("../", import.meta.url);
+
+async function readRustSources(directory) {
+  const sources = [];
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const url = new URL(entry.name + (entry.isDirectory() ? "/" : ""), directory);
+    if (entry.isDirectory()) {
+      sources.push(...(await readRustSources(url)));
+    } else if (entry.isFile() && entry.name.endsWith(".rs")) {
+      sources.push({ path: url.pathname, text: await readFile(url, "utf8") });
+    }
+  }
+  return sources;
+}
 
 test("launcher keeps the intentionally simple full-game-first hierarchy", async () => {
   const html = await readFile(new URL("web/index.html", root), "utf8");
@@ -23,6 +36,44 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   assert.match(html, />\s*Launch game\s*</);
   assert.match(html, /Leave on “full game” to begin at the opening/);
   assert.doesNotMatch(html, /Local-data bay|Runtime monitor|Launch Rust runtime/);
+  assert.doesNotMatch(html, /standby-glyph|>◆</);
+});
+
+test("browser runtime cannot restore the retired synthetic triangle game", async () => {
+  const sources = (
+    await Promise.all([
+      readRustSources(new URL("crates/sim/src/", root)),
+      readRustSources(new URL("crates/web/src/", root)),
+    ])
+  ).flat();
+  const forbidden = [
+    ["synthetic GameFlow authority", /\bpub\s+struct\s+GameFlow\b/],
+    ["synthetic PlayerState authority", /\bpub\s+struct\s+PlayerState\b/],
+    ["host-authored level goal", /\bfn\s+handle_level_goal\s*\(/],
+    ["diagnostic triangle vertex generator", /\bfn\s+scene_vertices\s*\(/],
+    ["diagnostic scene submission", /\bfn\s+submit_diagnostic_scene\s*\(/],
+    ["diagnostic VisualState player coordinate", /\bplayer_x\s*:\s*f32\b/],
+  ];
+
+  for (const [description, pattern] of forbidden) {
+    const offenders = sources
+      .filter((source) => pattern.test(source.text))
+      .map((source) => source.path);
+    assert.deepEqual(
+      offenders,
+      [],
+      `${description} must not return to authored runtime source`,
+    );
+  }
+
+  const [app, webgl] = await Promise.all([
+    readFile(new URL("crates/web/src/app.rs", root), "utf8"),
+    readFile(new URL("crates/web/src/webgl.rs", root), "utf8"),
+  ]);
+  assert.match(app, /RetailRuntime::new_for_level\s*\(/);
+  assert.match(app, /authored_scene_runtime_active\s*\(/);
+  assert.match(webgl, /update_retail_scene\s*\(/);
+  assert.match(webgl, /state\.show_retail_scene/);
 });
 
 test("the Rust DOM contract and original interface artwork stay packaged", async () => {

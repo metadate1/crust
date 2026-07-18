@@ -492,11 +492,6 @@ canvas {
   color: #b7c3ad;
   text-align: center;
 }
-.standby-glyph {
-  color: var(--stone);
-  font-size: 18px;
-  text-shadow: 0 0 14px rgba(255, 193, 61, .56);
-}
 .screen-standby p {
   margin: 0;
   font-family: var(--display);

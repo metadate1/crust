@@ -117,28 +117,27 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::RoadToNowhereCompletionRoute,
-        3_800,
+        2_800,
     )
     .expect("Road to Nowhere completion route must execute");
 
-    // This direct-boot characterization intentionally records four recovered
-    // collapsing-bridge falls. They exhaust the fresh runtime's initial life
-    // stock, so the authentic WarpC handoff requests Title rather than the
-    // normal Level Complete screen reached by a live carried session.
-    assert_eq!(survey.frames, 3_668);
-    assert_eq!(survey.next_lid, Some((3_668, 0x19)));
+    // The route uses only ordinary pad input and the authored outside rope
+    // lanes, preserving the fresh runtime's life stock through every
+    // collapsing span and reaching the normal Level Complete handoff.
+    assert_eq!(survey.frames, 2_452);
+    assert_eq!(survey.next_lid, Some((2_452, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 3668 requested level transition to 0x19")
+        Some("frame 2452 requested level transition to 0x2d")
     );
-    assert_eq!(survey.restarts, 4);
-    assert_eq!(survey.restart_frames, [1_206, 1_521, 1_836, 2_151]);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
             (1_120, 0x4_900, [0, 25_600, -18_662_400]),
-            (2_487, 0xa4_00, [0, 25_600, -24_012_800]),
+            (1_403, 0xa4_00, [0, 25_600, -24_012_800]),
         ]
     );
     assert_eq!(
@@ -147,31 +146,23 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
             (1, 0),
             (915, 0x100),
             (1_120, 0x200),
-            (1_207, 0),
-            (1_208, 0x100),
-            (1_522, 0),
-            (1_523, 0x100),
-            (1_837, 0),
-            (1_838, 0x100),
-            (2_152, 0),
-            (2_153, 0x100),
-            (2_487, 0x200),
-            (2_845, 0x300),
-            (3_279, 0x400),
+            (1_403, 0x300),
+            (1_982, 0x400),
+            (1_984, 0x500),
         ]
     );
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
-    assert_eq!(survey.effect_counts.get("load-state"), Some(&4));
+    assert_eq!(survey.effect_counts.get("load-state"), None);
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(
         survey.final_player_translation,
-        Some([4_096, 105_461, -40_313_904])
+        Some([-4_096, 3_720_270, -40_225_400])
     );
     let player = player_trace(&runtime)
         .expect("Road to Nowhere completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [4_096, 105_461, -40_313_904]);
+    assert_eq!(player.translation, [-4_096, 3_720_270, -40_225_400]);
     let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
     for state in 0..=4 {
         assert!(
@@ -179,7 +170,7 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.draw_count(), 1_517);
+    assert_eq!(runtime.draw_count(), 2_452);
     assert_eq!(survey.unexpected_spawn_errors, 0);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.faulted_objects, 0);
@@ -10865,6 +10856,10 @@ struct RoadToNowhereRouteController {
 }
 
 impl RoadToNowhereRouteController {
+    const FIRST_ROPE_STAGE: u8 = 65;
+    const SECOND_ROPE_LAUNCH_STAGE: u8 = 66;
+    const SECOND_ROPE_STAGE: u8 = 67;
+
     fn held(
         &mut self,
         _camera: RetailCameraLocation,
@@ -10995,6 +10990,15 @@ impl RoadToNowhereRouteController {
 
         if self.final_stage == 5
             && grounded
+            && player_collider_entity == Some(73)
+            && (-18_750_000..=-18_600_000).contains(&player.translation[2])
+        {
+            self.final_stage = Self::FIRST_ROPE_STAGE;
+            self.final_tick = 0;
+        }
+
+        if (self.final_stage == 5 || self.final_stage == Self::FIRST_ROPE_STAGE)
+            && grounded
             && (-24_500_000..=-24_250_000).contains(&player.translation[2])
         {
             if player.translation[2] < -24_400_000 {
@@ -11011,25 +11015,34 @@ impl RoadToNowhereRouteController {
         if self.final_stage == 7 {
             self.final_tick = self.final_tick.saturating_add(1);
             if grounded && player.velocity[2].abs() <= 120_000 {
-                self.final_stage = 8;
+                self.final_stage = Self::SECOND_ROPE_LAUNCH_STAGE;
                 self.final_tick = 0;
-                return Self::move_toward(player.translation, 0, -24_650_000);
+                return PAD_LEFT;
             }
             return Self::move_toward(player.translation, 0, -24_350_000);
         }
-        if self.final_stage == 8 {
-            self.final_tick = self.final_tick.saturating_add(1);
-            let toward = Self::move_toward(player.translation, 0, -24_650_000);
-            if self.final_tick <= 2 {
-                return toward | PAD_CROSS | PAD_SQUARE;
+        if self.final_stage == Self::SECOND_ROPE_LAUNCH_STAGE {
+            self.final_stage = Self::SECOND_ROPE_STAGE;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, -180_000, -25_000_000)
+                | PAD_CROSS
+                | PAD_SQUARE;
+        }
+        if self.final_stage == Self::SECOND_ROPE_STAGE {
+            // The authored outside rope quantizes this target to roughly
+            // -190_000. Rejoin the center just before the far-bank turtle.
+            let target_x = if player.translation[2] > -34_200_000 {
+                -180_000
+            } else {
+                0
+            };
+            if grounded && player.translation[2] < -34_850_000 {
+                self.final_stage = 57;
+                self.final_tick = 0;
+                self.jump_hold = 0;
+                return 0;
             }
-            if self.final_tick <= 5 {
-                return toward | PAD_CROSS;
-            }
-            if self.final_tick <= 12 {
-                return toward | PAD_CROSS | PAD_SQUARE;
-            }
-            return toward;
+            return self.jump_forward(grounded, player.translation, target_x);
         }
         if self.final_stage == 10 {
             self.final_tick = self.final_tick.saturating_add(1);
@@ -11602,8 +11615,20 @@ impl RoadToNowhereRouteController {
             return toward | PAD_CROSS | PAD_SQUARE;
         }
 
+        // Enter the first authored outside rope only after checkpoint 73, then
+        // return to the center in time to activate the checkpoint at -24M.
+        let target_x =
+            if self.final_stage == Self::FIRST_ROPE_STAGE && player.translation[2] > -22_800_000 {
+                -180_000
+            } else {
+                0
+            };
+        self.jump_forward(grounded, player.translation, target_x)
+    }
+
+    fn jump_forward(&mut self, grounded: bool, translation: [i32; 3], target_x: i32) -> u32 {
         self.final_tick = self.final_tick.saturating_add(1);
-        let forward = Self::move_toward(player.translation, 0, i32::MIN / 2);
+        let forward = Self::move_toward(translation, target_x, i32::MIN / 2);
         if self.final_tick <= 5 {
             return forward | PAD_CROSS;
         }

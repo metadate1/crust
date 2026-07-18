@@ -971,11 +971,8 @@ impl Runtime {
             crust_sim::retail_runtime::RetailWorldShaderSnapshot::initialized_for_level(pair.level),
             retail_world_shader_render_state,
         )?;
-        let retail_frame = if after_loading_image {
-            RetailFrameState::after_loading_image(retail_point_count, 0)
-        } else {
-            RetailFrameState::ready(retail_point_count, 0)
-        };
+        let retail_frame =
+            crate::retail_frame_for_mount(retail_point_count, 0, 0, false, after_loading_image);
         dom.log(
             &format!(
                 "Validated {} pages and {} entries for {}.",
@@ -1422,19 +1419,13 @@ impl Runtime {
             retail_objects.world_shader_snapshot(),
             retail_world_shader_render_state,
         )?;
-        let retail_frame = if after_loading_image {
-            RetailFrameState::after_loading_image_with_draw_count(
-                retail_point_count,
-                0,
-                retail_objects.draw_count(),
-            )
-        } else {
-            RetailFrameState::ready_with_draw_count(
-                retail_point_count,
-                0,
-                retail_objects.draw_count(),
-            )
-        };
+        let retail_frame = crate::retail_frame_for_mount(
+            retail_point_count,
+            0,
+            retail_objects.draw_count(),
+            mount.core_transition,
+            after_loading_image,
+        );
         let first_title_boot = flow_level == LevelId::TITLE && !self.title_seen;
         self.flow
             .mount_retail_level(flow_level, title_screen)

@@ -46,6 +46,38 @@ pub(crate) fn initial_presented_path_point(
     desired.min(usize::from(point_count.get() - 1))
 }
 
+/// Builds the presentation clock for an initial or destination stream mount.
+///
+/// `CoreFrame` arms two skipped draws for every authored stream transition.
+/// A loading image changes the retained framebuffer contents, not that timing.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn retail_frame_for_mount(
+    point_count: core::num::NonZeroU16,
+    initial_progress: i32,
+    draw_count: u32,
+    core_transition: bool,
+    loading_image_written: bool,
+) -> crust_sim::retail_frame::RetailFrameState {
+    use crust_sim::retail_frame::RetailFrameState;
+
+    if core_transition {
+        RetailFrameState::after_core_transition_with_draw_count(
+            point_count,
+            initial_progress,
+            draw_count,
+            loading_image_written,
+        )
+    } else if loading_image_written {
+        RetailFrameState::after_loading_image_with_draw_count(
+            point_count,
+            initial_progress,
+            draw_count,
+        )
+    } else {
+        RetailFrameState::ready_with_draw_count(point_count, initial_progress, draw_count)
+    }
+}
+
 /// Retail's first mount starts without any checkpoint or collected boxes.
 ///
 /// The mounted GOOL globals and level-state snapshot are authoritative as soon
@@ -180,6 +212,94 @@ mod tests {
             initial_presented_path_point(core::num::NonZeroU16::new(3).unwrap(), true),
             2
         );
+    }
+
+    #[test]
+    fn native_fortress_to_level_complete_core_mount_skips_without_an_image() {
+        use crust_sim::retail_frame::PresentedFrame;
+
+        let mut frame =
+            retail_frame_for_mount(core::num::NonZeroU16::new(72).unwrap(), 0, 41, true, false);
+        assert_eq!(frame.draw_skip(), 2);
+
+        let hidden = frame.tick();
+        assert_eq!(hidden.presented(), PresentedFrame::None);
+        assert_eq!(hidden.draw_skip(), 1);
+        assert_eq!(hidden.draw_count(), 42);
+
+        let visible = frame.tick();
+        assert!(matches!(
+            visible.presented(),
+            PresentedFrame::Gameplay { .. }
+        ));
+        assert_eq!(visible.draw_skip(), 0);
+        assert_eq!(visible.draw_count(), 43);
+    }
+
+    #[test]
+    fn level_complete_to_title_core_mount_retains_its_loading_image() {
+        use crust_sim::retail_frame::PresentedFrame;
+
+        let mut frame =
+            retail_frame_for_mount(core::num::NonZeroU16::new(72).unwrap(), 0, 91, true, true);
+        assert_eq!(frame.draw_skip(), 2);
+
+        let hidden = frame.tick();
+        assert_eq!(hidden.presented(), PresentedFrame::LoadingImage);
+        assert_eq!(hidden.draw_skip(), 1);
+        assert_eq!(hidden.draw_count(), 92);
+
+        let visible = frame.tick();
+        assert!(matches!(
+            visible.presented(),
+            PresentedFrame::Gameplay { .. }
+        ));
+        assert_eq!(visible.draw_skip(), 0);
+        assert_eq!(visible.draw_count(), 93);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn local_native_completion_destinations_have_the_characterized_image_contract() {
+        use std::path::PathBuf;
+
+        use crust_formats::stream::{LevelId, StreamKind, StreamName, parse_nsd};
+
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+        );
+        let has_loading_image = |level| {
+            let path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("could not read {}: {error}", path.display()));
+            let nsd = parse_nsd(&bytes, level)
+                .unwrap_or_else(|error| panic!("could not parse {}: {error}", path.display()));
+            nsd.image_data(&bytes)
+                .unwrap_or_else(|error| panic!("{} loading image: {error}", path.display()))
+                .is_some()
+        };
+
+        let native_to_complete = (LevelId::new_const(0x1a), LevelId::LEVEL_COMPLETE);
+        let complete_to_title = (LevelId::LEVEL_COMPLETE, LevelId::TITLE);
+        assert!(
+            !has_loading_image(native_to_complete.1),
+            "{} -> {} must use the no-image transition path",
+            native_to_complete.0,
+            native_to_complete.1,
+        );
+        assert!(
+            has_loading_image(complete_to_title.1),
+            "{} -> {} must retain the decoded loading image",
+            complete_to_title.0,
+            complete_to_title.1,
+        );
+
+        let point_count = core::num::NonZeroU16::new(72).unwrap();
+        let native_frame = retail_frame_for_mount(point_count, 0, 0, true, false);
+        let title_frame = retail_frame_for_mount(point_count, 0, 0, true, true);
+        assert_eq!(native_frame.draw_skip(), 2);
+        assert_eq!(title_frame.draw_skip(), 2);
     }
 
     #[test]

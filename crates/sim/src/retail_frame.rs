@@ -230,9 +230,24 @@ impl RetailFrameState {
         initial_progress: i32,
         draw_count: u32,
     ) -> Self {
+        Self::after_core_transition_with_draw_count(point_count, initial_progress, draw_count, true)
+    }
+
+    /// Creates the state after native `CoreFrame` committed a stream change.
+    ///
+    /// Native arms a skip count of two for every core transition, independently
+    /// of whether `TitleLoading` wrote an image. Image presence controls only
+    /// what remains visible during the hidden first destination tick.
+    #[must_use]
+    pub fn after_core_transition_with_draw_count(
+        point_count: NonZeroU16,
+        initial_progress: i32,
+        draw_count: u32,
+        loading_image_written: bool,
+    ) -> Self {
         Self {
             draw_skip: LOADING_DRAW_SKIP,
-            direct_loading_image_written: true,
+            direct_loading_image_written: loading_image_written,
             ..Self::ready_with_draw_count(point_count, initial_progress, draw_count)
         }
     }

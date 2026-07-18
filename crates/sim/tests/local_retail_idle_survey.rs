@@ -93,6 +93,102 @@ fn survey_frame_count() -> u32 {
         .unwrap_or(DEFAULT_SURVEY_FRAMES)
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x14);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Road to Nowhere");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Road to Nowhere pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::RoadToNowhereCompletionRoute,
+        3_800,
+    )
+    .expect("Road to Nowhere completion route must execute");
+
+    // This direct-boot characterization intentionally records four recovered
+    // collapsing-bridge falls. They exhaust the fresh runtime's initial life
+    // stock, so the authentic WarpC handoff requests Title rather than the
+    // normal Level Complete screen reached by a live carried session.
+    assert_eq!(survey.frames, 3_668);
+    assert_eq!(survey.next_lid, Some((3_668, 0x19)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3668 requested level transition to 0x19")
+    );
+    assert_eq!(survey.restarts, 4);
+    assert_eq!(survey.restart_frames, [1_206, 1_521, 1_836, 2_151]);
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_120, 0x4_900, [0, 25_600, -18_662_400]),
+            (2_487, 0xa4_00, [0, 25_600, -24_012_800]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (915, 0x100),
+            (1_120, 0x200),
+            (1_207, 0),
+            (1_208, 0x100),
+            (1_522, 0),
+            (1_523, 0x100),
+            (1_837, 0),
+            (1_838, 0x100),
+            (2_152, 0),
+            (2_153, 0x100),
+            (2_487, 0x200),
+            (2_845, 0x300),
+            (3_279, 0x400),
+        ]
+    );
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
+    assert_eq!(survey.effect_counts.get("load-state"), Some(&4));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(
+        survey.final_player_translation,
+        Some([4_096, 105_461, -40_313_904])
+    );
+    let player = player_trace(&runtime)
+        .expect("Road to Nowhere completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [4_096, 105_461, -40_313_904]);
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(runtime.draw_count(), 1_517);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(
+        survey.is_clean(),
+        "Road to Nowhere end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
 fn progression_frame_count() -> u32 {
     std::env::var("C1_PROGRESSION_FRAMES")
         .ok()
@@ -149,6 +245,7 @@ enum SurveyInputProfile {
     NativeFortressPostB9Route,
     NativeFortressC6Route,
     LostCityCompletionRoute,
+    RoadToNowhereCompletionRoute,
     PapuPapuCompletionRoute,
     KoalaKongCompletionRoute,
     PinstripeCompletionRoute,
@@ -233,6 +330,7 @@ impl SurveyInputProfile {
             Self::NativeFortressPostB9Route => "native-fortress-post-b9-route",
             Self::NativeFortressC6Route => "native-fortress-c6-route",
             Self::LostCityCompletionRoute => "lost-city-completion-route",
+            Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
             Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
             Self::PinstripeCompletionRoute => "pinstripe-completion-route",
@@ -287,6 +385,7 @@ impl SurveyInputProfile {
                 | Self::NativeFortressPostB9Route
                 | Self::NativeFortressC6Route
                 | Self::LostCityCompletionRoute
+                | Self::RoadToNowhereCompletionRoute
                 | Self::PapuPapuCompletionRoute
                 | Self::KoalaKongCompletionRoute
                 | Self::PinstripeCompletionRoute
@@ -10754,6 +10853,786 @@ impl UpstreamRecoveryRouteController {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RoadToNowhereRouteController {
+    jump_hold: u8,
+    final_stage: u8,
+    final_tick: u16,
+}
+
+impl RoadToNowhereRouteController {
+    fn held(
+        &mut self,
+        _camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        _objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if player.translation[2] < -13_600_000 {
+            return self.held_final_bridge(player, player_collider_entity);
+        }
+        let lateral = if player.translation[2] < -3_150_000 {
+            let leg = (-3_150_000_i32 - player.translation[2]) / 505_000;
+            let target = if leg & 1 == 0 { -190_000 } else { 190_000 };
+            if player.translation[0] < target - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > target + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            }
+        } else {
+            match player.translation[2] {
+                -549_999..=-250_001 => PAD_LEFT,
+                -2_779_999..=-2_400_001 => PAD_RIGHT,
+                _ => 0,
+            }
+        };
+        let forward = PAD_UP | lateral;
+        if matches!(player.state, 22 | 40) {
+            self.jump_hold = 0;
+            return 0;
+        }
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            return forward | PAD_CROSS | PAD_SQUARE;
+        }
+        if player.status_a & 1 != 0 {
+            self.jump_hold = 7;
+            return forward | PAD_CROSS | PAD_SQUARE;
+        }
+        forward
+    }
+
+    fn held_final_bridge(
+        &mut self,
+        player: PlayerTrace,
+        player_collider_entity: Option<u16>,
+    ) -> u32 {
+        let grounded = player.status_a & 1 != 0;
+        if matches!(player.state, 22 | 40) {
+            self.final_stage = 5;
+            self.final_tick = 13;
+            self.jump_hold = 0;
+            return 0;
+        }
+        if self.final_stage == 0 && player.translation[2] < -16_000_000 {
+            self.final_stage = 5;
+            self.final_tick = 13;
+        }
+        if self.final_stage == 0 {
+            if grounded && player.translation[2] < -13_680_000 {
+                self.final_stage = 1;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, -100_000, -13_940_000);
+            }
+            return Self::move_toward(player.translation, -120_000, -13_880_000);
+        }
+
+        if self.final_stage == 1 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -13_910_000 {
+                self.final_stage = 2;
+                self.final_tick = 0;
+                self.jump_hold = 0;
+                return Self::move_toward(player.translation, 0, -14_500_000) | PAD_CROSS;
+            }
+            return Self::move_toward(player.translation, -100_000, -13_940_000);
+        }
+
+        if self.final_stage == 2 && grounded && player_collider_entity == Some(173) {
+            self.final_stage = 6;
+            self.final_tick = 0;
+        }
+        if self.final_stage == 3 {
+            if grounded && player.translation[2] < -15_600_000 {
+                self.final_stage = 6;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -15_800_000) | PAD_CROSS;
+            }
+            return Self::move_toward(player.translation, 0, -15_620_000);
+        }
+        if self.final_stage == 6 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if player_collider_entity == Some(26) && player.translation[1] > -100_000 {
+                self.final_stage = 4;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -15_900_000);
+            }
+            if self.final_tick > 8
+                && grounded
+                && (-15_940_000..=-15_700_000).contains(&player.translation[2])
+            {
+                self.final_stage = 4;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -15_900_000);
+            }
+            let toward = Self::move_toward(player.translation, 0, -15_700_000);
+            if self.final_tick <= 5 {
+                return toward | PAD_CROSS;
+            }
+            if self.final_tick <= 12 {
+                return toward | PAD_CROSS | PAD_SQUARE;
+            }
+            return toward;
+        }
+        if self.final_stage == 4 {
+            if grounded && player_collider_entity == Some(26) && player.translation[2] < -15_830_000
+            {
+                self.final_stage = 5;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -16_450_000) | PAD_CROSS;
+            }
+            return Self::move_toward(player.translation, 0, -15_900_000);
+        }
+
+        if self.final_stage == 5
+            && grounded
+            && (-24_500_000..=-24_250_000).contains(&player.translation[2])
+        {
+            if player.translation[2] < -24_400_000 {
+                self.final_stage = 10;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -25_000_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            self.final_stage = 7;
+            self.final_tick = 0;
+            self.jump_hold = 0;
+        }
+        if self.final_stage == 7 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.velocity[2].abs() <= 120_000 {
+                self.final_stage = 8;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -24_650_000);
+            }
+            return Self::move_toward(player.translation, 0, -24_350_000);
+        }
+        if self.final_stage == 8 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            let toward = Self::move_toward(player.translation, 0, -24_650_000);
+            if self.final_tick <= 2 {
+                return toward | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.final_tick <= 5 {
+                return toward | PAD_CROSS;
+            }
+            if self.final_tick <= 12 {
+                return toward | PAD_CROSS | PAD_SQUARE;
+            }
+            return toward;
+        }
+        if self.final_stage == 10 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(165) {
+                self.final_stage = 11;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -25_300_000) | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -25_000_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 11 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(75) {
+                self.final_stage = 12;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -25_300_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 12 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 4 && player_collider_entity == Some(75) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 13;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -25_940_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 13 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(143) {
+                self.final_stage = 14;
+                self.final_tick = 0;
+                return PAD_DOWN | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -25_940_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 14 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.velocity[2].abs() <= 120_000 {
+                self.final_stage = 15;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -26_050_000) | PAD_CROSS;
+            }
+            return PAD_DOWN;
+        }
+        if self.final_stage == 15 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(77) {
+                self.final_stage = 16;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            let toward = Self::move_toward(player.translation, 0, -26_050_000);
+            if self.final_tick <= 8 {
+                return toward | PAD_CROSS;
+            }
+            return toward;
+        }
+        if self.final_stage == 16 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 4 && player_collider_entity == Some(77) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 17;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -26_530_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 17 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(142) {
+                self.final_stage = 18;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -26_530_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 18 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 3 && player_collider_entity == Some(142) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 19;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -26_850_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 19 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(78) {
+                self.final_stage = 20;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -26_850_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 20 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.velocity[2].abs() <= 120_000 {
+                self.final_stage = 21;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -27_060_000) | PAD_CROSS;
+            }
+            return if player.velocity[2] < 0 {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            };
+        }
+        if self.final_stage == 21 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(170) {
+                self.final_stage = 22;
+                self.final_tick = 0;
+                return PAD_DOWN | PAD_SQUARE;
+            }
+            let toward = Self::move_toward(player.translation, 0, -27_060_000);
+            if self.final_tick <= 8 {
+                return toward | PAD_CROSS;
+            }
+            return toward;
+        }
+        if self.final_stage == 22 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.velocity[2].abs() <= 120_000 {
+                self.final_stage = 23;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -27_230_000) | PAD_CROSS;
+            }
+            return if player.velocity[2] < 0 {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            };
+        }
+        if self.final_stage == 23 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(169) {
+                self.final_stage = 24;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            let toward = Self::move_toward(player.translation, 0, -27_230_000);
+            if self.final_tick <= 8 {
+                return toward | PAD_CROSS;
+            }
+            return toward;
+        }
+        if self.final_stage == 24 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 4 && player_collider_entity == Some(169) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 25;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -27_530_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 25 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(80) {
+                self.final_stage = 26;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -27_530_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 26 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 3 {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 27;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -27_870_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 27 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(81) {
+                self.final_stage = 28;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -27_870_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 28 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 3 {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 29;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -28_180_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 29 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player_collider_entity == Some(82) {
+                self.final_stage = 30;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -28_180_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 30 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 4 && player_collider_entity == Some(82) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 31;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -28_750_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 31 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -28_650_000 {
+                self.final_stage = 32;
+                self.final_tick = 0;
+                return PAD_UP;
+            }
+            return Self::move_toward(player.translation, 0, -28_750_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 32 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick == 1 {
+                return PAD_UP;
+            }
+            self.final_stage = 33;
+            self.final_tick = 0;
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.final_stage == 33 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -28_900_000 {
+                self.final_stage = 34;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -29_100_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.final_stage == 34 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(148) {
+                self.final_stage = 35;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -29_310_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 35 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 10 {
+                return 0;
+            }
+            self.final_stage = 36;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -30_200_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 36 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 15 && grounded && player_collider_entity == Some(213) {
+                self.final_stage = 37;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -30_200_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 37 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 3 && player_collider_entity == Some(213) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.final_stage = 38;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -30_330_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 38 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(212) {
+                self.final_stage = 39;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -30_330_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 39 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -30_680_000 {
+                self.final_stage = 40;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -31_150_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.final_stage == 40 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 15
+                && grounded
+                && (player_collider_entity == Some(209) || player.translation[2] < -31_170_000)
+            {
+                self.final_stage = 41;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -31_150_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 41 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -31_380_000 {
+                self.final_stage = 42;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -31_900_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.final_stage == 42 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10 && grounded && player.translation[2] < -31_650_000 {
+                self.final_stage = 43;
+                self.final_tick = 0;
+                return PAD_UP | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -31_900_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 43 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player.translation[2] < -32_090_000 {
+                self.final_stage = 44;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -32_300_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.final_stage == 44 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player_collider_entity == Some(217) {
+                self.final_stage = 45;
+                self.final_tick = 0;
+                return 0;
+            }
+            let held = if player.translation[2] > -32_320_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 45 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            self.final_stage = 46;
+            self.final_tick = 0;
+            return PAD_DOWN | PAD_CROSS;
+        }
+        if self.final_stage == 46 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8 && grounded && player.translation[2] > -32_100_000 {
+                self.final_stage = 47;
+                self.final_tick = 0;
+                return 0;
+            }
+            return PAD_DOWN | PAD_CROSS;
+        }
+        if self.final_stage == 47 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick <= 2 {
+                return 0;
+            }
+            if self.final_tick <= 22 {
+                return PAD_CROSS;
+            }
+            self.final_stage = 48;
+            self.final_tick = 0;
+            return 0;
+        }
+        if self.final_stage == 48 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 7 && grounded {
+                self.final_stage = 49;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -32_750_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if self.final_stage == 49 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10
+                && grounded
+                && (matches!(player_collider_entity, Some(214 | 215))
+                    || player.translation[2] < -32_650_000)
+            {
+                self.final_stage = 50;
+                self.final_tick = 0;
+                return PAD_UP;
+            }
+            return Self::move_toward(player.translation, 0, -32_750_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 50 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            self.final_stage = 51;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -33_050_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 51 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 10
+                && grounded
+                && (player_collider_entity == Some(225) || player.translation[2] < -32_950_000)
+            {
+                self.final_stage = 52;
+                self.final_tick = 0;
+                return PAD_UP;
+            }
+            return Self::move_toward(player.translation, 0, -33_050_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 52 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded {
+                self.final_stage = 53;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -33_450_000)
+                    | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+            return PAD_UP;
+        }
+        if self.final_stage == 53 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8
+                && grounded
+                && (matches!(player_collider_entity, Some(222 | 223))
+                    || player.translation[2] < -33_300_000)
+            {
+                self.final_stage = 54;
+                self.final_tick = 0;
+                return PAD_UP;
+            }
+            return Self::move_toward(player.translation, 0, -33_450_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 54 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            self.final_stage = 55;
+            self.final_tick = 0;
+            return Self::move_toward(player.translation, 0, -33_980_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 55 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8
+                && grounded
+                && (matches!(player_collider_entity, Some(220 | 221))
+                    || player.translation[2] < -33_850_000)
+            {
+                self.final_stage = 56;
+                self.final_tick = 0;
+                return PAD_UP;
+            }
+            return Self::move_toward(player.translation, 0, -33_980_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 56 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 20 && grounded && player.translation[2] < -34_850_000 {
+                self.final_stage = 57;
+                self.final_tick = 0;
+                return 0;
+            }
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.final_stage == 57 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if player.state == 6 && player.velocity[1] > 1_000_000 {
+                self.final_stage = 58;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -36_100_000) | PAD_CROSS;
+            }
+            if player.state == 14 && player.velocity[1] > 800_000 {
+                self.final_stage = 59;
+                self.final_tick = 0;
+                return PAD_DOWN | PAD_CROSS;
+            }
+            return Self::move_toward(player.translation, 0, -34_940_000) | PAD_CROSS;
+        }
+        if self.final_stage == 58 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded
+                && matches!(player.state, 1 | 10 | 13)
+                && player.translation[2] < -36_000_000
+            {
+                self.final_stage = 60;
+                self.final_tick = 0;
+                return 0;
+            }
+            return Self::move_toward(player.translation, 0, -36_100_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 59 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if player.state == 6 && player.velocity[1] > 1_000_000 {
+                self.final_stage = 58;
+                self.final_tick = 0;
+                return Self::move_toward(player.translation, 0, -36_100_000) | PAD_CROSS;
+            }
+            return (if self.final_tick < 4 {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            }) | PAD_CROSS;
+        }
+        if self.final_stage == 60 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if self.final_tick > 8
+                && grounded
+                && matches!(player.state, 1 | 10 | 13)
+                && player.translation[2] < -36_450_000
+            {
+                self.final_stage = 61;
+                self.final_tick = 0;
+                return 0;
+            }
+            return Self::move_toward(player.translation, 0, -36_650_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 61 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if player_collider_entity == Some(118) {
+                self.final_stage = 62;
+                self.final_tick = 0;
+                return PAD_DOWN;
+            }
+            return Self::move_toward(player.translation, 0, -37_450_000) | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.final_stage == 62 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if player.state == 6 && player.velocity[1] > 1_000_000 {
+                self.final_stage = 63;
+                self.final_tick = 0;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            return Self::move_toward(player.translation, 0, -37_400_000) | PAD_CROSS;
+        }
+        if self.final_stage == 63 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            if grounded && player_collider_entity == Some(196) {
+                self.final_stage = 64;
+                self.final_tick = 0;
+                return 0;
+            }
+            return Self::move_toward(player.translation, 160_000, -38_400_000)
+                | PAD_CROSS
+                | PAD_SQUARE;
+        }
+        if self.final_stage == 64 {
+            self.final_tick = self.final_tick.saturating_add(1);
+            let target_x = if player.translation[2] < -39_700_000 {
+                0
+            } else {
+                180_000
+            };
+            let toward = Self::move_toward(player.translation, target_x, i32::MIN / 2);
+            if grounded && self.jump_hold == 0 {
+                self.jump_hold = 8;
+                return toward;
+            }
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+            }
+            return toward | PAD_CROSS | PAD_SQUARE;
+        }
+
+        self.final_tick = self.final_tick.saturating_add(1);
+        let forward = Self::move_toward(player.translation, 0, i32::MIN / 2);
+        if self.final_tick <= 5 {
+            return forward | PAD_CROSS;
+        }
+        if self.final_tick <= 12 {
+            return forward | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            return forward | PAD_CROSS | PAD_SQUARE;
+        }
+        if grounded {
+            self.jump_hold = 7;
+            return forward | PAD_CROSS | PAD_SQUARE;
+        }
+        forward
+    }
+
+    fn move_toward(translation: [i32; 3], target_x: i32, target_z: i32) -> u32 {
+        let mut held = 0;
+        if translation[0] < target_x - 20_000 {
+            held |= PAD_RIGHT;
+        } else if translation[0] > target_x + 20_000 {
+            held |= PAD_LEFT;
+        }
+        if translation[2] > target_z + 20_000 {
+            held |= PAD_UP;
+        } else if translation[2] < target_z - 20_000 {
+            held |= PAD_DOWN;
+        }
+        held
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurveyInputController {
     profile: SurveyInputProfile,
@@ -10767,6 +11646,7 @@ struct SurveyInputController {
     up_the_creek: UpTheCreekRouteController,
     native_fortress: NativeFortressRouteController,
     lost_city: LostCityCompletionRouteController,
+    road_to_nowhere: RoadToNowhereRouteController,
     papu_papu: PapuPapuCompletionRouteController,
     ripper_roo: RipperRooCompletionRouteController,
     brio: BrioCompletionRouteController,
@@ -10928,6 +11808,11 @@ impl SurveyInputController {
                 return_stage: 0,
                 return_tick: 0,
             },
+            road_to_nowhere: RoadToNowhereRouteController {
+                jump_hold: 0,
+                final_stage: 0,
+                final_tick: 0,
+            },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
                 action_tick: 0,
@@ -10957,6 +11842,11 @@ impl SurveyInputController {
             self.rolling_stones.restart_from_checkpoint();
         } else if self.profile == SurveyInputProfile::LostCityCompletionRoute {
             self.lost_city = LostCityCompletionRouteController::default();
+        }
+        if self.profile == SurveyInputProfile::RoadToNowhereCompletionRoute {
+            self.road_to_nowhere.jump_hold = 0;
+            self.road_to_nowhere.final_stage = 0;
+            self.road_to_nowhere.final_tick = 0;
         }
     }
 
@@ -11084,6 +11974,10 @@ impl SurveyInputController {
                 lost_city_pbak.expect("the legally local Lost City PBAK is loaded in memory"),
                 route_objects,
             ),
+            SurveyInputProfile::RoadToNowhereCompletionRoute => {
+                self.road_to_nowhere
+                    .held(camera, player, player_collider_entity, route_objects)
+            }
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, boss_state)
             }
@@ -13390,6 +14284,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::UpTheCreekPostZeroFBankRoute
                     | SurveyInputProfile::UpTheCreekPostPlatform12Route
                     | SurveyInputProfile::UpTheCreekCompletionRoute
+                    | SurveyInputProfile::RoadToNowhereCompletionRoute
             ) {
             player_collider_entity(&runtime)?
         } else {
@@ -13464,6 +14359,10 @@ fn survey_pair_with_runtime(
                 ],
             )?,
             SurveyInputProfile::LostCityCompletionRoute => program_object_traces(&runtime, &[])?,
+            SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
+                &runtime,
+                &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
+            )?,
             _ => Vec::new(),
         };
         let pinstripe_boss_state =

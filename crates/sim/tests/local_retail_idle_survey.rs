@@ -52,6 +52,7 @@ use crust_sim::{
         SAVED_TITLE_STATE_GLOBAL, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmObject,
         VmStateProgram, process_register,
     },
+    math::Bounds3,
     object_arena::{NeighborZone, ObjectOrigin, SpawnError},
     paging::{PageInvalidations, Pager, PagerUpdateOutcome, PagingError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
@@ -230,6 +231,7 @@ enum SurveyInputProfile {
     UpTheCreekPostZeroFBankRoute,
     UpTheCreekPostPlatform12Route,
     UpTheCreekCompletionRoute,
+    TempleRuinsCompletionRoute,
     NativeFortressRoute,
     NativeFortressA7Route,
     NativeFortressExtendedRoute,
@@ -315,6 +317,7 @@ impl SurveyInputProfile {
             Self::UpTheCreekPostZeroFBankRoute => "up-the-creek-post-zero-f-bank-route",
             Self::UpTheCreekPostPlatform12Route => "up-the-creek-post-platform-12-route",
             Self::UpTheCreekCompletionRoute => "up-the-creek-completion-route",
+            Self::TempleRuinsCompletionRoute => "temple-ruins-completion-route",
             Self::NativeFortressRoute => "native-fortress-route",
             Self::NativeFortressA7Route => "native-fortress-a7-route",
             Self::NativeFortressExtendedRoute => "native-fortress-extended-route",
@@ -370,6 +373,7 @@ impl SurveyInputProfile {
                 | Self::UpTheCreekPostZeroFBankRoute
                 | Self::UpTheCreekPostPlatform12Route
                 | Self::UpTheCreekCompletionRoute
+                | Self::TempleRuinsCompletionRoute
                 | Self::NativeFortressRoute
                 | Self::NativeFortressA7Route
                 | Self::NativeFortressExtendedRoute
@@ -11633,6 +11637,1731 @@ impl RoadToNowhereRouteController {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+struct TempleRuinsCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    opening_spin_fired: bool,
+    opening_jump_fired: bool,
+    opening_platform_jump_fired: bool,
+    opening_platform_wait: u8,
+    opening_gap_spin_fired: bool,
+    a4_trap_attack_fired: bool,
+    a4_corridor_phase: u8,
+    a4_attack_release: u8,
+    platform27_wait_hops: u8,
+    platform27_waiting: bool,
+    platform27_launch_armed: bool,
+    platform27_launch_release: u8,
+    platform26_launch_armed: bool,
+    platform26_launch_release: u8,
+    platform33_launch_armed: bool,
+    platform33_launch_release: u8,
+    lift_exit_jump: bool,
+    b2_crossing_stage: u8,
+    b4_crossing_stage: u8,
+    b7_crossing_stage: u8,
+    b8_lift_stage: u8,
+    b8_lift_runup_frames: u8,
+    b9_crossing_stage: u8,
+    b9_lift_runup_frames: u8,
+    c0_crossing_stage: u8,
+    late_jump_rearm: bool,
+    platform13_exit_stage: u8,
+    c7_crate_stage: u8,
+    c9_launch_wait: u8,
+    c9_platform_target: Option<VmObjectHandle>,
+    c9_platform_stage: u8,
+    d2_dart_stage: u8,
+    d3_exit_stage: u8,
+    b5_orbit_target: Option<VmObjectHandle>,
+    b5_exit_x: i32,
+    active_platform: Option<u16>,
+    active_platform_subtype: u8,
+    active_platform_contacts: u8,
+    completed_platforms: [u64; 4],
+}
+
+impl TempleRuinsCompletionRouteController {
+    fn platform_centering_direction(
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+        entity: u16,
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let Some(platform_translation) = objects.iter().find_map(|object| match object.origin {
+            ObjectOrigin::Entity(descriptor) if descriptor.id == entity => Some(object.translation),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let x = if player.velocity[0] < -100_000 {
+            PAD_RIGHT
+        } else if player.velocity[0] > 100_000
+            || player.translation[0] > platform_translation[0] + 20_000
+        {
+            PAD_LEFT
+        } else if player.translation[0] < platform_translation[0] - 20_000 {
+            PAD_RIGHT
+        } else {
+            0
+        };
+        let z = if player.velocity[2] < -100_000 {
+            PAD_DOWN
+        } else if player.velocity[2] > 100_000
+            || player.translation[2] > platform_translation[2] + 20_000
+        {
+            PAD_UP
+        } else if player.translation[2] < platform_translation[2] - 20_000 {
+            PAD_DOWN
+        } else {
+            0
+        };
+        x | z
+    }
+
+    fn platform14_staging_direction(
+        &self,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        if self.active_platform_contacts >= 7 {
+            PAD_UP
+        } else {
+            Self::platform_centering_direction(player, objects, 14)
+        }
+    }
+
+    fn platform157_staging_direction(
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let Some(platform_translation) = objects.iter().find_map(|object| match object.origin {
+            ObjectOrigin::Entity(descriptor) if descriptor.id == 157 => Some(object.translation),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let x = if player.velocity[0] < -100_000 {
+            PAD_RIGHT
+        } else if player.velocity[0] > 100_000
+            || player.translation[0] > platform_translation[0] + 4_000
+        {
+            PAD_LEFT
+        } else if player.translation[0] < platform_translation[0] - 4_000 {
+            PAD_RIGHT
+        } else {
+            0
+        };
+        let target_z = platform_translation[2] + 90_000;
+        let z = if player.velocity[2] < -100_000 {
+            PAD_DOWN
+        } else if player.velocity[2] > 100_000 || player.translation[2] > target_z + 15_000 {
+            PAD_UP
+        } else if player.translation[2] < target_z - 15_000 {
+            PAD_DOWN
+        } else {
+            0
+        };
+        x | z
+    }
+
+    fn platform157_launch_direction(
+        &mut self,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let platform_is_high = objects.iter().any(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 157)
+                && object.translation[1] >= 1_400_000
+        });
+        if !platform_is_high {
+            return Self::platform157_staging_direction(player, objects);
+        }
+        if self.b8_lift_stage == 0 {
+            let staged = player.is_some_and(|player| {
+                player.translation[2] >= 13_370_000 && player.velocity[2].unsigned_abs() <= 100_000
+            });
+            if !staged {
+                return Self::platform157_staging_direction(player, objects);
+            }
+            self.b8_lift_stage = 1;
+        }
+        if self.b8_lift_stage == 1 && self.b8_lift_runup_frames < 8 {
+            self.b8_lift_runup_frames += 1;
+            return PAD_UP | PAD_SQUARE;
+        }
+        if player.is_some_and(|player| player.status_a & 0x0020_0000 != 0) {
+            self.b8_lift_stage = 2;
+            self.complete_platform(157);
+            self.active_platform = None;
+            self.jump_frames = 30;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        PAD_UP | PAD_SQUARE
+    }
+
+    fn platform175_staging_direction(
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let Some(platform_translation) = objects.iter().find_map(|object| match object.origin {
+            ObjectOrigin::Entity(descriptor) if descriptor.id == 175 => Some(object.translation),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let target_x = platform_translation[0] - 20_000;
+        let x = if player.velocity[0] < -100_000 {
+            PAD_RIGHT
+        } else if player.velocity[0] > 100_000 || player.translation[0] > target_x + 10_000 {
+            PAD_LEFT
+        } else if player.translation[0] < target_x - 10_000 {
+            PAD_RIGHT
+        } else {
+            0
+        };
+        let z = if player.velocity[2] < -100_000 {
+            PAD_DOWN
+        } else if player.velocity[2] > 100_000
+            || player.translation[2] > platform_translation[2] + 15_000
+        {
+            PAD_UP
+        } else if player.translation[2] < platform_translation[2] - 15_000 {
+            PAD_DOWN
+        } else {
+            0
+        };
+        x | z
+    }
+
+    fn platform175_launch_direction(
+        &mut self,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let platform_is_high = objects.iter().any(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 175)
+                && object.translation[1] >= 1_745_000
+        });
+        if !platform_is_high {
+            return Self::platform175_staging_direction(player, objects);
+        }
+        if self.b9_lift_runup_frames < 7 {
+            self.b9_lift_runup_frames += 1;
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if player.is_some_and(|player| player.status_a & 0x0020_0000 != 0) {
+            self.complete_platform(175);
+            self.active_platform = None;
+            self.b9_crossing_stage = 8;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        PAD_RIGHT | PAD_SQUARE
+    }
+
+    fn platform_is_completed(&self, entity: u16) -> bool {
+        let word = usize::from(entity / 64);
+        let bit = u32::from(entity % 64);
+        self.completed_platforms
+            .get(word)
+            .is_some_and(|completed| completed & (1_u64 << bit) != 0)
+    }
+
+    fn complete_platform(&mut self, entity: u16) {
+        let word = usize::from(entity / 64);
+        let bit = u32::from(entity % 64);
+        if let Some(completed) = self.completed_platforms.get_mut(word) {
+            *completed |= 1_u64 << bit;
+        }
+    }
+
+    fn path_direction(camera: RetailCameraLocation) -> u32 {
+        let zone = camera.path.zone;
+        let path = camera.path.index;
+        let is = |name| zone == Eid::from_name(name).expect("fixed Temple Ruins zone EID is valid");
+
+        if (is("a0_sZ") && path == 1)
+            || is("a1_sZ")
+            || (is("a2_sZ") && path == 0)
+            || (is("a3_sZ") && path == 1)
+            || (is("a4_sZ") && path != 1)
+            || (is("b9_sZ") && path == 2)
+            || is("s0_sZ")
+        {
+            PAD_LEFT
+        } else if (is("a9_sZ") && (path == 1 || camera.progress.raw() >= 24_000))
+            || is("b0_sZ")
+            || (is("b1_sZ") && path == 0 && camera.progress.raw() < 22_000)
+            || (is("b2_sZ") && path == 1)
+            || (is("b3_sZ") && path == 0)
+            || (is("b9_sZ") && path == 1)
+            || is("c0_sZ")
+            || is("c1_sZ")
+            || (is("c2_sZ") && path == 0)
+            || is("c4_sZ")
+            || is("c5_sZ")
+        {
+            PAD_RIGHT
+        } else if (is("b1_sZ") && (path == 1 || camera.progress.raw() >= 22_000))
+            || (is("b2_sZ") && path == 0)
+            || (is("c2_sZ") && path == 1)
+            || is("c3_sZ")
+        {
+            PAD_DOWN
+                | if is("b2_sZ") && path == 0 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+        } else {
+            PAD_UP
+        }
+    }
+
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        collider_entity: Option<u16>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let spawn_zone =
+            Eid::from_name("a0_sZ").expect("fixed Temple Ruins spawn-zone EID is valid");
+        let mut held = Self::path_direction(camera);
+        let b9_zone = Eid::from_name("b9_sZ").expect("fixed Temple Ruins junction EID is valid");
+        if camera.path.zone == b9_zone
+            && camera.path.index == 0
+            && self.b9_crossing_stage == 0
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 12_800_000
+            })
+        {
+            self.b9_crossing_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 2;
+            return 0;
+        }
+        if self.b9_crossing_stage == 1 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            self.b9_crossing_stage = 2;
+        }
+        if self.b9_crossing_stage == 2 {
+            let fire_is_active = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 18
+                    }
+                )
+            });
+            if fire_is_active {
+                return 0;
+            }
+            self.b9_crossing_stage = 3;
+            self.jump_frames = 30;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.b9_crossing_stage == 3 {
+            if player.is_some_and(|player| player.translation[2] > 12_450_000) {
+                held = PAD_UP | PAD_SQUARE;
+            } else if player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.b9_crossing_stage = 4;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return 0;
+            } else {
+                held = PAD_DOWN;
+            }
+        }
+        if self.b9_crossing_stage == 4 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            self.b9_crossing_stage = 5;
+        }
+        if self.b9_crossing_stage == 5 {
+            let platform_is_at_bottom = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 175)
+                    && object.translation[1] <= 1_335_000
+            });
+            if !platform_is_at_bottom {
+                return 0;
+            }
+            self.b9_crossing_stage = 6;
+        }
+        if self.b9_crossing_stage == 6 {
+            if player.is_some_and(|player| player.translation[0] < 10_100_000) {
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            self.b9_crossing_stage = 7;
+            self.jump_frames = 30;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.b9_crossing_stage == 7 {
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 175)
+                    .then_some(object.translation)
+            });
+            if let (Some(player), Some(target)) = (player, target) {
+                held = PAD_SQUARE;
+                held |= if player.translation[0] < target[0] - 120_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 100_000 || player.translation[0] > target[0] + 20_000
+                {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+        }
+        if self.b9_crossing_stage == 8
+            && camera.path.zone
+                == Eid::from_name("c0_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
+            && let Some(player) = player
+        {
+            if self.c0_crossing_stage == 0
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 11_050_000
+            {
+                self.c0_crossing_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 1;
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            if self.c0_crossing_stage == 1 && self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            if self.c0_crossing_stage == 1 && player.status_a & 1 != 0 {
+                self.c0_crossing_stage = 2;
+                self.jump_frames = 45;
+                self.release_frames = 5;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        let platform13_approach = camera.path.zone
+            == Eid::from_name("c4_sZ").expect("fixed Temple Ruins moving-platform EID is valid")
+            || (camera.path.zone
+                == Eid::from_name("c3_sZ")
+                    .expect("fixed Temple Ruins moving-platform approach EID is valid")
+                && player.is_some_and(|player| player.translation[2] >= 14_000_000));
+        if platform13_approach
+            && !self.platform_is_completed(13)
+            && self.active_platform != Some(13)
+            && collider_entity != Some(13)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.late_jump_rearm = false;
+            return Self::platform_centering_direction(player, objects, 13);
+        }
+        if self.platform13_exit_stage == 1 {
+            if collider_entity == Some(13) {
+                return PAD_UP;
+            }
+            self.platform13_exit_stage = 2;
+            self.late_jump_rearm = false;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            self.lift_exit_jump = true;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        let c7 = Eid::from_name("c7_sZ").expect("fixed Temple Ruins fire-trap EID is valid");
+        if camera.path.zone == c7
+            && self.c7_crate_stage == 0
+            && player.is_some_and(|player| {
+                player.translation[2] <= 13_000_000 && player.status_a & 1 != 0
+            })
+        {
+            self.c7_crate_stage = 1;
+            self.late_jump_rearm = false;
+            self.jump_frames = 20;
+            self.release_frames = 1;
+        }
+        if camera.path.zone == c7 && self.c7_crate_stage == 1 {
+            if player.is_some_and(|player| player.translation[2] <= 11_900_000) {
+                self.c7_crate_stage = 4;
+            } else if self.jump_frames == 0
+                && player.is_some_and(|player| {
+                    player.translation[2] <= 12_300_000 && player.status_a & 1 != 0
+                })
+            {
+                self.c7_crate_stage = 2;
+                self.jump_frames = 32;
+                self.release_frames = 1;
+                return PAD_UP;
+            } else if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            } else {
+                let jump = if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    PAD_CROSS
+                } else {
+                    0
+                };
+                return PAD_UP | jump;
+            }
+        }
+        if camera.path.zone == c7 && self.c7_crate_stage == 2 {
+            if player.is_some_and(|player| player.translation[2] <= 11_900_000) {
+                self.c7_crate_stage = 4;
+            } else if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            } else {
+                let jump = if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    PAD_CROSS
+                } else {
+                    0
+                };
+                return PAD_UP | jump;
+            }
+        }
+        if camera.path.zone == c7
+            && self.c7_crate_stage == 4
+            && player.is_some_and(|player| {
+                player.translation[2] <= 11_900_000 && player.status_a & 1 != 0
+            })
+        {
+            self.c7_crate_stage = 5;
+            self.late_jump_rearm = false;
+            self.jump_frames = 0;
+            self.release_frames = 8;
+            return PAD_UP;
+        }
+        if camera.path.zone == c7 && self.c7_crate_stage == 5 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.c7_crate_stage = 6;
+            self.jump_frames = 26;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        let c8 = Eid::from_name("c8_sZ").expect("fixed Temple Ruins bounce EID is valid");
+        if camera.path.zone
+            == Eid::from_name("c9_sZ").expect("fixed Temple Ruins post-fire EID is valid")
+            && let Some(player) = player
+        {
+            if self.c9_platform_target.is_none() {
+                self.c9_platform_target = objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 2
+                            }
+                        ) && object.bound.is_some()
+                            && object.translation[0].abs_diff(player.translation[0]) <= 450_000
+                            && object.translation[2] + 150_000 <= player.translation[2]
+                    })
+                    .min_by_key(|object| object.translation[2].abs_diff(player.translation[2]))
+                    .map(|object| object.object);
+            }
+            let target = self
+                .c9_platform_target
+                .and_then(|target| objects.iter().find(|object| object.object == target));
+            let landed_on_target = player.status_a & 1 != 0
+                && target.is_some_and(|target| {
+                    target.bound.is_some_and(|bound| {
+                        bound.min.x <= player.translation[0]
+                            && player.translation[0] <= bound.max.x
+                            && bound.min.z <= player.translation[2]
+                            && player.translation[2] <= bound.max.z
+                    })
+                });
+            if landed_on_target && self.c9_platform_stage == 0 {
+                self.c9_platform_stage = 1;
+                self.c9_platform_target = objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 2
+                            }
+                        ) && object.bound.is_some()
+                            && Some(object.object) != self.c9_platform_target
+                            && object.translation[0].abs_diff(player.translation[0]) <= 450_000
+                            && object.translation[2] + 150_000 <= player.translation[2]
+                    })
+                    .min_by_key(|object| object.translation[0].abs_diff(player.translation[0]))
+                    .map(|object| object.object);
+                self.late_jump_rearm = false;
+                self.jump_frames = 8;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            if landed_on_target && self.c9_platform_stage == 1 {
+                self.c9_platform_stage = 2;
+                self.c9_platform_target = None;
+                self.late_jump_rearm = false;
+                self.jump_frames = 10;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            if let Some(target) = target {
+                if player.translation[0] + 20_000 < target.translation[0] {
+                    held |= PAD_RIGHT;
+                } else if player.translation[0] > target.translation[0] + 20_000 {
+                    held |= PAD_LEFT;
+                }
+            } else if self.c9_platform_stage == 2 {
+                held = 0;
+            }
+        }
+        let late_route = [
+            "c1_sZ", "c2_sZ", "c3_sZ", "c4_sZ", "c5_sZ", "c6_sZ", "c7_sZ", "c8_sZ", "c9_sZ",
+            "d0_sZ", "d1_sZ", "d2_sZ", "d3_sZ",
+        ]
+        .into_iter()
+        .any(|name| {
+            camera.path.zone
+                == Eid::from_name(name).expect("fixed Temple Ruins late-route EID is valid")
+        });
+        let d2_entrance = (camera.path.zone
+            == Eid::from_name("d1_sZ").expect("fixed Temple Ruins lift-zone EID is valid")
+            && camera.path.index == 1
+            || camera.path.zone
+                == Eid::from_name("d2_sZ").expect("fixed Temple Ruins dart-corridor EID is valid")
+                && camera.path.index == 0)
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && (7_800_000..=7_950_000).contains(&player.translation[2])
+            });
+        if d2_entrance && self.d2_dart_stage < 2 {
+            self.late_jump_rearm = false;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.d2_dart_stage = 1;
+            let incoming_dart = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 11
+                        }
+                    ) && object.translation[2] <= player.translation[2]
+                        && player.translation[2] - object.translation[2] <= 1_700_000
+                })
+            });
+            if incoming_dart {
+                return 0;
+            }
+            self.d2_dart_stage = 2;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        let d3 = camera.path.zone
+            == Eid::from_name("d3_sZ").expect("fixed Temple Ruins exit-zone EID is valid")
+            && camera.path.index == 0;
+        if d3
+            && self.d3_exit_stage == 0
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 6_200_000
+            })
+        {
+            self.d3_exit_stage = 1;
+            self.late_jump_rearm = false;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
+        }
+        if d3 && self.d3_exit_stage == 1 {
+            if player.is_some_and(|player| player.translation[2] > 5_900_000) {
+                return PAD_UP;
+            }
+            self.d3_exit_stage = 2;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if camera.path.zone == c8
+            && self.jump_frames == 0
+            && self.release_frames != 0
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.late_jump_rearm = false;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return held | PAD_CROSS;
+        }
+        if late_route && self.late_jump_rearm {
+            if player.is_some_and(|player| player.status_a & 1 != 0) {
+                if camera.path.zone
+                    == Eid::from_name("c9_sZ").expect("fixed Temple Ruins post-fire EID is valid")
+                    && self.c9_launch_wait < 1
+                {
+                    self.c9_launch_wait += 1;
+                    return held;
+                }
+                self.late_jump_rearm = false;
+                self.jump_frames = if camera.path.zone
+                    == Eid::from_name("c7_sZ").expect("fixed Temple Ruins fire-trap EID is valid")
+                {
+                    45
+                } else if camera.path.zone
+                    == Eid::from_name("c9_sZ").expect("fixed Temple Ruins post-fire EID is valid")
+                {
+                    0
+                } else {
+                    45
+                };
+                self.release_frames = 5;
+                return held
+                    | PAD_CROSS
+                    | if camera.path.zone == c7 && self.c7_crate_stage >= 4 {
+                        0
+                    } else {
+                        PAD_SQUARE
+                    };
+            }
+            return held;
+        }
+        if late_route
+            && collider_entity.is_none()
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+            && (self.jump_frames != 0 || self.release_frames != 0)
+        {
+            self.late_jump_rearm = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held
+                | if camera.path.zone == c7 && self.c7_crate_stage >= 4 {
+                    0
+                } else {
+                    PAD_SQUARE
+                };
+        }
+        if camera.path.zone
+            == Eid::from_name("b3_sZ").expect("fixed Temple Ruins crate-zone EID is valid")
+            && camera.path.index == 0
+            && self.tick % 8 < 3
+        {
+            held |= PAD_SQUARE;
+        }
+        if camera.path.zone
+            == Eid::from_name("a7_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
+            && let Some(player) = player
+        {
+            if player.translation[0] < 5_820_000 {
+                held |= PAD_RIGHT;
+            } else if player.velocity[0] > 100_000 || player.translation[0] > 5_900_000 {
+                held |= PAD_LEFT;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("a8_sZ").expect("fixed Temple Ruins platform-zone EID is valid")
+            && !self.platform_is_completed(90)
+            && let Some(player) = player
+        {
+            if player.translation[0] > 5_760_000 {
+                held |= PAD_LEFT;
+            } else if player.velocity[0] < -100_000 || player.translation[0] < 5_700_000 {
+                held |= PAD_RIGHT;
+            }
+        }
+        let b4_spikes_are_extended = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Runtime {
+                    executable: 42,
+                    subtype: 10
+                }
+            ) && object.translation[1] > 950_000
+        });
+        let b3_fire_is_active = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Runtime {
+                    executable: 42,
+                    subtype: 18
+                }
+            )
+        });
+        let b4_spike_state = objects.iter().find_map(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Runtime {
+                    executable: 42,
+                    subtype: 10
+                }
+            )
+            .then_some(object.state)
+        });
+        let b3_spike_approach = camera.path.zone
+            == Eid::from_name("b3_sZ").expect("fixed Temple Ruins spike-approach EID is valid")
+            && camera.path.index == 1;
+        if b3_spike_approach && self.b4_crossing_stage < 3 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.b4_crossing_stage == 0 {
+                if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    return PAD_DOWN;
+                }
+                if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                    return PAD_UP;
+                }
+                self.b4_crossing_stage = 1;
+            }
+            if b4_spikes_are_extended || b3_fire_is_active {
+                self.b4_crossing_stage = 2;
+                return 0;
+            }
+            if self.b4_crossing_stage < 2 {
+                return 0;
+            }
+            self.b4_crossing_stage = 3;
+            return PAD_UP;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 3 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if b3_fire_is_active {
+                self.b4_crossing_stage = 5;
+                return PAD_DOWN;
+            }
+            if player.is_some_and(|player| player.translation[2] <= 19_980_000) {
+                self.b4_crossing_stage = 4;
+                return PAD_DOWN;
+            }
+            return PAD_UP;
+        }
+        if b3_spike_approach && matches!(self.b4_crossing_stage, 4 | 5) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| {
+                player.translation[2] < 20_080_000 || player.velocity[2] < -50_000
+            }) {
+                return PAD_DOWN;
+            }
+            if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                return PAD_UP;
+            }
+            if b3_fire_is_active {
+                self.b4_crossing_stage = 5;
+                return 0;
+            }
+            if self.b4_crossing_stage == 4 || b4_spikes_are_extended {
+                return 0;
+            }
+            self.b4_crossing_stage = 6;
+            return PAD_UP;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 6 {
+            if b4_spike_state == Some(5) {
+                return 0;
+            }
+            self.b4_crossing_stage = 8;
+            return 0;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 8 {
+            if b4_spike_state != Some(5) {
+                return 0;
+            }
+            self.b4_crossing_stage = 12;
+            return 0;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 12 {
+            if b4_spike_state == Some(5) {
+                return 0;
+            }
+            self.b4_crossing_stage = 13;
+            return 0;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 13 {
+            if !b4_spikes_are_extended {
+                return 0;
+            }
+            self.b4_crossing_stage = 17;
+            return 0;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 17 {
+            if b4_spikes_are_extended {
+                return 0;
+            }
+            self.b4_crossing_stage = 9;
+            return PAD_UP;
+        }
+        if b3_spike_approach && self.b4_crossing_stage == 9 {
+            if player.is_some_and(|player| player.translation[2] > 20_085_000) {
+                return PAD_UP;
+            }
+            self.b4_crossing_stage = 10;
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        let b4 = camera.path.zone
+            == Eid::from_name("b4_sZ").expect("fixed Temple Ruins spike-zone EID is valid")
+            && camera.path.index == 0;
+        let b5 = camera.path.zone
+            == Eid::from_name("b5_sZ").expect("fixed Temple Ruins orbiting-stone EID is valid");
+        let b6 = camera.path.zone
+            == Eid::from_name("b6_sZ").expect("fixed Temple Ruins post-orbit EID is valid");
+        let b7 = camera.path.zone
+            == Eid::from_name("b7_sZ").expect("fixed Temple Ruins gate-zone EID is valid");
+        if b7 && camera.path.index == 0 && self.b7_crossing_stage < 3 {
+            let gate_center_x = 10_034_944_i32;
+            let left_gate = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 115)
+            });
+            let right_gate = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 124)
+            });
+            let gate_is_closed = left_gate
+                .is_some_and(|gate| gate.translation[0].abs_diff(gate_center_x) <= 20_000)
+                && right_gate
+                    .is_some_and(|gate| gate.translation[0].abs_diff(gate_center_x) <= 20_000);
+            let gate_is_open = left_gate.is_some_and(|gate| gate.translation[0] <= 9_750_000)
+                && right_gate.is_some_and(|gate| gate.translation[0] >= 10_320_000);
+            if self.b7_crossing_stage == 0
+                && player.is_some_and(|player| player.translation[2] <= 15_420_000)
+            {
+                self.b7_crossing_stage = 1;
+            }
+            if self.b7_crossing_stage != 0 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if self.b7_crossing_stage == 1 && gate_is_closed {
+                    self.b7_crossing_stage = 2;
+                }
+                if self.b7_crossing_stage == 2
+                    && gate_is_open
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                {
+                    self.b7_crossing_stage = 3;
+                    self.jump_frames = 45;
+                    self.release_frames = 5;
+                    return PAD_UP | PAD_CROSS;
+                }
+                if let Some(player) = player {
+                    if player.translation[2] < 15_360_000 || player.velocity[2] < -100_000 {
+                        return PAD_DOWN;
+                    }
+                    if player.translation[2] > 15_430_000 || player.velocity[2] > 100_000 {
+                        return PAD_UP;
+                    }
+                }
+                return 0;
+            }
+        }
+        if b4 && self.b4_crossing_stage == 10 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 == 0
+                    && (player.translation[1] > 900_000 || player.velocity[1] >= 0)
+            }) {
+                // Preserve the tall plant bounce until the landing is assured.
+            } else if player.is_none_or(|player| player.status_a & 1 == 0) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.b4_crossing_stage = 15;
+                return held;
+            } else {
+                // The plant bounce holds Cross continuously. Give the landing
+                // state a few released frames before creating the next jump
+                // edge for the second ledge.
+                self.b4_crossing_stage = 14;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_UP;
+            }
+        }
+        if b4 && self.b4_crossing_stage == 15 {
+            if player.is_none_or(|player| player.status_a & 1 == 0) {
+                return PAD_UP;
+            }
+            self.b4_crossing_stage = 16;
+            return 0;
+        }
+        if b4 && self.b4_crossing_stage == 16 {
+            if b4_spike_state != Some(6) {
+                return 0;
+            }
+            self.b4_crossing_stage = 11;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS;
+        }
+        if b4
+            && self.b4_crossing_stage == 11
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] < 19_100_000
+            })
+        {
+            if player.is_some_and(|player| player.translation[2] < 18_700_000) {
+                self.b4_crossing_stage = 19;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.b4_crossing_stage = 18;
+            self.jump_frames = 0;
+            self.release_frames = 2;
+            return 0;
+        }
+        if b4 && self.b4_crossing_stage == 18 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.b4_crossing_stage = 11;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.b4_crossing_stage == 19 {
+            if b4 || b5 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 18_520_000
+                }) {
+                    let center_x = objects.iter().find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 127
+                        )
+                        .then_some(object.translation[0])
+                    });
+                    self.b5_orbit_target = center_x.and_then(|center_x| {
+                        objects
+                            .iter()
+                            .filter(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 42,
+                                        subtype: 2
+                                    }
+                                ) && object.translation[0] >= center_x
+                            })
+                            .max_by_key(|object| object.translation[2])
+                            .map(|object| object.object)
+                    });
+                    self.b4_crossing_stage = 20;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_RIGHT | PAD_CROSS;
+                }
+                let mut creeping = if self.tick.is_multiple_of(2) {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if !self.tick.is_multiple_of(2)
+                    && let (Some(player), Some(target_x)) = (
+                        player,
+                        objects.iter().find_map(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == 127
+                            )
+                            .then_some(object.translation[0])
+                        }),
+                    )
+                {
+                    if player.translation[0] + 20_000 < target_x {
+                        creeping |= PAD_RIGHT;
+                    } else if player.translation[0] > target_x + 20_000 {
+                        creeping |= PAD_LEFT;
+                    }
+                }
+                return creeping;
+            }
+            self.b4_crossing_stage = 11;
+            return PAD_UP;
+        }
+        if (b4 || b5) && self.b4_crossing_stage == 20 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] < 18_300_000
+            }) {
+                self.b4_crossing_stage = 21;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            let mut toward_platform = PAD_UP | PAD_CROSS;
+            if let (Some(player), Some(target)) = (
+                player,
+                self.b5_orbit_target
+                    .and_then(|target| objects.iter().find(|object| object.object == target)),
+            ) {
+                if player.translation[0] + 20_000 < target.translation[0] {
+                    toward_platform |= PAD_RIGHT;
+                } else if player.translation[0] > target.translation[0] + 20_000 {
+                    toward_platform |= PAD_LEFT;
+                }
+            }
+            return toward_platform;
+        }
+        if (b4 || b5 || b6) && self.b4_crossing_stage == 21 {
+            let exit_x = objects
+                .iter()
+                .find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 127
+                    )
+                    .then_some(object.translation[0])
+                })
+                .unwrap_or(10_034_432);
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.translation[2] <= 17_250_000
+                    && player.translation[0].abs_diff(exit_x) <= 60_000
+            }) {
+                self.b5_exit_x = exit_x;
+                self.b4_crossing_stage = 22;
+                self.release_frames = 2;
+            }
+            return 0;
+        }
+        if (b5 || b6) && self.b4_crossing_stage == 22 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.b4_crossing_stage = 23;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_RIGHT | PAD_CROSS;
+        }
+        if (b5 || b6) && self.b4_crossing_stage == 23 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] < 17_100_000
+            }) {
+                self.b4_crossing_stage = 24;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return Self::path_direction(camera);
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            let mut exit_jump = PAD_UP | PAD_CROSS;
+            if let Some(player) = player {
+                if player.translation[0] + 80_000 < self.b5_exit_x {
+                    exit_jump |= PAD_RIGHT;
+                } else if player.translation[0] > self.b5_exit_x + 80_000 {
+                    exit_jump |= PAD_LEFT;
+                }
+            }
+            return exit_jump;
+        }
+        if (b4 || b5)
+            && self.b4_crossing_stage == 11
+            && player.is_some_and(|player| player.translation[2] < 18_700_000)
+            && let Some(player) = player
+            && let Some(target_x) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 127
+                )
+                .then_some(object.translation[0])
+            })
+        {
+            held = PAD_UP;
+            if player.velocity[0] < -100_000 {
+                held |= PAD_RIGHT;
+            } else if player.velocity[0] > 100_000 || player.translation[0] > target_x + 20_000 {
+                held |= PAD_LEFT;
+            } else if player.translation[0] + 20_000 < target_x {
+                held |= PAD_RIGHT;
+            }
+        }
+        if b5 && self.b4_crossing_stage == 11 {
+            return held;
+        }
+        if b4 && self.b4_crossing_stage == 14 {
+            if player.is_none_or(|player| player.status_a & 1 == 0) {
+                return PAD_UP;
+            }
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.b4_crossing_stage = 11;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS;
+        }
+        let a4_trap_is_close = player.is_some_and(|player| {
+            objects.iter().any(|object| match object.origin {
+                ObjectOrigin::Entity(descriptor)
+                    if descriptor.id == 28
+                        && descriptor.executable == 25
+                        && descriptor.subtype == 1 =>
+                {
+                    object.translation[0] < player.translation[0]
+                        && player.translation[0].abs_diff(object.translation[0]) <= 550_000
+                        && player.translation[2].abs_diff(object.translation[2]) <= 128_000
+                }
+                _ => false,
+            })
+        });
+        let a4_corridor = camera.path.zone
+            == Eid::from_name("a4_sZ").expect("fixed Temple Ruins junction EID is valid")
+            && camera.path.index == 1;
+        if a4_corridor && let Some(player) = player {
+            match self.a4_corridor_phase {
+                0 if player.status_a & 1 == 0 => {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return if player.velocity[0] < -100_000 {
+                        PAD_RIGHT
+                    } else if player.velocity[0] > 100_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                }
+                0 if player.translation[0] > 5_590_000 => return PAD_LEFT,
+                0 if player.translation[0] < 5_550_000 => return PAD_RIGHT,
+                0 if player.velocity[0] < -100_000 => return PAD_RIGHT,
+                0 if player.velocity[0] > 100_000 => return PAD_LEFT,
+                0 => {
+                    self.a4_corridor_phase = 1;
+                    return PAD_DOWN;
+                }
+                1 if player.translation[2] < 25_390_000 => {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_DOWN;
+                }
+                1 if player.status_a & 1 != 0 => {
+                    self.a4_corridor_phase = 2;
+                    return PAD_UP | PAD_RIGHT | PAD_SQUARE;
+                }
+                1 => return 0,
+                2 if player.translation[0] < 5_670_000 || player.translation[2] > 25_260_000 => {
+                    return PAD_UP | PAD_RIGHT | PAD_SQUARE;
+                }
+                2 => {
+                    self.a4_corridor_phase = 3;
+                    self.a4_attack_release = 2;
+                    return PAD_UP;
+                }
+                3 if self.a4_attack_release != 0 => {
+                    self.a4_attack_release -= 1;
+                    return PAD_UP;
+                }
+                3 if player.status_a & 1 != 0 => {
+                    self.a4_corridor_phase = 4;
+                    self.jump_frames = 45;
+                    self.release_frames = 5;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                3 => return PAD_UP,
+                4 if player.translation[2] > 24_900_000 => {
+                    if self.jump_frames != 0 {
+                        self.jump_frames -= 1;
+                    }
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                4 => {
+                    self.a4_corridor_phase = 5;
+                    self.jump_frames = 0;
+                    self.release_frames = 5;
+                }
+                _ => {}
+            }
+        }
+        if self.platform27_launch_armed && !self.platform_is_completed(27) {
+            if self.platform27_launch_release != 0 {
+                self.platform27_launch_release -= 1;
+                return Self::platform_centering_direction(player, objects, 27);
+            }
+            let platform_is_high = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 27
+                ) && object.translation[1] >= 850_000
+            });
+            if !platform_is_high {
+                return Self::platform_centering_direction(player, objects, 27);
+            }
+            if player.is_some_and(|player| player.status_a & 0x0020_0000 != 0) {
+                self.platform27_waiting = false;
+                self.complete_platform(27);
+                self.jump_frames = 30;
+                self.release_frames = 5;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            return Self::platform_centering_direction(player, objects, 27);
+        }
+        if self.platform26_launch_armed && !self.platform_is_completed(26) {
+            if self.platform26_launch_release != 0 {
+                self.platform26_launch_release -= 1;
+                return Self::platform_centering_direction(player, objects, 26);
+            }
+            let platform_is_high = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 26
+                ) && object.translation[1] >= 1_050_000
+            });
+            if !platform_is_high {
+                return Self::platform_centering_direction(player, objects, 26);
+            }
+            if player.is_some_and(|player| player.status_a & 0x0020_0000 != 0) {
+                self.complete_platform(26);
+                self.jump_frames = 30;
+                self.release_frames = 5;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            return Self::platform_centering_direction(player, objects, 26);
+        }
+        if self.platform33_launch_armed && !self.platform_is_completed(33) {
+            if self.platform33_launch_release != 0 {
+                self.platform33_launch_release -= 1;
+                return Self::platform_centering_direction(player, objects, 33);
+            }
+            let platform_is_high = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 33
+                ) && object.translation[1] >= 1_300_000
+            });
+            if !platform_is_high {
+                return Self::platform_centering_direction(player, objects, 33);
+            }
+            if player.is_some_and(|player| player.status_a & 0x0020_0000 != 0) {
+                self.complete_platform(33);
+                self.jump_frames = 45;
+                self.release_frames = 5;
+                self.lift_exit_jump = true;
+                return held | PAD_CROSS | PAD_SQUARE;
+            }
+            return Self::platform_centering_direction(player, objects, 33);
+        }
+        let collider_platform = collider_entity.and_then(|entity| {
+            (entity != 55
+                && player.is_some_and(|player| player.status_a & 0x0020_0000 != 0)
+                && !self.platform_is_completed(entity))
+            .then(|| {
+                objects.iter().find_map(|object| match object.origin {
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == entity && descriptor.executable == 11 =>
+                    {
+                        Some((entity, descriptor.subtype))
+                    }
+                    _ => None,
+                })
+            })
+            .flatten()
+        });
+        if let Some((platform, subtype)) = collider_platform {
+            if self.active_platform != Some(platform) {
+                self.active_platform = Some(platform);
+                self.active_platform_subtype = subtype;
+                self.active_platform_contacts = 0;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.active_platform_contacts = self.active_platform_contacts.saturating_add(1);
+            if subtype == 3 {
+                let platform_is_at_launch = if platform == 81 {
+                    objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 81
+                        ) && object.translation[2] >= 20_060_000
+                    })
+                } else if platform == 13 {
+                    self.active_platform_contacts >= 165
+                        && objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == 13
+                            ) && object.state == 6
+                                && object.translation[2] <= 14_250_000
+                        })
+                } else {
+                    self.active_platform_contacts >= 180
+                };
+                if platform_is_at_launch {
+                    self.complete_platform(platform);
+                    self.active_platform = None;
+                    if platform == 13 {
+                        self.platform13_exit_stage = 1;
+                        self.jump_frames = 0;
+                        self.release_frames = 0;
+                        self.lift_exit_jump = false;
+                        return PAD_UP;
+                    }
+                    if platform == 81 {
+                        return held;
+                    }
+                    self.jump_frames = 45;
+                    self.release_frames = 5;
+                    self.lift_exit_jump = true;
+                    let exit_direction = if platform == 13 { PAD_UP } else { held };
+                    return exit_direction | PAD_CROSS | PAD_SQUARE;
+                }
+                return Self::platform_centering_direction(player, objects, platform);
+            }
+            if subtype == 6 {
+                if platform == 175 {
+                    return self.platform175_launch_direction(player, objects);
+                }
+                if platform == 157 {
+                    return self.platform157_launch_direction(player, objects);
+                }
+                if platform == 33 {
+                    self.active_platform = None;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    self.platform33_launch_armed = true;
+                    self.platform33_launch_release = 3;
+                    return Self::platform_centering_direction(player, objects, 33);
+                }
+                if platform == 26 {
+                    self.active_platform = None;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    self.platform26_launch_armed = true;
+                    self.platform26_launch_release = 3;
+                    return Self::platform_centering_direction(player, objects, 26);
+                }
+                if platform == 27 {
+                    self.active_platform = None;
+                    self.jump_frames = 30;
+                    self.release_frames = 5;
+                    if self.platform27_wait_hops < 2 {
+                        self.platform27_wait_hops += 1;
+                        self.platform27_waiting = true;
+                        return PAD_CROSS;
+                    }
+                    self.platform27_launch_armed = true;
+                    self.platform27_launch_release = 3;
+                    return Self::platform_centering_direction(player, objects, 27);
+                }
+                if platform == 39 {
+                    if self.active_platform_contacts < 70 {
+                        return 0;
+                    }
+                    if player.is_some_and(|player| player.translation[2] > 8_800_000) {
+                        return PAD_UP | PAD_SQUARE;
+                    }
+                }
+                if platform == 38 && player.is_some_and(|player| player.translation[0] < 15_620_000)
+                {
+                    return PAD_RIGHT;
+                }
+                if platform == 38 && player.is_some_and(|player| player.translation[1] < 900_000) {
+                    return 0;
+                }
+                if player.is_none_or(|player| player.translation[1] < 650_000) {
+                    return if platform == 38 {
+                        Self::platform_centering_direction(player, objects, 38)
+                    } else {
+                        0
+                    };
+                }
+                self.complete_platform(platform);
+                self.active_platform = None;
+                self.jump_frames = if platform == 39 {
+                    45
+                } else if platform == 38 {
+                    20
+                } else if platform == 27 {
+                    30
+                } else {
+                    8
+                };
+                self.release_frames = 5;
+                if platform == 39 {
+                    self.lift_exit_jump = true;
+                }
+                return held | PAD_CROSS | if platform == 39 { PAD_SQUARE } else { 0 };
+            }
+            let required_contacts = if matches!(platform, 157 | 158) {
+                1
+            } else if platform == 14 {
+                15
+            } else {
+                5
+            };
+            if self.active_platform_contacts >= required_contacts {
+                self.complete_platform(platform);
+                self.active_platform = None;
+                self.jump_frames = if platform == 63 {
+                    8
+                } else if platform == 81 {
+                    self.lift_exit_jump = true;
+                    45
+                } else {
+                    30
+                };
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            return if platform == 14 {
+                self.platform14_staging_direction(player, objects)
+            } else {
+                held
+            };
+        }
+        if self.active_platform.is_some() {
+            if self.active_platform == Some(175) {
+                return self.platform175_launch_direction(player, objects);
+            }
+            if self.active_platform == Some(157) {
+                return self.platform157_launch_direction(player, objects);
+            }
+            if self.active_platform == Some(14) {
+                return self.platform14_staging_direction(player, objects);
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return if self.active_platform_subtype == 6 {
+                0
+            } else if self.active_platform_subtype == 3 {
+                Self::platform_centering_direction(
+                    player,
+                    objects,
+                    self.active_platform.expect("active platform is present"),
+                )
+            } else {
+                held
+            };
+        }
+        if collider_entity == Some(106)
+            && camera.path.zone
+                == Eid::from_name("b3_sZ").expect("fixed Temple Ruins bounce-zone EID is valid")
+            && camera.path.index == 1
+        {
+            self.jump_frames = 45;
+            self.release_frames = 5;
+            return held | PAD_CROSS;
+        }
+        let b2_spikes_are_extended = camera.path.zone
+            == Eid::from_name("b2_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
+            && camera.path.index == 1
+            && player.is_some_and(|player| player.translation[0] >= 8_450_000)
+            && objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 10
+                    }
+                ) && object.translation[1] > 820_000
+            });
+        if b2_spikes_are_extended {
+            self.b2_crossing_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return if player.is_some_and(|player| {
+                player.velocity[0] > 50_000 || player.translation[0] > 8_650_000
+            }) {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if camera.path.zone
+            == Eid::from_name("b2_sZ").expect("fixed Temple Ruins exit-zone EID is valid")
+            && camera.path.index == 1
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            if self.b2_crossing_stage == 1 {
+                self.b2_crossing_stage = 2;
+                self.jump_frames = 10;
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            if self.b2_crossing_stage == 2 {
+                self.b2_crossing_stage = 3;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            if self.b2_crossing_stage == 3 {
+                if player.is_some_and(|player| player.translation[0] < 8_900_000) {
+                    return PAD_RIGHT;
+                }
+                self.b2_crossing_stage = 4;
+                self.jump_frames = 45;
+                self.release_frames = 5;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+        }
+        if self.lift_exit_jump
+            && camera.path.zone
+                == Eid::from_name("a6_sZ").expect("fixed Temple Ruins landing-zone EID is valid")
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.lift_exit_jump = false;
+            self.jump_frames = 0;
+            self.release_frames = 2;
+            return held;
+        }
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            let jump_direction = if self.lift_exit_jump && self.platform_is_completed(13) {
+                PAD_UP
+            } else if self.platform27_waiting {
+                Self::platform_centering_direction(player, objects, 27)
+            } else {
+                held
+            };
+            return jump_direction
+                | PAD_CROSS
+                | if a4_trap_is_close { PAD_SQUARE } else { 0 }
+                | if self.lift_exit_jump { PAD_SQUARE } else { 0 }
+                | if camera.path.zone
+                    == Eid::from_name("a7_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
+                    || (camera.path.zone
+                        == Eid::from_name("a8_sZ")
+                            .expect("fixed Temple Ruins platform-zone EID is valid")
+                        && !self.platform_is_completed(90))
+                {
+                    PAD_SQUARE
+                } else {
+                    0
+                }
+                | if camera.path.zone
+                    == Eid::from_name("c9_sZ").expect("fixed Temple Ruins post-fire EID is valid")
+                    && self.c9_platform_stage == 0
+                {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            if self.release_frames == 0 {
+                self.lift_exit_jump = false;
+            }
+            return if self.platform27_waiting {
+                Self::platform_centering_direction(player, objects, 27)
+            } else {
+                held
+            };
+        }
+        let opening = camera.path.zone == spawn_zone && camera.path.index == 0;
+        if opening {
+            let ruin = Eid::from_name("RuiOC").expect("fixed Temple Ruins hazard EID is valid");
+            let opening_hazard_is_close = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    object.program == ruin
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 18
+                            }
+                        )
+                        && object.translation[0] < player.translation[0]
+                        && (0..=160_000)
+                            .contains(&player.translation[2].saturating_sub(object.translation[2]))
+                })
+            });
+            if opening_hazard_is_close && !self.opening_spin_fired {
+                self.opening_spin_fired = true;
+                return held | PAD_SQUARE;
+            }
+            if camera.progress.raw() >= 22_000
+                && !self.opening_jump_fired
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.opening_jump_fired = true;
+                self.jump_frames = 9;
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if camera.path.zone
+            == Eid::from_name("a1_sZ").expect("fixed Temple Ruins opening-neighbor EID is valid")
+            && !self.opening_platform_jump_fired
+            && (collider_entity == Some(55) || self.opening_platform_wait != 0)
+        {
+            self.opening_platform_wait = self.opening_platform_wait.saturating_add(1);
+            if self.opening_platform_wait < 3 {
+                return PAD_LEFT;
+            }
+            self.opening_platform_jump_fired = true;
+            self.jump_frames = 30;
+            self.release_frames = 5;
+            return held | PAD_CROSS;
+        }
+        if self.opening_platform_jump_fired
+            && !self.opening_gap_spin_fired
+            && camera.path.zone
+                == Eid::from_name("a1_sZ")
+                    .expect("fixed Temple Ruins opening-neighbor EID is valid")
+            && player.is_some_and(|player| player.state == 11 && player.velocity[1] <= -1_000_000)
+        {
+            self.opening_gap_spin_fired = true;
+            return held | PAD_SQUARE;
+        }
+        if self.tick >= 48 && self.tick.is_multiple_of(24) {
+            held |= PAD_SQUARE;
+        }
+        if a4_trap_is_close
+            && !self.a4_trap_attack_fired
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.a4_trap_attack_fired = true;
+            self.jump_frames = 10;
+            self.release_frames = 5;
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if camera.path.zone
+            == Eid::from_name("a1_sZ").expect("fixed Temple Ruins opening-neighbor EID is valid")
+            && camera.path.index == 0
+        {
+            if camera.progress.raw() >= 9_500
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.jump_frames = 10;
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if player.is_some_and(|player| player.status_a & 1 != 0) {
+            self.jump_frames = if camera.path.zone
+                == Eid::from_name("a7_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
+                && camera.path.index == 1
+                && camera.progress.raw() >= 30_000
+            {
+                45
+            } else {
+                10
+            };
+            self.release_frames = 5;
+            held |= PAD_CROSS;
+        }
+        held
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurveyInputController {
     profile: SurveyInputProfile,
@@ -11644,6 +13373,7 @@ struct SurveyInputController {
     rolling_stones: RollingStonesRouteController,
     hog_wild: HogWildCompletionRouteController,
     up_the_creek: UpTheCreekRouteController,
+    temple_ruins: TempleRuinsCompletionRouteController,
     native_fortress: NativeFortressRouteController,
     lost_city: LostCityCompletionRouteController,
     road_to_nowhere: RoadToNowhereRouteController,
@@ -11769,6 +13499,50 @@ impl SurveyInputController {
                 collider_entity: None,
                 stage: 0,
                 tick: 0,
+            },
+            temple_ruins: TempleRuinsCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
+                opening_spin_fired: false,
+                opening_jump_fired: false,
+                opening_platform_jump_fired: false,
+                opening_platform_wait: 0,
+                opening_gap_spin_fired: false,
+                a4_trap_attack_fired: false,
+                a4_corridor_phase: 0,
+                a4_attack_release: 0,
+                platform27_wait_hops: 0,
+                platform27_waiting: false,
+                platform27_launch_armed: false,
+                platform27_launch_release: 0,
+                platform26_launch_armed: false,
+                platform26_launch_release: 0,
+                platform33_launch_armed: false,
+                platform33_launch_release: 0,
+                lift_exit_jump: false,
+                b2_crossing_stage: 0,
+                b4_crossing_stage: 0,
+                b7_crossing_stage: 0,
+                b8_lift_stage: 0,
+                b8_lift_runup_frames: 0,
+                b9_crossing_stage: 0,
+                b9_lift_runup_frames: 0,
+                c0_crossing_stage: 0,
+                late_jump_rearm: false,
+                platform13_exit_stage: 0,
+                c7_crate_stage: 0,
+                c9_launch_wait: 0,
+                c9_platform_target: None,
+                c9_platform_stage: 0,
+                d2_dart_stage: 0,
+                d3_exit_stage: 0,
+                b5_orbit_target: None,
+                b5_exit_x: 0,
+                active_platform: None,
+                active_platform_subtype: 0,
+                active_platform_contacts: 0,
+                completed_platforms: [0; 4],
             },
             native_fortress: NativeFortressRouteController {
                 target: match profile {
@@ -11948,6 +13722,10 @@ impl SurveyInputController {
             | SurveyInputProfile::UpTheCreekCompletionRoute => {
                 self.up_the_creek.held(camera, player)
             }
+            SurveyInputProfile::TempleRuinsCompletionRoute => {
+                self.temple_ruins
+                    .held(camera, player, player_collider_entity, route_objects)
+            }
             SurveyInputProfile::NativeFortressRoute
             | SurveyInputProfile::NativeFortressA7Route
             | SurveyInputProfile::NativeFortressExtendedRoute
@@ -12049,10 +13827,12 @@ struct SpawnedEntityTrace {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ProgramObjectTrace {
+    object: VmObjectHandle,
     origin: ObjectOrigin,
     program: Eid,
     state: u16,
     translation: [i32; 3],
+    bound: Option<Bounds3>,
     animation_counter: u32,
     register_72: u32,
 }
@@ -13413,6 +15193,7 @@ fn program_object_traces(
                 .map_err(|error| format!("program trace register {index}: {error:?}"))
         };
         traces.push(ProgramObjectTrace {
+            object: object.vm(),
             origin: spawned.origin(),
             program: identity.global_eid(),
             state: vm.state(),
@@ -13421,6 +15202,12 @@ fn program_object_traces(
                 register(process_register::TRANSLATION_Y)?.cast_signed(),
                 register(process_register::TRANSLATION_Z)?.cast_signed(),
             ],
+            bound: runtime
+                .machine()
+                .frame_bounds()
+                .iter()
+                .find(|bound| bound.object == object.vm())
+                .map(|bound| bound.bound),
             animation_counter: register(process_register::ANIMATION_COUNTER)?,
             register_72: register(72)?,
         });
@@ -14285,6 +16072,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::UpTheCreekPostPlatform12Route
                     | SurveyInputProfile::UpTheCreekCompletionRoute
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
+                    | SurveyInputProfile::TempleRuinsCompletionRoute
             ) {
             player_collider_entity(&runtime)?
         } else {
@@ -14358,7 +16146,10 @@ fn survey_pair_with_runtime(
                     Eid::from_name("BoxsC").expect("fixed Great Gate crate EID is valid"),
                 ],
             )?,
-            SurveyInputProfile::LostCityCompletionRoute => program_object_traces(&runtime, &[])?,
+            SurveyInputProfile::LostCityCompletionRoute
+            | SurveyInputProfile::TempleRuinsCompletionRoute => {
+                program_object_traces(&runtime, &[])?
+            }
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
@@ -14910,6 +16701,80 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
     let nsd = parse_nsd(&nsd_bytes, level).map_err(|error| error.to_string())?;
     let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
     Ok((nsd, nsf, nsf_bytes))
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn temple_ruins_direct_boot_reaches_level_complete() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1c);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Temple Ruins");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Temple Ruins pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::TempleRuinsCompletionRoute,
+        5_000,
+    )
+    .expect("Temple Ruins' ordinary-pad completion route must execute");
+
+    let (transition_frame, requested_lid) = survey
+        .next_lid
+        .expect("the authored end WarpC must request a level transition");
+    assert_eq!(requested_lid, 0x2d);
+    assert_eq!(transition_frame, 4_473);
+    assert_eq!(survey.frames, transition_frame);
+    let expected_terminal = format!("frame {transition_frame} requested level transition to 0x2d");
+    assert_eq!(survey.terminal.as_deref(), Some(expected_terminal.as_str()));
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.successful_spawns, 190);
+    assert_eq!(survey.spawn_attempts, 77_787);
+    assert_eq!(survey.expected_spawn_rejections, 77_597);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 148_192);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 33);
+    assert_eq!(survey.camera_ranges.len(), 60);
+    assert_eq!(survey.camera_path_changes, 59);
+    assert_eq!(survey.last_camera_path_change, 4_291);
+    assert_eq!(survey.last_camera_progress_change, 4_377);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.final_live_objects, 35);
+    assert_eq!(survey.max_live_objects, 66);
+
+    let final_camera = survey
+        .final_camera
+        .expect("the Temple Ruins survey must retain its final camera");
+    let exit_zone = Eid::from_name("d3_sZ").expect("fixed Temple Ruins exit-zone EID is valid");
+    assert_eq!(final_camera.path.zone, exit_zone);
+    assert_eq!(final_camera.path.index, 0);
+    assert_eq!(final_camera.progress.raw(), 50_687);
+    let player = player_trace(&runtime)
+        .expect("Temple Ruins completion player trace must resolve")
+        .expect("Temple Ruins completion must retain Crash");
+    assert_eq!(player.zone, exit_zone);
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [15_666_656, 4_742_996, 5_402_096]);
 }
 
 #[test]

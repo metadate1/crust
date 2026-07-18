@@ -3894,8 +3894,11 @@ impl VmObject {
             },
         )?;
 
-        self.set_process_vector(vector_index, oriented.location)?;
-        self.set_register(process_register::FLOOR_Y, oriented.location[1] as u32)?;
+        // `GoolObjectOrientOnPath` mutates these process fields while its
+        // caller holds the transformed location in a stack-local `trans_new`.
+        // Native copies `trans_new` back into the selected process vector
+        // only after the helper returns. Preserve that order because vectors
+        // one, four, and five alias rotation/target-rotation/misc-C fields.
         self.set_register(process_register::STATUS_A, oriented.status_a)?;
         self.set_register(process_register::MODE_FLAGS_B, oriented.misc_c_y as u32)?;
         self.set_register(process_register::ROTATION_Z, oriented.rotation_z as u32)?;
@@ -3906,7 +3909,9 @@ impl VmObject {
         self.set_register(
             process_register::MISC_B_Z,
             oriented.target_rotation_y as u32,
-        )
+        )?;
+        self.set_process_vector(vector_index, oriented.location)?;
+        self.set_register(process_register::FLOOR_Y, oriented.location[1] as u32)
     }
 
     pub fn set_retail_colors(&mut self, colors: [u16; COLOR_COUNT]) {
@@ -21867,6 +21872,39 @@ mod tests {
         // Source atan_table[40] == 0x1a for the -4:100 path pitch.
         assert_eq!(object.register(process_register::MISC_B_Z), Ok(0x1a));
         assert_eq!(object.stack().len(), 3, "stack progress must be consumed");
+    }
+
+    #[test]
+    fn transform_vectors_path_copy_wins_over_aliased_misc_c_side_effects() {
+        let h = handle(0);
+        let mut object =
+            VmObject::new(h, vec![transform_vectors_instruction(0, 5, 0, 0x800)]).unwrap();
+        object.initialize_retail_process(0, 0).unwrap();
+        object
+            .initialize_retail_entity_path(
+                &entity_with_path(vec![
+                    ZoneEntityPathPoint {
+                        x: 10,
+                        y: 20,
+                        z: 30,
+                    },
+                    ZoneEntityPathPoint {
+                        x: 35,
+                        y: 19,
+                        z: 30,
+                    },
+                ]),
+                RetailEntityPathSpace::Model,
+            )
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(object).unwrap();
+
+        machine.run(h, 1).unwrap();
+
+        let object = machine.object(h).unwrap();
+        assert_eq!(object.process_vector(5), Ok([2_560, 5_120, 7_680]));
+        assert_eq!(object.register(process_register::FLOOR_Y), Ok(5_120));
     }
 
     #[test]

@@ -354,7 +354,45 @@ fn ending_credits_reclaim_and_request_title() {
                 }
             })
             .collect::<Vec<_>>();
-        let _attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        if frame == 1 {
+            let main_attempt = attempts
+                .iter()
+                .find(|attempt| {
+                    attempt
+                        .result
+                        .as_ref()
+                        .is_ok_and(|object| object.arena().is_dedicated_main())
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "Ending's authored main entity must be scanned: {:?}",
+                        attempts
+                            .iter()
+                            .map(|attempt| attempt.descriptor)
+                            .collect::<Vec<_>>()
+                    )
+                });
+            assert_eq!(
+                (
+                    main_attempt.descriptor.id,
+                    main_attempt.descriptor.executable,
+                    main_attempt.descriptor.subtype,
+                ),
+                (1, 61, 5),
+                "Ending uses retail's ID-1 dedicated-main selector"
+            );
+            let main = main_attempt
+                .result
+                .as_ref()
+                .expect("Ending's authored main entity must bind");
+            assert!(main.arena().is_dedicated_main());
+            let initial_save = runtime
+                .saved_level_state()
+                .expect("Ending's dedicated main spawn must run native LevelSaveState");
+            assert_eq!(initial_save.level, LevelId::ENDING);
+            assert_eq!(initial_save.location, camera.location());
+        }
         let _cleanup = runtime.take_cleanup_actions();
         assert!(runtime.take_reclaim_event_faults().is_empty());
         assert!(runtime.take_solid_event_faults().is_empty());

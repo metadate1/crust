@@ -7053,13 +7053,15 @@ impl RetailRuntime {
         };
         let result = self.materialize(binding, host);
         if let Ok(materialized) = result.as_ref().copied()
-            && EntitySpawnDescriptor::from(entity).is_crash_program()
+            && materialized.object.arena.is_dedicated_main()
             && !self.suppress_initial_crash_save
             && self.level_state_context.is_some()
         {
             // `GoolObjectSpawn` establishes the initial death checkpoint as
-            // soon as Crash is bound unless native's temporary transition
-            // guard is active for the bonus-return pre-restart scan.
+            // soon as the dedicated `crash`/`main_obj` allocation is bound,
+            // including IDs 1..4 and executable 0x2c/0x30 subtype-zero
+            // specials. Native's temporary transition guard suppresses only
+            // the bonus-return pre-restart scan.
             let initial_save = self.save_level_state(materialized.object, true);
             if self.restricted_direct_boot_save == RestrictedDirectBootSave::Armed {
                 if matches!(initial_save, Ok(RetailSaveStateOutcome::RestrictedByZone))
@@ -10026,6 +10028,60 @@ mod tests {
             Some(&carried_snapshot),
             "the bonus pre-restart scan must not overwrite its return snapshot"
         );
+    }
+
+    #[test]
+    fn every_native_main_selector_replaces_the_initial_restart_snapshot() {
+        let old_level = LevelId::new_const(0x03);
+        let cases = [
+            (
+                "id-range special",
+                LevelId::new_const(0x09),
+                entity(1, 2, 7),
+            ),
+            (
+                "Great Hall executable",
+                LevelId::new_const(0x2c),
+                entity(5, 0x2c, 0),
+            ),
+            ("Ending executable", LevelId::ENDING, entity(5, 0x30, 0)),
+        ];
+
+        for (label, target, main_entity) in cases {
+            assert!(
+                EntitySpawnDescriptor::from(&main_entity).selects_main_object(),
+                "{label} must select native's dedicated main allocation"
+            );
+            assert!(
+                !EntitySpawnDescriptor::from(&main_entity).is_crash_program(),
+                "{label} exercises a non-Crash main selector"
+            );
+
+            let mut source = RetailRuntime::new_for_level(119, old_level);
+            source.saved_level_state = Some(level_snapshot(old_level));
+            let mut mounted =
+                RetailRuntime::new_from_session(119, target, source.export_session_carry())
+                    .unwrap();
+            mounted.set_level_state_context(level_context(ZONE_B, false, vec![ZONE_B]));
+            let neighbors = [NeighborZone {
+                eid: ZONE_B,
+                display_flags: ACTIVE_ZONE_DISPLAY_BIT,
+                entities: std::slice::from_ref(&main_entity),
+            }];
+
+            let attempts = mounted.spawn_current_zone_neighbors(&neighbors, &mut SnapshotHost);
+            let main = *attempts[0]
+                .result
+                .as_ref()
+                .unwrap_or_else(|error| panic!("{label} failed to bind: {error:?}"));
+
+            assert!(main.arena.is_dedicated_main(), "{label}");
+            let snapshot = mounted
+                .saved_level_state()
+                .unwrap_or_else(|| panic!("{label} omitted native's initial LevelSaveState"));
+            assert_eq!(snapshot.level, target, "{label}");
+            assert_eq!(snapshot.location.path.zone, ZONE_B, "{label}");
+        }
     }
 
     #[test]

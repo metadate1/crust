@@ -6,7 +6,9 @@ use std::{
 };
 
 use crust_formats::binary::{Eid, EntryHandle, PageIndex};
-use crust_formats::stream::{LevelId, Nsd, Nsf, NsfPage};
+use crust_formats::stream::{
+    LevelId, NSF_PAGE_SECTOR_COUNT, Nsd, Nsf, NsfPage, NsfPageSectorCount,
+};
 
 pub const MAX_PHYSICAL_PAGES: usize = 128;
 /// Retail Crash Bandicoot keeps exactly twenty-two ordinary NSF pages in RAM.
@@ -35,6 +37,41 @@ pub const fn retail_physical_slot_count(level: LevelId) -> usize {
 /// native physical slots `8..=15`; native slots `0..=7` hold frame buffers.
 pub const TEXTURE_SLOT_COUNT: usize = 8;
 const AUDIO_PAGE_TYPES: [u16; 2] = [3, 4];
+/// Retail's double-speed CD transfers 150 sectors per second. The cooperative
+/// simulation observes five sectors during each 30 Hz game frame.
+const RETAIL_CD_SECTORS_PER_FRAME: u16 = 5;
+/// Characterized CdlSeekL/read setup before the first page in a new group.
+/// Contiguous pages share this cost and retain only their own transfer time.
+const RETAIL_CD_SEEK_SETUP_FRAMES: u16 = 10;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetailCdTransfer {
+    pages: Vec<RetailCdPage>,
+    next: usize,
+    frames_remaining: u16,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailCdPage {
+    page: PageIndex,
+    reservation: Option<RetailCdReservation>,
+    /// False after native-style cancellation or synchronous materialization;
+    /// the combined read continues, but this cloned member is not published.
+    cloned: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RetailCdReservation {
+    slot: u8,
+}
+
+enum PendingPageUpdate {
+    Idle,
+    Waiting,
+    Stalled,
+    Invalidated(Vec<PageIndex>),
+    Resolved(PagerOpenOutcome),
+}
 
 /// Allocation state of one of retail's eight usable texture-page slots.
 ///
@@ -123,6 +160,20 @@ pub struct PagerOpenOutcome {
     pub invalidated: PageInvalidations,
     /// Full texture-slot identity retained for texture-cache diagnostics.
     pub evicted: Option<TextureSlotBinding>,
+}
+
+/// One observable frame-boundary change produced by `NSUpdate(-1)`.
+///
+/// A CD group re-arms every zero-reference victim PTE when its complete
+/// physical run is reserved, before any member finishes reading. The victim
+/// list is distinct from [`PageInvalidations`]: one group may reserve and
+/// invalidate all twenty-two ordinary slots at once.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PagerUpdateOutcome {
+    /// Transactional reservation-start invalidations, in physical-slot order.
+    Invalidated(Vec<PageIndex>),
+    /// One progressively published page from the active read group.
+    Resolved(PagerOpenOutcome),
 }
 
 impl PagerOpenOutcome {
@@ -316,6 +367,10 @@ pub struct Pager {
     /// `None` is the nominal twenty-two-page maximum.
     physical_slot_count: Option<NonZeroU8>,
     physical_clock: u64,
+    /// Validated per-page CD lengths. `None` keeps authored/synthetic pagers
+    /// synchronous; stream-backed production pagers use retail transfer time.
+    cd_page_sectors: Option<Vec<NsfPageSectorCount>>,
+    cd_transfer: Option<RetailCdTransfer>,
     /// EIDs protected by native's current-zone load-list allocation rule.
     /// `None` represents a null `cur_zone`, which has a distinct fallback.
     current_texture_load_eids: Option<BTreeSet<Eid>>,
@@ -388,6 +443,17 @@ impl Pager {
                 pager.bind_page_eid(pte.eid, page)?;
             }
         }
+        let mut page_sectors = Vec::with_capacity(metadata.header.page_count as usize);
+        for index in 0..metadata.header.page_count {
+            let page = PageIndex::new(index);
+            page_sectors.push(
+                metadata
+                    .header
+                    .page_sector_count(page)
+                    .ok_or(PagingError::UnknownPage(page))?,
+            );
+        }
+        pager.cd_page_sectors = Some(page_sectors);
         Ok(pager)
     }
 
@@ -994,10 +1060,28 @@ impl Pager {
 
     /// Performs one native `NSUpdate(-1)` virtual-page promotion.
     ///
-    /// Retail chooses the lowest pending pgid and leaves it queued when no
-    /// physical resource is replaceable. At most one request is promoted by a
-    /// frame update; callers can loop this operation for `NSUpdate2` behavior.
-    pub fn update_pending_virtual_page(&mut self) -> Result<Option<PagerOpenOutcome>, PagingError> {
+    /// Retail chooses the lowest pending pgid. Stream-backed pagers start one
+    /// source-ordered contiguous CD group and expose at most one completed
+    /// page per cooperative frame; synthetic pagers retain the immediate
+    /// promotion used by focused allocator tests. A request remains queued
+    /// when its transfer is incomplete or no physical resource is replaceable.
+    /// Callers can loop this operation for `NSUpdate2` behavior.
+    pub fn update_pending_virtual_page(
+        &mut self,
+    ) -> Result<Option<PagerUpdateOutcome>, PagingError> {
+        Ok(match self.update_pending_virtual_page_step()? {
+            PendingPageUpdate::Invalidated(pages) => Some(PagerUpdateOutcome::Invalidated(pages)),
+            PendingPageUpdate::Resolved(outcome) => Some(PagerUpdateOutcome::Resolved(outcome)),
+            PendingPageUpdate::Idle | PendingPageUpdate::Waiting | PendingPageUpdate::Stalled => {
+                None
+            }
+        })
+    }
+
+    fn update_pending_virtual_page_step(&mut self) -> Result<PendingPageUpdate, PagingError> {
+        if self.cd_page_sectors.is_some() {
+            return self.update_pending_cd_page();
+        }
         let Some(page) = self
             .pages
             .values()
@@ -1005,13 +1089,253 @@ impl Pager {
             .map(|record| record.index)
             .min()
         else {
-            return Ok(None);
+            return Ok(PendingPageUpdate::Idle);
         };
         match self.open_page_with_reference_outcome(page, false, OrdinaryPageKind::Physical) {
-            Ok(outcome) => Ok(Some(outcome)),
-            Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => Ok(None),
+            Ok(outcome) => Ok(PendingPageUpdate::Resolved(outcome)),
+            Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                Ok(PendingPageUpdate::Stalled)
+            }
             Err(error) => Err(error),
         }
+    }
+
+    fn update_pending_cd_page(&mut self) -> Result<PendingPageUpdate, PagingError> {
+        if self.cd_transfer.is_none() {
+            let Some(first) = self.lowest_queued_page() else {
+                return Ok(PendingPageUpdate::Idle);
+            };
+            let Some(invalidated) = self.start_cd_transfer(first)? else {
+                return Ok(PendingPageUpdate::Stalled);
+            };
+            // The cloning NSUpdate starts the asynchronous seek/read. Its
+            // first transfer frame is observed by the following NSUpdate,
+            // matching the independent PCSX PTE tick boundary.
+            return Ok(if invalidated.is_empty() {
+                PendingPageUpdate::Waiting
+            } else {
+                PendingPageUpdate::Invalidated(invalidated)
+            });
+        }
+
+        let (page, frames_remaining, cloned) = {
+            let transfer = self
+                .cd_transfer
+                .as_ref()
+                .expect("a CD transfer was started above");
+            let page = transfer.pages[transfer.next];
+            (page.page, transfer.frames_remaining, page.cloned)
+        };
+        if frames_remaining > 1 {
+            self.cd_transfer
+                .as_mut()
+                .expect("the active transfer still exists")
+                .frames_remaining -= 1;
+            return Ok(PendingPageUpdate::Waiting);
+        }
+
+        if !cloned {
+            self.advance_cd_transfer();
+            return Ok(PendingPageUpdate::Waiting);
+        }
+        if self.pages[&page].state != PageState::Queued {
+            self.cancel_cd_page_clone(page);
+            self.advance_cd_transfer();
+            return Ok(PendingPageUpdate::Waiting);
+        }
+
+        // Publication is transactional with texture/audio allocation. A
+        // failed destination allocation retains the already-read physical
+        // reservation and retries without consuming another transfer frame.
+        let mut preview = self.clone();
+        let reservation = preview
+            .take_cd_page_reservation(page)
+            .expect("every active cloned CD page owns one physical reservation");
+        match preview.open_reserved_cd_page_in_place(
+            page,
+            reservation,
+            false,
+            OrdinaryPageKind::Physical,
+        ) {
+            Ok(outcome) => {
+                preview.advance_cd_transfer();
+                *self = preview;
+                Ok(PendingPageUpdate::Resolved(outcome))
+            }
+            Err(PagingError::NoFreePhysicalSlot(_) | PagingError::NoFreeTextureSlot(_)) => {
+                Ok(PendingPageUpdate::Stalled)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn lowest_queued_page(&self) -> Option<PageIndex> {
+        self.pages
+            .values()
+            .filter(|record| record.state == PageState::Queued)
+            .map(|record| record.index)
+            .min()
+    }
+
+    fn start_cd_transfer(
+        &mut self,
+        first: PageIndex,
+    ) -> Result<Option<Vec<PageIndex>>, PagingError> {
+        let mut pages = Vec::new();
+        let mut index = first.get();
+        loop {
+            let page = PageIndex::new(index);
+            if self.pages.get(&page).map(|record| record.state) != Some(PageState::Queued) {
+                break;
+            }
+            pages.push(page);
+            let Some(next) = index.checked_add(1) else {
+                break;
+            };
+            index = next;
+        }
+        debug_assert!(!pages.is_empty());
+        let mut preview = self.clone();
+        let (reservations, invalidated) = preview.reserve_cd_physical_group(&pages)?;
+        if reservations.is_empty() {
+            return Ok(None);
+        }
+        pages.truncate(reservations.len());
+        let frames_remaining = RETAIL_CD_SEEK_SETUP_FRAMES + self.cd_page_transfer_frames(first);
+        preview.cd_transfer = Some(RetailCdTransfer {
+            pages: pages
+                .into_iter()
+                .zip(reservations)
+                .map(|(page, reservation)| RetailCdPage {
+                    page,
+                    reservation: Some(reservation),
+                    cloned: true,
+                })
+                .collect(),
+            next: 0,
+            frames_remaining,
+        });
+        *self = preview;
+        Ok(Some(invalidated))
+    }
+
+    /// Reserves the longest contiguous replaceable/free physical run, exactly
+    /// like `NSPageAllocate` shortening its requested count. Equal-length and
+    /// equal-age candidates choose the later slot encountered by the scan.
+    fn reserve_cd_physical_group(
+        &mut self,
+        pages: &[PageIndex],
+    ) -> Result<(Vec<RetailCdReservation>, Vec<PageIndex>), PagingError> {
+        let Some((start, count)) = self.longest_replaceable_physical_run(pages.len()) else {
+            return Ok((Vec::new(), Vec::new()));
+        };
+        let mut reservations = Vec::with_capacity(count);
+        let mut invalidated = Vec::with_capacity(count);
+        for (offset, page) in pages.iter().copied().take(count).enumerate() {
+            let slot = start + offset;
+            let evicted = self.physical_slots[slot];
+            if let Some(evicted) = evicted {
+                let record = self
+                    .pages
+                    .get_mut(&evicted)
+                    .ok_or(PagingError::UnknownPage(evicted))?;
+                record.state = PageState::Raw;
+                record.physical_slot = None;
+                record.ordinary_kind = None;
+                invalidated.push(evicted);
+            }
+            self.physical_slots[slot] = Some(page);
+            reservations.push(RetailCdReservation {
+                slot: u8::try_from(slot).expect("twenty-two physical slots fit u8"),
+            });
+        }
+        debug_assert!(invalidated.len() <= PHYSICAL_SLOT_COUNT);
+        Ok((reservations, invalidated))
+    }
+
+    fn longest_replaceable_physical_run(&self, requested: usize) -> Option<(usize, usize)> {
+        let mut best = None;
+        for start in 0..self.physical_slot_count() {
+            let mut age = 0_u64;
+            for len in 1..=requested.min(self.physical_slot_count() - start) {
+                let slot = start + len - 1;
+                let slot_age = match self.physical_slots[slot] {
+                    None => 0,
+                    Some(page) => {
+                        let record = self.pages.get(&page)?;
+                        if record.references != 0 {
+                            break;
+                        }
+                        // Rust stores an install timestamp; native's candidate
+                        // score is age. Convert it so larger still means older,
+                        // preserving the existing allocator's LRU direction.
+                        self.physical_clock
+                            .saturating_sub(record.physical_timestamp)
+                            .saturating_add(1)
+                    }
+                };
+                age = age.saturating_add(slot_age);
+                let candidate = (len, age, start);
+                if best.is_none_or(|current| candidate > current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best.map(|(len, _, start)| (start, len))
+    }
+
+    fn take_cd_page_reservation(&mut self, page: PageIndex) -> Option<RetailCdReservation> {
+        let member = self
+            .cd_transfer
+            .as_mut()?
+            .pages
+            .iter_mut()
+            .find(|member| member.page == page && member.cloned)?;
+        member.cloned = false;
+        member.reservation.take()
+    }
+
+    fn cancel_cd_page_clone(&mut self, page: PageIndex) {
+        let Some(reservation) = self.take_cd_page_reservation(page) else {
+            return;
+        };
+        let slot = usize::from(reservation.slot);
+        if self.physical_slots[slot] == Some(page) {
+            self.physical_slots[slot] = None;
+        }
+    }
+
+    fn advance_cd_transfer(&mut self) {
+        let next_page = self
+            .cd_transfer
+            .as_ref()
+            .and_then(|transfer| transfer.pages.get(transfer.next.saturating_add(1)))
+            .map(|member| member.page);
+        let Some(next_page) = next_page else {
+            self.cd_transfer = None;
+            return;
+        };
+        let frames_remaining = self.cd_page_transfer_frames(next_page);
+        let transfer = self
+            .cd_transfer
+            .as_mut()
+            .expect("the next transfer page belongs to an active group");
+        transfer.next += 1;
+        transfer.frames_remaining = frames_remaining;
+    }
+
+    fn cd_page_transfer_frames(&self, page: PageIndex) -> u16 {
+        let sectors = self
+            .cd_page_sectors
+            .as_ref()
+            .and_then(|counts| {
+                usize::try_from(page.get())
+                    .ok()
+                    .and_then(|index| counts.get(index))
+            })
+            .copied()
+            .map_or(NSF_PAGE_SECTOR_COUNT, NsfPageSectorCount::get);
+        (u16::from(sectors) / RETAIL_CD_SECTORS_PER_FRAME).max(1)
     }
 
     /// Drains native's virtual queue using `NSUpdate2` ordering.
@@ -1026,10 +1350,13 @@ impl Pager {
             let Some(next) = self.pending_virtual_pages().next() else {
                 return Ok(outcomes);
             };
-            let Some(outcome) = self.update_pending_virtual_page()? else {
-                return Err(PagingError::PendingUpdateStalled(next));
-            };
-            outcomes.push(outcome);
+            match self.update_pending_virtual_page_step()? {
+                PendingPageUpdate::Resolved(outcome) => outcomes.push(outcome),
+                PendingPageUpdate::Waiting | PendingPageUpdate::Invalidated(_) => {}
+                PendingPageUpdate::Idle | PendingPageUpdate::Stalled => {
+                    return Err(PagingError::PendingUpdateStalled(next));
+                }
+            }
         }
     }
 
@@ -1059,9 +1386,63 @@ impl Pager {
         // and a texture slot). Previewing keeps a failure in either allocator
         // from committing an eviction in the other.
         let mut preview = self.clone();
-        let outcome = preview.open_page_with_outcome_in_place(page, increment_reference, kind)?;
+        let outcome = if let Some(reservation) = preview.take_cd_page_reservation(page) {
+            preview.open_reserved_cd_page_in_place(page, reservation, increment_reference, kind)?
+        } else {
+            preview.open_page_with_outcome_in_place(page, increment_reference, kind)?
+        };
         *self = preview;
         Ok(outcome)
+    }
+
+    fn open_reserved_cd_page_in_place(
+        &mut self,
+        page: PageIndex,
+        reservation: RetailCdReservation,
+        increment_reference: bool,
+        kind: OrdinaryPageKind,
+    ) -> Result<PagerOpenOutcome, PagingError> {
+        let slot = usize::from(reservation.slot);
+        debug_assert_eq!(self.physical_slots[slot], Some(page));
+        let is_texture = self.texture_page_eids.contains_key(&page);
+        let is_audio = self.audio_pages.contains(&page);
+        let evicted = if is_texture {
+            self.physical_slots[slot] = None;
+            self.materialize_texture_page(page)?
+                .replaced
+                .filter(|binding| binding.state == TextureSlotState::Resident)
+        } else if is_audio {
+            self.physical_slots[slot] = None;
+            self.pages
+                .get_mut(&page)
+                .ok_or(PagingError::UnknownPage(page))?
+                .state = PageState::Translated;
+            None
+        } else {
+            self.physical_clock = self.physical_clock.wrapping_add(1);
+            let record = self
+                .pages
+                .get_mut(&page)
+                .ok_or(PagingError::UnknownPage(page))?;
+            record.state = PageState::Translated;
+            record.physical_slot = Some(reservation.slot);
+            record.physical_timestamp = self.physical_clock;
+            record.ordinary_kind = Some(kind);
+            None
+        };
+        let record = self
+            .pages
+            .get_mut(&page)
+            .ok_or(PagingError::UnknownPage(page))?;
+        if increment_reference {
+            record.references = record.references.saturating_add(1);
+        }
+        Ok(PagerOpenOutcome {
+            page,
+            resolved: true,
+            invalidated: PageInvalidations::new(None, evicted.map(|binding| binding.page)),
+            evicted,
+        })
     }
 
     fn open_page_with_outcome_in_place(
@@ -1198,16 +1579,23 @@ impl Pager {
     }
 
     pub fn close_page(&mut self, page: PageIndex) -> Result<(), PagingError> {
-        let record = self
-            .pages
-            .get_mut(&page)
-            .ok_or(PagingError::UnknownPage(page))?;
-        record.references = record
-            .references
-            .checked_sub(1)
-            .ok_or(PagingError::ReferenceUnderflow(page))?;
-        if record.references == 0 && record.state == PageState::Queued {
-            record.state = PageState::Raw;
+        let canceled = {
+            let record = self
+                .pages
+                .get_mut(&page)
+                .ok_or(PagingError::UnknownPage(page))?;
+            record.references = record
+                .references
+                .checked_sub(1)
+                .ok_or(PagingError::ReferenceUnderflow(page))?;
+            let canceled = record.references == 0 && record.state == PageState::Queued;
+            if canceled {
+                record.state = PageState::Raw;
+            }
+            canceled
+        };
+        if canceled {
+            self.cancel_cd_page_clone(page);
         }
         Ok(())
     }
@@ -1232,26 +1620,30 @@ impl Pager {
             .ok_or(PagingError::UnknownPage(page))?
             .state;
         if state == PageState::Queued {
-            let record = self
-                .pages
-                .get_mut(&page)
-                .ok_or(PagingError::UnknownPage(page))?;
-            if record.references == 0 {
-                return Ok(PagerCloseOutcome {
-                    page,
-                    decremented: false,
-                    unresolved: true,
-                });
-            }
-            record.references -= 1;
-            if record.references == 0 {
-                // Native NSPageDecRef deletes a zero-reference type-zero page,
-                // canceling its pending NSUpdate request.
-                record.state = PageState::Raw;
+            let (decremented, canceled) = {
+                let record = self
+                    .pages
+                    .get_mut(&page)
+                    .ok_or(PagingError::UnknownPage(page))?;
+                if record.references == 0 {
+                    (false, false)
+                } else {
+                    record.references -= 1;
+                    let canceled = record.references == 0;
+                    if canceled {
+                        // Native deletes one zero-reference type-zero clone
+                        // immediately while its read siblings continue.
+                        record.state = PageState::Raw;
+                    }
+                    (true, canceled)
+                }
+            };
+            if canceled {
+                self.cancel_cd_page_clone(page);
             }
             return Ok(PagerCloseOutcome {
                 page,
-                decremented: true,
+                decremented,
                 unresolved: true,
             });
         }
@@ -1693,6 +2085,28 @@ mod tests {
         eid
     }
 
+    fn enable_cd_transfer(
+        pager: &mut Pager,
+        page_count: usize,
+        overrides: impl IntoIterator<Item = (u32, u8)>,
+    ) {
+        let full = NsfPageSectorCount::new(NSF_PAGE_SECTOR_COUNT).unwrap();
+        let mut counts = vec![full; page_count];
+        for (page, sectors) in overrides {
+            counts[page as usize] = NsfPageSectorCount::new(sectors).unwrap();
+        }
+        pager.cd_page_sectors = Some(counts);
+    }
+
+    fn expect_resolution(update: PagerUpdateOutcome) -> PagerOpenOutcome {
+        match update {
+            PagerUpdateOutcome::Resolved(outcome) => outcome,
+            PagerUpdateOutcome::Invalidated(pages) => {
+                panic!("expected page resolution, got reservation invalidations {pages:?}")
+            }
+        }
+    }
+
     #[test]
     fn load_list_differences_keep_balanced_references() {
         let mut pager = Pager::new();
@@ -1847,10 +2261,12 @@ mod tests {
             assert_eq!(pager.page(page).unwrap().references, 1);
         }
         for expected in 0..8 {
-            let promoted = pager
-                .update_pending_virtual_page()
-                .unwrap()
-                .expect("the first eight protected textures have slots");
+            let promoted = expect_resolution(
+                pager
+                    .update_pending_virtual_page()
+                    .unwrap()
+                    .expect("the first eight protected textures have slots"),
+            );
             assert_eq!(promoted.page, PageIndex::new(expected));
         }
         let queued = PageIndex::new(8);
@@ -2177,10 +2593,12 @@ mod tests {
         assert_eq!(pager.page(page).unwrap().physical_slot(), None);
         assert!(!pager.resolved_pages().any(|resolved| resolved == page));
 
-        let promoted = pager
-            .update_pending_virtual_page()
-            .unwrap()
-            .expect("free ordinary RAM promotes the queued page on NSUpdate");
+        let promoted = expect_resolution(
+            pager
+                .update_pending_virtual_page()
+                .unwrap()
+                .expect("free ordinary RAM promotes the queued page on NSUpdate"),
+        );
         let slot = pager.page(page).unwrap().physical_slot();
         assert!(promoted.resolved);
         assert_eq!(promoted.page, page);
@@ -2215,6 +2633,356 @@ mod tests {
     }
 
     #[test]
+    fn retail_cd_frame_cost_uses_validated_sector_lengths_and_a_one_frame_minimum() {
+        let mut pager = Pager::new();
+        for page in 0..4 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 4, [(0, 1), (1, 5), (2, 31)]);
+
+        assert_eq!(pager.cd_page_transfer_frames(PageIndex::new(0)), 1);
+        assert_eq!(pager.cd_page_transfer_frames(PageIndex::new(1)), 1);
+        assert_eq!(pager.cd_page_transfer_frames(PageIndex::new(2)), 6);
+        assert_eq!(pager.cd_page_transfer_frames(PageIndex::new(3)), 6);
+    }
+
+    #[test]
+    fn retail_cd_group_resolves_source_order_after_one_shared_seek() {
+        let mut pager = Pager::new();
+        for page in 0..=26 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 27, [(23, 20), (24, 31), (26, 1)]);
+
+        // Request insertion order is deliberately reversed. Native chooses
+        // the lowest pgid and clones its source-contiguous successor.
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(24))
+            .unwrap();
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(23))
+            .unwrap();
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(26))
+            .unwrap();
+
+        for _ in 0..14 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(23),
+            "ten setup frames plus floor(20 / 5) transfer frames"
+        );
+        for _ in 0..5 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(24),
+            "the contiguous page shares setup and needs floor(31 / 5) frames"
+        );
+
+        // Page 25 breaks contiguity. Page 26 therefore pays a new ten-frame
+        // setup plus the one-frame minimum for its one-sector body.
+        for _ in 0..11 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(26)
+        );
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+    }
+
+    #[test]
+    fn retail_cd_wait_does_not_start_until_a_physical_run_is_replaceable() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(1).unwrap();
+        for page in 0..2 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 2, [(0, 1)]);
+        let requested = PageIndex::new(0);
+        let blocker = PageIndex::new(1);
+        pager.open_page(blocker).unwrap();
+        pager.open_page_virtual_with_outcome(requested).unwrap();
+
+        for _ in 0..20 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+            assert!(pager.cd_transfer.is_none(), "a blocked seek must not start");
+        }
+        pager.close_page(blocker).unwrap();
+        assert_eq!(
+            pager.update_pending_virtual_page().unwrap(),
+            Some(PagerUpdateOutcome::Invalidated(vec![blocker])),
+            "reservation invalidation is published at seek start"
+        );
+        for _ in 0..10 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        let outcome = expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap());
+        assert_eq!(outcome.page, requested);
+        assert_eq!(outcome.invalidated, PageInvalidations::NONE);
+    }
+
+    #[test]
+    fn retail_cd_clone_reserves_a_whole_later_tied_run_before_countdown() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(3).unwrap();
+        for page in 0..2 {
+            let page = PageIndex::new(page);
+            pager.register_page(page, []).unwrap();
+            pager.open_page_virtual_with_outcome(page).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 2, [(0, 1), (1, 1)]);
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        assert_eq!(
+            pager.physical_slots[..3],
+            [None, Some(PageIndex::new(0)), Some(PageIndex::new(1))],
+            "equal free runs choose the later native scan candidate"
+        );
+        assert_eq!(pager.cd_transfer.as_ref().unwrap().pages.len(), 2);
+        assert!(
+            pager
+                .cd_transfer
+                .as_ref()
+                .unwrap()
+                .pages
+                .iter()
+                .all(|member| member.cloned && member.reservation.is_some())
+        );
+    }
+
+    #[test]
+    fn retail_cd_reservation_keeps_existing_oldest_first_eviction_direction() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for page in 0..3 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        let requested = PageIndex::new(0);
+        let oldest = PageIndex::new(1);
+        let newest = PageIndex::new(2);
+        pager.open_page(oldest).unwrap();
+        pager.open_page(newest).unwrap();
+        pager.close_page(oldest).unwrap();
+        pager.close_page(newest).unwrap();
+        enable_cd_transfer(&mut pager, 3, [(0, 1)]);
+        pager.open_page_virtual_with_outcome(requested).unwrap();
+
+        assert_eq!(
+            pager.update_pending_virtual_page().unwrap(),
+            Some(PagerUpdateOutcome::Invalidated(vec![oldest]))
+        );
+        assert_eq!(pager.page(oldest).unwrap().state, PageState::Raw);
+        assert_eq!(pager.page(newest).unwrap().state, PageState::Translated);
+        assert_eq!(pager.physical_slots[..2], [Some(requested), Some(newest)]);
+    }
+
+    #[test]
+    fn retail_cd_reservation_reports_every_victim_before_the_group_resolves() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(4).unwrap();
+        for page in 0..8 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        let requested = (0..4).map(PageIndex::new).collect::<Vec<_>>();
+        let victims = (4..8).map(PageIndex::new).collect::<Vec<_>>();
+        for victim in &victims {
+            pager.open_page(*victim).unwrap();
+        }
+        for victim in &victims {
+            pager.close_page(*victim).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 8, requested.iter().map(|page| (page.get(), 1)));
+        for page in &requested {
+            pager.open_page_virtual_with_outcome(*page).unwrap();
+        }
+
+        assert_eq!(
+            pager.update_pending_virtual_page().unwrap(),
+            Some(PagerUpdateOutcome::Invalidated(victims.clone())),
+            "a reservation can invalidate more pages than PageInvalidations can hold"
+        );
+        for victim in &victims {
+            assert_eq!(pager.page(*victim).unwrap().state, PageState::Raw);
+            assert_eq!(pager.page(*victim).unwrap().physical_slot(), None);
+        }
+        for _ in 0..10 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        let first = expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap());
+        assert_eq!(first.page, requested[0]);
+        assert_eq!(first.invalidated, PageInvalidations::NONE);
+    }
+
+    #[test]
+    fn retail_cd_clone_shortens_to_the_longest_available_prefix() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for page in 0..4 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 4, [(0, 1), (1, 1), (2, 1)]);
+        let blocker = PageIndex::new(3);
+        pager.open_page(blocker).unwrap();
+        for page in 0..3 {
+            pager
+                .open_page_virtual_with_outcome(PageIndex::new(page))
+                .unwrap();
+        }
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        assert_eq!(pager.cd_transfer.as_ref().unwrap().pages.len(), 1);
+        assert_eq!(
+            pager.page(PageIndex::new(1)).unwrap().state,
+            PageState::Queued
+        );
+        assert_eq!(
+            pager.page(PageIndex::new(2)).unwrap().state,
+            PageState::Queued
+        );
+        for _ in 0..10 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(0)
+        );
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        assert!(pager.cd_transfer.is_none());
+        assert_eq!(pager.page(blocker).unwrap().references, 1);
+    }
+
+    #[test]
+    fn canceled_cd_clone_does_not_rejoin_when_reopened_during_the_same_read() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for page in 0..2 {
+            let page = PageIndex::new(page);
+            pager.register_page(page, []).unwrap();
+            pager.open_page_virtual_with_outcome(page).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 2, [(0, 1), (1, 1)]);
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        pager.close_page_retail(PageIndex::new(0)).unwrap();
+        assert_eq!(pager.page(PageIndex::new(0)).unwrap().state, PageState::Raw);
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(0))
+            .unwrap();
+        for _ in 0..11 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(1),
+            "the surviving sibling publishes while the reopened page stays queued"
+        );
+        assert_eq!(
+            pager.page(PageIndex::new(0)).unwrap().state,
+            PageState::Queued
+        );
+        for _ in 0..11 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(0),
+            "the reopened page pays for a new seek/read group"
+        );
+    }
+
+    #[test]
+    fn synchronous_materialization_consumes_the_in_flight_reservation() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for page in 0..2 {
+            let page = PageIndex::new(page);
+            pager.register_page(page, []).unwrap();
+            pager.open_page_virtual_with_outcome(page).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 2, [(0, 1), (1, 1)]);
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        assert_eq!(pager.resident_physical_page_count(), 2);
+        let materialized = pager
+            .materialize_page_with_outcome(PageIndex::new(0))
+            .unwrap();
+        assert!(materialized.resolved);
+        assert_eq!(
+            pager.page(PageIndex::new(0)).unwrap().state,
+            PageState::Translated
+        );
+        assert_eq!(pager.resident_physical_page_count(), 2);
+
+        let mut publications = Vec::new();
+        for _ in 0..20 {
+            if let Some(outcome) = pager.update_pending_virtual_page().unwrap() {
+                publications.push(expect_resolution(outcome).page);
+            }
+        }
+        assert_eq!(publications, [PageIndex::new(1)]);
+        assert!(pager.pending_virtual_pages().next().is_none());
+    }
+
+    #[test]
+    fn request_queued_after_clone_start_pays_for_a_later_seek_group() {
+        let mut pager = Pager::new();
+        pager.set_physical_slot_count(2).unwrap();
+        for page in 0..2 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+        }
+        enable_cd_transfer(&mut pager, 2, [(0, 1), (1, 1)]);
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(0))
+            .unwrap();
+
+        assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        pager
+            .open_page_virtual_with_outcome(PageIndex::new(1))
+            .unwrap();
+        for _ in 0..10 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(0)
+        );
+        for _ in 0..11 {
+            assert_eq!(pager.update_pending_virtual_page(), Ok(None));
+        }
+        assert_eq!(
+            expect_resolution(pager.update_pending_virtual_page().unwrap().unwrap()).page,
+            PageIndex::new(1)
+        );
+    }
+
+    #[test]
+    fn nsupdate2_drains_timed_groups_without_exposing_intermediate_waits() {
+        let mut pager = Pager::new();
+        for page in 0..3 {
+            pager.register_page(PageIndex::new(page), []).unwrap();
+            pager
+                .open_page_virtual_with_outcome(PageIndex::new(page))
+                .unwrap();
+        }
+        enable_cd_transfer(&mut pager, 3, [(0, 1), (1, 5), (2, 31)]);
+
+        let outcomes = pager.update_all_pending_virtual_pages().unwrap();
+        assert_eq!(
+            outcomes
+                .iter()
+                .map(|outcome| outcome.page)
+                .collect::<Vec<_>>(),
+            [PageIndex::new(0), PageIndex::new(1), PageIndex::new(2)]
+        );
+        assert!(pager.pending_virtual_pages().next().is_none());
+    }
+
+    #[test]
     fn nsupdate_serializes_pending_pages_by_lowest_pgid_not_open_order() {
         let mut pager = Pager::new();
         let pages = [PageIndex::new(7), PageIndex::new(5), PageIndex::new(2)];
@@ -2226,10 +2994,12 @@ mod tests {
 
         let mut promoted = Vec::new();
         for _ in pages {
-            let outcome = pager
-                .update_pending_virtual_page()
-                .unwrap()
-                .expect("free RAM promotes exactly one queued page");
+            let outcome = expect_resolution(
+                pager
+                    .update_pending_virtual_page()
+                    .unwrap()
+                    .expect("free RAM promotes exactly one queued page"),
+            );
             promoted.push(outcome.page);
         }
 
@@ -2290,10 +3060,12 @@ mod tests {
 
         let released = pager.close_eid_retail_with_outcome(eids[0]).unwrap();
         assert!(released.decremented);
-        let promoted = pager
-            .update_pending_virtual_page()
-            .unwrap()
-            .expect("a zero-reference ordinary slot permits the next NSUpdate");
+        let promoted = expect_resolution(
+            pager
+                .update_pending_virtual_page()
+                .unwrap()
+                .expect("a zero-reference ordinary slot permits the next NSUpdate"),
+        );
         assert!(promoted.resolved);
         assert_eq!(promoted.page, queued.page);
         assert_eq!(promoted.invalidated, PageInvalidations::one(released.page));

@@ -8768,6 +8768,32 @@ impl Machine {
         Ok(())
     }
 
+    /// Applies one transactional CD-group reservation invalidation batch.
+    ///
+    /// Native re-arms every victim PTE before starting the asynchronous read.
+    /// Validate the complete physical run first so a malformed platform event
+    /// cannot leave the VM mirror partially invalidated.
+    pub fn apply_platform_paging_evictions(&mut self, pages: &[PageIndex]) -> Result<(), VmError> {
+        let mut unique = BTreeSet::new();
+        for &page in pages {
+            if !unique.insert(page)
+                || !self.paging_loaded_pages.contains(&page)
+                || !self.paging_resolved_pages.contains(&page)
+                || self.paging_pending_pages.contains(&page)
+                || self
+                    .paging_page_references
+                    .get(&page)
+                    .is_some_and(|references| *references != 0)
+            {
+                return Err(VmError::InvalidPlatformPagingPage(page));
+            }
+        }
+        for page in unique {
+            self.paging_resolved_pages.remove(&page);
+        }
+        Ok(())
+    }
+
     /// Applies one browser lifecycle page close outside a GOOL instruction.
     pub fn apply_platform_paging_close(
         &mut self,
@@ -20117,6 +20143,40 @@ mod tests {
         assert!(
             machine.paging_resolved_pages.contains(&first),
             "validation must finish before either invalidation is committed"
+        );
+    }
+
+    #[test]
+    fn platform_cd_reservation_evictions_support_full_runs_and_are_transactional() {
+        let victims = (0..4).map(PageIndex::new).collect::<Vec<_>>();
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(6, victims.iter().copied(), [])
+            .unwrap();
+
+        machine.apply_platform_paging_evictions(&victims).unwrap();
+        assert!(
+            victims
+                .iter()
+                .all(|page| !machine.paging_resolved_pages.contains(page)),
+            "reservation batches are not limited to the two legacy invalidation fields"
+        );
+
+        let mut machine = Machine::new(0);
+        machine
+            .seed_platform_paging_state(6, victims.iter().copied(), [])
+            .unwrap();
+        let unresolved = PageIndex::new(5);
+        let before = machine.clone();
+        assert_eq!(
+            machine.apply_platform_paging_evictions(&[
+                victims[0], victims[1], unresolved, victims[2],
+            ]),
+            Err(VmError::InvalidPlatformPagingPage(unresolved))
+        );
+        assert_eq!(
+            machine, before,
+            "the complete reservation batch must validate before any PTE is re-armed"
         );
     }
 

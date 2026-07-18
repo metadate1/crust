@@ -31,7 +31,10 @@ pub use music::{
     SepEvent, SepEventKind, SepSequence, VabBank, VabProgram, VabTone, parse_instrument_entry,
     parse_retail_midi,
 };
-pub use nsd::{LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, Nsd, NsdHeader, NsdKind, NsdPte, parse_nsd};
+pub use nsd::{
+    LDAT_IMAGE_CAPACITY, LDAT_PREFIX_SIZE, NSF_PAGE_SECTOR_COUNT, Nsd, NsdHeader, NsdKind, NsdPte,
+    NsfPageSectorCount, parse_nsd,
+};
 pub use nsf::{
     ENTRY_MAGIC, Entry, EntryItem, NSF_PAGE_SIZE, Nsf, NsfPage, Page, PageHeader, TexturePage,
     parse_nsf,

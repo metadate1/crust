@@ -3143,6 +3143,11 @@ impl RetailRuntime {
             .apply_platform_paging_resolution(page, invalidated)
     }
 
+    /// Publishes every zero-reference PTE re-armed by one CD-group reservation.
+    pub fn apply_platform_paging_evictions(&mut self, pages: &[PageIndex]) -> Result<(), VmError> {
+        self.machine.apply_platform_paging_evictions(pages)
+    }
+
     /// Applies one browser lifecycle close outside a GOOL instruction.
     pub fn apply_platform_paging_close(
         &mut self,

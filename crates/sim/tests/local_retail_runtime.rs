@@ -19,7 +19,7 @@ use crust_sim::gool::{
 use crust_sim::object_arena::{
     ENEMY_OBJECT_ROOT, MAIN_OBJECT_ROOT, NeighborZone, ObjectOrigin, TreeParent, ZONE_OBJECT_ROOT,
 };
-use crust_sim::paging::Pager;
+use crust_sim::paging::{Pager, PagerUpdateOutcome};
 use crust_sim::retail_runtime::{
     NsfProgramHost, PagedNsfProgramHost, ProgramHost, RetailLevelStateContext, RetailRuntime,
 };
@@ -356,9 +356,16 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
     for frame in 1_u32..=300 {
         runtime.set_frame_timing(34, 34);
         if let Some(outcome) = host.pager_mut().update_pending_virtual_page().unwrap() {
-            runtime
-                .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
-                .unwrap();
+            match outcome {
+                PagerUpdateOutcome::Invalidated(pages) => {
+                    runtime.apply_platform_paging_evictions(&pages).unwrap();
+                }
+                PagerUpdateOutcome::Resolved(outcome) => {
+                    runtime
+                        .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+                        .unwrap();
+                }
+            }
         }
         let _ = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
         runtime.advance_level_shader().unwrap();

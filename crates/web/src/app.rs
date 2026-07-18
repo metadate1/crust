@@ -53,7 +53,7 @@ use crust_sim::gool::{
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::paging::{
-    PageInvalidations, Pager, PagerCloseOutcome, PagerOpenOutcome, PagingError,
+    PageInvalidations, Pager, PagerCloseOutcome, PagerOpenOutcome, PagerUpdateOutcome, PagingError,
     TextureFrameSnapshot,
 };
 use crust_sim::retail_frame::{PresentedFrame, RetailFrameState};
@@ -2571,10 +2571,18 @@ impl Runtime {
         else {
             return Ok(());
         };
-        debug_assert!(outcome.resolved);
-        self.retail_objects
-            .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
-            .map_err(|error| format!("could not publish promoted page: {error:?}"))
+        match outcome {
+            PagerUpdateOutcome::Invalidated(pages) => self
+                .retail_objects
+                .apply_platform_paging_evictions(&pages)
+                .map_err(|error| format!("could not publish reserved-page evictions: {error:?}")),
+            PagerUpdateOutcome::Resolved(outcome) => {
+                debug_assert!(outcome.resolved);
+                self.retail_objects
+                    .apply_platform_paging_resolution(outcome.page, outcome.invalidated)
+                    .map_err(|error| format!("could not publish promoted page: {error:?}"))
+            }
+        }
     }
 
     fn complete_retail_source_frame(

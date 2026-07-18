@@ -1,4 +1,4 @@
-use core::ops::Range;
+use core::{num::NonZeroU8, ops::Range};
 
 use crate::binary::{Eid, FormatError, Offset, PageIndex, PageRef, Reader, checked_slice};
 
@@ -20,6 +20,40 @@ const COMPRESSED_PAGE_CAPACITY: usize = 64;
 const PTE_SIZE: usize = 8;
 const MAX_PAGE_COUNT: u32 = 128;
 const LOGICAL_SECTOR_SIZE: usize = 0x800;
+/// One uncompressed 64 KiB NSF page occupies thirty-two CD-ROM sectors.
+pub const NSF_PAGE_SECTOR_COUNT: u8 = 32;
+
+/// Validated on-disc sector length of one NSF page.
+///
+/// The first `compressed_page_count` NSD words pack this value into their low
+/// six bits; later pages use the full thirty-two-sector length. Keeping the
+/// bit layout here prevents paging clients from interpreting raw NSD words.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[repr(transparent)]
+pub struct NsfPageSectorCount(NonZeroU8);
+
+impl NsfPageSectorCount {
+    #[must_use]
+    pub const fn new(value: u8) -> Option<Self> {
+        if value == 0 || value > NSF_PAGE_SECTOR_COUNT {
+            return None;
+        }
+        Some(Self(
+            NonZeroU8::new(value).expect("a checked nonzero sector count is valid"),
+        ))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u8 {
+        self.0.get()
+    }
+}
+
+impl From<NsfPageSectorCount> for u8 {
+    fn from(value: NsfPageSectorCount) -> Self {
+        value.get()
+    }
+}
 
 /// Bytes before `nsd_ldat.image_data` in the exact 32-bit disk layout.
 pub const LDAT_PREFIX_SIZE: usize = 0x118;
@@ -52,6 +86,20 @@ impl NsdHeader {
             .ok()
             .and_then(|value| value.checked_mul(LOGICAL_SECTOR_SIZE))
             .ok_or_else(|| FormatError::global("NSF page-data offset overflows the host size"))
+    }
+
+    /// Returns the validated compressed or full-page sector length.
+    #[must_use]
+    pub fn page_sector_count(&self, page: PageIndex) -> Option<NsfPageSectorCount> {
+        if page.get() >= self.page_count {
+            return None;
+        }
+        let packed = usize::try_from(page.get())
+            .ok()
+            .and_then(|index| self.compressed_page_offsets.get(index))
+            .copied();
+        let sectors = packed.map_or(NSF_PAGE_SECTOR_COUNT, |value| (value & 0x3f) as u8);
+        NsfPageSectorCount::new(sectors)
     }
 }
 
@@ -263,27 +311,45 @@ pub fn parse_nsd(bytes: &[u8], expected_level: LevelId) -> Result<Nsd, FormatErr
     let pages_sector_offset = read_u32_at(bytes, PAGES_SECTOR_OFFSET, "NSF page sector offset")?;
     let compressed_page_count =
         read_u32_at(bytes, COMPRESSED_PAGE_COUNT_OFFSET, "compressed-page count")?;
-    if compressed_page_count as usize > COMPRESSED_PAGE_CAPACITY {
+    if compressed_page_count as usize > COMPRESSED_PAGE_CAPACITY
+        || compressed_page_count > page_count
+    {
         return Err(FormatError::at(
             COMPRESSED_PAGE_COUNT_OFFSET,
-            "compressed-page count exceeds its 64-entry table",
+            "compressed-page count exceeds its table or the level page count",
         ));
     }
     let mut compressed_page_offsets = Vec::with_capacity(compressed_page_count as usize);
+    let mut previous_end = None;
     for index in 0..compressed_page_count as usize {
-        compressed_page_offsets.push(read_u32_at(
-            bytes,
-            COMPRESSED_PAGE_OFFSETS_OFFSET + index * 4,
-            "compressed-page offset",
-        )?);
+        let offset = COMPRESSED_PAGE_OFFSETS_OFFSET + index * 4;
+        let packed = read_u32_at(bytes, offset, "compressed-page offset")?;
+        let sectors = (packed & 0x3f) as u8;
+        if NsfPageSectorCount::new(sectors).is_none() {
+            return Err(FormatError::at(
+                offset,
+                "compressed NSF page sector count is outside 1..=32",
+            ));
+        }
+        let start = packed >> 6;
+        if previous_end.is_some_and(|end| start != end) {
+            return Err(FormatError::at(
+                offset,
+                "adjacent compressed NSF page spans are not contiguous",
+            ));
+        }
+        previous_end = Some(start.checked_add(u32::from(sectors)).ok_or_else(|| {
+            FormatError::at(
+                offset,
+                "compressed NSF page span overflows its sector offset",
+            )
+        })?);
+        compressed_page_offsets.push(packed);
     }
-    if !compressed_page_offsets
-        .windows(2)
-        .all(|pair| pair[0] <= pair[1])
-    {
+    if previous_end.is_some_and(|end| end > pages_sector_offset) {
         return Err(FormatError::at(
-            COMPRESSED_PAGE_OFFSETS_OFFSET,
-            "compressed-page offsets are not monotonic",
+            PAGES_SECTOR_OFFSET,
+            "compressed NSF page spans overlap the uncompressed page region",
         ));
     }
 
@@ -503,6 +569,13 @@ mod tests {
         assert_eq!(nsd.page_table[0].page_index(), PageIndex::new(0));
         assert!(nsd.image_data(&short).unwrap().is_none());
         assert!(nsd.validate_nsf_len(NSF_PAGE_SIZE).is_ok());
+        assert_eq!(
+            nsd.header
+                .page_sector_count(PageIndex::new(0))
+                .map(NsfPageSectorCount::get),
+            Some(NSF_PAGE_SECTOR_COUNT)
+        );
+        assert_eq!(nsd.header.page_sector_count(PageIndex::new(1)), None);
 
         let with_image = modern_nsd(true);
         let nsd = parse_nsd(&with_image, LevelId::TITLE).unwrap();
@@ -510,6 +583,71 @@ mod tests {
             nsd.image_data(&with_image).unwrap().unwrap().len(),
             LDAT_IMAGE_CAPACITY
         );
+    }
+
+    #[test]
+    fn decodes_validated_packed_page_sector_counts() {
+        let mut bytes = modern_nsd(false);
+        put_u32(&mut bytes, PAGE_COUNT_OFFSET, 3);
+        put_u32(&mut bytes, PAGES_SECTOR_OFFSET, 40);
+        put_u32(&mut bytes, COMPRESSED_PAGE_COUNT_OFFSET, 2);
+        put_u32(&mut bytes, COMPRESSED_PAGE_OFFSETS_OFFSET, (3 << 6) | 1);
+        put_u32(
+            &mut bytes,
+            COMPRESSED_PAGE_OFFSETS_OFFSET + 4,
+            (4 << 6) | 31,
+        );
+
+        let nsd = parse_nsd(&bytes, LevelId::TITLE).unwrap();
+        let sectors = (0..3)
+            .map(|page| {
+                nsd.header
+                    .page_sector_count(PageIndex::new(page))
+                    .unwrap()
+                    .get()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(sectors, [1, 31, NSF_PAGE_SECTOR_COUNT]);
+    }
+
+    #[test]
+    fn compressed_spans_allow_outer_padding_but_reject_internal_gaps_or_overlap() {
+        let packed = |start: u32, sectors: u32| (start << 6) | sectors;
+        let mut valid = modern_nsd(false);
+        put_u32(&mut valid, PAGE_COUNT_OFFSET, 3);
+        put_u32(&mut valid, PAGES_SECTOR_OFFSET, 40);
+        put_u32(&mut valid, COMPRESSED_PAGE_COUNT_OFFSET, 2);
+        put_u32(&mut valid, COMPRESSED_PAGE_OFFSETS_OFFSET, packed(3, 10));
+        put_u32(
+            &mut valid,
+            COMPRESSED_PAGE_OFFSETS_OFFSET + 4,
+            packed(13, 20),
+        );
+        assert!(parse_nsd(&valid, LevelId::TITLE).is_ok());
+
+        for second_start in [12, 14] {
+            let mut malformed = valid.clone();
+            put_u32(
+                &mut malformed,
+                COMPRESSED_PAGE_OFFSETS_OFFSET + 4,
+                packed(second_start, 20),
+            );
+            assert!(parse_nsd(&malformed, LevelId::TITLE).is_err());
+        }
+
+        let mut crosses_uncompressed = valid;
+        put_u32(&mut crosses_uncompressed, PAGES_SECTOR_OFFSET, 32);
+        assert!(parse_nsd(&crosses_uncompressed, LevelId::TITLE).is_err());
+    }
+
+    #[test]
+    fn rejects_zero_or_oversized_compressed_sector_counts() {
+        for invalid in [0, 33] {
+            let mut bytes = modern_nsd(false);
+            put_u32(&mut bytes, COMPRESSED_PAGE_COUNT_OFFSET, 1);
+            put_u32(&mut bytes, COMPRESSED_PAGE_OFFSETS_OFFSET, invalid);
+            assert!(parse_nsd(&bytes, LevelId::TITLE).is_err());
+        }
     }
 
     #[test]

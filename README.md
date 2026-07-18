@@ -62,6 +62,9 @@ the new held/tapped words to zero while retaining prior history. The mount then 
 object-creating half of
 `LevelInitMisc(1)`: its six applicable levels receive the native root-four controller, including
 Ripper Roo's executable-39/subtype-four controller and checked `ambiance_obj` global-eight link.
+Every authored `CoreFrame` stream change also arms the native two-draw presentation skip. A decoded
+loading image remains visible during the first hidden destination tick; an image-less destination
+such as Level Complete remains blank for that tick instead of presenting its gameplay scene early.
 State changes rebind at the synchronous host boundary: a captured once block runs before the state
 stamp, then the target transition block runs after it, including nested calls and hosted spawns;
 normal updates continue into newly bound state code in that same native update. Initial/call frames
@@ -306,19 +309,19 @@ count then becomes `0x0b00` and spawn flags become nine. It also breaks BoxsC en
 1,860, advancing the live count to `0x0c00`. Three ordinary terrain jumps carry Crash from `0M`
 into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
 WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,447. The
-route records 117 successful spawns from 29,211 attempts with 29,094 source-expected rejections,
-54,508 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
-final camera is `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x87bd5fc1`
+route records 117 successful spawns from 29,190 attempts with 29,073 source-expected rejections,
+55,034 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
+final camera is `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65`
 at draw 2,447. It has no restart, state-31 squash, death camera, terminal fall, VM fault, execution
 error, or LoadState. The carried route above independently reaches the same authored end two
 frames later.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
-checkpoint snapshot, a TurtC death, the 117-frame death camera, and the same-level checkpoint
+checkpoint snapshot, a TurtC death, the 174-frame death camera, and the same-level checkpoint
 restart. The checkpoint snapshot contains `0x900` before the handler's later live increment to
-`0xa00`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,150; the next trace
-sample observes zero at frame 1,151, and the respawned checkpoint recounts to `0x100` at frame
-1,152. A fixed-34-tick reference-C oracle confirms the early Box7, CrabC and Box12 contact order;
+`0xa00`. Restart, including `LevelInitMisc(0)`'s reset, completes at frame 1,207; the next trace
+sample observes zero at frame 1,208, and the respawned checkpoint recounts to `0x100` at frame
+1,209. A fixed-34-tick reference-C oracle confirms the early Box7, CrabC and Box12 contact order;
 the Crab gate does not emit the previously observed premature direct event `0x300`. This is a
 focused deterministic route, not broad checkpoint/death certification.
 Hog Wild now also has a complete direct-boot ordinary-pad route. It traverses 67 camera paths,
@@ -331,11 +334,14 @@ authored fall/load-state cadence at frames 178 and 355.
 Native Fortress now has cumulative exact ordinary-pad goldens from the first greasy-platform
 boundary through `a7_qZ`/`a8_qZ`, the `b0` rotating-log climb, the upper `b2`
 launcher-and-turtle chain, each subsequent bank through `b9_qZ`, and the two-plant/falling-log
-handoff into `c0_qZ`. The latest route runs 2,600 frames, performs 104 successful spawns and 25
-lifecycle transitions, and finishes at camera progress 17,593 with Crash at
-`[11308800, -7618863, 133120]`; player movement settles on frame 2,090. It records no restart,
-death camera, terminal fall, VM fault, faulted object, execution error, or checked issue. This
-establishes the authored handoff into `c0_qZ`, not Native Fortress completion.
+handoff into `c0_qZ`. The route now continues through the authored `c0`–`c5` hazards, uses entity
+114's subtype-five launcher to clear entity 115, and brakes before subtype-four entity 116 to
+settle on the `c6_qZ` floor. The exact 2,620-frame golden performs 122 successful spawns, 31
+lifecycle/zone transitions, and 51,633 executions. It finishes at `c6_qZ` path zero/progress 1,017
+with Crash at `[17987328, -7540650, 100352]`, state one, velocity `[0, -136000, 0]`, and last
+movement on frame 2,565. It records no restart, death camera, terminal fall, VM fault, faulted
+object, execution error, or checked issue. The route from `c6_qZ` to Native Fortress's normal end
+and a browser playthrough remain unproved.
 
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
 checkpoint entity 76 on frame 1,057, preserving saved box count `0x200` before the live count
@@ -356,8 +362,12 @@ N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Sto
 Up the Creek, plus authored Papu Papu and later boss completions. These are not a full retail
 playthrough or a browser-playthrough claim.
 Broader progression, several GOOL host
-operations, pixel-level rendering edge cases, later same-level restart cases, and asynchronous
-CD/page-residency timing remain incomplete. Source-ordered zone lifetime and synchronous paging,
+operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
+mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each
+page's one-to-thirty-two-sector NSD span, reserves a source-contiguous physical run transactionally,
+shares the characterized ten-frame setup, advances five sectors per 30 Hz frame, and publishes or
+cancels each member progressively. The legally local PCSX-Redux oracle publishes Native Fortress
+pages 23 and 24 on ticks 15 and 21, matching the Rust pager. Source-ordered zone lifetime,
 save/restart, event and audio calls, display-mask latching and local ADIO SFX are now connected.
 Zone graphics now select local
 retail MIDI/INST data; checked VAB/SEP decoding feeds the Rust software synth with 30-tick zone
@@ -443,12 +453,22 @@ filled all 97 arena slots at frame 1,437. The legally local completion regressio
 authored credits sequence through 113 credits-child spawns, peaks at 82 live objects while reusing
 returned slots through generation three, and requests Title `0x19` on frame 3,396 without a VM
 fault. Its checked `LEVEL_END` exports a clean session carry that a fresh Title runtime imports
-with the exact draw phase; the subsequent browser graph remount is not part of that native golden.
+with the exact draw phase. Ending's authored ID-one main entity also takes the dedicated native
+`crash` slot and now writes its initial restart snapshot exactly like executable-zero Crash, rather
+than retaining a stale snapshot from the preceding stream. The subsequent browser graph remount is
+not part of that native golden.
+A separate completed-card vertical flow now starts from the authored Title map, selects The Great
+Hall, completes its WarpC route with ordinary Up/Cross input, returns through Title, selects and
+defeats Dr. Neo Cortex, mounts the complete Ending credits, and returns to Title again. Timed page
+25 publication moves Great Hall's two Cross windows forward by fourteen frames; it now requests
+Title on frame 216 with no restart or fault. Cortex requests Ending on frame 2,164, and Ending
+requests Title on frame 3,396. The regression pins the card payload at load, selected globals and
+restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400
 browser-ordered simulation frames each—232,200 frames total—without a checked runtime issue. Rolling
 Stones and Jaws of Darkness also pass focused 1,800-frame reproductions of the two failures above.
-The `crust-sim` library has 583 passing tests; the locked workspace inventory has 940 default-active
-tests plus 130 ignored-by-default legally local tests. Native
+The `crust-sim` library has 596 passing tests; the locked all-target workspace inventory has 958
+default-active tests plus 133 ignored-by-default legally local tests. Native
 warnings-denied Clippy, optimized native release, warnings-denied Wasm Clippy, and optimized Wasm
 build gates pass.
 A final Chrome-compatible browser pass mounted the user's legally local 632 MB raw BIN through a

@@ -56,6 +56,11 @@ gameplay path.
   level complete, intro, and ending—create none. Mount-time `LevelInitMisc(1)` also creates the
   applicable native root-four controller for levels `0x05`, `0x14`, `0x16`, `0x17`, `0x22`, and
   `0x2e`; Ripper Roo's executable-39/subtype-four controller is published to global 8.
+- Every authored core transition arms the source's two-draw presentation skip whether or not the
+  destination NSD contains a loading image. Image-bearing transitions retain that decoded image
+  for the hidden first destination tick; image-less transitions retain no frame and reveal the new
+  gameplay scene only on the second tick. Direct initial boots keep their separate image/no-image
+  behavior.
 - The NSF program host binds initial and requested GOOL states, synchronously applies characterized
   child-spawn effects, maintains typed arena/VM links, and advances the implemented state-change
   and animation-select/wait path using frame/draw counters. Animation host effects `0x83` and `0x84`
@@ -317,8 +322,12 @@ gameplay path.
   captures, in-stream restarts and cross-pair session carry are connected. Camera zone
   crossings now execute the ordered lifecycle, dynamic pager references, TERM/migration teardown
   and next-frame adjacent-zone scan. Intra-object once/transition/event dispatch and GOOL paging
-  open/close/probe requests are synchronously coupled to the browser Pager and VM reference state;
-  this does not claim retail asynchronous I/O timing.
+  open/close/probe requests synchronously update the browser Pager and VM reference state. A
+  stream-backed `NSUpdate(-1)` then advances the characterized cooperative CD path: one shared
+  ten-frame group setup, five sectors per 30 Hz frame, and progressive member publication. The
+  model covers validated NSD sector lengths, contiguous group cloning, transactional physical-run
+  reservation, cancellation and late requests; it does not claim unmeasured mechanical seek,
+  read-error or retry behavior.
   Unsupported execution
   boundaries quarantine only the individual object rather than skipping a pre-incremented PC.
   The previously recorded legally local 300-frame N. Sanity trace crossed the former ShadC
@@ -353,8 +362,8 @@ gameplay path.
   occurrences of that nested case. Different-level loads capture their restart kind and clear bonus
   mode at the
   synchronous instruction boundary; later GOOL and LEVEL_END recipients can continue without a
-  later SaveState reclassifying the earlier request. Complete asynchronous page residency timing
-  also remains a gap.
+  later SaveState reclassifying the earlier request. The characterized successful-read residency
+  cadence is connected; mechanical seek variance and CD error/retry paths remain gaps.
 - `crust-renderer` implements texture decode, cache keys, projection, ordering and blend-command
   rules. Its WebGL2 command backend is connected to the live stage and presents decoded loading
   images, four image-backed retail title states and camera-selected worlds. Title, Hog Wild
@@ -368,8 +377,9 @@ gameplay path.
   backend's exact `[0,1,3]`, `[3,2,0]` order. The pager models the eight usable native
   texture slots (physical slots 8–15), source-order free/stale/unprotected replacement,
   current-zone load-list protection and immutable generation snapshots; initial mount, restart and
-  zone transition install destination protection before opening pages. GOOL paging effects execute
-  synchronously against that Pager. The world and filter use one exact frame-start slot snapshot,
+  zone transition install destination protection before opening pages. GOOL paging effects update
+  references synchronously; production `NSUpdate` advances the timed stream-backed read. The world
+  and filter use one exact frame-start slot snapshot,
   while every post-update/pre-child object display record replays its live
   `(EID, generation, page)` map before command generation. Cached pre-eviction regions survive a
   same-slot `A → B → A` sequence, uncached regions decode from the live mapping, and returning A
@@ -401,7 +411,11 @@ gameplay path.
   than re-reading the complete final arena. Animation/frame, transform, render process flags, text
   font/arguments, effective colors, live display mask, VM side effects, and Pager slot state are
   captured at the native per-object boundary. A later child link write, teardown, or reparent cannot
-  mutate or retract an already-rendered parent record. World geometry
+  mutate or retract an already-rendered parent record. Textured object primitives use that live
+  per-object Pager snapshot as their residency authority, while world geometry retains the
+  frame-opening snapshot. This matters when an object's own GOOL update synchronously replaces a
+  texture page: its newly opened texture is available to that object in the same draw instead of
+  being discarded against the stale world-page set. World geometry
   separately retains the pre-GOOL display mask, so an authored global-nine write during traversal
   cannot retroactively hide the world or be replaced by the end-of-frame next-mask latch. The
   current builder avoids reparsing an unchanged active graph,
@@ -584,11 +598,11 @@ gameplay path.
   windows and breaks BoxsC entity 92 on frame 1,860. Three terrain jumps continue `0M -> 0O`
   without taking alternate `0N`; a short right-jump enters end `WarpC`, which executes states zero
   through four and requests Level Complete on frame 2,447. The route records 117 successful spawns,
-  54,508 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
+  55,034 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
   while retaining checkpoint `0x0800`, saved translation
   `[2815232, 2979072, 17458688]`, saved boxes `0x0a00`, and live boxes `0x0c00`. It has no restart,
   state-31 squash, fall, fault, execution error, or LoadState. Its final camera is
-  `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x87bd5fc1` at draw 2,447.
+  `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65` at draw 2,447.
   The independent carried route reaches the
   same authored transition two frames later.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
@@ -606,7 +620,17 @@ gameplay path.
   objects, and requests Title `0x19` on frame 3,396 without a VM fault. This replaces the broken
   97-slot saturation at frame 1,437 and covers the authored Ending-to-Title request. Its clean
   `LEVEL_END` exports a session carry that a fresh Title runtime imports with the same draw phase;
-  the subsequent browser graph remount was not exercised in the same run. Hog Wild now has a
+  Ending's real ID-one main entity also triggers the native initial `LevelSaveState` through its
+  dedicated main allocation. Special ID one through four and subtype-zero executable `0x2c`/`0x30`
+  selectors share that checked behavior instead of retaining a prior stream's snapshot. The
+  subsequent browser graph remount was not exercised in the same run. A separate completed-card
+  vertical flow selects The Great Hall from the authored Title map, reaches its WarpC Title
+  transition on frame 216, returns through the map, selects and defeats Dr. Neo Cortex, executes
+  all 3,396 Ending frames, and returns to Title. Timed publication of Great Hall page 25 moves the
+  two ordinary Up/Cross windows forward by fourteen frames; the complete flow has no restart,
+  terminal fall, VM fault, or execution error. It pins the card payload at load, selected globals
+  and restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase. Hog Wild
+  now has a
   complete ordinary-pad direct-boot route: it traverses 67 camera paths, activates checkpoints 13
   and 30, reaches live box
   count `0x700`, observes WarpC states zero through four, and requests Level Complete `0x2d` on
@@ -628,11 +652,14 @@ gameplay path.
   Native Fortress has cumulative exact ordinary-pad goldens through the grease segment,
   `a7_qZ`/`a8_qZ`, `b0`'s rotating logs, `b2`'s launcher/turtle chain, and the subsequent
   banks through `b9_qZ`. It now also defeats both authored plant hazards and clears the falling
-  `WalOC` into `c0_qZ`. The latest 2,600-frame route performs 104 successful spawns and 25
-  lifecycle transitions, finishes at camera progress 17,593 with Crash at
-  `[11308800, -7618863, 133120]`, and settles movement on frame 2,090. It records no restart, death
-  camera, terminal fall, VM fault, faulted object, execution error, or checked issue. The remaining
-  Native Fortress route from `c0_qZ` to its normal end is still unproved.
+  `WalOC` into `c0_qZ`. The route continues through the authored `c0`–`c5` hazards, uses entity
+  114's subtype-five launcher to clear entity 115, and brakes before subtype-four entity 116 to
+  settle on the `c6_qZ` floor. The exact 2,620-frame golden performs 122 successful spawns, 31
+  lifecycle/zone transitions, and 51,633 executions. It finishes at `c6_qZ` path zero/progress
+  1,017 with Crash at `[17987328, -7540650, 100352]`, state one, velocity `[0, -136000, 0]`, and
+  last movement on frame 2,565. It records no restart, death camera, terminal fall, VM fault,
+  faulted object, execution error, or checked issue. The remaining Native Fortress route from
+  `c6_qZ` to its normal end and a browser playthrough are still unproved.
 
   Up the Creek has a complete normal-route direct-boot ordinary-pad golden. Checkpoint entity 76
   emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box

@@ -7928,9 +7928,203 @@ struct GreatGateRouteController {
     c5_break_started: bool,
     c5_crate_open_seen: bool,
     c5_token_jump_fired: bool,
+    yellow_tail_tick: u32,
+    yellow_wall_sequence_tick: Option<u16>,
+    yellow_wall_stage: u8,
 }
 
 impl GreatGateRouteController {
+    fn held_yellow_tail(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: PlayerTrace,
+        route_objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.yellow_tail_tick = self.yellow_tail_tick.saturating_add(1);
+
+        if camera.path.zone.name().as_deref() == Some("c8_iZ") {
+            // The two wall logs must be activated and boarded in sequence.
+            // Anchor every phase to authored object/player state so CD timing
+            // variance cannot turn a fixed input trace into a missed landing.
+            let lower_log = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 119)
+            });
+            let upper_log = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 120)
+            });
+            let lower_log_state = lower_log.map(|object| object.state);
+            let upper_log_state = upper_log.map(|object| object.state);
+            let grounded = player.status_a & 1 != 0;
+            let tick = self.yellow_wall_sequence_tick.get_or_insert(0);
+            let phase = *tick;
+            *tick = tick.saturating_add(1);
+
+            let mut held = match self.yellow_wall_stage {
+                0 => {
+                    if lower_log_state == Some(2) {
+                        self.yellow_wall_stage = 1;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_LEFT
+                    } else {
+                        let mut held = PAD_LEFT;
+                        if (9..=17).contains(&phase) {
+                            held |= PAD_CROSS;
+                        }
+                        if phase == 16 {
+                            held |= PAD_SQUARE;
+                        }
+                        held
+                    }
+                }
+                1 => {
+                    if grounded
+                        && player.translation[0] < 1_300_000
+                        && player.translation[1] > -8_250_000
+                    {
+                        self.yellow_wall_stage = 2;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_RIGHT
+                    } else if grounded && player.translation[1] < -8_250_000 {
+                        PAD_LEFT | PAD_CROSS
+                    } else {
+                        PAD_LEFT
+                    }
+                }
+                2 => {
+                    if player.velocity[0] >= -100_000 {
+                        self.yellow_wall_stage = 3;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_RIGHT | PAD_CROSS
+                    } else {
+                        PAD_RIGHT
+                    }
+                }
+                3 => {
+                    if grounded
+                        && player.translation[0] >= 1_430_000
+                        && player.translation[1] > -8_100_000
+                    {
+                        self.yellow_wall_stage = 4;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        0
+                    } else if phase < 14 {
+                        PAD_RIGHT | PAD_CROSS
+                    } else {
+                        PAD_RIGHT
+                    }
+                }
+                4 => {
+                    if upper_log_state == Some(2) {
+                        self.yellow_wall_stage = 5;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_RIGHT
+                    } else {
+                        let mut held = PAD_RIGHT;
+                        if phase < 14 {
+                            held |= PAD_CROSS;
+                        }
+                        if (6..=10).contains(&phase) {
+                            held |= PAD_SQUARE;
+                        }
+                        held
+                    }
+                }
+                5 => {
+                    if grounded
+                        && player.translation[0] > 1_700_000
+                        && player.translation[1] > -7_850_000
+                    {
+                        self.yellow_wall_stage = 6;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_LEFT
+                    } else if grounded && player.translation[1] < -7_850_000 {
+                        PAD_RIGHT | PAD_CROSS
+                    } else {
+                        PAD_RIGHT
+                    }
+                }
+                6 => {
+                    if phase >= 6 {
+                        self.yellow_wall_stage = 7;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        PAD_CROSS
+                    } else if phase == 0 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }
+                }
+                7 => {
+                    if grounded
+                        && player.translation[0] <= 1_640_000
+                        && player.translation[1] > -7_700_000
+                    {
+                        self.yellow_wall_stage = 8;
+                        self.yellow_wall_sequence_tick = Some(0);
+                        0
+                    } else if phase < 8 {
+                        PAD_CROSS
+                    } else if phase < 22 {
+                        PAD_LEFT | PAD_CROSS | PAD_SQUARE
+                    } else {
+                        PAD_RIGHT | PAD_SQUARE
+                    }
+                }
+                _ => 0,
+            };
+            if player.translation[2] < 120_000 {
+                held |= PAD_DOWN;
+            } else if player.translation[2] > 136_000 {
+                held |= PAD_UP;
+            }
+            return held;
+        }
+
+        let zone = camera.path.zone.name();
+        let grounded = player.status_a & 1 != 0;
+        let mut held = 0;
+        let mut steer = |target_x: i32, target_z: i32, tolerance_x: i32, tolerance_z: i32| {
+            if player.translation[0] > target_x + tolerance_x {
+                held |= PAD_LEFT;
+            } else if player.translation[0] < target_x - tolerance_x {
+                held |= PAD_RIGHT;
+            }
+            if player.translation[2] > target_z + tolerance_z {
+                held |= PAD_UP;
+            } else if player.translation[2] < target_z - tolerance_z {
+                held |= PAD_DOWN;
+            }
+        };
+
+        match zone.as_deref() {
+            Some("c9_iZ" | "d0_iZ" | "d1_iZ") => {
+                steer(1_125_632, 127_744, 32_000, 16_000);
+            }
+            Some("e7_iZ") => steer(21_401_088, 25_344, 32_000, 16_000),
+            Some("e8_iZ" | "e9_iZ" | "f0_iZ" | "f1_iZ") => {
+                steer(20_991_488, 127_744, 32_000, 16_000);
+            }
+            _ => {
+                held |= PAD_RIGHT;
+                if player.translation[2] > 140_000 {
+                    held |= PAD_UP;
+                } else if player.translation[2] < 116_000 {
+                    held |= PAD_DOWN;
+                }
+            }
+        }
+
+        let pulse = self.yellow_tail_tick % 40;
+        if pulse < 16 || (grounded && pulse == 16) {
+            held |= PAD_CROSS;
+        }
+        if (6..12).contains(&pulse) {
+            held |= PAD_SQUARE;
+        }
+
+        held
+    }
+
     // Keep equal actions as separate numbered stages so the deterministic
     // route remains auditable against its frame-by-frame pad trace.
     #[allow(clippy::match_same_arms)]
@@ -7950,9 +8144,8 @@ impl GreatGateRouteController {
         let c4 = Eid::from_name("c4_iZ").expect("fixed Great Gate route EID is valid");
         if self.yellow_gem_route
             && !self.c4_anchored
-            && self.stage >= 98
-            && self.active.is_none()
-            && camera.path.zone == c4
+            && self.stage >= 97
+            && ((self.stage == 97 && self.active.is_none()) || camera.path.zone == c4)
         {
             self.c4_anchored = true;
             // The fixed trace has now reached c4, but its rotating logs can
@@ -7964,6 +8157,21 @@ impl GreatGateRouteController {
         }
         if let Some(action) = self.active {
             let mut held = action.held(self.action_tick);
+            if self.yellow_gem_route && !self.c4_anchored && self.stage == 94 {
+                let player = player.expect("checked Yellow Gem route player is present");
+                let c3_hold_x = 7_632_640;
+                held = if player.translation[0] > c3_hold_x + HAZARD_POSITION_TOLERANCE
+                    || player.velocity[0] > HAZARD_VELOCITY_TOLERANCE
+                {
+                    PAD_LEFT
+                } else if player.translation[0] < c3_hold_x - HAZARD_POSITION_TOLERANCE
+                    || player.velocity[0] < -HAZARD_VELOCITY_TOLERANCE
+                {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
             // Timed CD paging can leave the c4-entry jump animation parked at
             // its probe loop for several cooperative frames. Brake on c3's
             // safe bank until the authored GOOL loop advances, then resume
@@ -8243,21 +8451,33 @@ impl GreatGateRouteController {
         let progress = camera.progress.raw();
         let phase_robust_normal = !self.yellow_gem_route && !collect_tawna_tokens;
 
-        if phase_robust_normal
+        if self.yellow_gem_route && self.c4_anchored && self.stage >= 112 {
+            return self.held_yellow_tail(camera, player, route_objects);
+        }
+
+        if (phase_robust_normal || (self.yellow_gem_route && self.c4_anchored))
             && self.stage == 102
             && camera.path.zone
                 == Eid::from_name("c5_iZ").expect("fixed Great Gate route EID is valid")
             && player.translation[0] <= 6_100_000
         {
             self.stage = 103;
+            self.c5_entry_jump_fired = true;
             self.pickup_wait_frames = 0;
-            return 0;
+            return PAD_LEFT;
         }
 
         // Retain forward momentum between the two c7 platform jumps, but
         // release Cross so the grounded action below produces a fresh tap.
         if self.yellow_gem_route && self.stage == 109 && camera.path.zone == c7 && !grounded {
             return PAD_LEFT;
+        }
+
+        // A carried c2 hazard phase can leave Crash airborne when the next
+        // c3 log jump becomes active. Release Cross until the floor is
+        // recovered so the route below issues a fresh authored jump edge.
+        if self.yellow_gem_route && !self.c4_anchored && self.stage == 91 && !grounded {
+            return 0;
         }
 
         let pickup_target = if self.stage == 76 && player.tawna_counter < 0x200 {
@@ -8413,7 +8633,9 @@ impl GreatGateRouteController {
             } else {
                 (14..30).contains(&(self.pickup_wait_frames % 45))
             };
-            if jump_window {
+            if jump_window
+                && !(self.yellow_gem_route && self.c4_anchored && !self.c4_hazard_released)
+            {
                 held |= PAD_CROSS;
             }
             if self.stage == 76 {
@@ -8685,7 +8907,7 @@ impl GreatGateRouteController {
             },
             92 if self.yellow_gem_route && !self.c4_anchored => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 18,
+                direction_frames: 31,
                 ..RouteAction::default()
             },
             99 if self.yellow_gem_route && self.c4_anchored => RouteAction {
@@ -9216,7 +9438,7 @@ impl GreatGateRouteController {
             },
             83 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 50,
+                direction_frames: if self.yellow_gem_route { 31 } else { 50 },
                 ..RouteAction::default()
             },
             84 => RouteAction {
@@ -9228,12 +9450,12 @@ impl GreatGateRouteController {
             },
             85 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 51,
+                direction_frames: if self.yellow_gem_route { 68 } else { 51 },
                 ..RouteAction::default()
             },
             86 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 17,
+                direction_frames: if self.yellow_gem_route { 29 } else { 17 },
                 ..RouteAction::default()
             },
             87 => RouteAction {
@@ -9286,7 +9508,7 @@ impl GreatGateRouteController {
             },
             93 => RouteAction {
                 direction: PAD_RIGHT,
-                direction_frames: 8,
+                direction_frames: if self.yellow_gem_route { 5 } else { 8 },
                 ..RouteAction::default()
             },
             94 => RouteAction {
@@ -14144,6 +14366,9 @@ impl SurveyInputController {
                 c5_break_started: false,
                 c5_crate_open_seen: false,
                 c5_token_jump_fired: false,
+                yellow_tail_tick: 0,
+                yellow_wall_sequence_tick: None,
+                yellow_wall_stage: 0,
             },
             boulders: BouldersCompletionRouteController {
                 zero_t_takeoff_fired: false,
@@ -29145,9 +29370,9 @@ fn raw_bin_extraction_matches_every_local_pair_and_bootable_graph() {
 
 #[test]
 #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
-fn great_gate_yellow_gem_card_route_reaches_c8() {
+fn great_gate_yellow_gem_card_route_reaches_c9() {
     const YELLOW_GEM_BIT: u32 = 1 << 29;
-    const ROUTE_FRAMES: u32 = 3_600;
+    const ROUTE_FRAMES: u32 = 3_300;
 
     let disc_path = PathBuf::from(
         std::env::var_os("C1_DISC_IMAGE")
@@ -29178,7 +29403,6 @@ fn great_gate_yellow_gem_card_route_reaches_c8() {
         .expect("Great Gate NSF is readable");
     let nsd = parse_nsd(&nsd_bytes, level).expect("Great Gate NSD must parse");
     let nsf = parse_nsf(&nsf_bytes, &nsd).expect("Great Gate NSF must parse");
-
     let save = SaveData {
         level_count: 1,
         initial_lives: 4 << 8,
@@ -29239,32 +29463,53 @@ fn great_gate_yellow_gem_card_route_reaches_c8() {
         SurveyInputProfile::GreatGateYellowGemExactCarry,
         ROUTE_FRAMES,
     )
-    .expect("Great Gate Yellow Gem route must reach c8");
+    .expect("Great Gate Yellow Gem route must reach c9");
     let c8_path = RetailPathId {
         zone: Eid::from_name("c8_iZ").expect("fixed Great Gate route EID is valid"),
         index: 0,
     };
-    let c8_range = survey
-        .camera_ranges
-        .get(&c8_path)
-        .expect("Yellow Gem platforms must route the camera into c8");
     assert_eq!(
-        *c8_range,
-        CameraProgressRange {
-            first_frame: 2_747,
+        survey.camera_ranges.get(&c8_path),
+        Some(&CameraProgressRange {
+            first_frame: 2_748,
+            last_frame: 2_789,
+            minimum: 427,
+            maximum: 20_775,
+        })
+    );
+    assert_eq!(
+        survey.camera_ranges.get(&RetailPathId {
+            zone: c8_path.zone,
+            index: 1,
+        }),
+        Some(&CameraProgressRange {
+            first_frame: 2_790,
+            last_frame: 2_862,
+            minimum: 499,
+            maximum: 15_453,
+        })
+    );
+    let c9_path = RetailPathId {
+        zone: Eid::from_name("c9_iZ").expect("fixed Great Gate route EID is valid"),
+        index: 0,
+    };
+    assert_eq!(
+        survey.camera_ranges.get(&c9_path),
+        Some(&CameraProgressRange {
+            first_frame: 2_863,
             last_frame: ROUTE_FRAMES,
-            minimum: 120,
-            maximum: 13_606,
-        }
+            minimum: 331,
+            maximum: 26_473,
+        })
     );
     let final_camera = survey
         .final_camera
-        .expect("Yellow Gem route must retain its c8 camera");
-    assert_eq!(final_camera.path, c8_path);
-    assert_eq!(final_camera.progress.raw(), 13_606);
+        .expect("Yellow Gem route must retain its c9 camera");
+    assert_eq!(final_camera.path, c9_path);
+    assert_eq!(final_camera.progress.raw(), 14_873);
     assert_eq!(
         survey.final_player_translation,
-        Some([1_855_232, -8_385_263, 83_712])
+        Some([1_134_336, -7_158_651, 132_864])
     );
     assert_eq!(survey.frames, ROUTE_FRAMES);
     assert_eq!(survey.restarts, 0);

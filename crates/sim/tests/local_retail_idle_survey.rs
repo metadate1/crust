@@ -5133,9 +5133,9 @@ impl UpTheCreekRouteController {
 
 /// One authoritative ordinary 30 Hz pad route through Native Fortress.
 ///
-/// The controller crosses every characterized obstacle bank from the opening
-/// arrow crates through the moving d6 wall into d7. Bounded goldens take snapshots of
-/// this same input sequence rather than selecting divergent per-zone routes.
+/// The controller crosses every characterized obstacle bank from the opening arrow
+/// crates through the moving d6 wall and d7 launcher pair into d9. Bounded goldens
+/// take snapshots of this same sequence rather than divergent per-zone routes.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NativeFortressRouteController {
@@ -6642,7 +6642,50 @@ impl NativeFortressRouteController {
                 return 0;
             }
             if self.stage == 89 {
+                let d7 =
+                    Eid::from_name("d7_qZ").expect("fixed Native Fortress tail route EID is valid");
+                if camera.path.zone == d7 && player.state == 6 && self.route_tick >= 90 {
+                    // The first launcher can clear the gap only by landing on
+                    // the second. Spin once, then reverse late in the arc so
+                    // horizontal momentum settles over entity 58.
+                    self.stage = 90;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
                 return PAD_CROSS | if self.route_tick > 4 { PAD_LEFT } else { 0 };
+            }
+            if self.stage == 90 {
+                if grounded && player_collider_entity == Some(58) {
+                    // Reverse again on the second launch to carry its full
+                    // arc toward d8 instead of returning to the first pad.
+                    self.stage = 91;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return if self.route_tick <= 20 {
+                    PAD_LEFT | PAD_CROSS
+                } else {
+                    PAD_RIGHT | PAD_CROSS
+                };
+            }
+            if self.stage == 91 {
+                let d8 =
+                    Eid::from_name("d8_qZ").expect("fixed Native Fortress tail route EID is valid");
+                if camera.path.zone == d8 && grounded && player.translation[0] <= 13_250_000 {
+                    // BoxsC 188 blocks the d8 landing; break it before the
+                    // distinct Cross window that carries the route into d9.
+                    self.stage = 92;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.stage == 92 {
+                return match self.route_tick {
+                    1..=8 => PAD_LEFT | PAD_SQUARE,
+                    9..=30 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => PAD_LEFT | PAD_CROSS,
+                };
             }
             let mut held = PAD_LEFT;
             if self.route_tick % 42 < 18 {
@@ -18704,6 +18747,92 @@ fn native_fortress_ordinary_pad_route_crosses_d6_wall_into_d7() {
     assert!(
         survey.is_clean(),
         "Native Fortress's ordinary-pad route into d7 must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_ordinary_pad_route_crosses_d7_launchers_into_d9() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Native Fortress",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NativeFortressD6Route,
+        4_550,
+    )
+    .expect("Native Fortress's ordinary-pad route through the d7 launchers must execute");
+    assert_eq!(survey.frames, 4_550);
+    assert!(survey.terminal.is_none());
+    let final_camera = survey
+        .final_camera
+        .expect("Native Fortress's d9 route must retain its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("d9_qZ")
+                .expect("fixed Native Fortress post-launcher zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 10_519);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([11_893_084, -2_045_841, 167_936])
+    );
+    let final_player = player_trace(&runtime)
+        .expect("Native Fortress's d9 player trace must resolve")
+        .expect("Native Fortress's d9 route must retain the player");
+    assert_eq!(final_player.zone, final_camera.path.zone);
+    assert_eq!(final_player.translation, [11_893_084, -2_045_841, 167_936]);
+    assert_eq!(final_player.velocity, [-614_400, -1_551_061, 0]);
+    assert_eq!(final_player.state, 10);
+    assert_eq!(final_player.status_a, 133_384);
+    assert_eq!(player_collider_entity(&runtime), Ok(None));
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
+    assert_eq!(survey.successful_spawns, 216);
+    assert_eq!(survey.zone_transitions, 48);
+    assert_eq!(survey.executions, 107_302);
+    assert_eq!(survey.last_player_movement, 4_550);
+    assert_eq!(survey.box_count_samples.last(), Some(&(4_482, 2_816)));
+    assert_eq!(
+        survey.checkpoint_samples.last(),
+        Some(&(4_482, 48_128, [13_106_432, -2_150_400, 128_000]))
+    );
+    assert_eq!(runtime.draw_count(), 4_550);
+    assert_eq!(survey.effect_counts.get("solid"), Some(&507));
+    assert_eq!(runtime.machine().random_seed(), 0x121e_9faa);
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the d7 launcher route must use ordinary directional, Cross, and Square input only"
+    );
+    assert!(
+        survey.is_clean(),
+        "Native Fortress's ordinary-pad route into d9 must remain clean: {}",
         survey.summary()
     );
 }

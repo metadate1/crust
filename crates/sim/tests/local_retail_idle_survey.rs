@@ -223,19 +223,6 @@ enum SurveyInputProfile {
     UpTheCreekPostPlatform12Route,
     UpTheCreekCompletionRoute,
     TempleRuinsCompletionRoute,
-    NativeFortressRoute,
-    NativeFortressA7Route,
-    NativeFortressExtendedRoute,
-    NativeFortressBounceClimbRoute,
-    NativeFortressPostB0Route,
-    NativeFortressPostB1Route,
-    NativeFortressPostB2Route,
-    NativeFortressPostB4Route,
-    NativeFortressPostB5Route,
-    NativeFortressPostB6Route,
-    NativeFortressPostB7Route,
-    NativeFortressPostB8Route,
-    NativeFortressPostB9Route,
     NativeFortressD6Route,
     LostCityCompletionRoute,
     RoadToNowhereCompletionRoute,
@@ -256,23 +243,7 @@ enum LevelContextSource {
 
 impl SurveyInputProfile {
     const fn is_native_fortress_route(self) -> bool {
-        matches!(
-            self,
-            Self::NativeFortressRoute
-                | Self::NativeFortressA7Route
-                | Self::NativeFortressExtendedRoute
-                | Self::NativeFortressBounceClimbRoute
-                | Self::NativeFortressPostB0Route
-                | Self::NativeFortressPostB1Route
-                | Self::NativeFortressPostB2Route
-                | Self::NativeFortressPostB4Route
-                | Self::NativeFortressPostB5Route
-                | Self::NativeFortressPostB6Route
-                | Self::NativeFortressPostB7Route
-                | Self::NativeFortressPostB8Route
-                | Self::NativeFortressPostB9Route
-                | Self::NativeFortressD6Route
-        )
+        matches!(self, Self::NativeFortressD6Route)
     }
 
     const fn label(self) -> &'static str {
@@ -309,19 +280,6 @@ impl SurveyInputProfile {
             Self::UpTheCreekPostPlatform12Route => "up-the-creek-post-platform-12-route",
             Self::UpTheCreekCompletionRoute => "up-the-creek-completion-route",
             Self::TempleRuinsCompletionRoute => "temple-ruins-completion-route",
-            Self::NativeFortressRoute => "native-fortress-route",
-            Self::NativeFortressA7Route => "native-fortress-a7-route",
-            Self::NativeFortressExtendedRoute => "native-fortress-extended-route",
-            Self::NativeFortressBounceClimbRoute => "native-fortress-bounce-climb-route",
-            Self::NativeFortressPostB0Route => "native-fortress-post-b0-route",
-            Self::NativeFortressPostB1Route => "native-fortress-post-b1-route",
-            Self::NativeFortressPostB2Route => "native-fortress-post-b2-route",
-            Self::NativeFortressPostB4Route => "native-fortress-post-b4-route",
-            Self::NativeFortressPostB5Route => "native-fortress-post-b5-route",
-            Self::NativeFortressPostB6Route => "native-fortress-post-b6-route",
-            Self::NativeFortressPostB7Route => "native-fortress-post-b7-route",
-            Self::NativeFortressPostB8Route => "native-fortress-post-b8-route",
-            Self::NativeFortressPostB9Route => "native-fortress-post-b9-route",
             Self::NativeFortressD6Route => "native-fortress-d6-route",
             Self::LostCityCompletionRoute => "lost-city-completion-route",
             Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
@@ -365,19 +323,6 @@ impl SurveyInputProfile {
                 | Self::UpTheCreekPostPlatform12Route
                 | Self::UpTheCreekCompletionRoute
                 | Self::TempleRuinsCompletionRoute
-                | Self::NativeFortressRoute
-                | Self::NativeFortressA7Route
-                | Self::NativeFortressExtendedRoute
-                | Self::NativeFortressBounceClimbRoute
-                | Self::NativeFortressPostB0Route
-                | Self::NativeFortressPostB1Route
-                | Self::NativeFortressPostB2Route
-                | Self::NativeFortressPostB4Route
-                | Self::NativeFortressPostB5Route
-                | Self::NativeFortressPostB6Route
-                | Self::NativeFortressPostB7Route
-                | Self::NativeFortressPostB8Route
-                | Self::NativeFortressPostB9Route
                 | Self::NativeFortressD6Route
                 | Self::LostCityCompletionRoute
                 | Self::RoadToNowhereCompletionRoute
@@ -5112,36 +5057,14 @@ impl UpTheCreekRouteController {
     }
 }
 
-/// Ordinary 30 Hz pad routes through Native Fortress's opening arrow crates.
+/// One authoritative ordinary 30 Hz pad route through Native Fortress.
 ///
-/// The base profile brakes into the last stable contact before the first
-/// subtype-2 `WalOC`. The a7 profile carries a running jump across the grease
-/// segment into `a7_qZ`. Longer profiles continue over the authored
-/// falling-platform series, into `b0_qZ`, up the rotating logs, through b2's
-/// launcher-and-turtle chain, and over b4's rotating platform and plant into
-/// a stable `b5_qZ` landing.
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
-enum NativeFortressRouteTarget {
-    #[default]
-    GreaseBoundary,
-    A7,
-    A8,
-    B0,
-    B1,
-    B2,
-    B4,
-    B5,
-    B6,
-    B7,
-    B8,
-    B9,
-    C0,
-    D6,
-}
+/// The controller crosses every characterized obstacle bank from the opening
+/// arrow crates through the d6 hand-off. Bounded goldens take snapshots of
+/// this same input sequence rather than selecting divergent per-zone routes.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NativeFortressRouteController {
-    target: NativeFortressRouteTarget,
     started: bool,
     stage: u8,
     jump_frames: u8,
@@ -5160,7 +5083,6 @@ impl NativeFortressRouteController {
         let Some(player) = player else {
             return 0;
         };
-        let d6_route = self.target == NativeFortressRouteTarget::D6;
         // WillC exposes the player before retail's level-start handshake has
         // finished. Do not let state 0/40 loading frames consume route
         // counters. State 1 is the settled idle and needs one ordinary
@@ -5210,65 +5132,24 @@ impl NativeFortressRouteController {
                 return PAD_LEFT | PAD_CROSS;
             }
             if self.stage == 4 {
-                if self.target >= NativeFortressRouteTarget::A8 && self.route_tick >= 190 {
+                if self.route_tick >= 190 {
                     self.stage = 5;
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
                 let mut held = 0;
-                if self.target >= NativeFortressRouteTarget::B0 {
-                    if d6_route {
-                        if self.route_tick <= 150 {
-                            held |= PAD_LEFT;
-                        }
-                        if self.route_tick <= 20
-                            || (35..=60).contains(&self.route_tick)
-                            || (80..=90).contains(&self.route_tick)
-                            || (106..=131).contains(&self.route_tick)
-                        {
-                            held |= PAD_CROSS;
-                        }
-                        if (106..=130).contains(&self.route_tick) {
-                            held |= PAD_SQUARE;
-                        }
-                    } else {
-                        // Preserve the characterized route used by all existing
-                        // Native Fortress targets through c6.
-                        if self.route_tick <= 3 {
-                            held |= PAD_LEFT;
-                        }
-                        if self.route_tick <= 16 {
-                            held |= PAD_CROSS;
-                        }
-                        if (30..46).contains(&self.route_tick) {
-                            held |= PAD_RIGHT | PAD_CROSS;
-                        }
-                        if (46..90).contains(&self.route_tick) {
-                            held |= PAD_LEFT;
-                        }
-                        if (50..58).contains(&self.route_tick)
-                            || (60..90).contains(&self.route_tick)
-                        {
-                            held |= PAD_CROSS;
-                        }
-                    }
-                } else {
-                    let left_end = if self.target >= NativeFortressRouteTarget::A7 {
-                        30
-                    } else {
-                        3
-                    };
-                    let jump_end = if self.target >= NativeFortressRouteTarget::A7 {
-                        20
-                    } else {
-                        16
-                    };
-                    if self.route_tick <= left_end {
-                        held |= PAD_LEFT;
-                    }
-                    if self.route_tick <= jump_end {
-                        held |= PAD_CROSS;
-                    }
+                if self.route_tick <= 150 {
+                    held |= PAD_LEFT;
+                }
+                if self.route_tick <= 20
+                    || (35..=60).contains(&self.route_tick)
+                    || (80..=90).contains(&self.route_tick)
+                    || (106..=131).contains(&self.route_tick)
+                {
+                    held |= PAD_CROSS;
+                }
+                if (106..=130).contains(&self.route_tick) {
+                    held |= PAD_SQUARE;
                 }
                 return held;
             }
@@ -5279,7 +5160,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                let mut held = if self.route_tick <= if d6_route { 25 } else { 15 } {
+                let mut held = if self.route_tick <= 25 {
                     PAD_LEFT
                 } else if self.route_tick <= 31 {
                     PAD_RIGHT
@@ -5300,38 +5181,20 @@ impl NativeFortressRouteController {
                 return PAD_LEFT;
             }
             if self.stage == 7 {
-                if self.target >= NativeFortressRouteTarget::B0 {
-                    let tap_tick = if d6_route { 34 } else { 28 };
-                    if self.route_tick > tap_tick + 12 && grounded {
-                        self.stage = 8;
-                        self.route_tick = 0;
-                        return 0;
-                    }
-                    let mut held = if self.route_tick <= 50 { PAD_LEFT } else { 0 };
-                    if (4..=26).contains(&self.route_tick)
-                        || (tap_tick..=tap_tick + 12).contains(&self.route_tick)
-                    {
-                        held |= PAD_CROSS;
-                    }
-                    if d6_route && (tap_tick..=tap_tick + 12).contains(&self.route_tick) {
-                        held |= PAD_SQUARE;
-                    }
-                    return held;
-                }
-                if self.route_tick > 22 && grounded {
+                const TAP_TICK: u32 = 34;
+                if self.route_tick > TAP_TICK + 12 && grounded {
                     self.stage = 8;
                     self.route_tick = 0;
                     return 0;
                 }
-                let mut held = if self.route_tick <= 28 {
-                    PAD_LEFT
-                } else if self.route_tick <= 45 {
-                    PAD_RIGHT
-                } else {
-                    0
-                };
-                if self.route_tick <= 22 {
+                let mut held = if self.route_tick <= 50 { PAD_LEFT } else { 0 };
+                if (4..=26).contains(&self.route_tick)
+                    || (TAP_TICK..=TAP_TICK + 12).contains(&self.route_tick)
+                {
                     held |= PAD_CROSS;
+                }
+                if (TAP_TICK..=TAP_TICK + 12).contains(&self.route_tick) {
+                    held |= PAD_SQUARE;
                 }
                 return held;
             }
@@ -5344,7 +5207,7 @@ impl NativeFortressRouteController {
                 return PAD_LEFT;
             }
             if self.stage == 9 {
-                let jump_at = if d6_route { 6 } else { 0 };
+                let jump_at = 6;
                 let jump_end = jump_at + 22;
                 if self.route_tick > jump_end && grounded {
                     self.stage = 10;
@@ -5361,10 +5224,7 @@ impl NativeFortressRouteController {
                     0
                 };
                 if (jump_at..=jump_end).contains(&self.route_tick) {
-                    held |= PAD_CROSS;
-                    if d6_route {
-                        held |= PAD_SQUARE;
-                    }
+                    held |= PAD_CROSS | PAD_SQUARE;
                 }
                 return held;
             }
@@ -5378,27 +5238,20 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                if self.target >= NativeFortressRouteTarget::B0 {
-                    self.stage = 11;
-                    self.route_tick = 0;
-                    return PAD_LEFT;
-                }
-                return 0;
+                self.stage = 11;
+                self.route_tick = 0;
+                return PAD_LEFT;
             }
 
             if self.stage == 11 {
-                let reached_handoff = if d6_route {
-                    let b0 = Eid::from_name("b0_qZ")
-                        .expect("fixed Native Fortress bounce-climb EID is valid");
-                    self.route_tick > 30
-                        && grounded
-                        && camera.path.zone == b0
-                        && camera.path.index == 1
-                        && (1_400_000..=1_700_000).contains(&player.translation[0])
-                        && player.translation[1] < -10_800_000
-                } else {
-                    self.route_tick > 70 && grounded
-                };
+                let b0 = Eid::from_name("b0_qZ")
+                    .expect("fixed Native Fortress bounce-climb EID is valid");
+                let reached_handoff = self.route_tick > 30
+                    && grounded
+                    && camera.path.zone == b0
+                    && camera.path.index == 1
+                    && (1_400_000..=1_700_000).contains(&player.translation[0])
+                    && player.translation[1] < -10_800_000;
                 if reached_handoff {
                     self.stage = 12;
                     self.route_tick = 0;
@@ -5478,14 +5331,6 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_CROSS;
                 }
-                if !d6_route {
-                    return PAD_RIGHT
-                        | if (5..=12).contains(&self.route_tick) {
-                            PAD_CROSS
-                        } else {
-                            0
-                        };
-                }
                 let direction = if (19..=60).contains(&self.route_tick) {
                     PAD_LEFT
                 } else if self.route_tick >= 65 || self.route_tick < 19 {
@@ -5535,44 +5380,28 @@ impl NativeFortressRouteController {
                 return held;
             }
             if self.stage == 17 {
-                if self.target >= NativeFortressRouteTarget::B1 {
-                    if grounded
-                        && player.translation[0] > 1_750_000
-                        && (-10_300_000..=-10_150_000).contains(&player.translation[1])
-                    {
-                        self.stage = 19;
-                        self.route_tick = 0;
-                        return 0;
-                    }
-                    if self.route_tick <= 14 {
-                        return 0;
-                    }
-                    if self.route_tick <= 20 {
-                        return PAD_RIGHT;
-                    }
-                    if self.route_tick <= 36 {
-                        return PAD_RIGHT | PAD_CROSS;
-                    }
-                    if self.route_tick <= 55 {
-                        return PAD_LEFT | PAD_CROSS;
-                    }
-                    if grounded {
-                        self.stage = 19;
-                        self.route_tick = 0;
-                    }
+                if grounded
+                    && player.translation[0] > 1_750_000
+                    && (-10_300_000..=-10_150_000).contains(&player.translation[1])
+                {
+                    self.stage = 19;
+                    self.route_tick = 0;
                     return 0;
                 }
-                // A second full jump reaches the now-horizontal log's
-                // underside but cannot clear it; retain the deterministic
-                // grounded return as the bounded characterization point.
                 if self.route_tick <= 14 {
                     return 0;
                 }
-                if self.route_tick <= 30 {
-                    return PAD_CROSS;
+                if self.route_tick <= 20 {
+                    return PAD_RIGHT;
                 }
-                if grounded && player_collider_entity == Some(62) {
-                    self.stage = 18;
+                if self.route_tick <= 36 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if self.route_tick <= 55 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if grounded {
+                    self.stage = 19;
                     self.route_tick = 0;
                 }
                 return 0;
@@ -5674,35 +5503,30 @@ impl NativeFortressRouteController {
                 return 0;
             }
             if self.stage == 23 {
-                if self.target >= NativeFortressRouteTarget::B2 {
-                    // Run across the second rotating log, keep Cross held
-                    // through the first trampoline, then brake left onto the
-                    // higher trampoline without losing its full launch.
-                    if self.route_tick <= 14 {
-                        return 0;
-                    }
-                    if self.route_tick <= 20 {
-                        return PAD_RIGHT;
-                    }
-                    if self.route_tick <= 34 {
-                        return PAD_RIGHT | PAD_CROSS;
-                    }
-                    if self.route_tick <= 68 {
-                        return PAD_LEFT | PAD_CROSS;
-                    }
-                    if self.route_tick <= 80 {
-                        return PAD_CROSS;
-                    }
-                    // The second trampoline clears the vertical crate bank.
-                    // Carry right at its apex to settle on b2's upper floor.
-                    if self.route_tick <= 110 {
-                        return PAD_RIGHT | PAD_CROSS;
-                    }
-                    if self.target >= NativeFortressRouteTarget::B4 && grounded {
-                        self.stage = 24;
-                        self.route_tick = 0;
-                        return PAD_RIGHT;
-                    }
+                // Run across the second rotating log, keep Cross held through
+                // the first trampoline, then brake left onto the higher one.
+                if self.route_tick <= 14 {
+                    return 0;
+                }
+                if self.route_tick <= 20 {
+                    return PAD_RIGHT;
+                }
+                if self.route_tick <= 34 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if self.route_tick <= 68 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.route_tick <= 80 {
+                    return PAD_CROSS;
+                }
+                if self.route_tick <= 110 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if grounded {
+                    self.stage = 24;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
                 }
                 return 0;
             }
@@ -5722,7 +5546,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                if self.route_tick <= if d6_route { 11 } else { 13 } {
+                if self.route_tick <= 11 {
                     return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
                 // Brake back onto the low launcher instead of carrying the
@@ -5748,10 +5572,6 @@ impl NativeFortressRouteController {
                 return PAD_RIGHT;
             }
             if self.stage == 27 {
-                // Arrest the final turtle bounce on b4's solid entry floor.
-                if self.target < NativeFortressRouteTarget::B5 {
-                    return if self.route_tick <= 8 { PAD_LEFT } else { 0 };
-                }
                 // A running jump reaches the first WalOC. Spin through its
                 // supported rotation, then wait for the stable far-side phase
                 // before jumping through b4's PlanC into b5.
@@ -5760,14 +5580,10 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                let action_tick = if d6_route {
-                    if self.route_tick < 14 {
-                        return PAD_RIGHT;
-                    }
-                    self.route_tick - 14
-                } else {
-                    self.route_tick
-                };
+                if self.route_tick < 14 {
+                    return PAD_RIGHT;
+                }
+                let action_tick = self.route_tick - 14;
                 if action_tick <= 16 {
                     return PAD_RIGHT | PAD_CROSS;
                 }
@@ -5775,7 +5591,7 @@ impl NativeFortressRouteController {
                     return PAD_RIGHT;
                 }
                 if action_tick <= 37 {
-                    return PAD_RIGHT | PAD_SQUARE | if d6_route { PAD_CROSS } else { 0 };
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
                 if action_tick <= 50 {
                     return PAD_RIGHT;
@@ -5786,13 +5602,9 @@ impl NativeFortressRouteController {
                 return PAD_RIGHT;
             }
             if self.stage == 28 {
-                if self.target < NativeFortressRouteTarget::B6 {
-                    return if self.route_tick <= 8 { PAD_LEFT } else { 0 };
-                }
                 if self.route_tick >= 20
                     && grounded
-                    && (if d6_route { 4_500_000 } else { 4_600_000 }..=4_750_000)
-                        .contains(&player.translation[0])
+                    && (4_500_000..=4_750_000).contains(&player.translation[0])
                 {
                     self.stage = 29;
                     self.route_tick = 0;
@@ -5804,8 +5616,7 @@ impl NativeFortressRouteController {
                 // Separate Cross edges clear the falling log and land on the
                 // b5 checkpoint crate; a held first jump skips the second
                 // edge and falls short of BoxsC's narrow collision face.
-                if grounded && player.translation[0] >= if d6_route { 5_400_000 } else { 5_450_000 }
-                {
+                if grounded && player.translation[0] >= 5_400_000 {
                     self.stage = 30;
                     self.route_tick = 0;
                     return PAD_LEFT;
@@ -5816,7 +5627,7 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 25 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= if d6_route { 53 } else { 52 } {
+                if self.route_tick <= 53 {
                     return PAD_RIGHT | PAD_CROSS;
                 }
                 return PAD_RIGHT;
@@ -5829,11 +5640,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                return if !d6_route && self.route_tick <= 8 {
-                    PAD_LEFT
-                } else {
-                    0
-                };
+                return 0;
             }
             if self.stage == 31 {
                 let b6 =
@@ -5850,20 +5657,14 @@ impl NativeFortressRouteController {
                     return PAD_RIGHT;
                 }
                 if self.route_tick <= 45 {
-                    return PAD_RIGHT | PAD_CROSS | if d6_route { PAD_SQUARE } else { 0 };
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
                 // Brake the launcher arc back over the returning WalOC
                 // instead of carrying past its narrow collision face.
                 return PAD_LEFT;
             }
             if self.stage == 32 {
-                if self.target < NativeFortressRouteTarget::B7 {
-                    return if self.route_tick <= 8 { PAD_LEFT } else { 0 };
-                }
-                if (self.route_tick >= 20 || d6_route)
-                    && grounded
-                    && (6_000_000..=6_200_000).contains(&player.translation[0])
-                {
+                if grounded && (6_000_000..=6_200_000).contains(&player.translation[0]) {
                     self.stage = 33;
                     self.route_tick = 0;
                     return 0;
@@ -5914,14 +5715,13 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 10 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= if d6_route { 38 } else { 35 } {
+                if self.route_tick <= 38 {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
                 return PAD_RIGHT;
             }
             if self.stage == 36 {
-                if self.target >= NativeFortressRouteTarget::B8 && self.route_tick >= 24 && grounded
-                {
+                if self.route_tick >= 24 && grounded {
                     self.stage = 37;
                     self.route_tick = 0;
                     return 0;
@@ -5954,10 +5754,7 @@ impl NativeFortressRouteController {
                 return PAD_LEFT;
             }
             if self.stage == 38 {
-                if self.target >= NativeFortressRouteTarget::B9
-                    && (d6_route || self.route_tick >= 20)
-                    && grounded
-                {
+                if grounded {
                     self.stage = 39;
                     self.route_tick = 0;
                     return 0;
@@ -5976,7 +5773,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                let lane_boundary = if d6_route { 9_350_000 } else { 8_800_000 };
+                let lane_boundary = 9_350_000;
                 let lane = if player.translation[0] < lane_boundary {
                     168_000
                 } else {
@@ -5990,13 +5787,13 @@ impl NativeFortressRouteController {
                     0
                 };
                 let jump = if (10..=25).contains(&self.route_tick)
-                    || (if d6_route { 32..=52 } else { 35..=55 }).contains(&self.route_tick)
+                    || (32..=52).contains(&self.route_tick)
                 {
                     PAD_CROSS
                 } else {
                     0
                 };
-                let horizontal = if d6_route && (20..=36).contains(&self.route_tick) {
+                let horizontal = if (20..=36).contains(&self.route_tick) {
                     PAD_LEFT
                 } else if self.route_tick >= 56 {
                     if player.velocity[0] > 70_000 {
@@ -6019,9 +5816,6 @@ impl NativeFortressRouteController {
                 // during coyote time carries Crash across the following floor
                 // break. Require two grounded frames before braking so the
                 // route cannot stop on a transient one-frame contact.
-                if !d6_route && self.route_tick < 60 {
-                    return 0;
-                }
                 if camera.path.zone == b9
                     && self.grounded_frames >= 2
                     && player.translation[0] >= 9_600_000
@@ -6030,17 +5824,10 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                let jump_tick = if d6_route { 9 } else { 68 };
-                return PAD_RIGHT
-                    | if self.route_tick == jump_tick {
-                        PAD_CROSS
-                    } else {
-                        0
-                    };
+                return PAD_RIGHT | if self.route_tick == 9 { PAD_CROSS } else { 0 };
             }
             if self.stage == 41 {
-                if self.target >= NativeFortressRouteTarget::C0 && self.route_tick >= 20 && grounded
-                {
+                if self.route_tick >= 20 && grounded {
                     self.stage = 42;
                     self.route_tick = 0;
                     return 0;
@@ -6055,13 +5842,9 @@ impl NativeFortressRouteController {
                 // WalOC entity 42. Brake on the solid ledge between entities 41 and
                 // 42 so this checkpoint does not depend on a moving collider.
                 if camera.path.zone == c0
-                    && if d6_route {
-                        grounded
-                    } else {
-                        self.grounded_frames >= 2
-                    }
+                    && grounded
                     && player.translation[0] >= 11_300_000
-                    && (!d6_route || player_collider_entity != Some(42))
+                    && player_collider_entity != Some(42)
                 {
                     self.stage = 43;
                     self.route_tick = 0;
@@ -6072,47 +5855,34 @@ impl NativeFortressRouteController {
                 // from entity 41 before its authored falling-platform path drops.
                 return PAD_RIGHT
                     | if (20..=42).contains(&self.route_tick)
-                        || (if d6_route { 45..=65 } else { 68..=88 }).contains(&self.route_tick)
+                        || (45..=65).contains(&self.route_tick)
                     {
                         PAD_CROSS
                     } else {
                         0
                     }
-                    | if d6_route && (20..=42).contains(&self.route_tick) {
+                    | if (20..=42).contains(&self.route_tick) {
                         PAD_SQUARE
                     } else {
                         0
                     };
             }
             if self.stage == 43 {
-                if d6_route {
-                    let c1 =
-                        Eid::from_name("c1_qZ").expect("fixed Native Fortress c1 EID is valid");
-                    if camera.path.zone == c1 && grounded && player.translation[0] >= 11_980_000 {
-                        self.stage = 44;
-                        self.route_tick = 0;
-                        return PAD_RIGHT | PAD_SQUARE;
-                    }
-                    // Let subtype-three WalOC entity 42 complete its authored
-                    // vertical-to-horizontal phase before committing to the
-                    // crossing. A running Cross edge then clears its collision
-                    // face and enters c1 without invoking WillC's HIT death.
-                    return if d6_route {
-                        match self.route_tick {
-                            0 => PAD_LEFT,
-                            5..=26 => PAD_RIGHT | PAD_CROSS,
-                            _ => PAD_RIGHT,
-                        }
-                    } else {
-                        match self.route_tick {
-                            1..=10 => PAD_LEFT,
-                            11..=30 => 0,
-                            46..=67 => PAD_RIGHT | PAD_CROSS,
-                            _ => PAD_RIGHT,
-                        }
-                    };
+                let c1 = Eid::from_name("c1_qZ").expect("fixed Native Fortress c1 EID is valid");
+                if camera.path.zone == c1 && grounded && player.translation[0] >= 11_980_000 {
+                    self.stage = 44;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_SQUARE;
                 }
-                return 0;
+                // Let subtype-three WalOC entity 42 complete its authored
+                // vertical-to-horizontal phase before committing to the
+                // crossing. A running Cross edge then clears its collision
+                // face and enters c1 without invoking WillC's HIT death.
+                return match self.route_tick {
+                    0 => PAD_LEFT,
+                    5..=26 => PAD_RIGHT | PAD_CROSS,
+                    _ => PAD_RIGHT,
+                };
             }
             if self.stage == 44 {
                 let c2 = Eid::from_name("c2_qZ").expect("fixed Native Fortress c2 EID is valid");
@@ -6139,16 +5909,10 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 8 {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
-                if self.route_tick <= if d6_route { 112 } else { 40 } {
+                if self.route_tick <= 112 {
                     return 0;
                 }
-                let jump_tick = if d6_route { 120 } else { 48 };
-                return PAD_RIGHT
-                    | if self.route_tick == jump_tick {
-                        PAD_CROSS
-                    } else {
-                        0
-                    };
+                return PAD_RIGHT | if self.route_tick == 120 { PAD_CROSS } else { 0 };
             }
             if self.stage == 46 {
                 let c3 = Eid::from_name("c3_qZ")
@@ -6163,7 +5927,7 @@ impl NativeFortressRouteController {
             if self.stage == 47 {
                 let c5 = Eid::from_name("c5_qZ")
                     .expect("fixed Native Fortress launcher-approach EID is valid");
-                if self.route_tick >= if d6_route { 95 } else { 105 }
+                if self.route_tick >= 95
                     && camera.path.zone == c5
                     && grounded
                     && (16_900_000..=17_000_000).contains(&player.translation[0])
@@ -6175,20 +5939,11 @@ impl NativeFortressRouteController {
                 // Land across c3's floor break, then take a fresh Cross edge
                 // over c4's approaching SheNC shield instead of running into
                 // its authored knockback face.
-                return if d6_route {
-                    match self.route_tick {
-                        0..=22 | 33..=81 => PAD_RIGHT | PAD_CROSS,
-                        23..=32 | 82..=99 => PAD_RIGHT,
-                        100 => PAD_LEFT,
-                        _ => 0,
-                    }
-                } else {
-                    match self.route_tick {
-                        0..=22 | 30..=78 | 80 => PAD_RIGHT | PAD_CROSS,
-                        23..=29 | 79 | 81..=99 => PAD_RIGHT,
-                        100 => PAD_LEFT,
-                        _ => 0,
-                    }
+                return match self.route_tick {
+                    0..=22 | 33..=81 => PAD_RIGHT | PAD_CROSS,
+                    23..=32 | 82..=99 => PAD_RIGHT,
+                    100 => PAD_LEFT,
+                    _ => 0,
                 };
             }
             if self.stage == 48 {
@@ -6203,18 +5958,13 @@ impl NativeFortressRouteController {
                 // entity 114 from above. Its authored launcher state supplies
                 // the vertical impulse that carries Crash over entity 115.
                 return match self.route_tick {
-                    tick if (if d6_route { 1..=20 } else { 4..=23 }).contains(&tick) => {
-                        PAD_RIGHT | PAD_CROSS
-                    }
+                    1..=20 => PAD_RIGHT | PAD_CROSS,
                     _ => PAD_RIGHT,
                 };
             }
             if self.stage == 49 {
-                if !d6_route {
-                    return 0;
-                }
-                // The extended route instead takes the rear lane used to
-                // catch WalOC 116's next raised face.
+                // Take the rear lane used to catch WalOC 116's next raised
+                // face.
                 if player.translation[2] < 169_000 {
                     return PAD_DOWN;
                 }
@@ -14485,26 +14235,6 @@ impl SurveyInputController {
                 completed_platforms: [0; 4],
             },
             native_fortress: NativeFortressRouteController {
-                target: match profile {
-                    SurveyInputProfile::NativeFortressA7Route => NativeFortressRouteTarget::A7,
-                    SurveyInputProfile::NativeFortressExtendedRoute => {
-                        NativeFortressRouteTarget::A8
-                    }
-                    SurveyInputProfile::NativeFortressBounceClimbRoute => {
-                        NativeFortressRouteTarget::B0
-                    }
-                    SurveyInputProfile::NativeFortressPostB0Route => NativeFortressRouteTarget::B1,
-                    SurveyInputProfile::NativeFortressPostB1Route => NativeFortressRouteTarget::B2,
-                    SurveyInputProfile::NativeFortressPostB2Route => NativeFortressRouteTarget::B4,
-                    SurveyInputProfile::NativeFortressPostB4Route => NativeFortressRouteTarget::B5,
-                    SurveyInputProfile::NativeFortressPostB5Route => NativeFortressRouteTarget::B6,
-                    SurveyInputProfile::NativeFortressPostB6Route => NativeFortressRouteTarget::B7,
-                    SurveyInputProfile::NativeFortressPostB7Route => NativeFortressRouteTarget::B8,
-                    SurveyInputProfile::NativeFortressPostB8Route => NativeFortressRouteTarget::B9,
-                    SurveyInputProfile::NativeFortressPostB9Route => NativeFortressRouteTarget::C0,
-                    SurveyInputProfile::NativeFortressD6Route => NativeFortressRouteTarget::D6,
-                    _ => NativeFortressRouteTarget::GreaseBoundary,
-                },
                 started: false,
                 stage: 0,
                 jump_frames: 0,
@@ -14670,20 +14400,7 @@ impl SurveyInputController {
                 self.temple_ruins
                     .held(camera, player, player_collider_entity, route_objects)
             }
-            SurveyInputProfile::NativeFortressRoute
-            | SurveyInputProfile::NativeFortressA7Route
-            | SurveyInputProfile::NativeFortressExtendedRoute
-            | SurveyInputProfile::NativeFortressBounceClimbRoute
-            | SurveyInputProfile::NativeFortressPostB0Route
-            | SurveyInputProfile::NativeFortressPostB1Route
-            | SurveyInputProfile::NativeFortressPostB2Route
-            | SurveyInputProfile::NativeFortressPostB4Route
-            | SurveyInputProfile::NativeFortressPostB5Route
-            | SurveyInputProfile::NativeFortressPostB6Route
-            | SurveyInputProfile::NativeFortressPostB7Route
-            | SurveyInputProfile::NativeFortressPostB8Route
-            | SurveyInputProfile::NativeFortressPostB9Route
-            | SurveyInputProfile::NativeFortressD6Route => {
+            SurveyInputProfile::NativeFortressD6Route => {
                 self.native_fortress
                     .held(camera, player, player_collider_entity, route_objects)
             }
@@ -17158,19 +16875,6 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::BrioCompletionRoute
                 | SurveyInputProfile::CortexCompletionRoute
                 | SurveyInputProfile::GreatHallCortexRoute
-                | SurveyInputProfile::NativeFortressRoute
-                | SurveyInputProfile::NativeFortressA7Route
-                | SurveyInputProfile::NativeFortressExtendedRoute
-                | SurveyInputProfile::NativeFortressBounceClimbRoute
-                | SurveyInputProfile::NativeFortressPostB0Route
-                | SurveyInputProfile::NativeFortressPostB1Route
-                | SurveyInputProfile::NativeFortressPostB2Route
-                | SurveyInputProfile::NativeFortressPostB4Route
-                | SurveyInputProfile::NativeFortressPostB5Route
-                | SurveyInputProfile::NativeFortressPostB6Route
-                | SurveyInputProfile::NativeFortressPostB7Route
-                | SurveyInputProfile::NativeFortressPostB8Route
-                | SurveyInputProfile::NativeFortressPostB9Route
                 | SurveyInputProfile::NativeFortressD6Route
         ) && survey
             .pad_change_samples
@@ -18087,105 +17791,28 @@ fn hog_wild_direct_boot_reaches_level_complete() {
         survey.summary()
     );
 }
-
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_reaches_first_greasy_platform_boundary() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressRoute,
-        550,
-    )
-    .expect("Native Fortress's ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 550);
-    assert!(survey.terminal.is_none());
-    assert!(survey.successful_spawns >= 17);
-    assert_eq!(
-        survey.spawn_attempts,
-        survey.successful_spawns
-            + survey.expected_spawn_rejections
-            + survey.unexpected_spawn_errors
-    );
-    assert!(survey.executions > u64::from(survey.frames));
-    assert!(survey.zone_transitions >= 5);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("a6_qZ").expect("fixed Native Fortress grease-zone EID is valid"),
-            index: 1,
-        }
-    );
-    assert!(final_camera.progress.raw() >= 4_000);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's final player trace must resolve")
-        .expect("Native Fortress's route must retain the player");
-    assert_eq!(
-        survey.final_player_translation,
-        Some(final_player.translation)
-    );
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert!(survey.final_live_objects > 0);
-    assert!(survey.max_live_objects >= survey.final_live_objects);
-    assert!(survey.last_player_movement < survey.frames);
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert!(!survey.effect_counts.contains_key("load-state"));
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert!(
-        survey
-            .effect_counts
-            .get("solid")
-            .is_some_and(|count| *count > 0)
-    );
-    assert!(
-        survey.observed_program_states.contains(&(
-            Eid::from_name("WalOC").expect("fixed Native Fortress grease-platform EID is valid"),
-            11,
-        )),
-        "the first authored greasy platform must execute its retail state"
-    );
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the route must use only ordinary player input"
-    );
-    assert_eq!(runtime.draw_count(), 550);
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's grease-platform boundary must remain clean: {}",
-        survey.summary()
-    );
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeFortressD6Milestone {
+    frames: u32,
+    zone: &'static str,
+    camera_path_index: u32,
+    camera_progress: i32,
+    player_translation: [i32; 3],
+    player_velocity: [i32; 3],
+    player_state: u16,
+    player_status_a: u32,
+    collider_entity: Option<u16>,
+    entity: u16,
+    entity_trace: SpawnedEntityTrace,
+    successful_spawns: u64,
+    zone_transitions: u64,
+    executions: u64,
+    last_player_movement: u32,
+    solid_effects: u64,
+    random_seed: u32,
 }
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7() {
+fn assert_native_fortress_d6_milestone(expected: NativeFortressD6Milestone) {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -18201,15 +17828,17 @@ fn native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7() {
         &nsf_bytes,
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressA7Route,
-        650,
+        SurveyInputProfile::NativeFortressD6Route,
+        expected.frames,
     )
-    .expect("Native Fortress's a7 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
+    .expect("Native Fortress's authoritative D6 ordinary-pad route must execute");
 
-    assert_eq!(survey.frames, 650);
+    assert_eq!(survey.frames, expected.frames);
     assert!(survey.terminal.is_none());
-    assert!(survey.successful_spawns >= 19);
+    assert_eq!(survey.successful_spawns, expected.successful_spawns);
+    assert_eq!(survey.zone_transitions, expected.zone_transitions);
+    assert_eq!(survey.executions, expected.executions);
+    assert_eq!(survey.last_player_movement, expected.last_player_movement);
     assert_eq!(
         survey.spawn_attempts,
         survey.successful_spawns
@@ -18217,1236 +17846,450 @@ fn native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7() {
             + survey.unexpected_spawn_errors
     );
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert!(survey.executions > u64::from(survey.frames));
-    assert_eq!(survey.execution_errors, 0);
-    assert!(survey.zone_transitions >= 6);
+
+    let expected_zone =
+        Eid::from_name(expected.zone).expect("fixed Native Fortress milestone EID is valid");
     let final_camera = survey
         .final_camera
-        .expect("Native Fortress's a7 route must retain its final camera");
+        .expect("Native Fortress's D6 route must retain its final camera");
     assert_eq!(
         final_camera.path,
         RetailPathId {
-            zone: Eid::from_name("a7_qZ").expect("fixed Native Fortress a7 EID is valid"),
-            index: 0,
+            zone: expected_zone,
+            index: expected.camera_path_index,
         }
     );
-    assert!(final_camera.progress.raw() > 0);
+    assert_eq!(final_camera.progress.raw(), expected.camera_progress);
     assert!(survey.camera_ranges.contains_key(&final_camera.path));
+
     let final_player = player_trace(&runtime)
-        .expect("Native Fortress's a7 player trace must resolve")
-        .expect("Native Fortress's a7 route must retain the player");
+        .expect("Native Fortress's D6 player trace must resolve")
+        .expect("Native Fortress's D6 route must retain the player");
+    assert_eq!(final_player.zone, expected_zone);
+    assert_eq!(final_player.translation, expected.player_translation);
+    assert_eq!(final_player.velocity, expected.player_velocity);
+    assert_eq!(final_player.state, expected.player_state);
+    assert_eq!(final_player.status_a, expected.player_status_a);
     assert_eq!(
         survey.final_player_translation,
-        Some(final_player.translation)
+        Some(expected.player_translation)
     );
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert!(survey.final_live_objects > 0);
-    assert!(survey.max_live_objects >= survey.final_live_objects);
-    assert!(survey.last_player_movement < survey.frames);
+    assert_eq!(
+        player_collider_entity(&runtime),
+        Ok(expected.collider_entity)
+    );
+    assert_eq!(
+        spawned_entity_trace(&runtime, expected.entity),
+        Ok(Some(expected.entity_trace))
+    );
+
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
     assert!(survey.first_terminal_fall.is_none());
     assert!(survey.next_lid.is_none());
-    assert!(!survey.effect_counts.contains_key("load-state"));
     assert_eq!(survey.faulted_objects, 0);
-    assert!(
-        survey
-            .effect_counts
-            .get("solid")
-            .is_some_and(|count| *count > 0)
-    );
-    assert!(
-        survey.observed_program_states.contains(&(
-            Eid::from_name("WalOC").expect("fixed Native Fortress grease-platform EID is valid"),
-            11,
-        )),
-        "both authored subtype-two WalOC programs must execute their retail state"
-    );
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the route must use only ordinary player input"
-    );
-    assert_eq!(runtime.draw_count(), 650);
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's a7 route must remain clean: {}",
-        survey.summary()
-    );
-}
-
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_falling_platforms_into_a8() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressExtendedRoute,
-        800,
-    )
-    .expect("Native Fortress's extended ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 800);
-    assert!(survey.terminal.is_none());
-    assert!(survey.successful_spawns >= 22);
-    assert_eq!(
-        survey.spawn_attempts,
-        survey.successful_spawns
-            + survey.expected_spawn_rejections
-            + survey.unexpected_spawn_errors
-    );
-    assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert!(survey.executions > u64::from(survey.frames));
     assert_eq!(survey.execution_errors, 0);
-    assert!(survey.zone_transitions >= 7);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's a8 route must retain its final camera");
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
     assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("a8_qZ").expect("fixed Native Fortress a8 EID is valid"),
-            index: 0,
-        }
+        survey.effect_counts.get("solid"),
+        Some(&expected.solid_effects)
     );
-    assert!(final_camera.progress.raw() > 0);
-    assert!(survey.camera_ranges.contains_key(&RetailPathId {
-        zone: Eid::from_name("a7_qZ").expect("fixed Native Fortress a7 EID is valid"),
-        index: 0,
-    }));
-    assert!(survey.camera_ranges.contains_key(&final_camera.path));
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's a8 player trace must resolve")
-        .expect("Native Fortress's a8 route must retain the player");
-    assert_eq!(
-        survey.final_player_translation,
-        Some(final_player.translation)
-    );
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert!(survey.final_live_objects > 0);
-    assert!(survey.max_live_objects >= survey.final_live_objects);
-    assert!(survey.last_player_movement < survey.frames);
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert!(!survey.effect_counts.contains_key("load-state"));
-    assert_eq!(survey.faulted_objects, 0);
-    assert!(
-        survey
-            .effect_counts
-            .get("solid")
-            .is_some_and(|count| *count > 0)
-    );
-    assert!(
-        survey.observed_program_states.contains(&(
-            Eid::from_name("WalOC").expect("fixed Native Fortress grease-platform EID is valid"),
-            11,
-        )),
-        "the authored falling WalOC series must execute its retail state"
-    );
+    assert_eq!(runtime.machine().random_seed(), expected.random_seed);
+    assert_eq!(runtime.draw_count(), expected.frames);
+
     let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
     assert!(
         survey
             .pad_change_samples
             .iter()
             .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the route must use only ordinary player input"
+        "the authoritative D6 route must use ordinary directional, Cross, and Square input only"
     );
-    assert_eq!(runtime.draw_count(), 800);
     assert!(
         survey.is_clean(),
-        "Native Fortress's falling-platform route into a8 must remain clean: {}",
+        "Native Fortress D6 milestone {} at frame {} must remain clean: {}",
+        expected.zone,
+        expected.frames,
         survey.summary()
     );
 }
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_flips_upper_log_and_returns_to_lower_log() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressBounceClimbRoute,
-        1_045,
-    )
-    .expect("Native Fortress's bounce-climb ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 1_045);
-    assert!(survey.terminal.is_none());
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's bounce-climb route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b0_qZ").expect("fixed Native Fortress bounce-climb EID is valid"),
-            index: 1,
+macro_rules! native_fortress_d6_milestone_test {
+    ($name:ident, $expected:expr) => {
+        #[test]
+        #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+        fn $name() {
+            assert_native_fortress_d6_milestone($expected);
         }
-    );
-    assert_eq!(final_camera.progress.raw(), 10_073);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's bounce-climb player trace must resolve")
-        .expect("Native Fortress's bounce-climb route must retain the player");
-    assert_eq!(final_player.translation, [1_539_840, -10_446_334, 122_880]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(Some(62)));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 63),
-        Ok(Some(SpawnedEntityTrace {
+    };
+}
+
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_reaches_first_greasy_platform_boundary,
+    NativeFortressD6Milestone {
+        frames: 414,
+        zone: "a6_qZ",
+        camera_path_index: 1,
+        camera_progress: 7_033,
+        player_translation: [6_463_232, -10_734_411, 116_736],
+        player_velocity: [0, -136_000, 0],
+        player_state: 2,
+        player_status_a: 395_273,
+        collider_entity: None,
+        entity: 30,
+        entity_trace: SpawnedEntityTrace {
+            translation: [6_450_176, -10_752_768, 102_400],
+            state: 11,
+            path_progress: 0,
+            status_a: 131_584,
+        },
+        successful_spawns: 17,
+        zone_transitions: 5,
+        executions: 7_076,
+        last_player_movement: 414,
+        solid_effects: 25,
+        random_seed: 0x1beb_2577,
+    }
+);
+
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_first_greasy_platform_into_a7,
+    NativeFortressD6Milestone {
+        frames: 480,
+        zone: "a7_qZ",
+        camera_path_index: 0,
+        camera_progress: 20_532,
+        player_translation: [5_303_240, -10_958_775, 116_736],
+        player_velocity: [-614_400, -136_000, 0],
+        player_state: 2,
+        player_status_a: 395_529,
+        collider_entity: None,
+        entity: 30,
+        entity_trace: SpawnedEntityTrace {
+            translation: [5_527_552, -10_980_096, 102_400],
+            state: 11,
+            path_progress: 0,
+            status_a: 131_588,
+        },
+        successful_spawns: 19,
+        zone_transitions: 6,
+        executions: 7_988,
+        last_player_movement: 480,
+        solid_effects: 25,
+        random_seed: 0xdb62_a213,
+    }
+);
+
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_falling_platforms_into_a8,
+    NativeFortressD6Milestone {
+        frames: 600,
+        zone: "a8_qZ",
+        camera_path_index: 0,
+        camera_progress: 24_869,
+        player_translation: [3_886_136, -10_743_621, 116_736],
+        player_velocity: [0, -136_000, 0],
+        player_state: 1,
+        player_status_a: 395_273,
+        collider_entity: None,
+        entity: 33,
+        entity_trace: SpawnedEntityTrace {
+            translation: [4_504_576, -10_751_744, 102_400],
+            state: 11,
+            path_progress: 0,
+            status_a: 131_584,
+        },
+        successful_spawns: 22,
+        zone_transitions: 7,
+        executions: 9_964,
+        last_player_movement: 570,
+        solid_effects: 25,
+        random_seed: 0x5cdb_20bd,
+    }
+);
+
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_flips_upper_log_and_returns_to_lower_log,
+    NativeFortressD6Milestone {
+        frames: 1_045,
+        zone: "b0_qZ",
+        camera_path_index: 1,
+        camera_progress: 20_313,
+        player_translation: [1_542_144, -10_036_734, 122_880],
+        player_velocity: [0, -136_000, 0],
+        player_state: 13,
+        player_status_a: 2_099_209,
+        collider_entity: Some(63),
+        entity: 63,
+        entity_trace: SpawnedEntityTrace {
             translation: [1_535_744, -10_060_544, 25_600],
             state: 2,
             path_progress: 0,
             status_a: 131_072,
-        }))
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(runtime.draw_count(), 1_045);
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's upper-log flip and lower-log return must remain clean: {}",
-        survey.summary()
-    );
-}
+        },
+        successful_spawns: 61,
+        zone_transitions: 13,
+        executions: 19_313,
+        last_player_movement: 1_042,
+        solid_effects: 108,
+        random_seed: 0x0718_f04b,
+    }
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_climbs_rotating_logs_into_b1() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB0Route,
-        1_200,
-    )
-    .expect("Native Fortress's rotating-log ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 1_200);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 74);
-    assert_eq!(survey.zone_transitions, 14);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's rotating-log route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b1_qZ")
-                .expect("fixed Native Fortress second-log zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 10_073);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's rotating-log player trace must resolve")
-        .expect("Native Fortress's rotating-log route must retain the player");
-    assert_eq!(final_player.translation, [1_539_840, -9_627_134, 122_880]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(Some(65)));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 65),
-        Ok(Some(SpawnedEntityTrace {
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_climbs_rotating_logs_into_b1,
+    NativeFortressD6Milestone {
+        frames: 1_120,
+        zone: "b1_qZ",
+        camera_path_index: 0,
+        camera_progress: 10_073,
+        player_translation: [1_566_720, -9_627_134, 122_880],
+        player_velocity: [0, -136_000, 0],
+        player_state: 13,
+        player_status_a: 2_099_209,
+        collider_entity: Some(65),
+        entity: 65,
+        entity_trace: SpawnedEntityTrace {
             translation: [1_535_744, -9_650_944, 25_600],
             state: 2,
             path_progress: 0,
             status_a: 131_072,
-        }))
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(runtime.draw_count(), 1_200);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the rotating-log route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's rotating-log climb into b1 must remain clean: {}",
-        survey.summary()
-    );
-}
+        },
+        successful_spawns: 74,
+        zone_transitions: 14,
+        executions: 21_469,
+        last_player_movement: 1_113,
+        solid_effects: 136,
+        random_seed: 0x0a04_4627,
+    }
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_reaches_b2_upper_landing() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB1Route,
-        1_320,
-    )
-    .expect("Native Fortress's b2 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_reaches_b2_upper_landing,
+    NativeFortressD6Milestone {
+        frames: 1_240,
+        zone: "b2_qZ",
+        camera_path_index: 1,
+        camera_progress: 11_315,
+        player_translation: [2_007_040, -7_564_249, 122_880],
+        player_velocity: [614_400, -136_000, 0],
+        player_state: 2,
+        player_status_a: 395_529,
+        collider_entity: None,
+        entity: 90,
+        entity_trace: SpawnedEntityTrace {
+            translation: [3_213_200, -7_552_256, 119_647],
+            state: 2,
+            path_progress: 225,
+            status_a: 165_888,
+        },
+        successful_spawns: 83,
+        zone_transitions: 17,
+        executions: 24_975,
+        last_player_movement: 1_240,
+        solid_effects: 165,
+        random_seed: 0x242a_5435,
+    }
+);
 
-    assert_eq!(survey.frames, 1_320);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 83);
-    assert_eq!(survey.zone_transitions, 17);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b2 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b2_qZ")
-                .expect("fixed Native Fortress upper-bounce zone EID is valid"),
-            index: 1,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 6_752);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b2 player trace must resolve")
-        .expect("Native Fortress's b2 route must retain the player");
-    assert_eq!(final_player.translation, [1_806_080, -7_564_241, 122_880]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(runtime.draw_count(), 1_320);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b2 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's upper bounce into b2 must remain clean: {}",
-        survey.summary()
-    );
-}
-
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b3_into_b4() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB2Route,
-        1_440,
-    )
-    .expect("Native Fortress's post-b2 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 1_440);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 87);
-    assert_eq!(survey.zone_transitions, 19);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's post-turtle route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b4_qZ")
-                .expect("fixed Native Fortress post-turtle zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 230);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's post-turtle player trace must resolve")
-        .expect("Native Fortress's post-turtle route must retain the player");
-    assert_eq!(final_player.translation, [3_272_448, -7_560_210, 122_880]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 89),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [2_730_000, -7_552_256, 122_684],
-            state: 3,
-            path_progress: -41,
-            status_a: 34_828,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 90),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [3_124_800, -7_552_256, 122_372],
-            state: 3,
-            path_progress: 4,
-            status_a: 2_056,
-        }))
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(runtime.machine().random_seed(), 0xdd1e_1c1e);
-    assert_eq!(runtime.draw_count(), 1_440);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the post-turtle route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's launcher-and-turtle route into b4 must remain clean: {}",
-        survey.summary()
-    );
-}
-
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b4_into_b5() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB4Route,
-        1_800,
-    )
-    .expect("Native Fortress's post-b4 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 1_800);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 90);
-    assert_eq!(survey.zone_transitions, 20);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b5 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b5_qZ")
-                .expect("fixed Native Fortress post-platform zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 2_656);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([4_665_088, -7_673_195, 153_600])
-    );
-    // The characterized startup CD wait shifts route-owned contact samples by
-    // one frame without changing the authored landing or pad sequence.
-    assert_eq!(survey.last_player_movement, 1_476);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b5 player trace must resolve")
-        .expect("Native Fortress's b5 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [4_665_088, -7_673_195, 153_600]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 95),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [4_298_752, -7_699_712, 102_400],
-            state: 11,
-            path_progress: 0,
-            status_a: 131_588,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 97),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [4_709_376, -7_680_512, 102_400],
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b3_into_b4,
+    NativeFortressD6Milestone {
+        frames: 1_340,
+        zone: "b4_qZ",
+        camera_path_index: 0,
+        camera_progress: 3_308,
+        player_translation: [3_411_968, -7_560_198, 122_880],
+        player_velocity: [510_000, -136_000, 0],
+        player_state: 2,
+        player_status_a: 395_521,
+        collider_entity: None,
+        entity: 95,
+        entity_trace: SpawnedEntityTrace {
+            translation: [3_787_776, -7_577_856, 102_400],
             state: 11,
             path_progress: 0,
             status_a: 131_584,
-        }))
-    );
-    assert_eq!(spawned_entity_trace(&runtime, 96), Ok(None));
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_458, 96, 3)),
-        "the b4 PlanC contact must publish its defeated entity flag"
-    );
-    let plant = Eid::from_name("PlanC").expect("fixed Native Fortress plant EID is valid");
-    for state in [2, 3, 4] {
-        assert!(
-            survey.observed_program_states.contains(&(plant, state)),
-            "the b4 PlanC must execute state {state} during the crossing"
-        );
+        },
+        successful_spawns: 87,
+        zone_transitions: 19,
+        executions: 27_262,
+        last_player_movement: 1_340,
+        solid_effects: 172,
+        random_seed: 0x5732_0f22,
     }
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    // The characterized asynchronous WillC read retains three additional
-    // grounded collision updates compared with the old synchronous bootstrap.
-    assert_eq!(survey.effect_counts.get("solid"), Some(&169));
-    // Timed page publication changes when newly resident authored objects join
-    // the deterministic RNG stream; pin the resulting source-order schedule.
-    assert_eq!(runtime.machine().random_seed(), 0x1ef7_3300);
-    assert_eq!(runtime.draw_count(), 1_800);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b4-to-b5 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's rotating-platform-and-plant route into b5 must remain clean: {}",
-        survey.summary()
-    );
-}
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b5_into_b6() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB5Route,
-        2_100,
-    )
-    .expect("Native Fortress's post-b5 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 2_100);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 92);
-    assert_eq!(survey.zone_transitions, 21);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b6 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b6_qZ")
-                .expect("fixed Native Fortress post-launcher zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 11_603);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([6_102_784, -7_751_426, 153_600])
-    );
-    // The characterized startup CD wait shifts route-owned contact samples by
-    // one frame without changing the authored landing or pad sequence.
-    assert_eq!(survey.last_player_movement, 1_626);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b6 player trace must resolve")
-        .expect("Native Fortress's b6 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [6_102_784, -7_751_426, 153_600]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 98),
-        Ok(Some(SpawnedEntityTrace {
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b4_into_b5,
+    NativeFortressD6Milestone {
+        frames: 1_440,
+        zone: "b5_qZ",
+        camera_path_index: 0,
+        camera_progress: 7_930,
+        player_translation: [4_894_520, -7_712_309, 122_880],
+        player_velocity: [614_400, -136_000, 0],
+        player_state: 10,
+        player_status_a: 395_521,
+        collider_entity: None,
+        entity: 98,
+        entity_trace: SpawnedEntityTrace {
             translation: [5_529_600, -7_782_912, 128_000],
-            state: 12,
-            path_progress: 0,
-            status_a: 524_289,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 99),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [5_836_800, -7_846_400, 1_024],
-            state: 13,
-            path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 100),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [6_094_216, -8_263_500, 153_600],
             state: 11,
             path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 101),
-        Ok(Some(SpawnedEntityTrace {
-            // The asynchronous source-order read starts this moving WalOC on
-            // its authored cycle later than the old eager materialization.
-            translation: [6_764_112, -7_629_312, 128_000],
-            state: 1,
-            path_progress: 12,
-            status_a: 34_832,
-        }))
-    );
-    assert_eq!(
-        survey.checkpoint_samples.last(),
-        Some(&(1_529, 25_088, [5_529_600, -7_782_912, 128_000]))
-    );
-    assert_eq!(survey.saved_box_count_samples.last(), Some(&(1_529, 1_024)));
-    assert_eq!(survey.box_count_samples.last(), Some(&(1_529, 1_280)));
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_529, 98, 9)),
-        "the b5 BoxsC contact must publish its checkpoint entity flag"
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&173));
-    // Source-order publication changes the bounded endpoint while the b6
-    // moving objects join the deterministic RNG stream.
-    assert_eq!(runtime.machine().random_seed(), 0x2de9_7676);
-    assert_eq!(runtime.draw_count(), 2_100);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b5-to-b6 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's checkpoint-and-launcher route into b6 must remain clean: {}",
-        survey.summary()
-    );
-}
+            status_a: 688_129,
+        },
+        successful_spawns: 90,
+        zone_transitions: 20,
+        executions: 29_180,
+        last_player_movement: 1_440,
+        solid_effects: 173,
+        random_seed: 0xd0fc_702b,
+    }
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b6_into_b7() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB6Route,
-        2_400,
-    )
-    .expect("Native Fortress's post-b6 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 2_400);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 94);
-    assert_eq!(survey.zone_transitions, 22);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b7 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b7_qZ")
-                .expect("fixed Native Fortress post-MonkC zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 8_198);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([7_261_952, -7_677_532, 153_600])
-    );
-    // The characterized startup CD wait shifts route-owned contact samples by
-    // one frame without changing the authored landing or pad sequence.
-    assert_eq!(survey.last_player_movement, 1_725);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b7 player trace must resolve")
-        .expect("Native Fortress's b7 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [7_261_952, -7_677_532, 153_600]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 99),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [5_836_800, -7_846_400, 1_024],
-            state: 13,
-            path_progress: 0,
-            status_a: 163_840,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 100),
-        Ok(Some(SpawnedEntityTrace {
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b5_into_b6,
+    NativeFortressD6Milestone {
+        frames: 1_590,
+        zone: "b6_qZ",
+        camera_path_index: 0,
+        camera_progress: 29_012,
+        player_translation: [6_817_588, -7_623_017, 122_880],
+        player_velocity: [614_400, -1_264_697, 0],
+        player_state: 10,
+        player_status_a: 133_376,
+        collider_entity: None,
+        entity: 100,
+        entity_trace: SpawnedEntityTrace {
             translation: [6_451_200, -7_680_512, 102_400],
             state: 11,
             path_progress: 0,
             status_a: 131_584,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 101),
-        Ok(None),
-        "the timed spin must defeat and dispose b6's MonkC"
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 102),
-        Ok(Some(SpawnedEntityTrace {
+        },
+        successful_spawns: 92,
+        zone_transitions: 21,
+        executions: 31_883,
+        last_player_movement: 1_590,
+        solid_effects: 174,
+        random_seed: 0xe4d3_dcf7,
+    }
+);
+
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b6_into_b7,
+    NativeFortressD6Milestone {
+        frames: 1_650,
+        zone: "b7_qZ",
+        camera_path_index: 0,
+        camera_progress: 8_097,
+        player_translation: [7_259_956, -7_677_532, 122_880],
+        player_velocity: [85_000, -136_000, 0],
+        player_state: 1,
+        player_status_a: 393_481,
+        collider_entity: None,
+        entity: 102,
+        entity_trace: SpawnedEntityTrace {
             translation: [7_782_400, -7_642_368, 1_024],
             state: 13,
             path_progress: 0,
             status_a: 163_840,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 103),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [7_986_176, -7_475_456, 102_400],
-            state: 11,
-            path_progress: 0,
-            status_a: 131_584,
-        }))
-    );
-    assert_eq!(
-        survey.checkpoint_samples.last(),
-        Some(&(1_529, 25_088, [5_529_600, -7_782_912, 128_000]))
-    );
-    assert_eq!(survey.saved_box_count_samples.last(), Some(&(1_529, 1_024)));
-    assert_eq!(survey.box_count_samples.last(), Some(&(1_529, 1_280)));
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_529, 98, 9)),
-        "the earlier b5 BoxsC handshake must survive the b6-to-b7 route"
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    // The same wait retains three additional grounded WillC collision calls.
-    assert_eq!(survey.effect_counts.get("solid"), Some(&175));
-    assert_eq!(runtime.machine().random_seed(), 0xda89_0a22);
-    assert_eq!(runtime.draw_count(), 2_400);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b6-to-b7 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's moving-log-and-MonkC route into b7 must remain clean: {}",
-        survey.summary()
-    );
-}
+        },
+        successful_spawns: 94,
+        zone_transitions: 22,
+        executions: 33_020,
+        last_player_movement: 1_650,
+        solid_effects: 175,
+        random_seed: 0x2562_6985,
+    }
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b7_into_b8() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB7Route,
-        2_400,
-    )
-    .expect("Native Fortress's post-b7 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b7_into_b8,
+    NativeFortressD6Milestone {
+        frames: 1_800,
+        zone: "b8_qZ",
+        camera_path_index: 0,
+        camera_progress: 17_110,
+        player_translation: [8_914_032, -7_560_205, 167_936],
+        player_velocity: [0, -136_000, 0],
+        player_state: 1,
+        player_status_a: 395_273,
+        collider_entity: None,
+        entity: 104,
+        entity_trace: SpawnedEntityTrace {
+            translation: [8_808_640, -7_577_856, 128_000],
+            state: 4,
+            path_progress: -38,
+            status_a: 2_060,
+        },
+        successful_spawns: 96,
+        zone_transitions: 23,
+        executions: 35_624,
+        last_player_movement: 1_790,
+        solid_effects: 179,
+        random_seed: 0x07e9_bdf5,
+    }
+);
 
-    assert_eq!(survey.frames, 2_400);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 96);
-    assert_eq!(survey.zone_transitions, 23);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b8 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b8_qZ")
-                .expect("fixed Native Fortress post-launcher zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 2_483);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([8_328_960, -7_540_646, 153_600])
-    );
-    // The characterized startup CD wait shifts route-owned contact samples by
-    // one frame without changing the authored landing or controller input.
-    assert_eq!(survey.last_player_movement, 1_801);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b8 player trace must resolve")
-        .expect("Native Fortress's b8 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [8_328_960, -7_540_646, 153_600]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 102),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [7_782_400, -7_642_368, 1_024],
-            state: 13,
-            path_progress: 0,
-            status_a: 163_840,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 103),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [8_337_460, -8_039_103, 153_600],
-            state: 11,
-            path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 104),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [9_292_800, -7_577_856, 128_000],
-            state: 1,
-            path_progress: 1_024,
-            status_a: 165_900,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 105),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [9_011_200, -7_168_256, 128_000],
-            state: 0,
-            path_progress: 0,
-            status_a: 688_129,
-        }))
-    );
-    assert_eq!(
-        survey.checkpoint_samples.last(),
-        Some(&(1_529, 25_088, [5_529_600, -7_782_912, 128_000]))
-    );
-    assert_eq!(survey.saved_box_count_samples.last(), Some(&(1_529, 1_024)));
-    assert_eq!(survey.box_count_samples.last(), Some(&(1_529, 1_280)));
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_529, 98, 9)),
-        "the earlier b5 BoxsC handshake must survive the b7 launcher route"
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&177));
-    // The one-frame startup wait realigns this bounded run with the original
-    // deterministic RNG endpoint even though collision totals differ.
-    assert_eq!(runtime.machine().random_seed(), 0xc314_915a);
-    assert_eq!(runtime.draw_count(), 2_400);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b7-to-b8 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's subtype-five launcher route into b8 must remain clean: {}",
-        survey.summary()
-    );
-}
-
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b8_into_b9() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB8Route,
-        2_200,
-    )
-    .expect("Native Fortress's post-b8 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 2_200);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 99);
-    assert_eq!(survey.zone_transitions, 24);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's b9 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("b9_qZ")
-                .expect("fixed Native Fortress post-SheNC zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 10_560);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([9_731_840, -7_560_206, 122_880])
-    );
-    // The retail CD bootstrap contributes one wait frame before the route;
-    // authored contacts and the final landing therefore publish one frame on.
-    assert_eq!(survey.last_player_movement, 1_983);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's b9 player trace must resolve")
-        .expect("Native Fortress's b9 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [9_731_840, -7_560_206, 122_880]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 104),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [8_787_968, -7_577_856, 128_000],
-            state: 1,
-            path_progress: 0,
-            status_a: 165_896,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 45),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [9_523_200, -7_062_784, 128_000],
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b8_into_b9,
+    NativeFortressD6Milestone {
+        frames: 1_900,
+        zone: "b9_qZ",
+        camera_path_index: 0,
+        camera_progress: 13_922,
+        player_translation: [9_884_784, -7_560_209, 167_936],
+        player_velocity: [614_400, -136_000, 0],
+        player_state: 2,
+        player_status_a: 395_529,
+        collider_entity: None,
+        entity: 45,
+        entity_trace: SpawnedEntityTrace {
+            translation: [9_523_200, -6_814_976, 128_000],
             state: 8,
             path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 46),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [10_444_800, -7_577_856, 128_000],
-            state: 2,
-            path_progress: 0,
-            status_a: 34_824,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 105),
-        Ok(None),
-        "the route must break and dispose b8's BoxsC before entering b9"
-    );
-    assert_eq!(
-        survey.checkpoint_samples.last(),
-        Some(&(1_529, 25_088, [5_529_600, -7_782_912, 128_000]))
-    );
-    assert_eq!(survey.saved_box_count_samples.last(), Some(&(1_529, 1_024)));
-    assert_eq!(survey.box_count_samples.last(), Some(&(1_867, 1_536)));
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_529, 98, 9)),
-        "the earlier b5 BoxsC handshake must survive the b8-to-b9 route"
-    );
-    assert!(
-        survey.spawn_flag_samples.contains(&(1_867, 105, 3)),
-        "b8's BoxsC must record its ordinary-pad break before b9"
-    );
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&184));
-    // Source-order publication changes the bounded endpoint after b8's late
-    // BoxsC joins the authored RNG stream.
-    assert_eq!(runtime.machine().random_seed(), 0xb897_b511);
-    assert_eq!(runtime.draw_count(), 2_200);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b8-to-b9 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's shield-and-WalOC route into b9 must remain clean: {}",
-        survey.summary()
-    );
-}
+            status_a: 163_840,
+        },
+        successful_spawns: 99,
+        zone_transitions: 24,
+        executions: 37_321,
+        last_player_movement: 1_900,
+        solid_effects: 184,
+        random_seed: 0xd1d4_0b5c,
+    }
+);
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn native_fortress_ordinary_pad_route_crosses_b9_into_c0() {
-    let root = PathBuf::from(
-        std::env::var_os("C1_STREAM_DIR")
-            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-    );
-    let level = LevelId::new_const(0x1a);
-    let (nsd, nsf, nsf_bytes) =
-        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
-    let (survey, runtime) = survey_pair_with_runtime(
-        "Native Fortress",
-        level,
-        &nsd,
-        &nsf,
-        &nsf_bytes,
-        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
-        LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressPostB9Route,
-        2_600,
-    )
-    .expect("Native Fortress's post-b9 ordinary-pad route must execute");
-    eprintln!("{}", survey.summary());
-
-    assert_eq!(survey.frames, 2_600);
-    assert!(survey.terminal.is_none());
-    assert_eq!(survey.successful_spawns, 104);
-    assert_eq!(survey.zone_transitions, 25);
-    let final_camera = survey
-        .final_camera
-        .expect("Native Fortress's c0 route must retain its final camera");
-    assert_eq!(
-        final_camera.path,
-        RetailPathId {
-            zone: Eid::from_name("c0_qZ")
-                .expect("fixed Native Fortress first post-b9 zone EID is valid"),
-            index: 0,
-        }
-    );
-    assert_eq!(final_camera.progress.raw(), 17_593);
-    assert_eq!(
-        survey.final_player_translation,
-        Some([11_308_800, -7_618_863, 133_120])
-    );
-    // Timed startup publication shifts the route's contact handshakes by one
-    // frame while preserving the exact c0 ledge and object outcomes.
-    assert_eq!(survey.last_player_movement, 2_091);
-    let final_player = player_trace(&runtime)
-        .expect("Native Fortress's c0 player trace must resolve")
-        .expect("Native Fortress's c0 route must retain the player");
-    assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [11_308_800, -7_618_863, 133_120]);
-    assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
-    assert_ne!(final_player.status_a & 1, 0);
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 41),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [11_317_300, -8_124_120, 133_120],
+native_fortress_d6_milestone_test!(
+    native_fortress_ordinary_pad_route_crosses_b9_into_c0,
+    NativeFortressD6Milestone {
+        frames: 1_988,
+        zone: "c0_qZ",
+        camera_path_index: 0,
+        camera_progress: 24_218,
+        player_translation: [11_592_216, -7_413_468, 167_936],
+        player_velocity: [614_400, 89_149, 0],
+        player_state: 10,
+        player_status_a: 133_384,
+        collider_entity: None,
+        entity: 41,
+        entity_trace: SpawnedEntityTrace {
+            translation: [11_569_152, -7_699_712, 102_400],
             state: 11,
             path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 42),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [11_673_600, -8_038_656, 128_000],
-            state: 4,
-            path_progress: 0,
-            status_a: 131_072,
-        }))
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 46),
-        Ok(None),
-        "the route must defeat and dispose b9's PlanC before entering c0"
-    );
-    assert_eq!(
-        spawned_entity_trace(&runtime, 40),
-        Ok(None),
-        "the route must defeat and dispose c0's PlanC before the falling WalOC"
-    );
-    assert_eq!(
-        survey.checkpoint_samples.last(),
-        Some(&(1_529, 25_088, [5_529_600, -7_782_912, 128_000]))
-    );
-    assert_eq!(survey.saved_box_count_samples.last(), Some(&(1_529, 1_024)));
-    assert_eq!(survey.box_count_samples.last(), Some(&(1_867, 1_536)));
-    assert!(survey.spawn_flag_samples.contains(&(2_045, 46, 3)));
-    assert!(survey.spawn_flag_samples.contains(&(2_062, 40, 3)));
-    assert_eq!(survey.restarts, 0);
-    assert!(survey.restart_frames.is_empty());
-    assert_eq!(survey.death_camera_frames, 0);
-    assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert_eq!(survey.faulted_objects, 0);
-    assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&188));
-    assert_eq!(runtime.machine().random_seed(), 0x0b65_7286);
-    assert_eq!(runtime.draw_count(), 2_600);
-    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
-    assert!(
-        survey
-            .pad_change_samples
-            .iter()
-            .all(|(_, held)| held & !ordinary_pad_mask == 0),
-        "the b9-to-c0 route must use ordinary directional, Cross, and Square input only"
-    );
-    assert!(
-        survey.is_clean(),
-        "Native Fortress's two-PlanC-and-falling-WalOC route into c0 must remain clean: {}",
-        survey.summary()
-    );
-}
-
+            status_a: 131_604,
+        },
+        successful_spawns: 104,
+        zone_transitions: 25,
+        executions: 38_921,
+        last_player_movement: 1_988,
+        solid_effects: 186,
+        random_seed: 0x6161_90bf,
+    }
+);
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {

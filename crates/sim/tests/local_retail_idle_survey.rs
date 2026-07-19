@@ -404,7 +404,7 @@ enum SurveyInputProfile {
     Idle,
     DirectionAndButtonSweep,
     DirectionAndButtonSweepToTransition,
-    JungleMaskAfterRestart,
+    JungleDeathAkuCompletionRoute,
     ForwardWithActions,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
@@ -464,7 +464,7 @@ impl SurveyInputProfile {
             Self::Idle => "idle",
             Self::DirectionAndButtonSweep => "direction-and-button-sweep",
             Self::DirectionAndButtonSweepToTransition => "direction-and-button-sweep-to-transition",
-            Self::JungleMaskAfterRestart => "jungle-mask-after-restart",
+            Self::JungleDeathAkuCompletionRoute => "jungle-death-aku-completion-route",
             Self::ForwardWithActions => "forward-with-actions",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
@@ -513,6 +513,7 @@ impl SurveyInputProfile {
         matches!(
             self,
             Self::DirectionAndButtonSweepToTransition
+                | Self::JungleDeathAkuCompletionRoute
                 | Self::ForwardWithActions
                 | Self::JunglePhaseRobust
                 | Self::GreatGatePhaseRobust
@@ -15349,6 +15350,8 @@ struct SurveyInputController {
     profile: SurveyInputProfile,
     n_sanity: NSanityRouteController,
     jungle: JungleRouteController,
+    jungle_restarted: bool,
+    jungle_restart_tick: u16,
     great_gate: GreatGateRouteController,
     boulders: BouldersCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
@@ -15386,6 +15389,8 @@ impl SurveyInputController {
                 plan_c_cycle_complete: false,
                 roller_square_rearm: false,
             },
+            jungle_restarted: false,
+            jungle_restart_tick: 0,
             great_gate: GreatGateRouteController {
                 yellow_gem_route: matches!(
                     profile,
@@ -15579,7 +15584,11 @@ impl SurveyInputController {
     }
 
     fn on_restart(&mut self) {
-        if self.profile == SurveyInputProfile::RollingStonesCheckpoint {
+        if self.profile == SurveyInputProfile::JungleDeathAkuCompletionRoute {
+            self.jungle_restarted = true;
+            self.jungle_restart_tick = 0;
+            self.jungle = JungleRouteController::default();
+        } else if self.profile == SurveyInputProfile::RollingStonesCheckpoint {
             self.rolling_stones.restart_from_checkpoint();
         } else if self.profile == SurveyInputProfile::LostCityCompletionRoute {
             self.lost_city = LostCityCompletionRouteController::default();
@@ -15612,12 +15621,38 @@ impl SurveyInputController {
             SurveyInputProfile::Idle => 0,
             SurveyInputProfile::DirectionAndButtonSweep
             | SurveyInputProfile::DirectionAndButtonSweepToTransition => active_survey_held(frame),
-            SurveyInputProfile::JungleMaskAfterRestart => {
+            SurveyInputProfile::JungleDeathAkuCompletionRoute => {
                 const MASK_X: i32 = 2_098_944;
                 const SPIN_START_Z: i32 = 31_890_000;
+                // Keep ordinary neutral samples after pickup until the
+                // characterized first-play hazard phase, then rejoin the
+                // path-relative completion controller using pad input only.
+                const REJOIN_TICK: u16 = 403;
+                const ACTION_FRAMES: u16 = 32;
 
-                if frame <= 558 {
-                    return active_survey_held(frame);
+                if !self.jungle_restarted {
+                    // Walk into 0b's first authored gap. This produces the
+                    // same normal LoadState restart as an ordinary failed
+                    // play attempt, without mutating runtime state.
+                    return PAD_UP;
+                }
+                self.jungle_restart_tick = self.jungle_restart_tick.saturating_add(1);
+                let restart_tick = self.jungle_restart_tick;
+                if (REJOIN_TICK..REJOIN_TICK + ACTION_FRAMES).contains(&restart_tick) {
+                    return PAD_UP | PAD_CROSS;
+                }
+                if (REJOIN_TICK + ACTION_FRAMES..REJOIN_TICK + 2 * ACTION_FRAMES)
+                    .contains(&restart_tick)
+                {
+                    return PAD_RIGHT;
+                }
+                if (REJOIN_TICK + 2 * ACTION_FRAMES..REJOIN_TICK + 3 * ACTION_FRAMES)
+                    .contains(&restart_tick)
+                {
+                    return PAD_UP | PAD_CROSS;
+                }
+                if restart_tick >= REJOIN_TICK + 3 * ACTION_FRAMES {
+                    return self.jungle.held(camera, player, route_objects);
                 }
                 let Some(player) = player else {
                     return 0;
@@ -15632,7 +15667,7 @@ impl SurveyInputController {
                 // while the pickup reaches Crash distinguishes the restart
                 // lifecycle handshake from the separate attack-state branch
                 // that can bat a pickup away.
-                } else if frame < 635 && frame % 16 < 4 {
+                } else if restart_tick < 77 && restart_tick % 16 < 4 {
                     PAD_UP | PAD_SQUARE
                 } else {
                     0
@@ -18065,7 +18100,8 @@ fn survey_pair_with_runtime(
             None
         };
         let route_objects = match input_profile {
-            SurveyInputProfile::JunglePhaseRobust => program_object_traces(
+            SurveyInputProfile::JungleDeathAkuCompletionRoute
+            | SurveyInputProfile::JunglePhaseRobust => program_object_traces(
                 &runtime,
                 &[
                     Eid::from_name("PlanC").expect("fixed Jungle plant EID is valid"),
@@ -18178,6 +18214,7 @@ fn survey_pair_with_runtime(
         if matches!(
             input_profile,
             SurveyInputProfile::RollingStonesCheckpoint
+                | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
                 | SurveyInputProfile::WholeHogCompletionRoute
@@ -24564,14 +24601,14 @@ fn jungle_rollers_collects_aku_after_an_authored_death_restart() {
         &nsf_bytes,
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
-        SurveyInputProfile::JungleMaskAfterRestart,
-        800,
+        SurveyInputProfile::JungleDeathAkuCompletionRoute,
+        600,
     )
     .expect("Jungle Rollers post-death mask route must execute");
 
-    assert_eq!(survey.frames, 800);
+    assert_eq!(survey.frames, 600);
     assert_eq!(survey.restarts, 1);
-    assert_eq!(survey.restart_frames, [558]);
+    assert_eq!(survey.restart_frames, [200]);
     assert_eq!(spawned_entity_trace(&runtime, 9), Ok(None));
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(runtime.faulted_object_count(), 0);
@@ -24639,6 +24676,152 @@ fn jungle_rollers_collects_aku_after_an_authored_death_restart() {
         Some(0)
     );
     assert_ne!(doctor.transform.translation, player.translation);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jungle_rollers_death_aku_route_reaches_authored_level_complete() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x0c);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Jungle Rollers pair must parse");
+    let (survey, mut runtime) = survey_pair_with_runtime(
+        "Jungle Rollers",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::JungleDeathAkuCompletionRoute,
+        3_600,
+    )
+    .expect("Jungle Rollers death/Aku completion route must execute");
+
+    assert_eq!(survey.frames, 3_391, "{}", survey.summary());
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3391 requested level transition to 0x2d")
+    );
+    assert_eq!(
+        survey.next_lid,
+        Some((3_391, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+    );
+    assert_eq!(survey.zone_transitions, 31);
+    assert_eq!(survey.restarts, 1);
+    assert_eq!(survey.restart_frames, [200]);
+    let (fall_frame, fall) = survey
+        .first_terminal_fall
+        .as_ref()
+        .expect("holding forward must enter the authored opening terminal fall");
+    assert_eq!(*fall_frame, 190);
+    assert_eq!(
+        fall.zone,
+        Eid::from_name("0c_cZ").expect("fixed Jungle fall-zone EID is valid")
+    );
+    assert_eq!(fall.state, 22);
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_904, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (269, 0x100),
+            (270, 0x200),
+            (1_174, 0x300),
+            (1_175, 0x400),
+            (1_904, 0x500),
+            (1_935, 0x600),
+            (1_936, 0x700),
+            (1_939, 0x800),
+            (1_940, 0x900),
+            (1_941, 0xa00),
+            (1_949, 0xb00),
+            (1_955, 0xc00),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_904, 0x400)]);
+    assert_eq!(survey.effect_counts.get("load-state").copied(), Some(1));
+    assert_eq!(survey.effect_counts.get("save-state").copied(), Some(1));
+    assert_eq!(survey.effect_counts.get("transition").copied(), Some(1));
+
+    let doctor = Eid::from_name("DoctC").expect("fixed Aku program EID is valid");
+    assert!(
+        survey.observed_program_states.contains(&(doctor, 1)),
+        "Aku must enter the collected/following state after the restart"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before Level Complete"
+        );
+    }
+    let ordinary_pad_bits = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_bits == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(46 << 8));
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xc00));
+    let final_camera = survey
+        .final_camera
+        .expect("Jungle Rollers end warp must retain a camera location");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0O_cZ").expect("fixed Jungle end-warp EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 17_836);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_193_152, 7_732_275, -2_147_072])
+    );
+    let player = player_trace(&runtime)
+        .expect("Jungle Rollers completion player trace must resolve")
+        .expect("WarpC must retain Crash through its transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(runtime.machine().random_seed(), 0x085c_5705);
+    assert_eq!(runtime.draw_count(), 3_191);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(
+        survey.is_clean(),
+        "Jungle Rollers death/Aku completion route must remain clean: {}",
+        survey.summary()
+    );
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let report = runtime
+        .finish_level_transition(
+            &mut host,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+        )
+        .expect("Jungle Rollers LEVEL_END must resolve Level Complete");
+    assert!(
+        report.event_failures.is_empty(),
+        "Jungle Rollers LEVEL_END handlers must finish cleanly: {:?}",
+        report.event_failures
+    );
+    assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+    assert!(!report.resolved.bonus_return);
+    assert_eq!(report.carry.random_seed, 0x085c_5705);
+    assert_eq!(report.carry.draw_count, 3_191);
 }
 
 #[test]

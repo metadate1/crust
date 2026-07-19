@@ -676,6 +676,9 @@ gameplay path.
   error. Road to Nowhere now follows both authored outside rope lanes across the collapsing spans,
   reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame 2,452.
   The route activates both checkpoints, preserves the fresh life stock, and emits no load-state.
+  The High Road separately follows its authored right rope, centers across the `b2_mZ` seam and on
+  the `d0_mZ` end island, observes WarpC states zero through four, and requests Level Complete
+  `0x2d` on frame 2,274 without a death, restart, load-state, VM fault, or execution error.
 
   Up the Creek has a complete normal-route direct-boot ordinary-pad golden. Checkpoint entity 76
   emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box

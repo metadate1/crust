@@ -1286,6 +1286,12 @@ is 1,322,866 bytes with SHA-256
   observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,452.
   Crash remains live in state 32 at `[-4096, 3720270, -40225400]`; the route has no VM fault,
   faulted object, or execution error.
+- The High Road (`0x16`) has a separate direct-boot ordinary-pad completion. It pre-aligns to the
+  authored right rope, centers across the physical `b2_mZ` seam, returns to the rope, and centers
+  again on the `d0_mZ` end island. WarpC states zero through four execute and request Level Complete
+  `0x2d` on frame 2,274. Crash remains live in state 32 at
+  `[-6144, 3722328, -45838336]`; the route has no death, restart, terminal fall, load-state, VM
+  fault, faulted object, or execution error.
 - Up the Creek (`0x18`) has a complete normal-route direct-boot ordinary-pad golden. It crosses the
   opening moving logs, orbiters, sinking-platform handoff, and later `RivOC` chain. Checkpoint entity
   76 executes `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]`, camera

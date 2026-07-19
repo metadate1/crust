@@ -353,7 +353,10 @@ zone transitions without a restart, reaches `d3_sZ`'s authored WarpC, and reques
 `0x2d` on frame 4,473 after 148,192 clean executions. Road to Nowhere now also has a no-death
 direct-boot route: it follows the authored outside rope lanes across every collapsing span, retains
 the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,452 without a restart
-or load-state effect.
+or load-state effect. The High Road now has its own clean ordinary-pad route: it follows the
+authored right rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives
+WarpC states zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming
+a life.
 
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
 checkpoint entity 76 on frame 1,057, preserving saved box count `0x200` before the live count
@@ -371,7 +374,7 @@ globals across every `LEVEL_END` handoff.
 
 The current native schedule therefore includes deterministic normal-route completions for
 N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
-Temple Ruins, Road to Nowhere, and Up the Creek, plus authored Papu Papu and later boss
+Temple Ruins, Road to Nowhere, The High Road, and Up the Creek, plus authored Papu Papu and later boss
 completions. These are not a full retail
 playthrough or a browser-playthrough claim.
 Broader progression, several GOOL host

@@ -181,6 +181,77 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn high_road_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x16);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains The High Road");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local High Road pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::HighRoadCompletionRoute,
+        2_800,
+    )
+    .expect("High Road completion route must execute");
+
+    // The route uses only ordinary pad input and the authored outside rope,
+    // crossing the b2 seam on the bridge proper before rejoining the rope.
+    // Crash then returns to the center of d0 to trigger the normal WarpC
+    // Level Complete handoff without consuming a life.
+    assert_eq!(survey.frames, 2_274);
+    assert_eq!(survey.next_lid, Some((2_274, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2274 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.checkpoint_samples, [(1, -1, [0, 0, 0])]);
+    assert_eq!(survey.box_count_samples, [(1, 0), (949, 0x100)]);
+    assert_eq!(survey.effect_counts.get("save-state"), None);
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(
+        survey.final_player_translation,
+        Some([-6_144, 3_722_328, -45_838_336])
+    );
+    let player = player_trace(&runtime)
+        .expect("High Road completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [-6_144, 3_722_328, -45_838_336]);
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(runtime.draw_count(), 2_274);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(
+        survey.is_clean(),
+        "High Road end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
 fn progression_frame_count() -> u32 {
     std::env::var("C1_PROGRESSION_FRAMES")
         .ok()
@@ -226,6 +297,7 @@ enum SurveyInputProfile {
     NativeFortressD6Route,
     LostCityCompletionRoute,
     RoadToNowhereCompletionRoute,
+    HighRoadCompletionRoute,
     PapuPapuCompletionRoute,
     KoalaKongCompletionRoute,
     PinstripeCompletionRoute,
@@ -283,6 +355,7 @@ impl SurveyInputProfile {
             Self::NativeFortressD6Route => "native-fortress-d6-route",
             Self::LostCityCompletionRoute => "lost-city-completion-route",
             Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
+            Self::HighRoadCompletionRoute => "high-road-completion-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
             Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
             Self::PinstripeCompletionRoute => "pinstripe-completion-route",
@@ -326,6 +399,7 @@ impl SurveyInputProfile {
                 | Self::NativeFortressD6Route
                 | Self::LostCityCompletionRoute
                 | Self::RoadToNowhereCompletionRoute
+                | Self::HighRoadCompletionRoute
                 | Self::PapuPapuCompletionRoute
                 | Self::KoalaKongCompletionRoute
                 | Self::PinstripeCompletionRoute
@@ -11510,6 +11584,60 @@ impl UpstreamRecoveryRouteController {
     }
 }
 
+/// Ordinary-pad completion route for The High Road.
+///
+/// The right outside rope is authored walkable collision and avoids the
+/// timing-sensitive turtle/plank chain. The bridge seam at the end of `b2_mZ`
+/// still requires a brief return to the center, followed by a rope re-entry
+/// before `b3_mZ`. The end island is centered again only after its safe bank
+/// so the retail `WarpC` object performs the level-complete handoff.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HighRoadCompletionRouteController {
+    jump_hold: u8,
+}
+
+impl HighRoadCompletionRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if player.translation[2] > -7_000_000 && player.translation[0] < 170_000 {
+            return PAD_RIGHT;
+        }
+
+        let b2 = Eid::from_name("b2_mZ").expect("fixed High Road bridge-zone EID is valid");
+        let d0 = Eid::from_name("d0_mZ").expect("fixed High Road end-zone EID is valid");
+        let target_x = if (camera.path.zone == d0 && player.translation[2] < -45_300_000)
+            || (camera.path.zone == b2
+                && camera.path.index == 1
+                && player.translation[2] > -17_650_000)
+        {
+            0
+        } else {
+            190_000
+        };
+        let mut held = PAD_UP;
+        if player.translation[0] < target_x - 20_000 {
+            held |= PAD_RIGHT;
+        } else if player.translation[0] > target_x + 20_000 {
+            held |= PAD_LEFT;
+        }
+        if matches!(player.state, 22 | 40) {
+            self.jump_hold = 0;
+            return 0;
+        }
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if player.status_a & 1 != 0 {
+            self.jump_hold = 7;
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        held
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RoadToNowhereRouteController {
     jump_hold: u8,
@@ -14064,6 +14192,7 @@ struct SurveyInputController {
     native_fortress: NativeFortressRouteController,
     lost_city: LostCityCompletionRouteController,
     road_to_nowhere: RoadToNowhereRouteController,
+    high_road: HighRoadCompletionRouteController,
     papu_papu: PapuPapuCompletionRouteController,
     ripper_roo: RipperRooCompletionRouteController,
     brio: BrioCompletionRouteController,
@@ -14257,6 +14386,7 @@ impl SurveyInputController {
                 final_stage: 0,
                 final_tick: 0,
             },
+            high_road: HighRoadCompletionRouteController { jump_hold: 0 },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
                 action_tick: 0,
@@ -14291,6 +14421,9 @@ impl SurveyInputController {
             self.road_to_nowhere.jump_hold = 0;
             self.road_to_nowhere.final_stage = 0;
             self.road_to_nowhere.final_tick = 0;
+        }
+        if self.profile == SurveyInputProfile::HighRoadCompletionRoute {
+            self.high_road.jump_hold = 0;
         }
     }
 
@@ -14417,6 +14550,7 @@ impl SurveyInputController {
                 self.road_to_nowhere
                     .held(camera, player, player_collider_entity, route_objects)
             }
+            SurveyInputProfile::HighRoadCompletionRoute => self.high_road.held(camera, player),
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, boss_state)
             }

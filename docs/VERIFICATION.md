@@ -136,10 +136,12 @@ not copy any disc or stream bytes into the repository:
   from the authored map, and observes timed page 25 publication on frame 18 instead of the former
   synchronous frame 4. Shifting only its two ordinary Up/Cross windows from frames 33–40/90–97 to
   47–54/104–111 reaches Title on frame 216 with no restart. The same checked carry returns through
-  the map, selects Cortex, requests Ending on frame 2,164, executes the 3,396-frame credits graph,
-  and returns to Title. Its checked assertions pin the card payload at load, selected globals and
-  destination restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw
-  phase.
+  the map and selects Cortex. Ordinary horizontal, jump, and spin input reflects Cortex's five
+  damaging cores on frames 266, 618, 2,786, 3,229, and 3,378; the authored boss-to-Crash victory
+  event arrives on frame 3,567 and Ending is requested on frame 3,612. The carried flow then
+  executes the 3,396-frame credits graph and returns to Title. Its checked assertions pin the card
+  payload at load, selected globals and destination restart snapshots around the Title/Cortex
+  boundary, and the Ending-to-Title draw phase.
 - The exact title MDAT runtime test loaded the legal title pair directly from the raw image and
   confirmed type-17 source-vs-object-zone binding, source-ordered state changes and the type-zero
   display masks `0x22_3ff0` at load and `0x22_3ffc` when active. Focused tests cover the complete

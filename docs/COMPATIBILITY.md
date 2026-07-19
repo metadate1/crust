@@ -634,8 +634,10 @@ gameplay path.
   all 3,396 Ending frames, and returns to Title. Timed publication of Great Hall page 25 moves the
   two ordinary Up/Cross windows forward by fourteen frames; the complete flow has no restart,
   terminal fall, VM fault, or execution error. It pins the card payload at load, selected globals
-  and restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase. Hog Wild
-  now has a
+  and restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase.
+  Cortex's ordinary-pad route reflects all five authored damaging cores on frames 266, 618, 2,786,
+  3,229, and 3,378, observes the victory event on frame 3,567, and requests Ending on frame 3,612.
+  Hog Wild now has a
   complete ordinary-pad direct-boot route: it traverses 67 camera paths, activates checkpoints 13
   and 30, reaches live box
   count `0x700`, observes WarpC states zero through four, and requests Level Complete `0x2d` on
@@ -745,8 +747,9 @@ gameplay path.
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser
   bonus round trip has been completed.
-  No later boss, complete ending, broad death/checkpoint
-  sequence, long soak, mobile audio session, or multiple physical gamepad matrix has been completed.
+  Remaining gates include every unfinished normal and bonus route, broader death/checkpoint
+  sequences, a complete browser-driven endgame, long soak, mobile audio sessions, and a multiple
+  physical-gamepad matrix.
 
 ## Automated coverage
 

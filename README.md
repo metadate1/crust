@@ -510,7 +510,9 @@ A separate completed-card vertical flow now starts from the authored Title map, 
 Hall, completes its WarpC route with ordinary Up/Cross input, returns through Title, selects and
 defeats Dr. Neo Cortex, mounts the complete Ending credits, and returns to Title again. Timed page
 25 publication moves Great Hall's two Cross windows forward by fourteen frames; it now requests
-Title on frame 216 with no restart or fault. Cortex requests Ending on frame 2,164, and Ending
+Title on frame 216 with no restart or fault. Cortex's ordinary-pad controller now survives the
+complete authored barrage, reflects all five damaging cores on frames 266, 618, 2,786, 3,229, and
+3,378, receives the victory event on frame 3,567, and requests Ending on frame 3,612. Ending then
 requests Title on frame 3,396. The regression pins the card payload at load, selected globals and
 restart snapshots around the Title/Cortex boundary, and the Ending-to-Title draw phase.
 The current strict direction/button survey runs all 43 bootable pairs for 5,400

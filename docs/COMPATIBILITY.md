@@ -657,11 +657,13 @@ gameplay path.
   Native Fortress has one authoritative exact ordinary-pad route through the grease segment,
   `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher sequence.
   It reaches a clean `c6_qZ` checkpoint on frame 2,548, then continues through the `c7`/`c8` wall
-  sequence, checkpoint entity 148 on frame 3,421, and the `d4`/`d5` hazards. The 4,200-frame route
-  finishes stable in `d6_qZ` at `[15938712, -2202144, 167936]` after 200 successful spawns, 43
-  lifecycle/zone transitions, and 98,003 executions. It records no restart, death camera, terminal
-  fall, VM fault, faulted object, execution error, or checked issue. The remaining Native Fortress
-  route from `d6_qZ` to its normal end and a browser playthrough are still unproved.
+  sequence, checkpoint entity 148 on frame 3,421, and the `d4`/`d5` hazards. It waits for the
+  authored low-stop state of the moving `d6` wall, jumps its top face, and reaches
+  `d7_qZ:0@12919` on frame 4,400 at `[14172508, -2057869, 167936]`. The route records 202
+  successful spawns, 44 lifecycle/zone transitions, 103,696 executions, 498 solid effects, and RNG
+  `0x698e789f`, with no restart, death camera, terminal fall, VM fault, faulted object, execution
+  error, or checked issue. The remaining Native Fortress route from `d7_qZ` to its normal end and
+  a browser playthrough are still unproved.
 
   The Great Gate's card-backed Yellow Gem route now completes from the owned raw BIN. It restores
   the retail payload and entitlement bit, crosses the live-phase `c4`/`c5` logs, rides both

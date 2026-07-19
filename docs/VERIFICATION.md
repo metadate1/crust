@@ -1263,11 +1263,12 @@ is 1,322,866 bytes with SHA-256
   greasy `WalOC` through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the
   `c0`–`c5` launcher sequence. It reaches a clean `c6_qZ` checkpoint at frame 2,548, then crosses
   the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, and clears `d4`/`d5`.
-  At frame 4,200 it is stable in `d6_qZ:0@1623`, Crash is
-  `[15938712, -2202144, 167936]` in state two, and the run has performed 200 successful spawns, 43
-  lifecycle/zone transitions, and 98,003 executions. It has no restart, death camera, terminal fall,
-  VM fault, faulted object, execution error, or checked issue. The route from `d6_qZ` to the normal
-  end and a browser playthrough remain unproved.
+  The same route waits for the moving `d6` wall's authored low-stop state, jumps its top face, and
+  reaches `d7_qZ:0@12919` on frame 4,400. Crash is `[14172508, -2057869, 167936]` in state ten;
+  the run has performed 202 successful spawns, 44 lifecycle/zone transitions, 103,696 executions,
+  and 498 solid effects, with RNG `0x698e789f`. It has no restart, death camera, terminal fall, VM
+  fault, faulted object, execution error, or checked issue. The route from `d7_qZ` to the normal end
+  and a browser playthrough remain unproved.
 - A card-backed Great Gate (`0x12`) Yellow Gem regression restores the exact 128-byte save payload,
   asserts item-pool bit 29 and gem count one through the carried Title-map session, crosses the
   phase-sensitive `c4`/`c5` logs, activates both subtype-five `GemsC` platforms, and activates and

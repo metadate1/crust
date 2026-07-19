@@ -352,14 +352,15 @@ sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted co
 the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, clears `d4`/`d5`,
 waits for and jumps the moving `d6` wall, crosses the paired `d7` launchers, breaks the obstructing
 `d8` crate, activates the next checkpoint on frame 4,482, clears the `d9` monk, waits for and jumps
-the second moving wall, and reaches `e0_qZ` on frame 4,620. It then brakes onto launcher 180,
-lands on the `e1_qZ` waiting floor, waits for the synchronized flame child to enter its authored
-safe state, and chains launchers 183 and 182 into `e2_qZ` on frame 4,855. The complete slice
-performs 233 successful spawns, 53 lifecycle/zone transitions, 114,182 executions, and 515 solid
-effects, with RNG `0x1000df0e`. Crash finishes at `[8147552, -2305043, 167936]` in state two with
-no restart, death camera, terminal fall, VM fault, faulted object, execution error, or checked
-issue. The route from `e2_qZ` to Native Fortress's normal end and a browser playthrough remain
-unproved.
+the second moving wall, and reaches `e0_qZ` on frame 4,620. It then crosses every remaining
+launcher and flame cycle, climbs `e7_qZ`'s five alternating stationary ledges and rotating logs,
+and brakes through the `e9`/`f0` three-arrow chain into `f1_qZ`'s normal WarpC. WarpC requests
+Level Complete `0x2d` on frame 6,165. The complete route performs 317 successful spawns, 64
+lifecycle/zone transitions, 153,291 executions, and 684 solid effects across 60 camera ranges and
+75 path changes. Crash finishes live in state 32 at `[1579260, 6596940, 167936]`, with final
+camera `f1_qZ:0@17919` and RNG `0x48320b2c`. It has no restart, death camera, terminal fall,
+LoadState, VM fault, faulted object, execution error, or checked issue. A browser-driven completion
+remains unproved.
 
 The Great Gate also has a complete card-backed Yellow Gem route from the owned raw BIN. It restores
 the exact retail payload and entitlement bit, crosses the phase-sensitive `c4`/`c5` logs, rides

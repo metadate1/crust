@@ -1282,14 +1282,16 @@ is 1,322,866 bytes with SHA-256
   The same route waits for the moving `d6` wall's authored low-stop state, jumps its top face,
   crosses the paired `d7` launchers, breaks the obstructing `d8` crate, and activates the next
   checkpoint on frame 4,482. It then clears the `d9` monk, waits for the second moving wall's
-  authored low stop, jumps its top face, and reaches `e0_qZ:0@4681` on frame 4,620. It brakes onto
-  launcher 180, lands on the `e1_qZ` waiting floor, waits for the synchronized subtype-six flame
-  child to enter state 16 with no collision bound, and chains launchers 183 and 182 into
-  `e2_qZ:0@12580` on frame 4,855; Crash is `[8147552, -2305043, 167936]` in state two. The run has
-  performed 233 successful spawns, 53 lifecycle/zone transitions, 114,182 executions, and 515
-  solid effects, with RNG `0x1000df0e`. It has no restart, death camera, terminal fall, VM fault,
-  faulted object, execution error, or checked issue. The route from `e2_qZ` to the normal end and
-  a browser playthrough remain unproved.
+  authored low stop, jumps its top face, and reaches `e0_qZ:0@4681` on frame 4,620. It then crosses
+  every remaining launcher and flame cycle, climbs `e7_qZ`'s five alternating stationary ledges
+  and rotating logs, and brakes through the `e9`/`f0` three-arrow chain into `f1_qZ`'s normal
+  WarpC. WarpC requests Level Complete `0x2d` on frame 6,165. The complete run records 317
+  successful spawns from 84,438 attempts/84,121 source-expected rejections, 153,291 executions,
+  64 lifecycle/zone transitions, 684 solid effects, 60 camera ranges, and 75 path changes. The
+  final camera is `f1_qZ:0@17919`; Crash remains live in state 32 at
+  `[1579260, 6596940, 167936]`, and RNG is `0x48320b2c`. It has no restart, death camera, terminal
+  fall, LoadState, VM fault, faulted object, execution error, or checked issue. A browser-driven
+  completion remains unproved.
 - A card-backed Great Gate (`0x12`) Yellow Gem regression restores the exact 128-byte save payload,
   asserts item-pool bit 29 and gem count one through the carried Title-map session, crosses the
   phase-sensitive `c4`/`c5` logs, activates both subtype-five `GemsC` platforms, and activates and
@@ -1363,14 +1365,24 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,092 tests: 958 default-active and 134
-  legally-local ignored tests. The complete 958-test default gate and the complete 134-test
-  owned-data sweep pass
-  with zero failures, including the Native Fortress-through-`c6` and complete Up the Creek route
-  goldens. Rustfmt,
+- The locked all-target workspace currently enumerates 1,093 tests: 958 default-active and 135
+  legally-local ignored tests. The complete 958-test default gate and the complete 135-test
+  owned-data sweep pass with zero failures, including the complete Native Fortress and Up the
+  Creek route goldens. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
   release builds, all eleven Node distribution tests, `npm run build`, and the distribution verifier
   pass on the delivery tree.
+- A fresh Chrome-compatible in-app browser reload selected the user's legally local
+  632,083,536-byte raw BIN through the real file input without a helper or copied asset. The app
+  recognized all 44 pairs/43 playable levels, launched the full game from the beginning, rendered
+  the publisher and title/menu presentations, and entered Jungle Rollers' authored attract run.
+  Its complete 1,348-input PBAK performed three hard death/restart cycles and released physical
+  input at completion. The live controls changed `RUNNING` to `PAUSED`, changed synthesized audio
+  to `MUTED`, then restored `RUNNING`/`SYNTH ACTIVE`; telemetry remained at 30.00 Hz. Browser
+  warning/error logs were empty, and the data remained local to the tab.
+- The exact owned-stream `jungle_rollers_collects_aku_after_an_authored_death_restart` regression
+  was rerun on this same tree and passed. It remains the direct guard for the reported second-level
+  failure to collect Aku after a death/restart.
 - The final Chrome-compatible pass used a loopback-only bridge to populate the native file input
   with the user's legally local 632,083,536-byte raw BIN. The app extracted 88 streams, reported all
   44 known pairs and 43 playable pairs, retained 219 MiB in the tab, and directly booted N. Sanity

@@ -671,12 +671,14 @@ gameplay path.
   It then clears the `d9` monk, waits for the second moving wall's authored low stop, jumps its top
   face, and reaches `e0_qZ:0@4681` on frame 4,620. The same controller brakes onto launcher 180,
   lands on the `e1_qZ` waiting floor, waits until the synchronized subtype-six flame child is in
-  state 16 with no collision bound, then chains launchers 183 and 182 into `e2_qZ:0@12580` on
-  frame 4,855 at `[8147552, -2305043, 167936]`. The route records 233 successful spawns, 53
-  lifecycle/zone transitions, 114,182 executions, 515 solid effects, and RNG `0x1000df0e`, with
-  no restart, death camera, terminal fall, VM fault, faulted object, execution error, or checked
-  issue. The remaining Native Fortress route from `e2_qZ` to its normal end and a browser
-  playthrough are still unproved.
+  state 16 with no collision bound, then crosses every remaining launcher and flame cycle. It
+  climbs `e7_qZ`'s five alternating stationary ledges and rotating logs, brakes through the
+  `e9`/`f0` three-arrow chain, and enters `f1_qZ`'s normal WarpC. WarpC requests Level Complete
+  `0x2d` on frame 6,165. The complete route records 317 successful spawns, 64 lifecycle/zone
+  transitions, 153,291 executions, 684 solid effects, 60 camera ranges, 75 path changes, and RNG
+  `0x48320b2c`. Crash remains live in state 32 at `[1579260, 6596940, 167936]`, with final camera
+  `f1_qZ:0@17919`. There is no restart, death camera, terminal fall, LoadState, VM fault, faulted
+  object, execution error, or checked issue. A browser playthrough remains unproved.
 
   The Great Gate's card-backed Yellow Gem route now completes from the owned raw BIN. It restores
   the retail payload and entitlement bit, crosses the live-phase `c4`/`c5` logs, rides both
@@ -719,10 +721,9 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Nine deterministic retail-authored levels now reach their real end warps and request Level
-  Complete, including the independent Hog Wild, Whole Hog, Boulder Dash, and Rolling Stones routes.
-  The carried
-  chain executes the complete legally local Upstream PBAK input,
+- Ten deterministic retail-authored levels now reach their real end warps and request Level
+  Complete, including the independent Hog Wild, Whole Hog, Boulder Dash, Native Fortress, and
+  Rolling Stones routes. The carried chain executes the complete legally local Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
   carries Rolling Stones from the post-boss Map handoff through its normal end. The independent
   Rolling Stones direct boot reaches the same end on its own deterministic phase.

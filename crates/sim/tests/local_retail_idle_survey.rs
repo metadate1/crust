@@ -13683,7 +13683,11 @@ impl SurveyInputController {
                     PAD_LEFT
                 } else if player.translation[0] < MASK_X - 70_000 {
                     PAD_RIGHT
-                } else if frame % 16 < 4 {
+                // One authored spin breaks the mask crate. Remaining neutral
+                // while the pickup reaches Crash distinguishes the restart
+                // lifecycle handshake from the separate attack-state branch
+                // that can bat a pickup away.
+                } else if frame < 635 && frame % 16 < 4 {
                     PAD_UP | PAD_SQUARE
                 } else {
                     0
@@ -22761,24 +22765,39 @@ fn jungle_rollers_collects_aku_after_an_authored_death_restart() {
     let player = player_trace(&runtime)
         .expect("the post-death player trace must remain readable")
         .expect("Crash must remain live after collecting Aku");
-    let masks = runtime
+    let doctor_word = runtime
+        .global_word(DOCTOR_OBJECT_GLOBAL)
+        .expect("the post-death Doctor global must remain readable");
+    let doctor_reference = CollisionObjectReference::from_word(doctor_word)
+        .expect("the post-death Doctor global must retain a checked object reference");
+    let doctor_handle = runtime
+        .object_for_vm(doctor_reference.object())
+        .expect("the null-zone Doctor object must survive the authored restart");
+    let doctors = runtime
         .render_objects()
         .expect("the post-death render snapshot must remain valid")
         .into_iter()
-        .filter(|object| object.executable == 29)
+        .filter(|object| object.object == doctor_handle)
         .collect::<Vec<_>>();
-    assert_eq!(masks.len(), 1);
-    let mask = &masks[0];
-    assert_eq!(mask.subtype, 0);
-    assert_eq!(mask.transform.translation, player.translation);
-    assert_eq!(mask.size, 24);
-    assert!(mask.display_eligible);
+    assert_eq!(doctors.len(), 1);
+    let doctor = &doctors[0];
+    assert_eq!(doctor.executable, 5);
+    assert_eq!(doctor.subtype, 0);
     assert_eq!(
-        mask.animation_reference.map(AnimationReference::offset),
+        doctor
+            .program
+            .and_then(|program| program.global_eid().name())
+            .as_deref(),
+        Some("DoctC")
+    );
+    assert!(doctor.display_eligible);
+    assert_eq!(
+        doctor.animation_reference.map(AnimationReference::offset),
         Some(0)
     );
     assert_eq!(
-        mask.texture_frame_snapshot
+        doctor
+            .texture_frame_snapshot
             .expect("Aku must retain its live display-boundary texture slots")
             .slots()
             .iter()
@@ -22786,6 +22805,21 @@ fn jungle_rollers_collects_aku_after_an_authored_death_restart() {
             .count(),
         5
     );
+    let doctor_vm = runtime
+        .machine()
+        .object(doctor_reference.object())
+        .expect("the displayed Doctor must retain VM storage");
+    assert_eq!(doctor_vm.state(), 1);
+    assert_eq!(doctor_vm.state_flags(), 9);
+    assert_eq!(
+        doctor_vm
+            .register(process_register::ANIMATION_SEQUENCE)
+            .ok()
+            .and_then(AnimationReference::from_word)
+            .map(AnimationReference::offset),
+        Some(0)
+    );
+    assert_ne!(doctor.transform.translation, player.translation);
 }
 
 #[test]

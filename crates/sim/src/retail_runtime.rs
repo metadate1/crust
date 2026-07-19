@@ -4402,28 +4402,12 @@ impl RetailRuntime {
         self.arena
             .set_zone(main_arena, snapshot.location.path.zone)
             .map_err(RuntimeError::Tree)?;
-        // Every ordinary zone object has just been killed. Clearing the
-        // remaining bounded set's collider slot removes both sides of Crash's
-        // pair without exposing a raw-link getter from the VM.
-        let surviving_vms = self
-            .handles
-            .arena_by_vm
-            .iter()
-            .enumerate()
-            .filter_map(|(index, arena)| {
-                arena
-                    .as_ref()
-                    .and_then(|_| u16::try_from(index).ok())
-                    .and_then(VmObjectHandle::new)
-            })
-            .collect::<Vec<_>>();
-        for survivor in surviving_vms {
-            self.machine
-                .object_mut(survivor)
-                .map_err(RuntimeError::Vm)?
-                .set_link(6, None)
-                .map_err(RuntimeError::Vm)?;
-        }
+        // Native clears only Crash's current collider pair. Other surviving
+        // objects can retain asymmetric collider links to Crash; DoctC uses
+        // exactly that link to accept a mask after a death restart.
+        self.machine
+            .clear_retail_collider_pair(main.vm)
+            .map_err(RuntimeError::Vm)?;
         let player = self.machine.object_mut(main.vm).map_err(RuntimeError::Vm)?;
         for (register, value) in [
             (
@@ -4465,7 +4449,6 @@ impl RetailRuntime {
                 .set_register(register, value.cast_unsigned())
                 .map_err(RuntimeError::Vm)?;
         }
-        player.set_link(6, None).map_err(RuntimeError::Vm)?;
         self.draw_count = 0;
         self.machine.set_draw_count(0);
         self.set_mount_global(SCREEN_SHAKE_GLOBAL, 0);

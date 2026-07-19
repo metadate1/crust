@@ -189,6 +189,7 @@ const RETAIL_FREE_LIST_ROOT_REFERENCE: u32 = 0xa200_0000;
 const PROCESS_LINK_PARENT: usize = 1;
 const PROCESS_LINK_SIBLING: usize = 2;
 const PROCESS_LINK_CHILDREN: usize = 3;
+const PROCESS_LINK_COLLIDER: usize = 6;
 const EVENT_ARGUMENT_REFERENCE_TAG: u32 = 0xc000_0000;
 const EVENT_ARGUMENT_REFERENCE_GENERATION_BITS: u32 = 0x0fff_ffff;
 const EVENT_ARGUMENT_REFERENCE_GENERATION_SHIFT: u32 = 2;
@@ -6613,6 +6614,42 @@ impl Machine {
             Some(pool_slot) => Ok(self.live_object_in_retail_pool_slot(pool_slot)),
             None => Ok(cached),
         }
+    }
+
+    /// Clears the collider pair named by `object`, in retail source order.
+    ///
+    /// `LevelRestart` does not clear link six on every surviving object. It
+    /// snapshots Crash's current collider, clears that object's collider, and
+    /// then clears Crash's. Other asymmetric collider links remain live; the
+    /// Doctor object relies on its retained Crash link to accept a mask after
+    /// a death restart. A native collider pointer can still name initialized
+    /// physical storage after its logical pool object has been reclaimed, so
+    /// that retained slot must be cleared before the object's own link.
+    pub(crate) fn clear_retail_collider_pair(
+        &mut self,
+        object: ObjectHandle,
+    ) -> Result<(), VmError> {
+        let (word, pool_slot, cached) = {
+            let process = self.object(object)?;
+            (
+                process.register(PROCESS_LINK_COLLIDER)?,
+                process.register_pool_slot(PROCESS_LINK_COLLIDER)?,
+                process.links[PROCESS_LINK_COLLIDER],
+            )
+        };
+        if word == 0 {
+            return Ok(());
+        }
+
+        if let Some(pool_slot) = pool_slot {
+            self.write_retail_pool_register_word(pool_slot, PROCESS_LINK_COLLIDER, 0, None)?;
+        } else if let Some(collider) = cached {
+            self.object_mut(collider)?
+                .set_link(PROCESS_LINK_COLLIDER, None)?;
+        }
+        self.object_mut(object)?
+            .set_link(PROCESS_LINK_COLLIDER, None)?;
+        Ok(())
     }
 
     /// Reads the live occupant or the initialized static storage retained in
@@ -15721,6 +15758,98 @@ mod tests {
                 .unwrap()
                 & STATUS_HOTSPOT_COLLISION,
             0
+        );
+    }
+
+    #[test]
+    fn restart_clears_only_crash_current_collider_pair() {
+        let crash = handle(0);
+        let current = handle(1);
+        let doctor = handle(2);
+        let mut crash_object = VmObject::new(crash, Vec::new()).unwrap();
+        crash_object.set_link(6, Some(current)).unwrap();
+        let mut current_object = VmObject::new(current, Vec::new()).unwrap();
+        current_object.set_link(6, Some(crash)).unwrap();
+        let mut doctor_object = VmObject::new(doctor, Vec::new()).unwrap();
+        doctor_object.set_link(6, Some(crash)).unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(crash_object).unwrap();
+        machine.insert_object(current_object).unwrap();
+        machine.insert_object(doctor_object).unwrap();
+
+        machine.clear_retail_collider_pair(crash).unwrap();
+
+        assert_eq!(machine.object(crash).unwrap().links[6], None);
+        assert_eq!(machine.object(current).unwrap().links[6], None);
+        assert_eq!(
+            machine.object(doctor).unwrap().links[6],
+            Some(crash),
+            "native LevelRestart leaves unrelated asymmetric collider links intact"
+        );
+    }
+
+    #[test]
+    fn restart_clears_crash_collider_storage_after_pool_reclamation() {
+        let crash = handle(0);
+        let collider = handle(1);
+        let doctor = handle(2);
+        let mut crash_object = VmObject::new(crash, Vec::new()).unwrap();
+        crash_object
+            .set_link(PROCESS_LINK_COLLIDER, Some(collider))
+            .unwrap();
+        let mut collider_object = VmObject::new(collider, Vec::new()).unwrap();
+        collider_object
+            .set_link(PROCESS_LINK_COLLIDER, Some(crash))
+            .unwrap();
+        let mut doctor_object = VmObject::new(doctor, Vec::new()).unwrap();
+        doctor_object
+            .set_link(PROCESS_LINK_COLLIDER, Some(crash))
+            .unwrap();
+        let mut machine = Machine::new(0);
+        machine.insert_object(crash_object).unwrap();
+        machine.insert_object(collider_object).unwrap();
+        machine.insert_object(doctor_object).unwrap();
+        machine.bind_retail_pool_slot(collider, 0).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(collider, 0)
+            .unwrap();
+
+        assert_eq!(
+            machine
+                .object(crash)
+                .unwrap()
+                .register_pool_slot(PROCESS_LINK_COLLIDER),
+            Ok(Some(0))
+        );
+        assert_eq!(
+            machine.resolve_process_link(crash, PROCESS_LINK_COLLIDER),
+            Ok(None)
+        );
+        assert_ne!(
+            machine
+                .retail_pool_register_word(0, PROCESS_LINK_COLLIDER)
+                .unwrap()
+                .0,
+            0
+        );
+
+        machine.clear_retail_collider_pair(crash).unwrap();
+
+        assert_eq!(
+            machine
+                .object(crash)
+                .unwrap()
+                .register(PROCESS_LINK_COLLIDER),
+            Ok(0)
+        );
+        assert_eq!(
+            machine.retail_pool_register_word(0, PROCESS_LINK_COLLIDER),
+            Ok((0, None))
+        );
+        assert_eq!(
+            machine.object(doctor).unwrap().links[PROCESS_LINK_COLLIDER],
+            Some(crash),
+            "clearing a reclaimed collider must not sever the Doctor's asymmetric Crash link"
         );
     }
 

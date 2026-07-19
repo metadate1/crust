@@ -1265,11 +1265,12 @@ is 1,322,866 bytes with SHA-256
   the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, and clears `d4`/`d5`.
   The same route waits for the moving `d6` wall's authored low-stop state, jumps its top face,
   crosses the paired `d7` launchers, breaks the obstructing `d8` crate, and activates the next
-  checkpoint on frame 4,482. It reaches `d9_qZ:0@10519` on frame 4,550; Crash is
-  `[11893084, -2045841, 167936]` in state ten. The run has performed 216 successful spawns, 48
-  lifecycle/zone transitions, 107,302 executions, and 507 solid effects, with RNG `0x121e9faa`.
+  checkpoint on frame 4,482. It then clears the `d9` monk, waits for the second moving wall's
+  authored low stop, jumps its top face, and reaches `e0_qZ:0@4681` on frame 4,620; Crash is
+  `[10796680, -2194457, 167936]` in state two. The run has performed 218 successful spawns, 49
+  lifecycle/zone transitions, 109,079 executions, and 509 solid effects, with RNG `0xcfee9303`.
   It has no restart, death camera, terminal fall, VM fault, faulted object, execution error, or
-  checked issue. The route from `d9_qZ` to the normal end and a browser playthrough remain unproved.
+  checked issue. The route from `e0_qZ` to the normal end and a browser playthrough remain unproved.
 - A card-backed Great Gate (`0x12`) Yellow Gem regression restores the exact 128-byte save payload,
   asserts item-pool bit 29 and gem count one through the carried Title-map session, crosses the
   phase-sensitive `c4`/`c5` logs, activates both subtype-five `GemsC` platforms, and activates and

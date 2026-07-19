@@ -660,11 +660,12 @@ gameplay path.
   sequence, checkpoint entity 148 on frame 3,421, and the `d4`/`d5` hazards. It waits for the
   authored low-stop state of the moving `d6` wall, jumps its top face, crosses the paired `d7`
   launchers, breaks the obstructing `d8` crate, and activates the next checkpoint on frame 4,482.
-  It reaches `d9_qZ:0@10519` on frame 4,550 at `[11893084, -2045841, 167936]`. The route records
-  216 successful spawns, 48 lifecycle/zone transitions, 107,302 executions, 507 solid effects, and
-  RNG `0x121e9faa`, with no restart, death camera, terminal fall, VM fault, faulted object,
-  execution error, or checked issue. The remaining Native Fortress route from `d9_qZ` to its normal
-  end and a browser playthrough are still unproved.
+  It then clears the `d9` monk, waits for the second moving wall's authored low stop, jumps its top
+  face, and reaches `e0_qZ:0@4681` on frame 4,620 at `[10796680, -2194457, 167936]`. The route
+  records 218 successful spawns, 49 lifecycle/zone transitions, 109,079 executions, 509 solid
+  effects, and RNG `0xcfee9303`, with no restart, death camera, terminal fall, VM fault, faulted
+  object, execution error, or checked issue. The remaining Native Fortress route from `e0_qZ` to
+  its normal end and a browser playthrough are still unproved.
 
   The Great Gate's card-backed Yellow Gem route now completes from the owned raw BIN. It restores
   the retail payload and entitlement bit, crosses the live-phase `c4`/`c5` logs, rides both

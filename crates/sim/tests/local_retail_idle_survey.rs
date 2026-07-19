@@ -791,15 +791,17 @@ impl KoalaKongCompletionRouteController {
 /// Ordinary-pad route for Cortex's authored energy-bolt sequence.
 ///
 /// `CorOC` subtypes two and five are the reflectable core variants, while
-/// subtype four is the direct purple core. Crash jumps the latter and only
-/// spins when a reflectable core enters the normal player-contact window; all
-/// boss damage remains driven by the retail collision and event programs.
+/// subtype four is the direct purple core. Crash evades Cortex's phase-specific
+/// barrages, charges the parked third-hit core, and reflects every damaging
+/// shot with ordinary pad input; the retail collision and event programs drive
+/// all five boss hits and the ending transition.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CortexCompletionRouteController {
     hit_count: u8,
     previous_boss_state: Option<u16>,
     late_dodge_started: bool,
     barrage_direction: u32,
+    barrage_object: Option<VmObjectHandle>,
 }
 
 impl CortexCompletionRouteController {
@@ -807,6 +809,18 @@ impl CortexCompletionRouteController {
     const EVADE_DEPTH: u32 = 200_000;
     const GREEN_TRACK_DEPTH: u32 = 500_000;
     const GREEN_ALIGN_RANGE: u32 = 48_000;
+    const PHASE_TWO_LANE_X: i32 = -320_000;
+
+    fn oscillating_lateral(&mut self, player_x: i32) -> u32 {
+        if player_x <= -240_000 {
+            self.barrage_direction = PAD_RIGHT;
+        } else if player_x >= 240_000 {
+            self.barrage_direction = PAD_LEFT;
+        } else if self.barrage_direction == 0 {
+            self.barrage_direction = if player_x < 0 { PAD_RIGHT } else { PAD_LEFT };
+        }
+        self.barrage_direction
+    }
 
     fn held(
         &mut self,
@@ -825,21 +839,29 @@ impl CortexCompletionRouteController {
             self.hit_count = self.hit_count.saturating_add(1);
             self.late_dodge_started = false;
             self.barrage_direction = 0;
+            self.barrage_object = None;
         }
         self.previous_boss_state = boss_state;
-        let incoming = |subtype, state, depth| {
-            objects.iter().any(|object| {
+        let direct_depth =
+            if self.hit_count == 2 && frame >= 2_300 && player.translation[0] < -50_000 {
+                300_000
+            } else {
+                Self::EVADE_DEPTH
+            };
+        let direct_core = objects
+            .iter()
+            .filter(|object| {
                 matches!(
                     object.origin,
                     ObjectOrigin::Runtime {
                         executable: 50,
-                        subtype: candidate,
-                    } if candidate == subtype
-                ) && object.state == state
+                        subtype: 4,
+                    }
+                ) && object.state == 2
                     && object.translation[2] <= player.translation[2].saturating_add(80_000)
-                    && object.translation[2].abs_diff(player.translation[2]) <= depth
+                    && object.translation[2].abs_diff(player.translation[2]) <= direct_depth
             })
-        };
+            .min_by_key(|object| object.translation[2].abs_diff(player.translation[2]));
         let green = objects
             .iter()
             .filter(|object| {
@@ -852,7 +874,7 @@ impl CortexCompletionRouteController {
                 ) && matches!(object.state, 4 | 5)
                     && object.translation[2] <= player.translation[2].saturating_add(160_000)
                     && object.translation[2].abs_diff(player.translation[2])
-                        <= if self.hit_count >= 3 {
+                        <= if self.hit_count >= 3 || self.hit_count == 2 && frame >= 2_300 {
                             Self::GREEN_TRACK_DEPTH
                         } else {
                             Self::CONTACT_DEPTH
@@ -876,30 +898,249 @@ impl CortexCompletionRouteController {
                     && object.translation[2] <= player.translation[2]
                     && object.translation[2].abs_diff(player.translation[2]) <= 300_000
             });
-        if incoming(4, 2, Self::EVADE_DEPTH) {
+        let phase_two_reflected_core = self.hit_count == 2
+            && objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 50,
+                        subtype: 2 | 5,
+                    }
+                ) && object.state == 5
+            });
+        let phase_two_reflected_count = objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 50,
+                        subtype: 2 | 5,
+                    }
+                ) && object.state == 5
+            })
+            .count();
+        let low_lateral_hazard = matches!(self.hit_count, 1 | 2)
+            .then(|| {
+                objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 50,
+                                subtype: 3,
+                            }
+                        ) && object.state == 3
+                            && if frame >= 2_600 {
+                                object.translation[1] < 800_000
+                                    || object.animation_counter == 256
+                                        && object.translation[1] < 950_000
+                            } else {
+                                object.translation[1] < 800_000
+                            }
+                            && object.translation[2].abs_diff(player.translation[2]) <= 80_000
+                            && object.translation[0].abs_diff(player.translation[0])
+                                <= if frame >= 2_600 { 350_000 } else { 100_000 }
+                    })
+                    .min_by_key(|object| {
+                        (
+                            frame >= 2_600 && object.animation_counter != 256,
+                            object.translation[0].abs_diff(player.translation[0]),
+                        )
+                    })
+            })
+            .flatten()
+            .filter(|_| !phase_two_reflected_core || frame >= 2_600);
+        let low_lateral_hazard = if frame >= 2_600 {
+            self.barrage_object
+                .and_then(|active| {
+                    objects.iter().find(|object| {
+                        object.object == active
+                            && matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 50,
+                                    subtype: 3,
+                                }
+                            )
+                            && object.state == 3
+                            && object.translation[2].abs_diff(player.translation[2]) <= 80_000
+                            && object.translation[0].abs_diff(player.translation[0]) <= 350_000
+                    })
+                })
+                .or(low_lateral_hazard)
+        } else {
+            low_lateral_hazard
+        };
+        let phase_two_green_pending = self.hit_count == 2
+            && frame >= 2_300
+            && phase_two_reflected_core
+            && green.is_some_and(|object| object.state == 4);
+
+        if self.hit_count == 2
+            && frame >= 2_300
+            && !phase_two_green_pending
+            && low_lateral_hazard.is_none()
+        {
+            self.barrage_direction = 0;
+            self.barrage_object = None;
+        }
+        if self.hit_count == 2 && frame >= 2_600 && phase_two_reflected_count >= 2 {
             return PAD_CROSS;
+        }
+        if late_projectile_pending {
+            return self.oscillating_lateral(player.translation[0])
+                | if frame % 20 < 8 { PAD_CROSS } else { 0 };
+        }
+        if phase_two_green_pending {
+            let green = green.expect("a pending phase-two green core is present");
+            let green_depth = green.translation[2].abs_diff(player.translation[2]);
+            let target_x = green.translation[0].saturating_sub(80_000);
+            let lateral = if target_x < player.translation[0].saturating_sub(40_000) {
+                PAD_LEFT
+            } else if target_x > player.translation[0].saturating_add(40_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let high_blue_crossing = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 50,
+                        subtype: 3,
+                    }
+                ) && object.state == 3
+                    && (800_000..1_000_000).contains(&object.translation[1])
+                    && object.translation[2].abs_diff(player.translation[2]) <= 80_000
+                    && object.translation[0].abs_diff(player.translation[0]) <= 120_000
+            });
+            if high_blue_crossing {
+                return lateral;
+            }
+            return lateral
+                | if green_depth
+                    <= if frame >= 2_600 {
+                        70_000
+                    } else {
+                        Self::CONTACT_DEPTH
+                    }
+                {
+                    PAD_CROSS | PAD_SQUARE
+                } else if low_lateral_hazard.is_some() {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+        }
+        if let Some(low_lateral_hazard) = low_lateral_hazard {
+            return if self.hit_count == 2 && frame >= 2_600 {
+                self.barrage_object = Some(low_lateral_hazard.object);
+                PAD_CROSS
+            } else if self.hit_count == 2 {
+                PAD_RIGHT | PAD_CROSS
+            } else {
+                PAD_CROSS
+            };
+        }
+        if direct_core.is_some() {
+            return if self.hit_count == 2 && frame >= 2_300 && player.translation[0] < -50_000 {
+                PAD_RIGHT | PAD_CROSS
+            } else if self.hit_count == 2 && player.translation[0] > 50_000 {
+                PAD_LEFT | PAD_CROSS
+            } else {
+                PAD_CROSS
+            };
         }
         if let Some(green) = green {
             let green_depth = green.translation[2].abs_diff(player.translation[2]);
-            let lateral = if self.hit_count >= 3 && green.state == 5 {
-                if player.translation[0] <= -240_000 {
-                    self.barrage_direction = PAD_RIGHT;
-                } else if player.translation[0] >= 240_000 {
-                    self.barrage_direction = PAD_LEFT;
-                } else if self.barrage_direction == 0 {
-                    self.barrage_direction = if player.translation[0] < 0 {
-                        PAD_RIGHT
-                    } else {
-                        PAD_LEFT
-                    };
-                }
-                self.barrage_direction | if frame % 20 < 8 { PAD_CROSS } else { 0 }
-            } else if late_projectile_pending {
-                if player.translation[0] > -80_000 {
-                    PAD_LEFT
+            if self.hit_count == 2 {
+                let low_barrage = objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 50,
+                                subtype: 3,
+                            }
+                        ) && object.state == 3
+                            && object.translation[1] < 800_000
+                            && object.translation[2].abs_diff(player.translation[2]) <= 80_000
+                            && object.translation[0].abs_diff(player.translation[0]) <= 150_000
+                    })
+                    .min_by_key(|object| object.translation[0].abs_diff(player.translation[0]));
+                let high_barrage = (frame >= 1_300)
+                    .then(|| {
+                        objects
+                            .iter()
+                            .filter(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 50,
+                                        subtype: 3,
+                                    }
+                                ) && object.state == 3
+                                    && (800_000..1_000_000).contains(&object.translation[1])
+                                    && object.translation[2].abs_diff(player.translation[2])
+                                        <= if frame >= 2_600 { 80_000 } else { 20_000 }
+                                    && object.translation[0].abs_diff(player.translation[0])
+                                        <= 250_000
+                            })
+                            .min_by_key(|object| {
+                                object.translation[0].abs_diff(player.translation[0])
+                            })
+                    })
+                    .flatten();
+                let target_x = if phase_two_reflected_core {
+                    Self::PHASE_TWO_LANE_X
                 } else {
                     0
-                }
+                };
+                let lateral = if player.translation[0] > target_x + 12_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < target_x - 12_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let dodge = if phase_two_reflected_core
+                    && (low_barrage.is_some() || high_barrage.is_some())
+                {
+                    let low_lateral = if low_barrage.is_some() && frame >= 1_200 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    let high_lateral = if high_barrage.is_some() && frame <= 2_300 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    let jump = if low_barrage.is_some() { PAD_CROSS } else { 0 };
+                    let movement = if high_barrage.is_some() {
+                        high_lateral
+                    } else if low_lateral != 0 {
+                        low_lateral
+                    } else {
+                        lateral
+                    };
+                    jump | movement
+                } else {
+                    lateral
+                };
+                return dodge
+                    | if high_barrage.is_none() && frame % 5 < 4 {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            let lateral = if self.hit_count >= 3 && green.state == 5 {
+                self.oscillating_lateral(player.translation[0])
+                    | if frame % 20 < 8 { PAD_CROSS } else { 0 }
             } else if self.hit_count < 3 {
                 0
             } else if green.translation[0]
@@ -913,8 +1154,7 @@ impl CortexCompletionRouteController {
             } else {
                 0
             };
-            let spin = if !late_projectile_pending
-                && green_depth <= Self::CONTACT_DEPTH
+            let spin = if green_depth <= Self::CONTACT_DEPTH
                 && (self.hit_count < 3
                     || green.state == 4
                         && player.translation[0].saturating_add(60_000) >= green.translation[0])
@@ -926,15 +1166,12 @@ impl CortexCompletionRouteController {
             };
             lateral | spin
         } else if self.hit_count >= 3 && boss_state == Some(1) {
+            let jump = if frame % 20 < 8 { PAD_CROSS } else { 0 };
             if boss.is_some_and(|object| object.translation[2] >= 5_210_000) {
                 self.late_dodge_started = true;
-                PAD_LEFT | PAD_CROSS
+                self.oscillating_lateral(player.translation[0]) | jump
             } else if self.late_dodge_started {
-                if player.translation[0] > -80_000 {
-                    PAD_LEFT
-                } else {
-                    0
-                }
+                self.oscillating_lateral(player.translation[0]) | jump
             } else {
                 PAD_RIGHT
             }
@@ -16405,6 +16642,7 @@ impl SurveyInputController {
                 previous_boss_state: None,
                 late_dodge_started: false,
                 barrage_direction: 0,
+                barrage_object: None,
             },
         }
     }
@@ -25967,24 +26205,24 @@ fn dr_neo_cortex_ordinary_pad_route_reaches_authored_ending_transition() {
         runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::CortexCompletionRoute,
-        2_300,
+        4_000,
     )
     .expect("Dr. Neo Cortex's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 2_164, "{}", survey.summary());
+    assert_eq!(survey.frames, 3_612, "{}", survey.summary());
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2164 requested level transition to 0x39")
+        Some("frame 3612 requested level transition to 0x39")
     );
-    assert_eq!(survey.next_lid, Some((2_164, 0x39)));
+    assert_eq!(survey.next_lid, Some((3_612, 0x39)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.save_handshakes, 0);
     assert_eq!(survey.death_camera_frames, 0);
     assert!(survey.first_terminal_fall.is_none());
     assert!(!survey.effect_counts.contains_key("load-state"));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&80));
-    assert_eq!(survey.effect_counts.get("state-changed"), Some(&180));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&95));
+    assert_eq!(survey.effect_counts.get("state-changed"), Some(&416));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
 
     let core = Eid::from_name("CorOC").expect("fixed Cortex energy-core EID is valid");
@@ -25998,7 +26236,7 @@ fn dr_neo_cortex_ordinary_pad_route_reaches_authored_ending_transition() {
         })
         .map(|sample| sample.frame)
         .collect::<Vec<_>>();
-    assert_eq!(reflected_hit_frames, [266, 626, 1_458, 1_783, 1_930]);
+    assert_eq!(reflected_hit_frames, [266, 618, 2_786, 3_229, 3_378]);
     let victory_events = survey
         .direct_send_program_samples
         .iter()
@@ -26007,7 +26245,7 @@ fn dr_neo_cortex_ordinary_pad_route_reaches_authored_ending_transition() {
         })
         .collect::<Vec<_>>();
     assert_eq!(victory_events.len(), 1);
-    assert_eq!(victory_events[0].frame, 2_119);
+    assert_eq!(victory_events[0].frame, 3_567);
     assert!(survey.observed_player_states.contains(&32));
     let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
     assert!(
@@ -26230,11 +26468,11 @@ fn authored_completed_card_route_reaches_great_hall_cortex_and_ending_title_retu
         cortex_runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::CortexCompletionRoute,
-        2_300,
+        4_000,
     )
     .expect("Dr. Neo Cortex's authored carried completion route must execute");
-    assert_eq!(cortex_survey.frames, 2_164, "{}", cortex_survey.summary());
-    assert_eq!(cortex_survey.next_lid, Some((2_164, 0x39)));
+    assert_eq!(cortex_survey.frames, 3_612, "{}", cortex_survey.summary());
+    assert_eq!(cortex_survey.next_lid, Some((3_612, 0x39)));
     assert_eq!(cortex_survey.restarts, 0);
     assert!(cortex_survey.restart_frames.is_empty());
     assert_eq!(cortex_survey.faulted_objects, 0);

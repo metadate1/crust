@@ -277,6 +277,7 @@ enum SurveyInputProfile {
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
+    WholeHogCompletionRoute,
     UpTheCreekRoute,
     UpTheCreekExtendedRoute,
     UpTheCreekPostZeroYRoute,
@@ -335,6 +336,7 @@ impl SurveyInputProfile {
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
+            Self::WholeHogCompletionRoute => "whole-hog-completion-route",
             Self::UpTheCreekRoute => "up-the-creek-route",
             Self::UpTheCreekExtendedRoute => "up-the-creek-extended-route",
             Self::UpTheCreekPostZeroYRoute => "up-the-creek-post-zero-y-route",
@@ -379,6 +381,7 @@ impl SurveyInputProfile {
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
+                | Self::WholeHogCompletionRoute
                 | Self::UpTheCreekRoute
                 | Self::UpTheCreekExtendedRoute
                 | Self::UpTheCreekPostZeroYRoute
@@ -7070,6 +7073,67 @@ impl HogWildCompletionRouteController {
 
         self.active = Some(action);
         self.held(camera, Some(player), checkpoint_id)
+    }
+}
+
+/// Ordinary 30 Hz pad route through Whole Hog's authored rider course.
+///
+/// The route uses only the inputs available to a player riding the boar. Camera
+/// path gates keep each jump and lateral correction tied to retail geometry:
+/// Cross is held through the `VilOC` drums that amplify a bounce, while the
+/// late `1F_uZ` correction lands on `1G_uZ`'s safe path instead of its adjacent
+/// fatal strip. No VM state, object transform, or level global is written.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct WholeHogCompletionRouteController;
+
+impl WholeHogCompletionRouteController {
+    fn held(camera: RetailCameraLocation) -> u32 {
+        let at = |name: &str| {
+            camera.path.zone == Eid::from_name(name).expect("fixed Whole Hog route EID is valid")
+        };
+        let progress = camera.progress.raw();
+
+        let mut held = if at("0r_uZ") && progress >= 2_048 {
+            PAD_RIGHT
+        } else if at("0s_uZ") || at("0t_uZ") {
+            PAD_LEFT
+        } else if at("0u_uZ") {
+            PAD_RIGHT
+        } else if at("0K_uZ")
+            && (camera.path.index == 1 || (camera.path.index == 0 && progress >= 10_240))
+        {
+            PAD_LEFT
+        } else if at("1d_uZ") {
+            PAD_RIGHT
+        } else if at("1o_uZ") {
+            PAD_LEFT
+        } else if at("1t_uZ") {
+            PAD_RIGHT
+        } else if at("1F_uZ") {
+            PAD_LEFT
+        } else {
+            0
+        };
+
+        let cross = (at("0q_uZ") && progress >= 5_376)
+            || (at("0r_uZ") && progress >= 6_656)
+            || (at("0s_uZ") && progress >= 14_000)
+            || (at("0w_uZ") && progress >= 4_096)
+            || (at("0x_uZ") && progress >= 9_000)
+            || (at("0y_uZ") && camera.path.index == 1)
+            || (at("0A_uZ") && progress >= 8_000)
+            || at("0B_uZ")
+            || at("0C_uZ")
+            || (at("0M_uZ") && progress >= 3_072)
+            || (at("1d_uZ") && camera.path.index == 1 && progress >= 2_048)
+            || (at("1r_uZ") && progress >= 4_096)
+            || (at("1u_uZ") && camera.path.index == 1)
+            || (at("1C_uZ") && progress >= 9_216)
+            || at("1F_uZ");
+        if cross {
+            held |= PAD_CROSS;
+        }
+        held
     }
 }
 
@@ -14746,6 +14810,9 @@ impl SurveyInputController {
             SurveyInputProfile::HogWildCompletionRoute => {
                 self.hog_wild.held(camera, player, checkpoint_id)
             }
+            SurveyInputProfile::WholeHogCompletionRoute => {
+                WholeHogCompletionRouteController::held(camera)
+            }
             SurveyInputProfile::UpTheCreekRoute
             | SurveyInputProfile::UpTheCreekExtendedRoute
             | SurveyInputProfile::UpTheCreekPostZeroYRoute
@@ -15047,6 +15114,7 @@ impl LevelSurvey {
             if matches!(
                 self.input_profile,
                 SurveyInputProfile::HogWildCompletionRoute
+                    | SurveyInputProfile::WholeHogCompletionRoute
             ) && player.event == 0x700
             {
                 self.player_0x700_samples.push((frame, player.translation));
@@ -17240,6 +17308,7 @@ fn survey_pair_with_runtime(
             input_profile,
             SurveyInputProfile::RollingStonesCheckpoint
                 | SurveyInputProfile::HogWildCompletionRoute
+                | SurveyInputProfile::WholeHogCompletionRoute
                 | SurveyInputProfile::RipperRooCompletionRoute
                 | SurveyInputProfile::BrioCompletionRoute
                 | SurveyInputProfile::CortexCompletionRoute
@@ -18157,6 +18226,200 @@ fn hog_wild_direct_boot_reaches_level_complete() {
     assert!(
         survey.is_clean(),
         "Hog Wild completion must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn whole_hog_direct_boot_reaches_level_complete() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1e);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Whole Hog pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Whole Hog",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::WholeHogCompletionRoute,
+        2_000,
+    )
+    .expect("Whole Hog's ordinary-pad completion route must execute");
+    eprintln!("{}", survey.summary());
+
+    assert_eq!(survey.frames, 1_785);
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 1785 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.next_lid, Some((1_785, 0x2d)));
+    assert_eq!(survey.final_live_objects, 17);
+    assert_eq!(survey.max_live_objects, 21);
+    assert_eq!(survey.successful_spawns, 43);
+    assert_eq!(survey.spawn_attempts, 6_199);
+    assert_eq!(survey.expected_spawn_rejections, 6_156);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 23_436);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 51);
+    assert_eq!(survey.camera_ranges.len(), 62);
+    assert_eq!(survey.camera_path_changes, 61);
+    assert_eq!(survey.last_camera_path_change, 1_648);
+    assert_eq!(survey.last_camera_progress_change, 1_670);
+    assert_eq!(survey.last_player_movement, 1_781);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.save_handshakes, 1);
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_death_camera_pose.is_none());
+    assert!(survey.last_death_camera_pose.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
+
+    let final_camera = survey
+        .final_camera
+        .expect("Whole Hog's completion route retains its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("1M_uZ").expect("fixed Whole Hog end-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 10_239);
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([357_632, 1_825_792, 25_934_592])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([5_310_032, 13_171_424, -31_824_488])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([237_168, 1_790_972, -31_824_488])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([5_395_712, 13_171_424, 25_934_592])
+    );
+    let final_player = player_trace(&runtime)
+        .expect("Whole Hog's final player trace must resolve")
+        .expect("Whole Hog's completion route must retain Crash");
+    assert_eq!(
+        final_player.zone,
+        Eid::from_name("1O_uZ").expect("fixed Whole Hog warp-zone EID is valid")
+    );
+    assert_eq!(
+        final_player.translation,
+        [5_310_032, 13_171_424, -31_824_488]
+    );
+    assert_eq!(final_player.velocity, [0, 5_108_000, 0]);
+    assert_eq!(final_player.state, 32);
+    assert_eq!(final_player.status_a, 8);
+    assert_eq!(final_player.event, 0x1600);
+    assert_eq!(player_collider_entity(&runtime), Ok(None));
+
+    assert_eq!(
+        survey.pad_change_samples,
+        [
+            (1, 0),
+            (274, PAD_CROSS),
+            (285, 0),
+            (289, PAD_RIGHT),
+            (299, PAD_RIGHT | PAD_CROSS),
+            (314, PAD_LEFT),
+            (339, PAD_LEFT | PAD_CROSS),
+            (340, PAD_LEFT),
+            (368, PAD_RIGHT),
+            (419, 0),
+            (426, PAD_CROSS),
+            (438, 0),
+            (456, PAD_CROSS),
+            (463, 0),
+            (485, PAD_CROSS),
+            (514, 0),
+            (530, PAD_CROSS),
+            (612, 0),
+            (782, PAD_LEFT),
+            (813, 0),
+            (820, PAD_CROSS),
+            (835, PAD_RIGHT),
+            (870, PAD_RIGHT | PAD_CROSS),
+            (887, 0),
+            (1_045, PAD_LEFT),
+            (1_073, 0),
+            (1_131, PAD_CROSS),
+            (1_149, 0),
+            (1_177, PAD_RIGHT),
+            (1_206, 0),
+            (1_229, PAD_CROSS),
+            (1_250, 0),
+            (1_416, PAD_CROSS),
+            (1_422, 0),
+            (1_442, PAD_CROSS),
+            (1_452, 0),
+            (1_477, PAD_LEFT | PAD_CROSS),
+            (1_496, 0),
+        ]
+    );
+    assert!(
+        survey.player_0x700_samples.is_empty(),
+        "the route must avoid every authored 0x700 surface boundary"
+    );
+    assert!(
+        !survey.observed_player_states.contains(&39),
+        "the route must never enter Crash's authored fatal-surface state"
+    );
+    assert!(
+        !survey.effect_counts.contains_key("load-state"),
+        "completion must not pass through a death restart"
+    );
+    assert_eq!(survey.checkpoint_samples, [(1, -1, [0, 0, 0])]);
+    assert!(survey.saved_box_count_samples.is_empty());
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (680, 0x100),
+            (688, 0x200),
+            (705, 0x300),
+            (925, 0x400),
+            (1_183, 0x500),
+            (1_319, 0x600),
+            (1_354, 0x700),
+            (1_392, 0x800),
+            (1_461, 0x900),
+            (1_627, 0xa00),
+        ]
+    );
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&79));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&45));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(runtime.machine().random_seed(), 0xa49c_ade2);
+    assert_eq!(runtime.draw_count(), 1_785);
+    assert!(
+        survey.is_clean(),
+        "Whole Hog completion must remain clean: {}",
         survey.summary()
     );
 }

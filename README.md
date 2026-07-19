@@ -343,6 +343,19 @@ movement on frame 2,565. It records no restart, death camera, terminal fall, VM 
 object, execution error, or checked issue. The route from `c6_qZ` to Native Fortress's normal end
 and a browser playthrough remain unproved.
 
+The Great Gate also has a card-backed Yellow Gem route that restores the exact retail payload,
+keeps the entitlement bit live, crosses the phase-sensitive `c4`/`c5` logs, rides both `GemsC`
+platforms, and enters alternate zone `c8_iZ` on frame 2,747. The 3,600-frame golden ends at
+progress 13,606 with no death, restart, terminal fall, VM fault, or execution error. The remaining
+alternate path from `c8_iZ` to its end warp is still unproved.
+
+Temple Ruins now has a complete direct-boot ordinary-pad route. It crosses 60 camera paths and 33
+zone transitions without a restart, reaches `d3_sZ`'s authored WarpC, and requests Level Complete
+`0x2d` on frame 4,473 after 148,192 clean executions. Road to Nowhere now also has a no-death
+direct-boot route: it follows the authored outside rope lanes across every collapsing span, retains
+the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,452 without a restart
+or load-state effect.
+
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
 checkpoint entity 76 on frame 1,057, preserving saved box count `0x200` before the live count
 advances, then traverses the complete authored `RivOC` chain through `0F_oZ` platforms 12 and 11.
@@ -358,8 +371,9 @@ preserving the exact primary/secondary RNG state, draw count, 128-byte card data
 globals across every `LEVEL_END` handoff.
 
 The current native schedule therefore includes deterministic normal-route completions for
-N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild, and
-Up the Creek, plus authored Papu Papu and later boss completions. These are not a full retail
+N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
+Temple Ruins, Road to Nowhere, and Up the Creek, plus authored Papu Papu and later boss
+completions. These are not a full retail
 playthrough or a browser-playthrough claim.
 Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized

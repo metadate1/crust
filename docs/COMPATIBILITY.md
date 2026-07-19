@@ -168,6 +168,11 @@ gameplay path.
   open. Each Pager delta is mirrored into the VM, newly adjacent zones activate, and their objects
   scan on the following cooperative frame. Display and animation masks latch with retail's
   one-frame timing.
+- Same-level death restart clears only Crash's current reciprocal collider pair, including a
+  collider that now occupies retained physical pool storage. It deliberately preserves unrelated
+  asymmetric links to Crash. The null-zone `DoctC` object depends on that retained link to accept
+  an Aku Aku pickup after respawn; clearing every inbound collider link made the first mask in
+  Jungle Rollers uncollectable after a death.
 - Misc 12/7 synchronously visits the current header's forward neighbor list without filtering or
   deduplication. Each neighbor uses the live eight-root postorder TERM traversal, including immunity,
   migration, non-title Crash survival and persistent typed `ObjectZoneContext` target/sentinel
@@ -660,6 +665,19 @@ gameplay path.
   last movement on frame 2,565. It records no restart, death camera, terminal fall, VM fault,
   faulted object, execution error, or checked issue. The remaining Native Fortress route from
   `c6_qZ` to its normal end and a browser playthrough are still unproved.
+
+  The Great Gate's card-backed Yellow Gem route restores the retail payload and entitlement bit,
+  crosses the live-phase `c4`/`c5` logs, rides both subtype-five `GemsC` platforms, and enters
+  alternate `c8_iZ` on frame 2,747. It remains clean through frame 3,600 at camera progress 13,606,
+  with no death, restart, fall, VM fault, or execution error. The alternate route beyond `c8_iZ`
+  is not yet a completion claim.
+
+  Temple Ruins has a complete direct-boot ordinary-pad golden through 60 camera paths and 33 zone
+  transitions. Its `d3_sZ` WarpC requests Level Complete `0x2d` on frame 4,473 after 190 successful
+  spawns and 148,192 clean executions, with no restart, fall, VM fault, faulted object, or execution
+  error. Road to Nowhere now follows both authored outside rope lanes across the collapsing spans,
+  reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame 2,452.
+  The route activates both checkpoints, preserves the fresh life stock, and emits no load-state.
 
   Up the Creek has a complete normal-route direct-boot ordinary-pad golden. Checkpoint entity 76
   emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box

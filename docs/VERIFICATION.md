@@ -687,10 +687,12 @@ legally local data:
   `A → B → A`: cached A regions survive, uncached regions follow the current mapping, and returning
   A reuses its frozen generation.
 - A legally local Jungle Rollers regression drives an authored death and same-level restart, breaks
-  the first Aku Aku crate afterward, and verifies that the crate is gone and exactly one live
-  executable-29 mask object is attached to Crash with its five texture bindings. A clean browser
-  replay of the same sequence rendered both textured mask-face primitives from the object's live
-  display-boundary Pager snapshot, with no skipped primitive or runtime fault.
+  the first Aku Aku crate afterward, and verifies that the crate is gone and the surviving null-zone
+  `DoctC` object accepts the pickup. The checked Doctor global still names executable five in state
+  one with animation offset zero and all five live texture bindings. This catches the stale-collider
+  regression that previously made Aku uncollectable after death. A clean browser replay of the same
+  sequence rendered both textured mask-face primitives from the object's live display-boundary Pager
+  snapshot, with no skipped primitive or runtime fault.
 - Normal and hard-restart transitions were audited for old-protection TERM handling, idempotent
   closes, VM/Pager reference reconciliation, and no-core title/special-stream seeding. Normal
   transitions install destination protection before close/open work; hard restart retains old
@@ -1269,6 +1271,23 @@ is 1,322,866 bytes with SHA-256
   `[0, -136000, 0]`, with last movement on frame 2,565. It has no restart, death camera, terminal
   fall, VM fault, faulted object, execution error, or checked issue. The route from `c6_qZ` to the
   normal end and a browser playthrough are still unproved.
+- A card-backed Great Gate (`0x12`) Yellow Gem regression restores the exact 128-byte save payload,
+  asserts item-pool bit 29 and gem count one through the carried Title-map session, crosses the
+  phase-sensitive `c4`/`c5` logs, and activates both subtype-five `GemsC` platforms. It first enters
+  alternate `c8_iZ` on frame 2,747 and remains there through frame 3,600 at progress 13,606, with
+  no death, restart, terminal fall, transition, VM fault, or execution error. This pins alternate-
+  path entry; it does not yet prove the route from `c8_iZ` to its end warp.
+- Temple Ruins (`0x1c`) now has a complete legally local direct-boot route using ordinary 30 Hz pad
+  words. It traverses 60 camera paths/59 changes and 33 zone transitions, then reaches `d3_sZ`'s
+  WarpC and requests Level Complete `0x2d` on frame 4,473. The run performs 190 successful spawns
+  and 148,192 clean executions with no restart, below-zero sample, terminal fall, VM fault, faulted
+  object, or execution error; Crash remains live in state 32 at
+  `[15666656, 4742996, 5402096]`.
+- Road to Nowhere (`0x14`) has a no-death direct-boot route over the authored outside rope lanes.
+  It activates both checkpoints, crosses every collapsing span without a restart or load-state,
+  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,452.
+  Crash remains live in state 32 at `[-4096, 3720270, -40225400]`; the route has no VM fault,
+  faulted object, or execution error.
 - Up the Creek (`0x18`) has a complete normal-route direct-boot ordinary-pad golden. It crosses the
   opening moving logs, orbiters, sinking-platform handoff, and later `RivOC` chain. Checkpoint entity
   76 executes `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]`, camera

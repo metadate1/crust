@@ -322,6 +322,75 @@ fn boulder_dash_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x28);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Lights Out");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Lights Out pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::LightsOutCompletionRoute,
+        4_700,
+    )
+    .expect("Lights Out's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 4_536, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((4_536, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 4536 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.observed_player_states.contains(&32));
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    let player = player_trace(&runtime)
+        .expect("Lights Out completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(runtime.draw_count(), 4_536);
+    assert!(
+        survey.is_clean(),
+        "Lights Out end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn high_road_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -415,6 +484,7 @@ enum SurveyInputProfile {
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
     HeavyMachineryCompletionRoute,
+    LightsOutCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
@@ -476,6 +546,7 @@ impl SurveyInputProfile {
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
+            Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -524,6 +595,7 @@ impl SurveyInputProfile {
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
+                | Self::LightsOutCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
@@ -11261,6 +11333,236 @@ impl HeavyMachineryCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Lights Out from a fresh
+/// level boot through its normal `WarpC` transition. The route uses only
+/// directional, jump, and spin pad bits; it never injects runtime state or
+/// embeds proprietary recording data.
+struct LightsOutCompletionRouteController;
+
+impl LightsOutCompletionRouteController {
+    fn held(frame: u32) -> u32 {
+        // Each tuple is (inclusive start, inclusive end, clear base, buttons).
+        // The opening retains the characterized forward + 2/22 Cross cadence;
+        // later windows clear that base explicitly before applying their bits.
+        const ROUTE_INPUTS: &[(u32, u32, bool, u32)] = &[
+            (198, 209, false, PAD_CROSS),
+            (225, 232, false, PAD_CROSS),
+            (245, 256, false, PAD_CROSS),
+            (273, 284, false, PAD_CROSS),
+            (306, 317, false, PAD_CROSS),
+            (395, 410, false, PAD_RIGHT | PAD_SQUARE),
+            (437, 448, false, PAD_CROSS),
+            (461, 472, false, PAD_CROSS),
+            (468, 490, false, PAD_RIGHT | PAD_SQUARE),
+            (524, 540, false, PAD_LEFT | PAD_SQUARE),
+            (549, 560, false, PAD_CROSS),
+            (573, 590, false, PAD_LEFT | PAD_SQUARE),
+            (628, 650, false, PAD_RIGHT | PAD_SQUARE),
+            (660, 680, true, PAD_UP),
+            (668, 676, false, PAD_LEFT | PAD_SQUARE),
+            (681, 694, false, PAD_CROSS),
+            (704, 722, false, PAD_RIGHT),
+            (742, 755, false, PAD_RIGHT),
+            (770, 781, false, PAD_CROSS),
+            (798, 809, false, PAD_CROSS),
+            (822, 834, false, PAD_RIGHT),
+            (854, 874, false, PAD_LEFT | PAD_SQUARE),
+            (902, 917, false, PAD_CROSS),
+            (963, 975, false, PAD_LEFT),
+            (986, 1_010, false, PAD_RIGHT | PAD_SQUARE),
+            (990, 1_001, false, PAD_CROSS),
+            (1_034, 1_054, false, PAD_LEFT | PAD_SQUARE),
+            (1_100, 1_114, false, PAD_LEFT),
+            (1_162, 1_169, true, PAD_RIGHT),
+            (1_170, 1_269, true, 0),
+            (1_270, 1_275, true, PAD_RIGHT | PAD_CROSS),
+            (1_276, 1_302, true, PAD_RIGHT),
+            (1_303, 1_340, false, PAD_UP),
+            (1_341, 1_385, true, 0),
+            (1_386, 1_391, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (1_392, 1_415, true, PAD_UP | PAD_LEFT),
+            (1_416, 1_455, true, 0),
+            (1_456, 1_461, true, PAD_LEFT | PAD_CROSS),
+            (1_462, 1_480, true, PAD_LEFT),
+            (1_481, 1_486, true, PAD_RIGHT | PAD_CROSS),
+            (1_487, 1_503, true, PAD_RIGHT),
+            (1_504, 1_529, true, PAD_UP),
+            (1_530, 1_535, true, PAD_UP | PAD_RIGHT | PAD_CROSS),
+            (1_536, 1_549, true, PAD_UP),
+            (1_550, 1_555, true, PAD_RIGHT | PAD_CROSS),
+            (1_556, 1_585, true, PAD_RIGHT),
+            (1_586, 1_609, true, PAD_UP),
+            (1_610, 1_615, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (1_616, 1_640, true, PAD_UP),
+            (1_641, 1_734, true, 0),
+            (1_735, 1_740, true, PAD_LEFT | PAD_CROSS),
+            (1_741, 1_744, true, PAD_LEFT),
+            (1_745, 1_765, true, 0),
+            (1_766, 1_771, true, PAD_UP),
+            (1_772, 1_777, true, PAD_UP | PAD_CROSS),
+            (1_778, 1_805, true, PAD_UP),
+            (1_806, 1_815, true, PAD_UP | PAD_CROSS),
+            (1_816, 1_849, true, PAD_UP),
+            (1_850, 1_869, true, PAD_UP | PAD_LEFT),
+            (1_870, 1_875, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (1_876, 1_885, true, PAD_UP),
+            (1_886, 1_910, true, PAD_UP | PAD_SQUARE),
+            (1_911, 1_939, true, PAD_UP),
+            (1_940, 1_945, true, PAD_UP | PAD_CROSS),
+            (1_946, 1_963, true, PAD_UP),
+            (1_964, 1_973, true, PAD_UP | PAD_CROSS),
+            (1_974, 1_987, true, PAD_UP),
+            (1_988, 1_999, true, PAD_UP | PAD_CROSS),
+            (2_000, 2_047, true, PAD_UP),
+            (2_048, 2_057, true, PAD_UP | PAD_CROSS),
+            (2_058, 2_079, true, PAD_UP),
+            (2_080, 2_087, true, PAD_UP | PAD_RIGHT | PAD_CROSS),
+            (2_088, 2_091, true, PAD_UP | PAD_CROSS),
+            (2_092, 2_105, true, PAD_UP),
+            (2_106, 2_124, true, PAD_UP | PAD_SQUARE),
+            (2_125, 2_127, true, PAD_UP),
+            (2_128, 2_139, true, PAD_UP | PAD_CROSS),
+            (2_140, 2_217, true, PAD_UP),
+            (2_218, 2_221, true, PAD_UP | PAD_RIGHT | PAD_CROSS),
+            (2_222, 2_229, true, PAD_UP | PAD_CROSS),
+            (2_230, 2_257, true, PAD_UP),
+            (2_258, 2_269, true, PAD_UP | PAD_CROSS),
+            (2_270, 2_303, true, PAD_UP),
+            (2_304, 2_309, true, PAD_UP | PAD_CROSS),
+            (2_310, 2_315, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (2_316, 2_329, true, PAD_UP | PAD_LEFT),
+            (2_330, 2_347, true, PAD_UP),
+            (2_348, 2_359, true, PAD_UP | PAD_CROSS),
+            (2_360, 2_389, true, PAD_UP),
+            (2_390, 2_394, true, PAD_UP | PAD_SQUARE),
+            (2_395, 2_404, true, PAD_LEFT),
+            (2_405, 2_417, true, PAD_UP),
+            (2_418, 2_425, true, PAD_UP | PAD_SQUARE),
+            (2_426, 2_445, true, PAD_DOWN),
+            (2_446, 2_455, true, 0),
+            (2_456, 2_471, true, PAD_UP),
+            (2_472, 2_483, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (2_484, 2_496, true, PAD_UP | PAD_LEFT),
+            (2_497, 2_513, true, PAD_UP),
+            (2_514, 2_525, true, PAD_UP | PAD_CROSS),
+            (2_526, 2_539, true, PAD_UP),
+            (2_540, 2_553, true, PAD_RIGHT),
+            (2_554, 2_563, true, PAD_LEFT),
+            (2_564, 2_588, true, 0),
+            (2_589, 2_600, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (2_601, 2_623, true, PAD_UP | PAD_LEFT),
+            (2_624, 2_660, true, 0),
+            (2_661, 2_678, true, PAD_RIGHT),
+            (2_679, 2_682, true, PAD_LEFT),
+            (2_683, 2_710, true, 0),
+            (2_711, 2_722, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (2_723, 2_745, true, PAD_UP | PAD_LEFT),
+            (2_746, 2_757, true, PAD_RIGHT | PAD_CROSS),
+            (2_758, 2_780, true, PAD_RIGHT),
+            (2_781, 2_820, true, 0),
+            (2_821, 2_832, true, PAD_UP | PAD_RIGHT | PAD_CROSS),
+            (2_833, 2_845, true, PAD_UP | PAD_RIGHT),
+            (2_846, 2_900, true, 0),
+            (2_901, 2_920, true, PAD_LEFT),
+            (2_921, 2_924, true, PAD_RIGHT),
+            (2_925, 2_958, true, 0),
+            (2_959, 2_962, true, PAD_UP),
+            (2_963, 2_974, true, PAD_UP | PAD_CROSS),
+            (2_975, 2_998, true, PAD_UP),
+            (2_999, 3_050, true, 0),
+            (3_051, 3_054, true, PAD_UP),
+            (3_055, 3_066, true, PAD_UP | PAD_CROSS),
+            (3_067, 3_080, true, PAD_UP),
+            (3_081, 3_088, true, 0),
+            (3_089, 3_092, true, PAD_UP),
+            (3_093, 3_104, true, PAD_UP | PAD_CROSS),
+            (3_105, 3_132, true, PAD_UP),
+            (3_133, 3_216, true, 0),
+            (3_217, 3_220, true, PAD_UP),
+            (3_221, 3_232, true, PAD_UP | PAD_CROSS),
+            (3_233, 3_255, true, PAD_UP),
+            (3_256, 3_320, true, 0),
+            (3_321, 3_324, true, PAD_UP),
+            (3_325, 3_336, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (3_337, 3_365, true, PAD_UP | PAD_LEFT),
+            (3_366, 3_420, true, 0),
+            (3_421, 3_432, true, PAD_UP | PAD_CROSS),
+            (3_433, 3_489, true, 0),
+            (3_490, 3_495, true, PAD_RIGHT | PAD_CROSS),
+            (3_496, 3_505, true, PAD_RIGHT),
+            (3_506, 3_559, true, 0),
+            (3_560, 3_571, true, PAD_UP | PAD_CROSS),
+            (3_572, 3_604, true, PAD_UP),
+            (3_605, 3_660, true, 0),
+            (3_661, 3_664, true, PAD_UP),
+            (3_665, 3_676, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (3_677, 3_690, true, PAD_UP | PAD_LEFT),
+            (3_691, 3_760, true, 0),
+            (3_761, 3_772, true, PAD_UP | PAD_RIGHT | PAD_CROSS),
+            (3_773, 3_820, true, PAD_UP | PAD_RIGHT),
+            (3_821, 3_880, true, 0),
+            (3_881, 3_884, true, PAD_UP | PAD_SQUARE),
+            (
+                3_885,
+                3_896,
+                true,
+                PAD_UP | PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+            ),
+            (3_897, 3_912, true, PAD_UP | PAD_SQUARE),
+            (3_913, 3_960, true, 0),
+            (3_961, 3_964, true, PAD_UP | PAD_LEFT),
+            (3_965, 3_976, true, PAD_UP | PAD_LEFT | PAD_CROSS),
+            (3_977, 3_988, true, PAD_UP),
+            (3_989, 3_990, true, PAD_DOWN),
+            (3_991, 3_994, true, 0),
+            (3_995, 3_998, true, PAD_UP | PAD_SQUARE),
+            (3_999, 4_010, true, PAD_UP | PAD_CROSS | PAD_SQUARE),
+            (4_011, 4_045, true, PAD_UP | PAD_SQUARE),
+            (4_046, 4_110, true, 0),
+            (4_111, 4_118, true, PAD_UP | PAD_LEFT),
+            (4_119, 4_140, true, PAD_UP),
+            (4_141, 4_152, true, PAD_UP | PAD_CROSS),
+            (4_153, 4_164, true, PAD_UP),
+            (4_165, 4_166, true, PAD_DOWN),
+            (4_167, 4_184, true, 0),
+            (4_185, 4_190, true, PAD_UP | PAD_SQUARE),
+            (4_191, 4_202, true, PAD_UP | PAD_CROSS | PAD_SQUARE),
+            (4_203, 4_224, true, PAD_UP | PAD_SQUARE),
+            (4_225, 4_226, true, PAD_DOWN),
+            (4_227, 4_235, true, 0),
+            (4_236, 4_245, true, PAD_UP),
+            (4_246, 4_247, true, PAD_UP | PAD_CROSS),
+            (4_248, 4_262, true, PAD_UP | PAD_SQUARE),
+            (4_263, 4_264, true, PAD_DOWN),
+            (4_265, 4_320, true, 0),
+            (4_321, 4_324, true, PAD_UP | PAD_SQUARE),
+            (4_325, 4_336, true, PAD_UP | PAD_CROSS | PAD_SQUARE),
+            (4_337, 4_375, true, PAD_UP | PAD_SQUARE),
+            (4_376, 4_410, true, 0),
+            (4_411, 4_415, true, PAD_RIGHT),
+            (4_416, 4_417, true, PAD_LEFT),
+            (4_418, 4_425, true, 0),
+            (4_426, 4_437, true, PAD_UP | PAD_CROSS | PAD_SQUARE),
+            (4_438, 4_490, true, PAD_UP | PAD_SQUARE),
+            (4_491, 4_700, true, 0),
+        ];
+
+        let mut held = PAD_UP;
+        if frame % 22 < 2 {
+            held |= PAD_CROSS;
+        }
+        for &(start, end, clear_base, buttons) in ROUTE_INPUTS {
+            if (start..=end).contains(&frame) {
+                if clear_base {
+                    held = 0;
+                }
+                held |= buttons;
+            }
+        }
+        held
+    }
+}
+
 const UPSTREAM_PBAK_FRAMES: u32 = 934;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16049,6 +16351,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 HeavyMachineryCompletionRouteController::held(frame)
+            }
+            SurveyInputProfile::LightsOutCompletionRoute => {
+                LightsOutCompletionRouteController::held(frame)
             }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {

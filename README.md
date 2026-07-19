@@ -185,10 +185,13 @@ rectangle/graphics/water fallback, never extra geometry candidates. A previously
 18,000-frame state-aware input trace carried the camera and Crash from `e0_9Z` through the complete
 `a0_9Z`–`b7_9Z` authored chain and requested Level Complete `0x2d` at frame 1,995 with no VM error,
 faulted object, death restart, below-zero position, or terminal fall. The current native-schedule
-characterization also completes: a legally local 2,100-frame invocation follows
+fresh-boot completion golden also reaches the normal authored end: a legally local 2,100-frame
+invocation follows
 `b5_9Z:p4 → b5_9Z:p1 → b6_9Z:p0`, reaches `b7_9Z`'s `WarpC`, and emits
-`Transition(0x2d)` at frame 1,900. It records 18 zone transitions, 42 observed paths, 65 successful
-spawns and 40,881 GOOL executions with zero restarts, falls, VM errors or faulted objects. The
+`Transition(0x2d)` at frame 1,900. Checkpoint 19 saves at frame 861, the counted-box total reaches
+`0xa00`, and `WarpC` executes states zero through four before the checked `LEVEL_END` resolves the
+Level Complete stream. It records 18 zone transitions with zero restarts, falls, VM errors or
+faulted objects. The
 former b5/b6 stop came from missing route actions in the test controller at authored static cells;
 the later b7 stop came from steering `LEFT` around the live portal lane. Correcting those route
 actions required no camera or collision runtime change. The current six-frame change instead comes

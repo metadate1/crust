@@ -731,9 +731,12 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Eleven deterministic retail-authored levels now reach their real end warps and request Level
-  Complete, including the independent Jungle Rollers, Hog Wild, Whole Hog, Boulder Dash, Native
-  Fortress, and Rolling Stones routes. The carried chain executes the complete legally local
+- Twelve deterministic retail-authored levels now reach their real end warps and request Level
+  Complete, including the independent N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog,
+  Boulder Dash, Native Fortress, and Rolling Stones routes. N. Sanity's fresh ordinary-pad golden
+  activates checkpoint 19, reaches `0xa00` counted boxes, executes `WarpC` states zero through four,
+  and resolves the checked Level Complete handoff at frame 1,900 without a restart or fault. The
+  carried chain executes the complete legally local
   Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
   carries Rolling Stones from the post-boss Map handoff through its normal end. The independent

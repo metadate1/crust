@@ -1371,10 +1371,10 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,094 tests: 958 default-active and 136
-  legally-local ignored tests. The complete 958-test default gate and the complete 136-test
-  owned-data sweep pass with zero failures, including the complete Native Fortress and Up the
-  Creek route goldens. Rustfmt,
+- The locked all-target workspace currently enumerates 1,095 tests: 958 default-active and 137
+  legally-local ignored tests. The complete 958-test default gate and previously published
+  136-test owned-data sweep pass with zero failures, including the complete Native Fortress and Up
+  the Creek route goldens; the added N. Sanity completion golden passes independently. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
   release builds, all eleven Node distribution tests, `npm run build`, and the distribution verifier
   pass on the delivery tree.
@@ -1386,6 +1386,13 @@ is 1,322,866 bytes with SHA-256
   input at completion. The live controls changed `RUNNING` to `PAUSED`, changed synthesized audio
   to `MUTED`, then restored `RUNNING`/`SYNTH ACTIVE`; telemetry remained at 30.00 Hz. Browser
   warning/error logs were empty, and the data remained local to the tab.
+- A new exact fresh-boot N. Sanity Beach completion golden follows only ordinary directional,
+  Cross, and Square pad words. It activates checkpoint 19 on frame 861 with source-ordered saved
+  box count `0x900`, advances the live count to `0xa00`, observes `WarpC` states zero through four,
+  and requests Level Complete on frame 1,900. The final camera is `b7_9Z:0@2017`, Crash remains in
+  warp state 32 at `[3908352,9051438,10669312]`, and RNG is `0x42587668` at draw 1,900. There is no
+  death, restart, terminal fall, LoadState, VM fault, execution error, faulted object, or checked
+  issue; the subsequent checked `LEVEL_END` resolves Level Complete with no handler failure.
 - The exact owned-stream `jungle_rollers_collects_aku_after_an_authored_death_restart` regression
   was rerun on this same tree and passed. It remains the direct guard for the reported second-level
   failure to collect Aku after a death/restart.
@@ -1433,6 +1440,9 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams C1_SURVEY_REQUIRE_CLEAN=1 C1_PROGRESSION_FRAMES=2100 \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_goal_directed_input_characterizes_progression -- --ignored --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  n_sanity_beach_fresh_route_reaches_authored_level_complete -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_checkpoint_survives_an_authored_death_restart -- --ignored --exact --nocapture

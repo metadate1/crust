@@ -5279,9 +5279,9 @@ impl UpTheCreekRouteController {
 /// One authoritative ordinary 30 Hz pad route through Native Fortress.
 ///
 /// The controller crosses every characterized obstacle bank from the opening arrow
-/// crates through the moving d6/d9 walls and the final launcher chain into e2.
-/// Bounded goldens take snapshots of this same sequence rather than divergent
-/// per-zone routes.
+/// crates through the moving d6/d9 walls, e7's rotating-log climb, and the authored
+/// end `WarpC`. Bounded goldens take snapshots of this same sequence rather than
+/// divergent per-zone routes.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NativeFortressRouteController {
@@ -6989,7 +6989,611 @@ impl NativeFortressRouteController {
                 };
             }
             if self.stage == 102 {
+                // Release Cross after the e2 launcher, then use a fresh
+                // Cross+Square edge to clear its flame child. Once Crash has
+                // settled, move to the authored WalOC 184 wait point.
+                if self.route_tick >= 60 && grounded {
+                    self.stage = 103;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return match self.route_tick {
+                    0..=31 => PAD_LEFT | PAD_CROSS,
+                    32..=38 => PAD_LEFT,
+                    _ => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                };
+            }
+            if self.stage == 103 {
+                let wall_is_low = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 184)
+                        && object.state == 4
+                        && object.translation[1] <= -2_500_000
+                });
+                if self.route_tick <= 10 {
+                    return PAD_LEFT;
+                }
+                if self.route_tick == 11 {
+                    return PAD_RIGHT;
+                }
+                if grounded
+                    && wall_is_low
+                    && player.velocity[0].abs() <= 100_000
+                    && (7_500_000..=7_680_000).contains(&player.translation[0])
+                {
+                    self.stage = 104;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                // The e2 floor is narrow and the retail walk animation has a
+                // small root-motion step while horizontal velocity changes.
+                // Prioritize the position envelope before braking velocity;
+                // otherwise every acceleration sample reverses immediately
+                // and the accumulated root motion walks Crash off the edge.
+                if player.translation[0] > 7_600_000 {
+                    return PAD_LEFT;
+                }
+                if player.translation[0] < 7_540_000 {
+                    return PAD_RIGHT;
+                }
+                if player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 104 {
+                if self.route_tick < 2 {
+                    return PAD_LEFT;
+                }
+                self.stage = 105;
+                self.route_tick = 0;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 105 {
+                let e3 =
+                    Eid::from_name("e3_qZ").expect("fixed Native Fortress tail route EID is valid");
+                let align_depth = camera.path.zone == e3 && camera.progress.raw() >= 4_500;
+                if align_depth && grounded {
+                    self.stage = 106;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_LEFT
+                    | PAD_CROSS
+                    | PAD_SQUARE
+                    | if align_depth && player.translation[2] > 150_000 {
+                        PAD_UP
+                    } else if align_depth && player.translation[2] < 80_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+            }
+            if self.stage == 106 {
+                let e4 =
+                    Eid::from_name("e4_qZ").expect("fixed Native Fortress tail route EID is valid");
+                if camera.path.zone == e4
+                    && camera.progress.raw() >= 15_000
+                    && grounded
+                    && player.translation[0] <= 5_650_000
+                {
+                    self.stage = 107;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return PAD_CROSS
+                    | if self.route_tick <= 10 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+            }
+            if self.stage == 107 {
+                let wall_is_low = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 80)
+                        && object.state == 4
+                        && object.translation[1] <= -2_500_000
+                });
+                if self.route_tick >= 150
+                    && grounded
+                    && wall_is_low
+                    && player.velocity[0].abs() <= 100_000
+                    && (5_450_000..=5_700_000).contains(&player.translation[0])
+                {
+                    self.stage = 108;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                if player.translation[0] < 5_450_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 5_700_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 108 {
+                if self.route_tick < 2 {
+                    return PAD_LEFT;
+                }
+                self.stage = 109;
+                self.route_tick = 0;
                 return PAD_LEFT | PAD_CROSS;
+            }
+            if self.stage == 109 {
+                if self.route_tick > 45 && grounded {
+                    self.stage = 112;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return match self.route_tick {
+                    0..=27 => PAD_LEFT | PAD_CROSS,
+                    28..=37 => PAD_LEFT,
+                    _ => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                };
+            }
+            if self.stage == 112 {
+                if player_collider_entity == Some(205) {
+                    self.stage = 116;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_LEFT
+                    | PAD_CROSS
+                    | if self.route_tick % 8 < 5 {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            if self.stage == 116 {
+                if player_collider_entity == Some(204) {
+                    self.stage = 117;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_LEFT
+                    | PAD_CROSS
+                    | if self.route_tick % 8 < 5 {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            if self.stage == 117 {
+                if player_collider_entity == Some(202) {
+                    self.stage = 118;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_CROSS
+                    | if (10..24).contains(&self.route_tick) {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+            }
+            if self.stage == 118 {
+                let e7 = Eid::from_name("e7_qZ")
+                    .expect("fixed Native Fortress vertical-climb EID is valid");
+                if camera.path.zone == e7 && camera.path.index == 1 && grounded {
+                    self.stage = 119;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+
+            // e7 alternates five rotating logs with stationary ledges. Each
+            // WalOC is first struck upright, then used as the next takeoff
+            // surface after it rotates horizontal.
+            if self.stage == 119 {
+                if grounded
+                    && player.velocity[0].abs() <= 100_000
+                    && (1_510_000..=1_550_000).contains(&player.translation[0])
+                {
+                    self.stage = 120;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if player.translation[0] < 1_510_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 1_550_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 120 {
+                let first_log_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 192)
+                        && object.state == 2
+                });
+                if first_log_is_horizontal {
+                    self.stage = 121;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 121 {
+                if self.route_tick > 8
+                    && grounded
+                    && (-1_900_000..=-1_800_000).contains(&player.translation[1])
+                {
+                    self.stage = 122;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return if self.route_tick < 9 {
+                    PAD_LEFT
+                } else if self.route_tick <= 32 {
+                    PAD_LEFT | PAD_CROSS
+                } else {
+                    0
+                };
+            }
+            if self.stage == 122 {
+                if grounded && player.velocity[0] >= 400_000 && player.translation[0] >= 1_050_000 {
+                    self.stage = 123;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 123 {
+                if grounded
+                    && player_collider_entity == Some(192)
+                    && (-1_650_000..=-1_630_000).contains(&player.translation[1])
+                {
+                    self.stage = 124;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.stage == 124 {
+                if grounded
+                    && player_collider_entity == Some(192)
+                    && player.velocity[0].abs() <= 100_000
+                    && (1_500_000..=1_570_000).contains(&player.translation[0])
+                {
+                    self.stage = 125;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if player.translation[0] < 1_500_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 1_570_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 125 {
+                let second_log_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 193)
+                        && object.state == 2
+                });
+                if second_log_is_horizontal {
+                    self.stage = 126;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 126 {
+                if grounded
+                    && player_collider_entity == Some(192)
+                    && (-1_650_000..=-1_630_000).contains(&player.translation[1])
+                {
+                    self.stage = 127;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 127 {
+                if self.route_tick > 20
+                    && grounded
+                    && (-1_480_000..=-1_350_000).contains(&player.translation[1])
+                {
+                    self.stage = 128;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return match self.route_tick {
+                    13..=19 => PAD_RIGHT,
+                    20..=48 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 128 {
+                if grounded && player.velocity[0] <= -400_000 && player.translation[0] <= 2_000_000
+                {
+                    self.stage = 129;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_LEFT;
+            }
+            if self.stage == 129 {
+                if grounded
+                    && player_collider_entity == Some(193)
+                    && (-1_240_000..=-1_220_000).contains(&player.translation[1])
+                {
+                    self.stage = 130;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.stage == 130 {
+                if grounded
+                    && player_collider_entity == Some(193)
+                    && player.velocity[0].abs() <= 100_000
+                    && (1_500_000..=1_570_000).contains(&player.translation[0])
+                {
+                    self.stage = 131;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if player.translation[0] < 1_500_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 1_570_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 131 {
+                let third_log_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 198)
+                        && object.state == 2
+                });
+                if third_log_is_horizontal {
+                    self.stage = 132;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 132 {
+                if grounded
+                    && player_collider_entity == Some(193)
+                    && (-1_240_000..=-1_220_000).contains(&player.translation[1])
+                {
+                    self.stage = 133;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 133 {
+                if self.route_tick > 20
+                    && grounded
+                    && (-1_070_000..=-950_000).contains(&player.translation[1])
+                {
+                    self.stage = 134;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return match self.route_tick {
+                    13..=19 => PAD_LEFT,
+                    20..=48 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 134 {
+                if grounded && player.velocity[0] >= 400_000 && player.translation[0] >= 1_050_000 {
+                    self.stage = 135;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 135 {
+                if grounded
+                    && player_collider_entity == Some(198)
+                    && (-831_000..=-811_000).contains(&player.translation[1])
+                {
+                    self.stage = 136;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.stage == 136 {
+                if grounded
+                    && player_collider_entity == Some(198)
+                    && player.velocity[0].abs() <= 100_000
+                    && (1_500_000..=1_570_000).contains(&player.translation[0])
+                {
+                    self.stage = 137;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if player.translation[0] < 1_500_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 1_570_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 137 {
+                let fourth_log_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 199)
+                        && object.state == 2
+                });
+                if fourth_log_is_horizontal {
+                    self.stage = 138;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 138 {
+                if grounded
+                    && player_collider_entity == Some(198)
+                    && (-831_000..=-811_000).contains(&player.translation[1])
+                {
+                    self.stage = 139;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 139 {
+                if self.route_tick > 20
+                    && grounded
+                    && (-680_000..=-550_000).contains(&player.translation[1])
+                {
+                    self.stage = 140;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return match self.route_tick {
+                    13..=19 => PAD_RIGHT,
+                    20..=48 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 140 {
+                if grounded && player.velocity[0] <= -400_000 && player.translation[0] <= 2_000_000
+                {
+                    self.stage = 141;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_LEFT;
+            }
+            if self.stage == 141 {
+                if grounded
+                    && player_collider_entity == Some(199)
+                    && (-422_000..=-402_000).contains(&player.translation[1])
+                {
+                    self.stage = 142;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.stage == 142 {
+                if grounded
+                    && player_collider_entity == Some(199)
+                    && player.velocity[0].abs() <= 100_000
+                    && (1_500_000..=1_570_000).contains(&player.translation[0])
+                {
+                    self.stage = 143;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if player.translation[0] < 1_500_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                if player.translation[0] > 1_570_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.stage == 143 {
+                let fifth_log_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 200)
+                        && object.state == 2
+                });
+                if fifth_log_is_horizontal {
+                    self.stage = 144;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            if self.stage == 144 {
+                if grounded
+                    && player_collider_entity == Some(199)
+                    && (-422_000..=-402_000).contains(&player.translation[1])
+                {
+                    self.stage = 145;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 145 {
+                if self.route_tick > 20
+                    && grounded
+                    && (-260_000..=-100_000).contains(&player.translation[1])
+                {
+                    self.stage = 146;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return match self.route_tick {
+                    13..=19 => PAD_LEFT,
+                    20..=48 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 146 {
+                if grounded && player.velocity[0] >= 400_000 && player.translation[0] >= 1_050_000 {
+                    self.stage = 147;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 147 {
+                if grounded
+                    && player_collider_entity == Some(200)
+                    && (-10_000..=10_000).contains(&player.translation[1])
+                {
+                    self.stage = 148;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+
+            // The final ascent is an alternating three-arrow chain. Brake in
+            // each launch arc so Crash lands on the next BoxsC face, then
+            // center the last arc over f1's authored WarpC.
+            if self.stage == 148 {
+                if grounded && player_collider_entity == Some(221) {
+                    self.stage = 149;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if self.route_tick >= 22 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.route_tick >= 2 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 149 {
+                if grounded && player_collider_entity == Some(206) {
+                    self.stage = 151;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if self.route_tick >= 25 {
+                    PAD_RIGHT | PAD_CROSS
+                } else {
+                    PAD_LEFT | PAD_CROSS
+                };
+            }
+            if self.stage == 151 {
+                if player.translation[0] < 1_500_000 || player.velocity[0] < -100_000 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if player.translation[0] > 1_570_000 || player.velocity[0] > 100_000 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_CROSS;
             }
             let mut held = PAD_LEFT;
             if self.route_tick % 42 < 18 {
@@ -19648,19 +20252,19 @@ fn native_fortress_ordinary_pad_route_chains_final_launchers_into_e2() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 12_580);
+    assert_eq!(final_camera.progress.raw(), 12_734);
     assert_eq!(
         survey.final_player_translation,
-        Some([8_147_552, -2_305_043, 167_936])
+        Some([8_137_312, -2_226_823, 167_936])
     );
     let final_player = player_trace(&runtime)
         .expect("Native Fortress's e2 player trace must resolve")
         .expect("Native Fortress's final launcher route must retain the player");
     assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [8_147_552, -2_305_043, 167_936]);
-    assert_eq!(final_player.velocity, [-614_400, -136_000, 0]);
-    assert_eq!(final_player.state, 2);
-    assert_eq!(final_player.status_a, 395_529);
+    assert_eq!(final_player.translation, [8_137_312, -2_226_823, 167_936]);
+    assert_eq!(final_player.velocity, [-700_000, 759_918, 0]);
+    assert_eq!(final_player.state, 18);
+    assert_eq!(final_player.status_a, 264);
     assert_eq!(player_collider_entity(&runtime), Ok(None));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -19695,6 +20299,130 @@ fn native_fortress_ordinary_pad_route_chains_final_launchers_into_e2() {
     assert!(
         survey.is_clean(),
         "Native Fortress's synchronized launcher route into e2 must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_ordinary_pad_route_reaches_level_complete_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Native Fortress",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NativeFortressD6Route,
+        6_400,
+    )
+    .expect("Native Fortress's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 6_165);
+    assert_eq!(survey.next_lid, Some((6_165, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 6165 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_death_camera_pose.is_none());
+    assert!(survey.last_death_camera_pose.is_none());
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.final_live_objects, 27);
+    assert_eq!(survey.max_live_objects, 51);
+    assert_eq!(survey.successful_spawns, 317);
+    assert_eq!(survey.spawn_attempts, 84_438);
+    assert_eq!(survey.expected_spawn_rejections, 84_121);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 153_291);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 64);
+    assert_eq!(survey.camera_ranges.len(), 60);
+    assert_eq!(survey.camera_path_changes, 75);
+    assert_eq!(survey.last_camera_path_change, 6_044);
+    assert_eq!(survey.last_camera_progress_change, 6_136);
+    assert_eq!(survey.last_player_movement, 6_161);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.fault_contexts.is_empty());
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&684));
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&3));
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.box_count_samples.last(), Some(&(4_999, 3_072)));
+    assert_eq!(
+        survey.checkpoint_samples.last(),
+        Some(&(4_482, 48_128, [13_106_432, -2_150_400, 128_000]))
+    );
+
+    let final_camera = survey
+        .final_camera
+        .expect("Native Fortress's completion route must retain its final camera");
+    let exit_zone =
+        Eid::from_name("f1_qZ").expect("fixed Native Fortress end-warp zone EID is valid");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: exit_zone,
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 17_919);
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([11_570_944, -12_697_600, 307_200])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([1_579_260, 6_596_940, 167_936])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([1_046_780, -12_842_984, 77_824])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([22_070_412, 6_596_940, 307_200])
+    );
+    let final_player = player_trace(&runtime)
+        .expect("Native Fortress completion player trace must resolve")
+        .expect("Native Fortress's WarpC must retain Crash through the transition request");
+    assert_eq!(final_player.zone, exit_zone);
+    assert_eq!(final_player.translation, [1_579_260, 6_596_940, 167_936]);
+    assert_eq!(final_player.velocity, [-40_650, 5_108_000, 0]);
+    assert_eq!(final_player.state, 32);
+    assert_eq!(final_player.state_flags, 32);
+    assert_eq!(final_player.status_a, 8);
+    assert_eq!(final_player.status_b, 0x0400_0000);
+    assert_eq!(final_player.event, 0x1600);
+    assert_eq!(player_collider_entity(&runtime), Ok(None));
+    assert_eq!(runtime.draw_count(), 6_165);
+    assert_eq!(runtime.machine().random_seed(), 0x4832_0b2c);
+
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the completion route must use ordinary directional, Cross, and Square input only"
+    );
+    assert!(
+        survey.is_clean(),
+        "Native Fortress's ordinary-pad completion route must remain clean: {}",
         survey.summary()
     );
 }

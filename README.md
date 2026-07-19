@@ -338,6 +338,14 @@ Complete `0x2d` on frame 1,785. The route performs 43 successful spawns from 6,1
 state, death camera, terminal fall, VM fault, execution error, or checked issue. Its final camera
 is `1M_uZ:0@10239`, Crash reaches `1O_uZ` in warp state 32 at
 `[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` at draw 1,785.
+Boulder Dash now has a complete fresh-boot ordinary-pad route. It activates both authored
+checkpoints, advances the live box count through `0x700`, survives the complete boulder chase and
+the final `0M` platform chain, then enters `0a_jZ`'s normal WarpC. WarpC executes states zero
+through four and requests Level Complete `0x2d` on frame 3,085. The route covers 71 camera paths,
+70 path changes, and 38 lifecycle/zone transitions with no death, restart, terminal fall,
+LoadState, VM fault, faulted object, or execution error. Its final camera is
+`0a_jZ:0@20479`, and Crash remains live in warp state 32 at
+`[2242624, 4753692, 32124160]`.
 Native Fortress now has one authoritative ordinary-pad route from the opening grease platforms
 through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher
 sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted controller crosses

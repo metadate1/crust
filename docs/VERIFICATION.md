@@ -1267,6 +1267,14 @@ is 1,322,866 bytes with SHA-256
   restart, VM fault, or execution error. This proves the post-Hog unlock handoff, not completion of
   Native Fortress. Separate fresh-boot goldens characterize both the first greasy-platform
   boundary and the ordinary-pad crossing into `a7_qZ` below.
+- Boulder Dash (`0x13`) has a complete fresh-boot route using ordinary 30 Hz pad words. It
+  activates checkpoints `0x4f00` and `0x6600`, preserves their source-ordered saved box counts,
+  advances the live count through `0x700`, survives the authored chase, and clears the final
+  `0M_jZ` platform sequence. Entity 156's subtype-one WarpC in `0a_jZ` executes states zero through
+  four and requests Level Complete `0x2d` on frame 3,085. The route spans 71 camera paths/70
+  changes and 38 lifecycle/zone transitions; the final camera is `0a_jZ:0@20479`, and Crash remains
+  live in warp state 32 at `[2242624, 4753692, 32124160]`. It has no death, restart, death-camera
+  frame, terminal fall, LoadState, VM fault, faulted object, or execution error.
 - Native Fortress (`0x1a`) has one authoritative exact ordinary-pad direct route from the opening
   greasy `WalOC` through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the
   `c0`–`c5` launcher sequence. It reaches a clean `c6_qZ` checkpoint at frame 2,548, then crosses
@@ -1355,8 +1363,8 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,091 tests: 958 default-active and 133
-  legally-local ignored tests. The complete 958-test default gate and the complete 133-test
+- The locked all-target workspace currently enumerates 1,092 tests: 958 default-active and 134
+  legally-local ignored tests. The complete 958-test default gate and the complete 134-test
   owned-data sweep pass
   with zero failures, including the Native Fortress-through-`c6` and complete Up the Creek route
   goldens. Rustfmt,

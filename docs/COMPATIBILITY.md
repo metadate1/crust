@@ -719,8 +719,9 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Eight deterministic retail-authored levels now reach their real end warps and request Level
-  Complete, including the independent Hog Wild, Whole Hog, and Rolling Stones routes. The carried
+- Nine deterministic retail-authored levels now reach their real end warps and request Level
+  Complete, including the independent Hog Wild, Whole Hog, Boulder Dash, and Rolling Stones routes.
+  The carried
   chain executes the complete legally local Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
   carries Rolling Stones from the post-boss Map handoff through its normal end. The independent

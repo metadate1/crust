@@ -654,23 +654,21 @@ gameplay path.
   queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
-  Native Fortress has cumulative exact ordinary-pad goldens through the grease segment,
-  `a7_qZ`/`a8_qZ`, `b0`'s rotating logs, `b2`'s launcher/turtle chain, and the subsequent
-  banks through `b9_qZ`. It now also defeats both authored plant hazards and clears the falling
-  `WalOC` into `c0_qZ`. The route continues through the authored `c0`–`c5` hazards, uses entity
-  114's subtype-five launcher to clear entity 115, and brakes before subtype-four entity 116 to
-  settle on the `c6_qZ` floor. The exact 2,620-frame golden performs 122 successful spawns, 31
-  lifecycle/zone transitions, and 51,633 executions. It finishes at `c6_qZ` path zero/progress
-  1,017 with Crash at `[17987328, -7540650, 100352]`, state one, velocity `[0, -136000, 0]`, and
-  last movement on frame 2,565. It records no restart, death camera, terminal fall, VM fault,
-  faulted object, execution error, or checked issue. The remaining Native Fortress route from
-  `c6_qZ` to its normal end and a browser playthrough are still unproved.
+  Native Fortress has one authoritative exact ordinary-pad route through the grease segment,
+  `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher sequence.
+  It reaches a clean `c6_qZ` checkpoint on frame 2,548, then continues through the `c7`/`c8` wall
+  sequence, checkpoint entity 148 on frame 3,421, and the `d4`/`d5` hazards. The 4,200-frame route
+  finishes stable in `d6_qZ` at `[15938712, -2202144, 167936]` after 200 successful spawns, 43
+  lifecycle/zone transitions, and 98,003 executions. It records no restart, death camera, terminal
+  fall, VM fault, faulted object, execution error, or checked issue. The remaining Native Fortress
+  route from `d6_qZ` to its normal end and a browser playthrough are still unproved.
 
-  The Great Gate's card-backed Yellow Gem route restores the retail payload and entitlement bit,
-  crosses the live-phase `c4`/`c5` logs, rides both subtype-five `GemsC` platforms, and enters
-  alternate `c8_iZ` on frame 2,747. It remains clean through frame 3,600 at camera progress 13,606,
-  with no death, restart, fall, VM fault, or execution error. The alternate route beyond `c8_iZ`
-  is not yet a completion claim.
+  The Great Gate's card-backed Yellow Gem route now completes from the owned raw BIN. It restores
+  the retail payload and entitlement bit, crosses the live-phase `c4`/`c5` logs, rides both
+  subtype-five `GemsC` platforms, activates and boards both `c8_iZ` wall logs, and traverses
+  `c9_iZ`. Its authored WarpC requests Level Complete `0x2d` on frame 3,209 with Crash in state 32
+  at `[3501824, -4780684, 132864]`. There is no death, restart, terminal fall, VM fault, faulted
+  object, execution error, or checked issue.
 
   Temple Ruins has a complete direct-boot ordinary-pad golden through 60 camera paths and 33 zone
   transitions. Its `d3_sZ` WarpC requests Level Complete `0x2d` on frame 4,473 after 190 successful

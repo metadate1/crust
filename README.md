@@ -331,23 +331,22 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
-Native Fortress now has cumulative exact ordinary-pad goldens from the first greasy-platform
-boundary through `a7_qZ`/`a8_qZ`, the `b0` rotating-log climb, the upper `b2`
-launcher-and-turtle chain, each subsequent bank through `b9_qZ`, and the two-plant/falling-log
-handoff into `c0_qZ`. The route now continues through the authored `c0`–`c5` hazards, uses entity
-114's subtype-five launcher to clear entity 115, and brakes before subtype-four entity 116 to
-settle on the `c6_qZ` floor. The exact 2,620-frame golden performs 122 successful spawns, 31
-lifecycle/zone transitions, and 51,633 executions. It finishes at `c6_qZ` path zero/progress 1,017
-with Crash at `[17987328, -7540650, 100352]`, state one, velocity `[0, -136000, 0]`, and last
-movement on frame 2,565. It records no restart, death camera, terminal fall, VM fault, faulted
-object, execution error, or checked issue. The route from `c6_qZ` to Native Fortress's normal end
-and a browser playthrough remain unproved.
+Native Fortress now has one authoritative ordinary-pad route from the opening grease platforms
+through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher
+sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted controller crosses
+the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, clears `d4`/`d5`, and
+reaches a stable `d6_qZ` handoff on frame 4,200. The complete slice performs 200 successful spawns,
+43 lifecycle/zone transitions, and 98,003 executions. Crash finishes at
+`[15938712, -2202144, 167936]` in state two with no restart, death camera, terminal fall, VM fault,
+faulted object, execution error, or checked issue. The route from `d6_qZ` to Native Fortress's
+normal end and a browser playthrough remain unproved.
 
-The Great Gate also has a card-backed Yellow Gem route that restores the exact retail payload,
-keeps the entitlement bit live, crosses the phase-sensitive `c4`/`c5` logs, rides both `GemsC`
-platforms, and enters alternate zone `c8_iZ` on frame 2,747. The 3,600-frame golden ends at
-progress 13,606 with no death, restart, terminal fall, VM fault, or execution error. The remaining
-alternate path from `c8_iZ` to its end warp is still unproved.
+The Great Gate also has a complete card-backed Yellow Gem route from the owned raw BIN. It restores
+the exact retail payload and entitlement bit, crosses the phase-sensitive `c4`/`c5` logs, rides
+both `GemsC` platforms, activates and boards both `c8_iZ` wall logs, and traverses `c9_iZ`. The
+authored WarpC requests Level Complete `0x2d` on frame 3,209 with Crash in state 32 at
+`[3501824, -4780684, 132864]`. The route has no death, restart, terminal fall, VM fault, faulted
+object, execution error, or checked issue.
 
 Temple Ruins now has a complete direct-boot ordinary-pad route. It crosses 60 camera paths and 33
 zone transitions without a restart, reaches `d3_sZ`'s authored WarpC, and requests Level Complete

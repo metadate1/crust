@@ -8115,10 +8115,11 @@ impl GreatGateRouteController {
         }
 
         let pulse = self.yellow_tail_tick % 40;
-        if pulse < 16 || (grounded && pulse == 16) {
+        let vertical_crates = matches!(zone.as_deref(), Some("c9_iZ" | "d0_iZ" | "d1_iZ"));
+        if vertical_crates || pulse < 16 || (grounded && pulse == 16) {
             held |= PAD_CROSS;
         }
-        if (6..12).contains(&pulse) {
+        if !vertical_crates && (6..12).contains(&pulse) {
             held |= PAD_SQUARE;
         }
 
@@ -29370,9 +29371,9 @@ fn raw_bin_extraction_matches_every_local_pair_and_bootable_graph() {
 
 #[test]
 #[ignore = "set C1_DISC_IMAGE to a legally local NTSC-U raw BIN"]
-fn great_gate_yellow_gem_card_route_reaches_c9() {
+fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
     const YELLOW_GEM_BIT: u32 = 1 << 29;
-    const ROUTE_FRAMES: u32 = 3_300;
+    const ROUTE_FRAME_BUDGET: u32 = 3_400;
 
     let disc_path = PathBuf::from(
         std::env::var_os("C1_DISC_IMAGE")
@@ -29461,9 +29462,9 @@ fn great_gate_yellow_gem_card_route_reaches_c9() {
         runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::GreatGateYellowGemExactCarry,
-        ROUTE_FRAMES,
+        ROUTE_FRAME_BUDGET,
     )
-    .expect("Great Gate Yellow Gem route must reach c9");
+    .expect("Great Gate Yellow Gem route must reach the authored end warp");
     let c8_path = RetailPathId {
         zone: Eid::from_name("c8_iZ").expect("fixed Great Gate route EID is valid"),
         index: 0,
@@ -29472,9 +29473,9 @@ fn great_gate_yellow_gem_card_route_reaches_c9() {
         survey.camera_ranges.get(&c8_path),
         Some(&CameraProgressRange {
             first_frame: 2_748,
-            last_frame: 2_789,
-            minimum: 427,
-            maximum: 20_775,
+            last_frame: 3_008,
+            minimum: 89,
+            maximum: 21_407,
         })
     );
     assert_eq!(
@@ -29484,8 +29485,8 @@ fn great_gate_yellow_gem_card_route_reaches_c9() {
         }),
         Some(&CameraProgressRange {
             first_frame: 2_790,
-            last_frame: 2_862,
-            minimum: 499,
+            last_frame: 2_961,
+            minimum: 160,
             maximum: 15_453,
         })
     );
@@ -29497,27 +29498,40 @@ fn great_gate_yellow_gem_card_route_reaches_c9() {
         survey.camera_ranges.get(&c9_path),
         Some(&CameraProgressRange {
             first_frame: 2_863,
-            last_frame: ROUTE_FRAMES,
-            minimum: 331,
-            maximum: 26_473,
+            last_frame: 2_900,
+            minimum: 116,
+            maximum: 6_122,
         })
     );
     let final_camera = survey
         .final_camera
-        .expect("Yellow Gem route must retain its c9 camera");
-    assert_eq!(final_camera.path, c9_path);
-    assert_eq!(final_camera.progress.raw(), 14_873);
+        .expect("Yellow Gem end warp must retain its camera location");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("c7_iZ").expect("fixed Great Gate route EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 4_832);
     assert_eq!(
         survey.final_player_translation,
-        Some([1_134_336, -7_158_651, 132_864])
+        Some([3_501_824, -4_780_684, 132_864])
     );
-    assert_eq!(survey.frames, ROUTE_FRAMES);
+    assert_eq!(survey.frames, 3_209);
+    assert_eq!(
+        survey.next_lid,
+        Some((3_209, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+    );
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3209 requested level transition to 0x2d")
+    );
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
     assert!(survey.first_terminal_fall.is_none());
-    assert!(survey.next_lid.is_none());
-    assert!(survey.terminal.is_none());
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(survey.execution_errors, 0);
     assert!(survey.is_clean(), "{}", survey.summary());
@@ -29528,13 +29542,20 @@ fn great_gate_yellow_gem_card_route_reaches_c9() {
         )),
         "card-backed Yellow Gem must activate subtype-five GemsC platforms"
     );
+    let waloc = Eid::from_name("WalOC").expect("fixed rotating-log EID is valid");
     assert!(
-        !survey.observed_program_states.contains(&(
-            Eid::from_name("WillC").expect("fixed player EID is valid"),
-            32,
-        )),
-        "the alternate route must avoid normal WarpC"
+        survey.observed_program_states.contains(&(waloc, 2)),
+        "the alternate route must flip both wall logs before climbing"
     );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    let crash = Eid::from_name("WillC").expect("fixed player EID is valid");
+    assert!(survey.observed_program_states.contains(&(warp, 1)));
+    assert!(survey.observed_program_states.contains(&(crash, 32)));
+    let player = player_trace(&runtime)
+        .expect("Yellow Gem completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [3_501_824, -4_780_684, 132_864]);
     assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(YELLOW_GEM_BIT));
     assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(0));
     assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(1));

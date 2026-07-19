@@ -7894,6 +7894,8 @@ struct RollingStonesRouteController {
     checkpoint_route_started: bool,
     checkpoint_tick: u16,
     checkpoint_lateral_corrected: bool,
+    checkpoint_phase_recovered: bool,
+    checkpoint_phase_wait: u8,
     post_bank_tick: Option<u16>,
 }
 
@@ -7966,15 +7968,24 @@ impl RollingStonesRouteController {
 
     fn carried_checkpoint_pad(tick: u16) -> u32 {
         // Session carry reaches the 0A crusher on a different global hazard
-        // phase. The complete historical platform cycle remains necessary;
-        // its final jump also clears the carried rolling-stone phase.
-        Self::historical_checkpoint_pad(tick)
+        // phase and boards the adjacent PoPlC cycle. Its exit is farther
+        // right, so retain left air control through the ordinary exit jump
+        // until Crash rejoins the historical landing line.
+        match tick {
+            470..=477 | 525..=530 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            478..=496 | 629 => 0,
+            497..=504 => PAD_UP,
+            505.. => Self::historical_checkpoint_pad(tick - 8),
+            _ => Self::historical_checkpoint_pad(tick),
+        }
     }
 
     fn restart_from_checkpoint(&mut self) {
         self.checkpoint_route_started = false;
         self.checkpoint_tick = 0;
         self.checkpoint_lateral_corrected = false;
+        self.checkpoint_phase_recovered = false;
+        self.checkpoint_phase_wait = 0;
         self.post_bank_tick = None;
     }
 
@@ -8037,6 +8048,31 @@ impl RollingStonesRouteController {
             let tick = self.checkpoint_tick;
             let zero_y =
                 Eid::from_name("0y_lZ").expect("fixed Rolling Stones correction-zone EID is valid");
+            if self.session_globals
+                && tick == 280
+                && self.checkpoint_phase_wait < 2
+                && camera.path.zone == zero_y
+                && camera.path.index == 0
+                && player.is_some_and(|player| player.translation[0] < 2_340_000)
+            {
+                // Let the converging JunOC pair advance two live samples
+                // while Crash is still on the preceding safe shelf.
+                self.checkpoint_phase_wait += 1;
+                return 0;
+            }
+            if self.session_globals
+                && (280..295).contains(&tick)
+                && camera.path.zone == zero_y
+                && camera.path.index == 0
+                && player.is_some_and(|player| player.translation[0] < 2_340_000)
+            {
+                // A carried RNG phase can place the preceding moving shelf
+                // one collision cell farther left. Rejoin the established
+                // landing line while the checkpoint clock continues to run.
+                self.checkpoint_phase_recovered = true;
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_RIGHT;
+            }
             if !self.checkpoint_lateral_corrected
                 && tick == 295
                 && camera.path.zone == zero_y
@@ -8053,13 +8089,40 @@ impl RollingStonesRouteController {
             }
 
             self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+            let zero_upper_b =
+                Eid::from_name("0B_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+            if self.session_globals
+                && self.checkpoint_phase_recovered
+                && (531..=550).contains(&tick)
+                && camera.path.zone == zero_upper_b
+                && camera.path.index == 0
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 53
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                // The adjacent 0A cycle also changes which 0B PoPlC is under
+                // the next landing. Track its live collision edge while
+                // airborne instead of steering toward the historical cycle.
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                if predicted_x > platform_bound.max.x - 24_000 {
+                    return PAD_LEFT;
+                }
+                return PAD_UP;
+            }
             let zero_f =
                 Eid::from_name("0F_lZ").expect("fixed Rolling Stones bank-zone EID is valid");
             let post_bank_phase = 697;
             let at_post_bank_anchor = tick >= post_bank_phase
                 && camera.path.zone == zero_f
                 && camera.path.index == 0
-                && matches!(camera.progress.raw(), 11_742 | 11_745)
+                && matches!(camera.progress.raw(), 11_742 | 11_745 | 11_751)
                 && player
                     .as_ref()
                     .is_some_and(|player| player.state == 2 && player.status_a & 1 != 0);
@@ -8099,6 +8162,28 @@ impl RollingStonesRouteController {
                         .then_some(PAD_CROSS)
                         .unwrap_or(0);
                     return PAD_UP | lateral | jump;
+                }
+                if self.session_globals
+                    && (364..=385).contains(&post_bank_tick)
+                    && let Some(player) = player
+                    && let Some(platform_bound) = objects.iter().find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 97
+                        )
+                        .then_some(object.bound)
+                        .flatten()
+                    })
+                {
+                    // The delayed post-bank entry meets the final PoPlC on
+                    // its rightward cycle. Follow its live leading edge until
+                    // the landing instead of falling left of the collision.
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                    if predicted_x < platform_bound.min.x + 64_000 {
+                        return PAD_UP | PAD_RIGHT;
+                    }
+                    return PAD_UP;
                 }
                 if self.session_globals && matches!(post_bank_tick, 24..=25) {
                     // Session carry enters this diagonal shelf one movement
@@ -8198,6 +8283,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         checkpoint_route_started: true,
         checkpoint_tick: 701,
         checkpoint_lateral_corrected: true,
+        checkpoint_phase_recovered: true,
+        checkpoint_phase_wait: 2,
         post_bank_tick: Some(23),
     };
 
@@ -8209,6 +8296,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert!(!controller.checkpoint_route_started);
     assert_eq!(controller.checkpoint_tick, 0);
     assert!(!controller.checkpoint_lateral_corrected);
+    assert!(!controller.checkpoint_phase_recovered);
+    assert_eq!(controller.checkpoint_phase_wait, 0);
     assert_eq!(controller.post_bank_tick, None);
 }
 
@@ -8800,6 +8889,7 @@ struct GreatGateRouteController {
     c5_break_started: bool,
     c5_crate_open_seen: bool,
     c5_token_jump_fired: bool,
+    b9_second_jump_tick: Option<u8>,
     yellow_tail_tick: u32,
     yellow_wall_sequence_tick: Option<u16>,
     yellow_wall_stage: u8,
@@ -9184,11 +9274,70 @@ impl GreatGateRouteController {
             {
                 held |= PAD_CROSS | PAD_SQUARE;
             }
-            if !self.yellow_gem_route && self.stage == 83 && (32..48).contains(&self.action_tick) {
-                held |= PAD_CROSS | PAD_SQUARE;
+            // WalOC 94 carries Crash left while he crosses b9 after the
+            // native path helper copies its transformed path vector back in
+            // retail order. Brake against that authored platform motion once
+            // Crash lands so the carried route reaches the next gap from its
+            // safe bank instead of running past the edge.
+            if !self.yellow_gem_route && self.stage == 81 {
+                let player = player.expect("checked Great Gate route player is present");
+                if player.status_a & 1 != 0 && self.action_tick < 18 {
+                    held = PAD_RIGHT;
+                }
             }
-            if !self.yellow_gem_route && self.stage == 88 && (58..72).contains(&self.action_tick) {
-                held |= PAD_CROSS | PAD_SQUARE;
+            if !self.yellow_gem_route && self.stage == 83 {
+                let player = player.expect("checked Great Gate route player is present");
+                held &= !(PAD_CROSS | PAD_SQUARE);
+                if (9..25).contains(&self.action_tick) {
+                    held |= PAD_CROSS | PAD_SQUARE;
+                } else if let Some(tick) = &mut self.b9_second_jump_tick {
+                    if *tick < 16 {
+                        held |= PAD_CROSS | PAD_SQUARE;
+                        *tick = tick.saturating_add(1);
+                    }
+                } else if self.action_tick >= 32 && player.status_a & 1 != 0 {
+                    self.b9_second_jump_tick = Some(1);
+                    held |= PAD_CROSS | PAD_SQUARE;
+                }
+            }
+            if !self.yellow_gem_route && self.stage == 88 {
+                held &= !(PAD_CROSS | PAD_SQUARE);
+                if (6..22).contains(&self.action_tick) {
+                    held &= !(PAD_LEFT | PAD_RIGHT);
+                    held |= PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+            }
+            // The corrected WalOC path writeback leaves the carried route in
+            // the air when the old fixed c4 landing window expires.
+            // Hold over the safe bank without consuming stage 100 until the
+            // authored platform/collision reports a landing; stage 101's spin
+            // must be a fresh grounded input, not an early airborne tap.
+            if !self.yellow_gem_route && self.stage == 100 {
+                let player = player.expect("checked Great Gate route player is present");
+                if player.status_a & 1 != 0
+                    && self.action_tick == 0
+                    && player.translation[0] < 8_480_000
+                {
+                    return PAD_RIGHT;
+                }
+                if player.status_a & 1 == 0 {
+                    return if player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else if player.velocity[0] > 80_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 8_320_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 8_460_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                }
+                // The approach is complete; consume the authored stage
+                // window while remaining on this moving bank. Retail's
+                // corrected platform phase no longer contributes the old
+                // accidental rightward carry, so counter-steer it explicitly.
+                held = PAD_RIGHT;
             }
             if !self.yellow_gem_route && self.stage == 90 && self.action_tick < 16 {
                 held |= PAD_SQUARE;
@@ -9437,7 +9586,12 @@ impl GreatGateRouteController {
                 if log_y >= -8_600_000 {
                     self.c4_hazard_high_seen = true;
                 }
-                if self.c4_hazard_high_seen && log_y <= -8_700_000 {
+                let release_y = if self.yellow_gem_route {
+                    -8_700_000
+                } else {
+                    -8_600_000
+                };
+                if self.c4_hazard_high_seen && log_y <= release_y {
                     self.c4_hazard_released = true;
                     held = PAD_LEFT | PAD_CROSS | PAD_SQUARE;
                 } else if player.translation[0] < 7_480_000 {
@@ -10323,12 +10477,12 @@ impl GreatGateRouteController {
             },
             85 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: if self.yellow_gem_route { 68 } else { 51 },
+                direction_frames: if self.yellow_gem_route { 68 } else { 16 },
                 ..RouteAction::default()
             },
             86 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: if self.yellow_gem_route { 29 } else { 17 },
+                direction_frames: if self.yellow_gem_route { 29 } else { 1 },
                 ..RouteAction::default()
             },
             87 => RouteAction {
@@ -11063,6 +11217,7 @@ struct UpstreamRecoveryRouteController {
     wait_tick: u8,
     leaf_reached_far_side: bool,
     leaf_completed_cycle: bool,
+    zero_x_approach_tick: Option<u8>,
 }
 
 impl UpstreamRecoveryRouteController {
@@ -11091,13 +11246,12 @@ impl UpstreamRecoveryRouteController {
     const ZERO_S_SECOND_PLATFORM_WAIT_FRAMES: u8 = 26;
     const ZERO_T_HAZARD_WAIT_FRAMES: u8 = 14;
     const ZERO_T_BANK_WAIT_FRAMES: u8 = 20;
-    const ZERO_UVW_ADVANCE_FRAMES: u8 = 227;
     const ZERO_X_LEAF_BOARD_FRAMES: u8 = 10;
     const ZERO_X_LEAF_RIDE_FRAMES: u8 = 91;
     const ZERO_Y_PLATFORM_JUMP_FRAMES: u8 = 24;
     const ZERO_Y_PLATFORM_SETTLE_FRAMES: u8 = 18;
     const ZERO_Y_LEAF_JUMP_FRAMES: u8 = 24;
-    const ZERO_Y_LEAF_EXIT_RIDE_FRAMES: u8 = 96;
+    const ZERO_Y_LEAF_EXIT_RIDE_FRAMES: u8 = 94;
     const ZERO_Z_EXIT_JUMP_FRAMES: u8 = 26;
     const ZERO_Z_EXIT_SETTLE_FRAMES: u8 = 1;
     const ZERO_A_PLATFORM_JUMP_FRAMES: u8 = 36;
@@ -11303,26 +11457,21 @@ impl UpstreamRecoveryRouteController {
                 if Self::zero_m_hazard_bank_is_ready(camera, player, platforms.zero_m) {
                     self.stage = UpstreamRecoveryStage::CrossZeroMHazard;
                     self.action_tick = 0;
-                    return self.advance_zero_m_hazard_clearance();
+                    return self.advance_zero_m_hazard_clearance(checkpoint_id, player);
                 }
                 0
             }
-            UpstreamRecoveryStage::CrossZeroMHazard => self.advance_zero_m_hazard_clearance(),
+            UpstreamRecoveryStage::CrossZeroMHazard => {
+                self.advance_zero_m_hazard_clearance(checkpoint_id, player)
+            }
             UpstreamRecoveryStage::WaitForFirstCheckpoint => {
                 if checkpoint_id != 57 << 8 {
                     self.wait_tick = 0;
                     return 0;
                 }
-                if self.wait_tick < 10 {
-                    self.wait_tick += 1;
-                    return 0;
-                }
-                if Self::first_checkpoint_takeoff_is_ready(camera, player) {
-                    self.stage = UpstreamRecoveryStage::AdvancePastFirstCheckpoint;
-                    self.action_tick = 0;
-                    return self.advance_first_checkpoint_action();
-                }
-                0
+                self.stage = UpstreamRecoveryStage::AdvancePastFirstCheckpoint;
+                self.action_tick = 0;
+                self.advance_first_checkpoint_action()
             }
             UpstreamRecoveryStage::AdvancePastFirstCheckpoint => {
                 self.advance_first_checkpoint_action()
@@ -11578,9 +11727,22 @@ impl UpstreamRecoveryRouteController {
                 }
                 self.stage = UpstreamRecoveryStage::AdvanceAcrossZeroUvw;
                 self.action_tick = 0;
-                self.advance_zero_uvw_action()
+                self.advance_zero_uvw_action(camera, player)
             }
-            UpstreamRecoveryStage::AdvanceAcrossZeroUvw => self.advance_zero_uvw_action(),
+            UpstreamRecoveryStage::AdvanceAcrossZeroUvw => {
+                if Self::zero_x_leaf_board_is_ready(camera, player, platforms.zero_x_leaf) {
+                    self.stage = UpstreamRecoveryStage::BoardZeroXLeaf;
+                    self.action_tick = 0;
+                    return self.advance_zero_x_leaf_board_action();
+                }
+                if Self::zero_x_bank_is_ready(camera, player) {
+                    self.stage = UpstreamRecoveryStage::WaitForZeroXBank;
+                    self.action_tick = 0;
+                    self.wait_tick = 0;
+                    return 0;
+                }
+                self.advance_zero_uvw_action(camera, player)
+            }
             UpstreamRecoveryStage::WaitForZeroXBank => {
                 if Self::zero_x_leaf_board_is_ready(camera, player, platforms.zero_x_leaf) {
                     self.stage = UpstreamRecoveryStage::BoardZeroXLeaf;
@@ -11756,12 +11918,25 @@ impl UpstreamRecoveryRouteController {
         held
     }
 
-    fn advance_zero_m_hazard_clearance(&mut self) -> u32 {
-        let tick = self.action_tick;
-        let mut held = 0;
-        if tick < 64 {
-            held |= PAD_UP;
+    fn advance_zero_m_hazard_clearance(
+        &mut self,
+        checkpoint_id: i32,
+        player: Option<PlayerTrace>,
+    ) -> u32 {
+        if checkpoint_id == 57 << 8 {
+            self.stage = UpstreamRecoveryStage::WaitForFirstCheckpoint;
+            self.action_tick = 0;
+            self.wait_tick = 0;
+            return 0;
         }
+        if player.is_some_and(|player| player.translation[2] <= 15_700_000) {
+            self.stage = UpstreamRecoveryStage::WaitForFirstCheckpoint;
+            self.action_tick = 0;
+            self.wait_tick = 0;
+            return 0;
+        }
+        let tick = self.action_tick;
+        let mut held = PAD_UP;
         if tick < 20 {
             held |= PAD_RIGHT;
         }
@@ -11775,21 +11950,16 @@ impl UpstreamRecoveryRouteController {
             held |= PAD_CROSS;
         }
         self.action_tick = self.action_tick.saturating_add(1);
-        if self.action_tick >= 64 {
-            self.stage = UpstreamRecoveryStage::WaitForFirstCheckpoint;
-            self.action_tick = 0;
-            self.wait_tick = 0;
-        }
         held
     }
 
     fn advance_first_checkpoint_action(&mut self) -> u32 {
         let tick = self.action_tick;
         let mut held = 0;
-        if tick < 12 {
+        if tick < 16 {
             held |= PAD_UP;
         }
-        if tick < 6 {
+        if tick < 7 {
             held |= PAD_LEFT;
         }
         if tick < 16 {
@@ -12004,21 +12174,32 @@ impl UpstreamRecoveryRouteController {
         held
     }
 
-    fn advance_zero_uvw_action(&mut self) -> u32 {
+    fn advance_zero_uvw_action(
+        &mut self,
+        camera: RetailCameraLocation,
+        _player: Option<PlayerTrace>,
+    ) -> u32 {
         let tick = self.action_tick;
         let mut held = PAD_UP;
-        if (tick % 25) >= 4 && (tick % 25) < 20 {
-            held |= PAD_CROSS;
-        }
-        if tick.is_multiple_of(18) {
-            held |= PAD_SQUARE;
+        let zero_x = Eid::from_name("0x_fZ").expect("fixed Upstream bank-zone EID is valid");
+        if camera.path.zone == zero_x && camera.path.index == 0 {
+            let approach_tick = self.zero_x_approach_tick.get_or_insert(0);
+            if (8..24).contains(approach_tick) {
+                held |= PAD_CROSS;
+            }
+            if *approach_tick == 2 {
+                held |= PAD_SQUARE;
+            }
+            *approach_tick = approach_tick.saturating_add(1);
+        } else {
+            if (tick % 25) >= 4 && (tick % 25) < 20 {
+                held |= PAD_CROSS;
+            }
+            if tick.is_multiple_of(18) {
+                held |= PAD_SQUARE;
+            }
         }
         self.action_tick = self.action_tick.saturating_add(1);
-        if self.action_tick >= Self::ZERO_UVW_ADVANCE_FRAMES {
-            self.stage = UpstreamRecoveryStage::WaitForZeroXBank;
-            self.action_tick = 0;
-            self.wait_tick = 0;
-        }
         held
     }
 
@@ -12273,23 +12454,6 @@ impl UpstreamRecoveryRouteController {
                     && hazard.translation[0].abs_diff(2_139_136) <= 4_096
                     && hazard.translation[1].abs_diff(1_793_792) <= 4_096
                     && hazard.translation[2].abs_diff(16_699_392) <= 4_096
-            })
-    }
-
-    fn first_checkpoint_takeoff_is_ready(
-        camera: RetailCameraLocation,
-        player: Option<PlayerTrace>,
-    ) -> bool {
-        let zone = Eid::from_name("0n_fZ").expect("fixed Upstream checkpoint-zone EID is valid");
-        camera.path.zone == zone
-            && camera.path.index == 0
-            && (16_000..=16_750).contains(&camera.progress.raw())
-            && player.is_some_and(|player| {
-                player.state == 11
-                    && (2_200_000..=2_280_000).contains(&player.translation[0])
-                    && (2_550_000..=2_625_000).contains(&player.translation[1])
-                    && (15_550_000..=15_650_000).contains(&player.translation[2])
-                    && (-600_000..=-500_000).contains(&player.velocity[1])
             })
     }
 
@@ -12611,6 +12775,19 @@ impl UpstreamRecoveryRouteController {
             })
     }
 
+    fn zero_x_bank_is_ready(camera: RetailCameraLocation, player: Option<PlayerTrace>) -> bool {
+        let zone = Eid::from_name("0x_fZ").expect("fixed Upstream bank-zone EID is valid");
+        camera.path.zone == zone
+            && camera.path.index == 0
+            && (14_000..=15_000).contains(&camera.progress.raw())
+            && player.is_some_and(|player| {
+                player.state == 10
+                    && (2_200_000..=2_300_000).contains(&player.translation[0])
+                    && (2_900_000..=3_100_000).contains(&player.translation[1])
+                    && (3_400_000..=3_650_000).contains(&player.translation[2])
+            })
+    }
+
     fn zero_x_leaf_apex_is_ready(
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
@@ -12661,9 +12838,12 @@ impl UpstreamRecoveryRouteController {
             && player.translation[2].abs_diff(platform.translation[2]) <= 150_000
             && target.is_some_and(|target| {
                 target.state == 9
-                    && target.translation[0].abs_diff(2_367_504) <= 4_096
+                    // The source-correct path writeback lands Crash 2,864 units
+                    // farther back on the preceding platform. Board two RivOC
+                    // ticks later so the leaf enters the same collision window.
+                    && target.translation[0].abs_diff(2_371_728) <= 4_096
                     && target.translation[1].abs_diff(2_961_408) <= 4_096
-                    && target.translation[2].abs_diff(1_936_608) <= 4_096
+                    && target.translation[2].abs_diff(1_952_664) <= 4_096
             })
     }
 
@@ -15420,6 +15600,7 @@ impl SurveyInputController {
                 c5_break_started: false,
                 c5_crate_open_seen: false,
                 c5_token_jump_fired: false,
+                b9_second_jump_tick: None,
                 yellow_tail_tick: 0,
                 yellow_wall_sequence_tick: None,
                 yellow_wall_stage: 0,
@@ -15436,6 +15617,7 @@ impl SurveyInputController {
                 wait_tick: 0,
                 leaf_reached_far_side: false,
                 leaf_completed_cycle: false,
+                zero_x_approach_tick: None,
             },
             rolling_stones: RollingStonesRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
@@ -15445,6 +15627,8 @@ impl SurveyInputController {
                 checkpoint_route_started: false,
                 checkpoint_tick: 0,
                 checkpoint_lateral_corrected: false,
+                checkpoint_phase_recovered: false,
+                checkpoint_phase_wait: 0,
                 post_bank_tick: None,
             },
             hog_wild: HogWildCompletionRouteController {
@@ -28029,25 +28213,25 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     .expect("The Great Gate must execute through its Tawna bonus transition");
     assert_eq!(
         great_gate_survey.frames,
-        2_863,
+        2_835,
         "{}",
         great_gate_survey.summary()
     );
-    assert_eq!(great_gate_survey.successful_spawns, 95);
-    assert_eq!(great_gate_survey.executions, 51_402);
-    assert_eq!(great_gate_survey.zone_transitions, 38);
+    assert_eq!(great_gate_survey.successful_spawns, 92);
+    assert_eq!(great_gate_survey.executions, 51_027);
+    assert_eq!(great_gate_survey.zone_transitions, 36);
     assert_eq!(great_gate_survey.camera_ranges.len(), 28);
-    assert_eq!(great_gate_survey.camera_path_changes, 41);
-    assert_eq!(great_gate_survey.last_camera_path_change, 2_707);
+    assert_eq!(great_gate_survey.camera_path_changes, 39);
+    assert_eq!(great_gate_survey.last_camera_path_change, 2_706);
     assert_eq!(great_gate_survey.restarts, 0);
     assert!(great_gate_survey.restart_frames.is_empty());
     assert_eq!(great_gate_survey.death_camera_frames, 0);
     assert!(great_gate_survey.first_terminal_fall.is_none());
     assert_eq!(
         great_gate_survey.terminal.as_deref(),
-        Some("frame 2863 requested level transition to 0x33")
+        Some("frame 2835 requested level transition to 0x33")
     );
-    assert_eq!(great_gate_survey.next_lid, Some((2_863, 0x33)));
+    assert_eq!(great_gate_survey.next_lid, Some((2_835, 0x33)));
     assert_eq!(great_gate_survey.faulted_objects, 0);
     assert_eq!(great_gate_survey.execution_errors, 0);
     assert_eq!(
@@ -28067,7 +28251,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             (1_632, 0xb00),
             (1_633, 0xc00),
             (1_646, 0xd00),
-            (2_781, 0xe00),
+            (1_942, 0xe00),
+            (2_753, 0xf00),
         ]
     );
     assert_eq!(
@@ -28077,13 +28262,13 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             (530, -1, [15_871_744, -10_670_848, 127_744]),
             (1_170, 76 << 8, [20_991_488, -8_397_312, 127_744]),
             (1_670, 76 << 8, [15_154_944, -8_185_290, 127_744]),
-            (2_805, 76 << 8, [5_426_944, -8_346_368, 127_744]),
-            (2_807, 113 << 8, [5_426_944, -8_346_368, 127_744]),
+            (2_777, 76 << 8, [5_426_944, -8_346_368, 127_744]),
+            (2_779, 113 << 8, [5_426_944, -8_346_368, 127_744]),
         ]
     );
     assert_eq!(
         great_gate_survey.saved_box_count_samples,
-        [(1_170, 0x900), (2_807, 0xe00)]
+        [(1_170, 0x900), (2_779, 0xf00)]
     );
     assert!(
         great_gate_survey
@@ -28099,7 +28284,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("send-event").copied(),
-        Some(203)
+        Some(197)
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("transition").copied(),
@@ -28124,12 +28309,12 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             index: 0,
         }
     );
-    assert_eq!(great_gate_camera.progress.raw(), 17_318);
+    assert_eq!(great_gate_camera.progress.raw(), 17_442);
     assert_eq!(
         great_gate_survey.final_player_translation,
-        Some([5_377_792, -8_168_628, 130_816])
+        Some([5_372_832, -8_168_639, 124_672])
     );
-    assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xe00));
+    assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xf00));
     assert_eq!(
         great_gate_runtime.global_word(CHECKPOINT_ID_GLOBAL),
         Ok(113 << 8)
@@ -28151,15 +28336,15 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .contains(&(waloc, 2)),
         "the route must flip the rotating log into its horizontal state before climbing"
     );
-    for token in [(529, 27, 7), (1_646, 89, 7), (2_805, 113, 10)] {
+    for token in [(529, 27, 7), (1_646, 89, 7), (2_777, 113, 10)] {
         assert!(
             great_gate_survey.spawn_flag_samples.contains(&token),
             "all three authored Tawna crates must break on the carried route: {token:?}"
         );
     }
     assert_eq!(great_gate_runtime.global_word(60), Ok(4));
-    assert_eq!(great_gate_runtime.machine().random_seed(), 0xa604_373a);
-    assert_eq!(great_gate_runtime.draw_count(), 8_896);
+    assert_eq!(great_gate_runtime.machine().random_seed(), 0x4605_ec78);
+    assert_eq!(great_gate_runtime.draw_count(), 8_868);
     assert_eq!(
         player_trace(&great_gate_runtime)
             .unwrap()
@@ -28173,7 +28358,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         .cloned()
         .expect("the third Tawna pickup must save the complete Great Gate return state");
     assert_eq!(expected_parent_snapshot.level, great_gate);
-    assert_eq!(expected_parent_snapshot.box_count, 0xe00);
+    assert_eq!(expected_parent_snapshot.box_count, 0xf00);
     assert_eq!(
         expected_parent_snapshot.player_translation,
         [5_426_944, -8_346_368, 127_744]
@@ -28182,7 +28367,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     // frame's CamFollow -> LevelUpdate. Native LevelSaveState reads the live
     // cur_progress word at that point, so the bonus-return snapshot retains
     // the current c5 camera progress rather than its old path-entry fraction.
-    assert_eq!(expected_parent_snapshot.location.progress.raw(), 17_318);
+    assert_eq!(expected_parent_snapshot.location.progress.raw(), 17_442);
 
     let bonus = LevelId::new_const(0x33);
     let bonus_transition = {
@@ -28459,8 +28644,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .iter()
             .all(|(_, report)| report.event_failures.is_empty())
     );
-    assert_eq!(restart.restored_box_count, 0xd00);
-    assert_eq!(returned_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xd00));
+    assert_eq!(restart.restored_box_count, 0xe00);
+    assert_eq!(returned_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xe00));
     assert_eq!(
         returned_runtime
             .level_state_context()
@@ -28511,27 +28696,27 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         .expect("The Great Gate must execute through its end WarpC transition");
         assert_eq!(
             great_gate_survey.frames,
-            2_941,
+            2_940,
             "{}",
             great_gate_survey.summary()
         );
-        assert_eq!(great_gate_survey.successful_spawns, 107);
-        assert_eq!(great_gate_survey.executions, 53_382);
-        assert_eq!(great_gate_survey.zone_transitions, 40);
+        assert_eq!(great_gate_survey.successful_spawns, 104);
+        assert_eq!(great_gate_survey.executions, 53_626);
+        assert_eq!(great_gate_survey.zone_transitions, 38);
         assert_eq!(great_gate_survey.camera_ranges.len(), 30);
-        assert_eq!(great_gate_survey.camera_path_changes, 43);
-        assert_eq!(great_gate_survey.last_camera_path_change, 2_845);
+        assert_eq!(great_gate_survey.camera_path_changes, 41);
+        assert_eq!(great_gate_survey.last_camera_path_change, 2_844);
         assert_eq!(great_gate_survey.restarts, 0);
         assert!(great_gate_survey.restart_frames.is_empty());
         assert_eq!(great_gate_survey.death_camera_frames, 0);
         assert!(great_gate_survey.first_terminal_fall.is_none());
         assert_eq!(
             great_gate_survey.terminal.as_deref(),
-            Some("frame 2941 requested level transition to 0x2d")
+            Some("frame 2940 requested level transition to 0x2d")
         );
         assert_eq!(
             great_gate_survey.next_lid,
-            Some((2_941, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+            Some((2_940, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
         );
         assert_eq!(great_gate_survey.faulted_objects, 0);
         assert_eq!(great_gate_survey.execution_errors, 0);
@@ -28552,6 +28737,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 (1_632, 0xb00),
                 (1_633, 0xc00),
                 (1_646, 0xd00),
+                (1_942, 0xe00),
             ]
         );
         assert_eq!(
@@ -28578,7 +28764,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             great_gate_survey.effect_counts.get("send-event").copied(),
-            Some(212)
+            Some(205)
         );
         assert_eq!(
             great_gate_survey.effect_counts.get("transition").copied(),
@@ -28603,12 +28789,12 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 index: 0,
             }
         );
-        assert_eq!(great_gate_camera.progress.raw(), 3_654);
+        assert_eq!(great_gate_camera.progress.raw(), 3_624);
         assert_eq!(
             great_gate_survey.final_player_translation,
-            Some([3_548_928, -4_780_684, 130_816])
+            Some([3_550_112, -4_780_678, 124_672])
         );
-        assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xd00));
+        assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xe00));
         assert_eq!(
             great_gate_runtime.global_word(CHECKPOINT_ID_GLOBAL),
             Ok(76 << 8)
@@ -28665,8 +28851,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 0,
             ]
         );
-        assert_eq!(great_gate_runtime.machine().random_seed(), 0x2047_e8ce);
-        assert_eq!(great_gate_runtime.draw_count(), 8_974);
+        assert_eq!(great_gate_runtime.machine().random_seed(), 0x339f_8218);
+        assert_eq!(great_gate_runtime.draw_count(), 8_973);
 
         let great_gate_completion_carry: RetailSessionCarry = {
             let mut host =
@@ -28708,8 +28894,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 0,
             ]
         );
-        assert_eq!(great_gate_completion_carry.random_seed, 0x2047_e8ce);
-        assert_eq!(great_gate_completion_carry.draw_count, 8_974);
+        assert_eq!(great_gate_completion_carry.random_seed, 0x339f_8218);
+        assert_eq!(great_gate_completion_carry.draw_count, 8_973);
         let great_gate_completion_runtime = RetailRuntime::new_from_session(
             GLOBAL_WORDS,
             LevelId::LEVEL_COMPLETE,
@@ -28729,7 +28915,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 COMPLETION_FRAMES,
             )
             .expect("The Great Gate's Level Complete runtime must execute");
-        assert_eq!(great_gate_completion_survey.frames, 273);
+        assert_eq!(great_gate_completion_survey.frames, 225);
         assert_eq!(great_gate_completion_survey.zone_transitions, 0);
         assert_eq!(great_gate_completion_survey.restarts, 0);
         assert!(great_gate_completion_survey.restart_frames.is_empty());
@@ -28738,7 +28924,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert!(great_gate_completion_survey.first_terminal_fall.is_none());
         assert_eq!(
             great_gate_completion_survey.next_lid,
-            Some((273, i32::try_from(LevelId::TITLE.get()).unwrap()))
+            Some((225, i32::try_from(LevelId::TITLE.get()).unwrap()))
         );
         assert_eq!(great_gate_completion_survey.faulted_objects, 0);
         assert_eq!(great_gate_completion_survey.execution_errors, 0);
@@ -28777,9 +28963,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             great_gate_completion_runtime.machine().random_seed(),
-            0xc3cd_1619
+            0x7186_4345
         );
-        assert_eq!(great_gate_completion_runtime.draw_count(), 9_247);
+        assert_eq!(great_gate_completion_runtime.draw_count(), 9_198);
         let post_great_gate_title_carry: RetailSessionCarry = {
             let mut host =
                 NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -28801,8 +28987,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(post_great_gate_title_carry.random_seed, 0xc3cd_1619);
-        assert_eq!(post_great_gate_title_carry.draw_count, 9_247);
+        assert_eq!(post_great_gate_title_carry.random_seed, 0x7186_4345);
+        assert_eq!(post_great_gate_title_carry.draw_count, 9_198);
         let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
             &title_nsd,
             &title_nsf,
@@ -28854,9 +29040,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             post_great_gate_map.runtime.machine().random_seed(),
-            0x005e_e542
+            0x592a_ffc0
         );
-        assert_eq!(post_great_gate_map.runtime.draw_count(), 9_500);
+        assert_eq!(post_great_gate_map.runtime.draw_count(), 9_451);
         let boulders_carry: RetailSessionCarry = {
             let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
             let report = post_great_gate_map
@@ -28896,8 +29082,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 1,
             ]
         );
-        assert_eq!(boulders_carry.random_seed, 0x005e_e542);
-        assert_eq!(boulders_carry.draw_count, 9_500);
+        assert_eq!(boulders_carry.random_seed, 0x592a_ffc0);
+        assert_eq!(boulders_carry.draw_count, 9_451);
         let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
             parse_local_pair(&root, boulders).expect("Boulders pair must parse");
         let boulders_pbak_entry = boulders_nsf
@@ -28933,7 +29119,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
         assert_eq!(
             boulders_survey.executions,
-            18_288,
+            18_257,
             "{}",
             boulders_survey.summary()
         );
@@ -28993,8 +29179,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             boulders_survey.final_player_translation,
             Some([2_313_984, 8_158_316, -14_955_008])
         );
-        assert_eq!(boulders_runtime.machine().random_seed(), 0xf891_7cd4);
-        assert_eq!(boulders_runtime.draw_count(), 10_270);
+        assert_eq!(boulders_runtime.machine().random_seed(), 0x7ca0_4317);
+        assert_eq!(boulders_runtime.draw_count(), 10_221);
 
         let completion_route_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
@@ -29027,7 +29213,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(completion_route_survey.spawn_attempts, 28_891);
         assert_eq!(completion_route_survey.expected_spawn_rejections, 28_797);
         assert_eq!(completion_route_survey.unexpected_spawn_errors, 0);
-        assert_eq!(completion_route_survey.executions, 56_973);
+        assert_eq!(completion_route_survey.executions, 56_500);
         assert_eq!(completion_route_survey.zone_transitions, 24);
         assert_eq!(completion_route_survey.camera_ranges.len(), 48);
         assert_eq!(completion_route_survey.camera_path_changes, 47);
@@ -29098,13 +29284,13 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(completion_route_camera.progress.raw(), 12_799);
         assert_eq!(
             completion_route_survey.final_player_translation,
-            Some([2_395_904, 7_835_420, 10_526_208])
+            Some([2_395_904, 7_835_426, 10_526_208])
         );
         assert_eq!(
             completion_route_runtime.machine().random_seed(),
-            0xf1b8_0d88
+            0x071e_421c
         );
-        assert_eq!(completion_route_runtime.draw_count(), 11_735);
+        assert_eq!(completion_route_runtime.draw_count(), 11_686);
         assert!(
             completion_route_survey.is_clean(),
             "Boulders completion route must remain clean: {}",
@@ -29129,8 +29315,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(boulders_completion_carry.random_seed, 0xf1b8_0d88);
-        assert_eq!(boulders_completion_carry.draw_count, 11_735);
+        assert_eq!(boulders_completion_carry.random_seed, 0x071e_421c);
+        assert_eq!(boulders_completion_carry.draw_count, 11_686);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -29234,9 +29420,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             boulders_completion_runtime.machine().random_seed(),
-            0xd8b9_16d0
+            0x07e3_b6e4
         );
-        assert_eq!(boulders_completion_runtime.draw_count(), 11_888);
+        assert_eq!(boulders_completion_runtime.draw_count(), 11_839);
 
         let post_boulders_title_carry: RetailSessionCarry = {
             let mut host =
@@ -29259,8 +29445,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(post_boulders_title_carry.random_seed, 0xd8b9_16d0);
-        assert_eq!(post_boulders_title_carry.draw_count, 11_888);
+        assert_eq!(post_boulders_title_carry.random_seed, 0x07e3_b6e4);
+        assert_eq!(post_boulders_title_carry.draw_count, 11_839);
 
         let mut post_boulders_map = AuthoredTitleMapHarness::from_session(
             &title_nsd,
@@ -29313,9 +29499,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             post_boulders_map.runtime.machine().random_seed(),
-            0x92ac_26e7
+            0xd3cf_0f5a
         );
-        assert_eq!(post_boulders_map.runtime.draw_count(), 12_141);
+        assert_eq!(post_boulders_map.runtime.draw_count(), 12_092);
 
         let upstream_carry: RetailSessionCarry = {
             let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -29335,8 +29521,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(upstream_carry.random_seed, 0x92ac_26e7);
-        assert_eq!(upstream_carry.draw_count, 12_141);
+        assert_eq!(upstream_carry.random_seed, 0xd3cf_0f5a);
+        assert_eq!(upstream_carry.draw_count, 12_092);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -29389,29 +29575,34 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             4_000,
         )
         .expect("Upstream must recover from the carried-spawn PBAK phase mismatch");
-        assert_eq!(upstream_survey.frames, 3_791);
+        assert_eq!(
+            upstream_survey.frames,
+            3_810,
+            "{}",
+            upstream_survey.summary()
+        );
         assert_eq!(
             upstream_survey.terminal.as_deref(),
-            Some("frame 3791 requested level transition to 0x2d")
+            Some("frame 3810 requested level transition to 0x2d")
         );
         assert_eq!(upstream_survey.final_live_objects, 29);
         assert_eq!(upstream_survey.max_live_objects, 71);
         assert_eq!(upstream_survey.successful_spawns, 152);
-        assert_eq!(upstream_survey.spawn_attempts, 52_426);
-        assert_eq!(upstream_survey.expected_spawn_rejections, 52_274);
+        assert_eq!(upstream_survey.spawn_attempts, 52_659);
+        assert_eq!(upstream_survey.expected_spawn_rejections, 52_507);
         assert_eq!(upstream_survey.unexpected_spawn_errors, 0);
         assert_eq!(
             upstream_survey.executions,
-            110_918,
+            111_454,
             "{}",
             upstream_survey.summary()
         );
         assert_eq!(upstream_survey.zone_transitions, 24);
         assert_eq!(upstream_survey.camera_ranges.len(), 35);
         assert_eq!(upstream_survey.camera_path_changes, 40);
-        assert_eq!(upstream_survey.last_camera_path_change, 3_686);
-        assert_eq!(upstream_survey.last_camera_progress_change, 3_702);
-        assert_eq!(upstream_survey.last_player_movement, 3_787);
+        assert_eq!(upstream_survey.last_camera_path_change, 3_705);
+        assert_eq!(upstream_survey.last_camera_progress_change, 3_721);
+        assert_eq!(upstream_survey.last_player_movement, 3_806);
         assert_eq!(upstream_survey.restarts, 3);
         assert_eq!(upstream_survey.restart_frames, [154, 288, 816]);
         assert_eq!(
@@ -29428,22 +29619,22 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             upstream_survey.box_count_samples,
             [
                 (1, 0),
-                (1_935, 0x100),
-                (2_316, 0x200),
-                (3_088, 0x300),
-                (3_094, 0x400),
+                (1_945, 0x100),
+                (2_326, 0x200),
+                (3_098, 0x300),
+                (3_104, 0x400),
             ]
         );
         assert_eq!(
             upstream_survey.checkpoint_samples,
             [
                 (1, -1, [2_303_232, 6_860_544, -5_172_480]),
-                (1_935, 57 << 8, [2_252_800, 2_350_080, 15_564_288]),
+                (1_945, 57 << 8, [2_252_800, 2_350_080, 15_564_288]),
             ]
         );
-        assert_eq!(upstream_survey.saved_box_count_samples, [(1_935, 0)]);
+        assert_eq!(upstream_survey.saved_box_count_samples, [(1_945, 0)]);
         assert!(
-            upstream_survey.spawn_flag_samples.contains(&(1_935, 57, 9)),
+            upstream_survey.spawn_flag_samples.contains(&(1_945, 57, 9)),
             "BoxsC subtype-four entity 57 must publish its native seen flags: {}",
             upstream_survey.summary()
         );
@@ -29452,7 +29643,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert!(upstream_survey.first_terminal_fall.is_none());
         assert_eq!(
             upstream_survey.next_lid,
-            Some((3_791, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
+            Some((3_810, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
         );
         assert_eq!(upstream_survey.faulted_objects, 0);
         assert_eq!(upstream_survey.execution_errors, 0);
@@ -29478,18 +29669,18 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 index: 1,
             }
         );
-        assert_eq!(upstream_final_camera.progress.raw(), 8_352);
+        assert_eq!(upstream_final_camera.progress.raw(), 8_364);
         assert_eq!(
             upstream_survey.final_player_translation,
-            Some([2_228_500, 6_590_796, -472_100])
+            Some([2_228_980, 6_590_796, -472_772])
         );
         assert_eq!(
             upstream_survey.player_minimum,
-            Some([1_923_856, 1_535_458, -472_100])
+            Some([1_918_976, 1_535_458, -472_772])
         );
         assert_eq!(
             upstream_survey.player_maximum,
-            Some([2_413_576, 6_590_796, 25_025_792])
+            Some([2_414_200, 6_590_796, 25_025_792])
         );
         assert_eq!(
             upstream_runtime.global_word(CHECKPOINT_ID_GLOBAL),
@@ -29520,8 +29711,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 state: 13,
             })
         );
-        assert_eq!(upstream_runtime.machine().random_seed(), 0xb0b3_7435);
-        assert_eq!(upstream_runtime.draw_count(), 2_975);
+        assert_eq!(upstream_runtime.machine().random_seed(), 0x537c_63d1);
+        assert_eq!(upstream_runtime.draw_count(), 2_994);
         assert!(
             upstream_survey.is_clean(),
             "Upstream carried-spawn recovery must remain clean: {}",
@@ -29548,8 +29739,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(upstream_completion_carry.random_seed, 0xb0b3_7435);
-        assert_eq!(upstream_completion_carry.draw_count, 2_975);
+        assert_eq!(upstream_completion_carry.random_seed, 0x537c_63d1);
+        assert_eq!(upstream_completion_carry.draw_count, 2_994);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -29593,17 +29784,17 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .expect("Upstream's Level Complete runtime must execute");
         assert_eq!(
             upstream_completion_survey.frames,
-            273,
+            185,
             "{}",
             upstream_completion_survey.summary()
         );
         assert_eq!(upstream_completion_survey.final_live_objects, 5);
         assert_eq!(upstream_completion_survey.max_live_objects, 8);
         assert_eq!(upstream_completion_survey.successful_spawns, 2);
-        assert_eq!(upstream_completion_survey.spawn_attempts, 546);
-        assert_eq!(upstream_completion_survey.expected_spawn_rejections, 544);
+        assert_eq!(upstream_completion_survey.spawn_attempts, 370);
+        assert_eq!(upstream_completion_survey.expected_spawn_rejections, 368);
         assert_eq!(upstream_completion_survey.unexpected_spawn_errors, 0);
-        assert_eq!(upstream_completion_survey.executions, 1_437);
+        assert_eq!(upstream_completion_survey.executions, 1_042);
         assert_eq!(upstream_completion_survey.zone_transitions, 0);
         assert_eq!(upstream_completion_survey.restarts, 0);
         assert!(upstream_completion_survey.restart_frames.is_empty());
@@ -29614,11 +29805,11 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(upstream_completion_survey.execution_errors, 0);
         assert_eq!(
             upstream_completion_survey.next_lid,
-            Some((273, i32::try_from(LevelId::TITLE.get()).unwrap()))
+            Some((185, i32::try_from(LevelId::TITLE.get()).unwrap()))
         );
         assert_eq!(
             upstream_completion_survey.terminal.as_deref(),
-            Some("frame 273 requested level transition to 0x19")
+            Some("frame 185 requested level transition to 0x19")
         );
         assert_eq!(
             upstream_completion_survey
@@ -29656,9 +29847,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             upstream_completion_runtime.machine().random_seed(),
-            0x12a3_fcf7
+            0x133a_f4ed
         );
-        assert_eq!(upstream_completion_runtime.draw_count(), 3_248);
+        assert_eq!(upstream_completion_runtime.draw_count(), 3_179);
 
         let post_upstream_title_carry: RetailSessionCarry = {
             let mut host =
@@ -29678,8 +29869,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(post_upstream_title_carry.random_seed, 0x12a3_fcf7);
-        assert_eq!(post_upstream_title_carry.draw_count, 3_248);
+        assert_eq!(post_upstream_title_carry.random_seed, 0x133a_f4ed);
+        assert_eq!(post_upstream_title_carry.draw_count, 3_179);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -29754,9 +29945,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(post_upstream_map.runtime.faulted_object_count(), 0);
         assert_eq!(
             post_upstream_map.runtime.machine().random_seed(),
-            0x723a_55d0
+            0xb6aa_d4a5
         );
-        assert_eq!(post_upstream_map.runtime.draw_count(), 3_501);
+        assert_eq!(post_upstream_map.runtime.draw_count(), 3_432);
 
         let papu_papu_carry: RetailSessionCarry = {
             let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -29776,8 +29967,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(papu_papu_carry.random_seed, 0x723a_55d0);
-        assert_eq!(papu_papu_carry.draw_count, 3_501);
+        assert_eq!(papu_papu_carry.random_seed, 0xb6aa_d4a5);
+        assert_eq!(papu_papu_carry.draw_count, 3_432);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -29830,7 +30021,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(papu_papu_completion_survey.spawn_attempts, 5_684);
             assert_eq!(papu_papu_completion_survey.expected_spawn_rejections, 5_678);
             assert_eq!(papu_papu_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(papu_papu_completion_survey.executions, 16_387);
+            assert_eq!(papu_papu_completion_survey.executions, 16_379);
             assert_eq!(papu_papu_completion_survey.zone_transitions, 0);
             assert_eq!(papu_papu_completion_survey.camera_ranges.len(), 3);
             assert_eq!(papu_papu_completion_survey.camera_path_changes, 2);
@@ -29866,7 +30057,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     .effect_counts
                     .get("send-event")
                     .copied(),
-                Some(41)
+                Some(39)
             );
             assert!(
                 !papu_papu_completion_survey
@@ -30016,9 +30207,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 papu_papu_completion_runtime.machine().random_seed(),
-                0x843d_2658
+                0x2f55_863f
             );
-            assert_eq!(papu_papu_completion_runtime.draw_count(), 4_313);
+            assert_eq!(papu_papu_completion_runtime.draw_count(), 4_244);
             assert!(
                 papu_papu_completion_survey.is_clean(),
                 "Papu Papu's carried completion route must remain clean: {}",
@@ -30046,8 +30237,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert!(report.effects.is_empty());
                 report.carry
             };
-            assert_eq!(carry.random_seed, 0x843d_2658);
-            assert_eq!(carry.draw_count, 4_313);
+            assert_eq!(carry.random_seed, 0x2f55_863f);
+            assert_eq!(carry.draw_count, 4_244);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -30159,8 +30350,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                         1,
                     ]
                 );
-                assert_eq!(post_papu_map.runtime.machine().random_seed(), 0x843d_2658);
-                assert_eq!(post_papu_map.runtime.draw_count(), 4_379);
+                assert_eq!(post_papu_map.runtime.machine().random_seed(), 0x2f55_863f);
+                assert_eq!(post_papu_map.runtime.draw_count(), 4_310);
 
                 let mut host = NsfProgramHost::new(title_nsd, title_nsf, title_nsf_bytes);
                 let report = post_papu_map
@@ -30177,8 +30368,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, rolling_stones);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x843d_2658);
-                assert_eq!(report.carry.draw_count, 4_379);
+                assert_eq!(report.carry.random_seed, 0x2f55_863f);
+                assert_eq!(report.carry.draw_count, 4_310);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -30249,32 +30440,32 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             let rolling_stones_runtime = &rolling_stones_result.1;
             assert_eq!(
                 rolling_stones_survey.frames,
-                2_491,
+                2_500,
                 "{}",
                 rolling_stones_survey.summary()
             );
             assert_eq!(
                 rolling_stones_survey.terminal.as_deref(),
-                Some("frame 2491 requested level transition to 0x2d")
+                Some("frame 2500 requested level transition to 0x2d")
             );
             assert_eq!(rolling_stones_survey.final_live_objects, 22);
             assert_eq!(rolling_stones_survey.max_live_objects, 35);
             assert_eq!(rolling_stones_survey.successful_spawns, 117);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 29_522);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_405);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 29_692);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_575);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 55_828);
+            assert_eq!(rolling_stones_survey.executions, 56_023);
             assert_eq!(rolling_stones_survey.zone_transitions, 32);
             assert_eq!(rolling_stones_survey.camera_ranges.len(), 45);
             assert_eq!(rolling_stones_survey.camera_path_changes, 46);
-            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_348);
-            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_402);
+            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_377);
+            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_411);
             assert_eq!(rolling_stones_survey.restarts, 0);
             assert!(rolling_stones_survey.restart_frames.is_empty());
             assert_eq!(rolling_stones_survey.death_camera_frames, 0);
             assert!(rolling_stones_survey.first_below_zero.is_none());
             assert!(rolling_stones_survey.first_terminal_fall.is_none());
-            assert_eq!(rolling_stones_survey.next_lid, Some((2_491, 0x2d)));
+            assert_eq!(rolling_stones_survey.next_lid, Some((2_500, 0x2d)));
             assert_eq!(rolling_stones_survey.faulted_objects, 0);
             assert_eq!(rolling_stones_survey.execution_errors, 0);
             assert!(rolling_stones_survey.issue_counts.is_empty());
@@ -30303,14 +30494,14 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     index: 0,
                 }
             );
-            assert_eq!(rolling_final_camera.progress.raw(), 10_897);
+            assert_eq!(rolling_final_camera.progress.raw(), 7_424);
             assert_eq!(
                 rolling_stones_survey.initial_player_translation,
                 Some([2_252_544, 1_023_744, 31_794_432])
             );
             assert_eq!(
                 rolling_stones_survey.final_player_translation,
-                Some([2_238_752, 9_256_231, -1_856_256])
+                Some([2_242_656, 9_250_924, -1_710_848])
             );
             assert_eq!(
                 player_trace(rolling_stones_runtime)
@@ -30337,9 +30528,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("send-event"),
-                Some(&100)
+                Some(&110)
             );
-            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&217));
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&228));
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("master-fade-reset"),
                 Some(&1)
@@ -30369,7 +30560,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     0,
                 ]
             );
-            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0xc2b5_5f6e);
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x2ecb_eaad);
             let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
             for state in 0..=4 {
                 assert!(
@@ -30379,7 +30570,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     "carried WarpC state {state} must execute before the authored transition"
                 );
             }
-            assert_eq!(rolling_stones_runtime.draw_count(), 6_870);
+            assert_eq!(rolling_stones_runtime.draw_count(), 6_810);
             assert!(
                 rolling_stones_survey.is_clean(),
                 "Rolling Stones' carried ordinary-pad route must remain clean: {}",
@@ -30417,10 +30608,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
                 "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
-                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4265); Map -> Rolling ",
-                "Stones at frame 66 (draw 4379); Rolling Stones carried route: 2491 frames -> ",
+                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4244); Map -> Rolling ",
+                "Stones at frame 66 (draw 4310); Rolling Stones carried route: 2500 frames -> ",
                 "Level Complete, 45 paths/46 changes, 32 zone transitions, 12 boxes, RNG ",
-                "0xc2b55f6e, draw 6870",
+                "0x2ecbeaad, draw 6810",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

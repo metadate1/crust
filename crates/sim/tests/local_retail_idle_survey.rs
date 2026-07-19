@@ -3610,6 +3610,7 @@ impl UpTheCreekRouteEnd {
 /// running jump, and enters the authored `WarpC` portal.
 struct UpTheCreekRouteController {
     route_end: UpTheCreekRouteEnd,
+    session_globals: bool,
     collider_entity: Option<u16>,
     stage: u8,
     tick: u16,
@@ -3645,14 +3646,12 @@ impl UpTheCreekRouteController {
         let zero_d = Eid::from_name("0D_oZ").expect("fixed Up the Creek 0D EID is valid");
         let zero_e = Eid::from_name("0E_oZ").expect("fixed Up the Creek 0E EID is valid");
         let zero_f = Eid::from_name("0F_oZ").expect("fixed Up the Creek 0F EID is valid");
-        let completion_route = self.route_end == UpTheCreekRouteEnd::Completion;
         let route_translation_matches = |actual: [i32; 3], expected: [i32; 3]| {
             actual == expected
-                || (completion_route
-                    && actual
-                        .iter()
-                        .zip(expected)
-                        .all(|(actual, expected)| actual.abs_diff(expected) <= 4_096))
+                || actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= 4_096)
         };
         match self.stage {
             0 => {
@@ -3862,7 +3861,7 @@ impl UpTheCreekRouteController {
                 // on the preceding bounce reverses the authored handoff.
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick >= 55 {
+                if tick >= 72 {
                     self.stage = 17;
                     self.tick = 0;
                 }
@@ -3898,7 +3897,7 @@ impl UpTheCreekRouteController {
             19 => {
                 if player.is_some_and(|player| {
                     player.status_a & 1 != 0
-                        && (25_900_000..=26_200_000).contains(&player.translation[2])
+                        && (25_900_000..=26_350_000).contains(&player.translation[2])
                 }) {
                     self.stage = 20;
                     self.tick = 0;
@@ -3929,7 +3928,7 @@ impl UpTheCreekRouteController {
             22 => {
                 if player.is_some_and(|player| {
                     player.status_a & 1 != 0
-                        && (25_850_000..=26_000_000).contains(&player.translation[2])
+                        && (26_200_000..=26_350_000).contains(&player.translation[2])
                 }) {
                     self.stage = 23;
                     self.tick = 0;
@@ -3962,7 +3961,7 @@ impl UpTheCreekRouteController {
             25 => {
                 if player.is_some_and(|player| {
                     player.status_a & 1 != 0
-                        && (25_400_000..=25_600_000).contains(&player.translation[2])
+                        && (25_950_000..=26_100_000).contains(&player.translation[2])
                 }) {
                     self.stage = 26;
                     self.tick = 0;
@@ -4008,7 +4007,8 @@ impl UpTheCreekRouteController {
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 8 { PAD_UP } else { PAD_UP | PAD_CROSS }
+                let cross = (8..24).contains(&tick) || (32..56).contains(&tick) || tick >= 60;
+                PAD_UP | if cross { PAD_CROSS } else { 0 }
             }
             29 => {
                 self.stage = 30;
@@ -4241,8 +4241,9 @@ impl UpTheCreekRouteController {
                     self.tick = 0;
                     return 0;
                 }
+                let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                PAD_UP | PAD_CROSS
+                PAD_UP | PAD_CROSS | if tick < 4 { PAD_LEFT } else { 0 }
             }
             47 => {
                 let tick = self.tick;
@@ -4359,7 +4360,7 @@ impl UpTheCreekRouteController {
                     player.zone == zero_n
                         && player.state == 1
                         && player.status_a & 1 != 0
-                        && (15_490_000..=15_510_000).contains(&player.translation[2])
+                        && (15_600_000..=15_630_000).contains(&player.translation[2])
                 }) {
                     self.stage = 56;
                     self.tick = 0;
@@ -4367,7 +4368,7 @@ impl UpTheCreekRouteController {
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if (46..62).contains(&tick) {
+                let held = if (46..62).contains(&tick) {
                     PAD_LEFT | PAD_CROSS
                 } else if (90..94).contains(&tick) {
                     PAD_UP
@@ -4376,20 +4377,21 @@ impl UpTheCreekRouteController {
                     || (152..180).contains(&tick)
                 {
                     PAD_UP | PAD_CROSS
-                } else if (180..209).contains(&tick) {
+                } else if (180..220).contains(&tick) {
                     PAD_UP
-                } else if (209..217).contains(&tick) {
+                } else if (220..228).contains(&tick) {
                     PAD_DOWN
                 } else {
                     0
-                }
+                };
+                held | if tick >= 210 { PAD_SQUARE } else { 0 }
             }
             56 => {
                 if player.is_some_and(|player| {
                     player.zone == zero_o
                         && player.state == 1
                         && player.status_a & 1 != 0
-                        && (14_970_000..=15_000_000).contains(&player.translation[2])
+                        && (15_070_000..=15_090_000).contains(&player.translation[2])
                 }) {
                     self.stage = 57;
                     self.tick = 0;
@@ -4410,7 +4412,7 @@ impl UpTheCreekRouteController {
                     player.zone == zero_o
                         && player.state == 1
                         && player.status_a & 1 != 0
-                        && (14_540_000..=14_570_000).contains(&player.translation[2])
+                        && (14_460_000..=14_480_000).contains(&player.translation[2])
                 }) {
                     self.stage = 58;
                     self.tick = 0;
@@ -4418,9 +4420,9 @@ impl UpTheCreekRouteController {
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 2 {
+                if tick < 4 {
                     PAD_UP
-                } else if tick < 22 {
+                } else if tick < 34 {
                     PAD_UP | PAD_CROSS
                 } else {
                     0
@@ -4432,7 +4434,7 @@ impl UpTheCreekRouteController {
                         player.zone == zero_p
                             && matches!(player.state, 1 | 10)
                             && player.status_a & 1 != 0
-                            && (13_970_000..=14_000_000).contains(&player.translation[2])
+                            && (13_890_000..=13_910_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 59;
@@ -4455,7 +4457,7 @@ impl UpTheCreekRouteController {
                         player.zone == zero_p
                             && player.state == 1
                             && player.status_a & 1 != 0
-                            && (13_500_000..=13_560_000).contains(&player.translation[2])
+                            && (13_440_000..=13_470_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 60;
@@ -4554,7 +4556,7 @@ impl UpTheCreekRouteController {
                 if player.is_some_and(|player| {
                     player.state == 1
                         && player.status_a & 1 != 0
-                        && (10_100_000..=10_140_000).contains(&player.translation[2])
+                        && (9_900_000..=10_140_000).contains(&player.translation[2])
                 }) {
                     self.stage = 66;
                     self.tick = 0;
@@ -4580,7 +4582,7 @@ impl UpTheCreekRouteController {
                     && player.is_some_and(|player| {
                         player.state == 1
                             && player.status_a & 1 != 0
-                            && (9_600_000..=9_640_000).contains(&player.translation[2])
+                            && (9_400_000..=9_640_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 68;
@@ -4607,7 +4609,7 @@ impl UpTheCreekRouteController {
                     && player.is_some_and(|player| {
                         player.state == 1
                             && player.status_a & 1 != 0
-                            && (9_130_000..=9_170_000).contains(&player.translation[2])
+                            && (8_950_000..=9_170_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 70;
@@ -4634,7 +4636,7 @@ impl UpTheCreekRouteController {
                     && player.is_some_and(|player| {
                         player.state == 1
                             && player.status_a & 1 != 0
-                            && (8_560_000..=8_600_000).contains(&player.translation[2])
+                            && (8_400_000..=8_600_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 72;
@@ -4646,7 +4648,8 @@ impl UpTheCreekRouteController {
             72 => {
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 8 {
+                let run_up = if self.session_globals { 7 } else { 8 };
+                if tick < run_up {
                     PAD_UP | PAD_SQUARE
                 } else if tick < 32 {
                     PAD_UP | PAD_CROSS | PAD_SQUARE
@@ -4661,7 +4664,7 @@ impl UpTheCreekRouteController {
                     && player.is_some_and(|player| {
                         player.state == 1
                             && player.status_a & 1 != 0
-                            && (8_050_000..=8_090_000).contains(&player.translation[2])
+                            && (7_900_000..=8_090_000).contains(&player.translation[2])
                     })
                 {
                     self.stage = 74;
@@ -4710,7 +4713,10 @@ impl UpTheCreekRouteController {
                 if (8..32).contains(&tick) {
                     held |= PAD_CROSS;
                 }
-                if tick < 12 {
+                if tick < 12
+                    || (tick == 12
+                        && player.is_some_and(|player| player.translation[0] < 2_260_000))
+                {
                     held |= PAD_RIGHT;
                 }
                 held
@@ -4749,9 +4755,11 @@ impl UpTheCreekRouteController {
             79 => {
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 5 {
+                if tick < 8 {
+                    PAD_UP
+                } else if tick < 13 {
                     PAD_LEFT | PAD_UP | PAD_CROSS
-                } else if tick < 36 {
+                } else if tick < 44 {
                     PAD_UP | PAD_CROSS
                 } else {
                     self.stage = 80;
@@ -4842,6 +4850,12 @@ impl UpTheCreekRouteController {
                     self.stage = 89;
                     self.tick = 0;
                     return self.held(camera, player);
+                } else if self.collider_entity == Some(128)
+                    && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
+                {
+                    self.stage = 91;
+                    self.tick = 0;
+                    return self.held(camera, player);
                 }
                 0
             }
@@ -4892,7 +4906,9 @@ impl UpTheCreekRouteController {
             93 => {
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 12 {
+                if tick < 4 {
+                    PAD_UP
+                } else if tick < 28 {
                     PAD_UP | PAD_CROSS
                 } else {
                     self.stage = 94;
@@ -4943,15 +4959,16 @@ impl UpTheCreekRouteController {
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 38 {
+                let wait = if self.session_globals { 34 } else { 38 };
+                if tick < wait {
                     // Entity 129 is only safely reachable near the high part
                     // of its orbit; leaving immediately enters its grab state.
                     0
-                } else if tick < 46 {
+                } else if tick < wait + 8 {
                     PAD_RIGHT | PAD_UP
-                } else if tick < 66 {
+                } else if tick < wait + 28 {
                     let mut held = PAD_UP | PAD_CROSS;
-                    if tick == 56 {
+                    if tick == wait + 18 {
                         // The contact requires a fresh Square edge. Holding
                         // Square from takeoff expires before the collision.
                         held |= PAD_SQUARE;
@@ -4967,15 +4984,21 @@ impl UpTheCreekRouteController {
                 if self.collider_entity == Some(129) {
                     self.stage = 99;
                     self.tick = 0;
+                } else if self.collider_entity == Some(131)
+                    && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
+                {
+                    self.stage = 100;
+                    self.tick = 0;
+                    return self.held(camera, player);
                 }
                 0
             }
             99 => {
-                if self.tick < 9 {
+                if self.tick < 10 {
                     // Carry the 129 contact into the center of entity 131,
                     // then release until its authored safe state settles.
                     self.tick += 1;
-                    return PAD_UP | PAD_CROSS;
+                    return PAD_LEFT | PAD_UP | PAD_CROSS;
                 }
                 if self.collider_entity == Some(131)
                     && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
@@ -4989,12 +5012,13 @@ impl UpTheCreekRouteController {
             100 => {
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick < 6 {
+                let side = if tick < 8 { PAD_LEFT } else { 0 };
+                if tick < 1 {
                     // Build enough speed on 131 to span the lower-platform
                     // gap, but jump before its next lethal contact cycle.
-                    PAD_UP
-                } else if tick < 30 {
-                    PAD_UP | PAD_CROSS
+                    PAD_UP | side
+                } else if tick < 31 {
+                    PAD_UP | PAD_CROSS | side
                 } else {
                     self.stage = 101;
                     self.tick = 0;
@@ -5011,10 +5035,30 @@ impl UpTheCreekRouteController {
             102 => {
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                if tick >= 54
+                let ready_progress = 15_800;
+                if self.session_globals
+                    && tick >= 44
+                    && player.is_some_and(|player| {
+                        player.state == 1
+                            && player.status_a & 1 != 0
+                            && player.translation[0] < 2_350_000
+                    })
+                {
+                    return PAD_RIGHT | PAD_UP;
+                }
+                if self.session_globals
+                    && tick >= 44
                     && camera.path.zone == zero_y
                     && camera.path.index == 1
-                    && camera.progress.raw() == 16_128
+                    && camera.progress.raw() < ready_progress
+                    && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
+                {
+                    return PAD_UP;
+                }
+                if tick >= 44
+                    && camera.path.zone == zero_y
+                    && camera.path.index == 1
+                    && camera.progress.raw() >= ready_progress
                     && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
                 {
                     self.stage = 103;
@@ -5023,13 +5067,17 @@ impl UpTheCreekRouteController {
                 }
                 // One 30 Hz run-up sample on 136 is the difference between
                 // catching the post-water terrain lip and falling short.
-                Self::post_zero_y_jump_held(tick)
+                match tick {
+                    1..=25 => PAD_UP | PAD_CROSS,
+                    0 | 26..=34 => PAD_UP,
+                    _ => 0,
+                }
             }
             103 => {
                 if self.collider_entity == Some(140)
                     && camera.path.zone == zero_z
                     && camera.path.index == 1
-                    && camera.progress.raw() == 512
+                    && camera.progress.raw() >= 1_536
                     && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
                 {
                     self.stage = 104;
@@ -5041,6 +5089,16 @@ impl UpTheCreekRouteController {
                 // Carry the bank launch across 141 and settle on 140 before
                 // its authored falling cycle starts.
                 Self::post_zero_y_jump_held(tick)
+                    | if (29..33).contains(&tick) {
+                        PAD_UP | PAD_CROSS
+                    } else {
+                        0
+                    }
+                    | if (29..37).contains(&tick) {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }
             }
             104 => {
                 if !self.route_end.continues_after_platform_140() {
@@ -5049,7 +5107,7 @@ impl UpTheCreekRouteController {
                 if self.collider_entity == Some(139)
                     && camera.path.zone == zero_z
                     && camera.path.index == 1
-                    && camera.progress.raw() == 2_022
+                    && camera.progress.raw() >= 3_200
                     && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
                 {
                     self.stage = 105;
@@ -5076,7 +5134,7 @@ impl UpTheCreekRouteController {
                 if self.collider_entity == Some(138)
                     && camera.path.zone == zero_a
                     && camera.path.index == 0
-                    && camera.progress.raw() == 2_048
+                    && camera.progress.raw() >= 3_400
                     && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0)
                 {
                     self.stage = 106;
@@ -5086,12 +5144,7 @@ impl UpTheCreekRouteController {
                 let ready = self.collider_entity == Some(139)
                     && camera.path.zone == zero_z
                     && camera.path.index == 1
-                    && camera.progress.raw() == 2_022
-                    && player.is_some_and(|player| {
-                        player.state == 1
-                            && player.status_a == 2_099_201
-                            && player.translation == [2_137_364, 2_943_938, 1_009_904]
-                    });
+                    && player.is_some_and(|player| player.state == 1 && player.status_a & 1 != 0);
                 if self.tick == 0 && !ready {
                     return 0;
                 }
@@ -5099,13 +5152,15 @@ impl UpTheCreekRouteController {
                 self.tick = self.tick.saturating_add(1);
                 // Build speed while 139 is still level, then carry the
                 // diagonal jump through entity 138's activation window.
-                match tick {
-                    0..=2 => PAD_UP | PAD_LEFT,
-                    3..=10 => PAD_UP | PAD_LEFT | PAD_CROSS,
-                    11..=28 => PAD_UP | PAD_CROSS,
-                    29..=34 => PAD_UP,
+                let mut held = match tick {
+                    3..=28 => PAD_UP | PAD_CROSS,
+                    0..=2 | 29..=34 => PAD_UP,
                     _ => 0,
+                };
+                if tick < 4 {
+                    held |= PAD_LEFT;
                 }
+                held
             }
             106 => {
                 if camera.path.zone == zero_a
@@ -5137,11 +5192,12 @@ impl UpTheCreekRouteController {
                 }
                 if camera.path.zone == zero_a
                     && camera.path.index == 0
-                    && camera.progress.raw() == 14_848
+                    && camera.progress.raw() >= 14_848
                     && player.is_some_and(|player| {
                         player.state == 1
                             && player.status_a == 395_265
-                            && player.translation == [2_006_292, 3_002_867, -110_352]
+                            && player.translation[1].abs_diff(3_002_867) <= 4_096
+                            && player.translation[2] < 0
                     })
                 {
                     self.stage = 108;
@@ -5166,18 +5222,7 @@ impl UpTheCreekRouteController {
                 // first local platform and lands on entity 38 from `03_oZ`,
                 // an authored auxiliary neighbor shared through 0B.
                 if tick <= 29 {
-                    PAD_UP
-                        | PAD_CROSS
-                        | if self.route_end == UpTheCreekRouteEnd::Completion && tick < 5 {
-                            PAD_LEFT
-                        } else {
-                            0
-                        }
-                        | if self.route_end == UpTheCreekRouteEnd::Completion {
-                            PAD_SQUARE
-                        } else {
-                            0
-                        }
+                    PAD_UP | PAD_CROSS | if tick < 5 { PAD_LEFT } else { 0 } | PAD_SQUARE
                 } else {
                     0
                 }
@@ -5306,25 +5351,28 @@ impl UpTheCreekRouteController {
                     && camera.path.index == 0
                     && self.collider_entity.is_none()
                     && player.is_some_and(|player| {
-                        player.zone == zero_c
-                            && player.state == 1
-                            && player.status_a & 1 != 0
-                            && route_translation_matches(
-                                player.translation,
-                                [2_268_808, 3_002_866, -3_335_504],
-                            )
+                        player.zone == zero_c && player.state == 1 && player.status_a & 1 != 0
                     });
                 if self.tick == 0 && !ready {
                     return 0;
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                // Preserve the checked f3500 terrain boundary, then take one
-                // straight ordinary-pad jump onto 0D platform 161.
-                match tick {
-                    70..=73 => PAD_UP,
-                    74..=97 => PAD_UP | PAD_CROSS,
-                    _ => 0,
+                // Wait for platform 161's solid phase, then make a small
+                // lateral correction during the ordinary-pad jump.
+                let held = if tick < 32 {
+                    0
+                } else if tick < 36 {
+                    PAD_UP
+                } else if tick < 60 {
+                    PAD_UP | PAD_CROSS
+                } else {
+                    0
+                };
+                held | if (32..35).contains(&tick) {
+                    PAD_LEFT
+                } else {
+                    0
                 }
             }
             113 => {
@@ -5356,8 +5404,8 @@ impl UpTheCreekRouteController {
                 }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
-                // Preserve the checked f3600 platform-161 boundary, then use
-                // the same straight arc for its paired 0D platform 160.
+                // Wait on platform 161, then use the same straight arc for
+                // its paired 0D platform 160.
                 match tick {
                     41..=44 => PAD_UP,
                     45..=68 => PAD_UP | PAD_CROSS,
@@ -5447,7 +5495,7 @@ impl UpTheCreekRouteController {
                 if self.collider_entity.is_none()
                     && camera.path.zone == zero_f
                     && camera.path.index == 0
-                    && camera.progress.raw() == 2_304
+                    && (2_304..=2_560).contains(&camera.progress.raw())
                     && player.is_some_and(|player| {
                         player.zone == zero_e
                             && player.state == 2
@@ -5505,7 +5553,7 @@ impl UpTheCreekRouteController {
                 let ready = self.collider_entity.is_none()
                     && camera.path.zone == zero_f
                     && camera.path.index == 0
-                    && camera.progress.raw() == 2_304
+                    && (2_304..=2_560).contains(&camera.progress.raw())
                     && player.is_some_and(|player| {
                         player.zone == zero_e
                             && player.state == 2
@@ -17268,6 +17316,7 @@ impl SurveyInputController {
                     SurveyInputProfile::UpTheCreekCompletionRoute => UpTheCreekRouteEnd::Completion,
                     _ => UpTheCreekRouteEnd::ZeroU,
                 },
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 collider_entity: None,
                 stage: 0,
                 tick: 0,
@@ -22691,16 +22740,16 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
 
     assert_eq!(survey.frames, 509);
     assert_eq!(survey.successful_spawns, 42);
-    assert_eq!(survey.spawn_attempts, 7_246);
-    assert_eq!(survey.expected_spawn_rejections, 7_204);
+    assert_eq!(survey.spawn_attempts, 7_216);
+    assert_eq!(survey.expected_spawn_rejections, 7_174);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 13_834);
+    assert_eq!(survey.executions, 13_794);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 6);
     assert_eq!(survey.camera_ranges.len(), 9);
     assert_eq!(survey.camera_path_changes, 9);
-    assert_eq!(survey.last_camera_path_change, 496);
-    assert_eq!(survey.last_camera_progress_change, 497);
+    assert_eq!(survey.last_camera_path_change, 497);
+    assert_eq!(survey.last_camera_progress_change, 509);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain the camera behind the first static island");
@@ -22711,10 +22760,10 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 22_521);
+    assert_eq!(final_camera.progress.raw(), 17_292);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_088_800, 1_439_169, 26_055_976])
+        Some([2_197_776, 1_316_255, 26_328_744])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -22723,9 +22772,9 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
         trace.zone,
         Eid::from_name("0f_oZ").expect("fixed Up the Creek island-zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_088_800, 1_439_169, 26_055_976]);
-    assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 10);
+    assert_eq!(trace.translation, [2_197_776, 1_316_255, 26_328_744]);
+    assert_eq!(trace.velocity, [0, -136_000, -255_000]);
+    assert_eq!(trace.state, 2);
     assert_ne!(trace.status_a & 1, 0);
 
     // The local ZDAT characterization resolves raw cell 0x0003 with top
@@ -22745,14 +22794,14 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
         player_vm
             .register(process_register::FLOOR_IMPACT_VELOCITY)
             .map(u32::cast_signed),
-        Ok(-2_049_723)
+        Ok(-136_000)
     );
     assert_eq!(player_vm.register(PROCESS_LINK_COLLIDER), Ok(0));
     assert_eq!(player_vm.register(process_register::NODE), Ok(0xffff));
     assert_eq!(survey.final_live_objects, 23);
     assert_eq!(survey.max_live_objects, 35);
     assert_eq!(survey.effect_counts.get("solid"), Some(&174));
-    assert!(survey.spawn_flag_samples.contains(&(482, 44, 5)));
+    assert!(survey.spawn_flag_samples.contains(&(493, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -22796,15 +22845,15 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
 
     assert_eq!(survey.frames, 581);
     assert_eq!(survey.successful_spawns, 50);
-    assert_eq!(survey.spawn_attempts, 8_383);
-    assert_eq!(survey.expected_spawn_rejections, 8_333);
+    assert_eq!(survey.spawn_attempts, 8_296);
+    assert_eq!(survey.expected_spawn_rejections, 8_246);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 15_835);
+    assert_eq!(survey.executions, 15_659);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 7);
-    assert_eq!(survey.camera_ranges.len(), 10);
-    assert_eq!(survey.camera_path_changes, 11);
-    assert_eq!(survey.last_camera_path_change, 546);
+    assert_eq!(survey.camera_ranges.len(), 9);
+    assert_eq!(survey.camera_path_changes, 10);
+    assert_eq!(survey.last_camera_path_change, 533);
     assert_eq!(survey.last_camera_progress_change, 581);
     let final_camera = survey
         .final_camera
@@ -22813,30 +22862,30 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
         final_camera.path,
         RetailPathId {
             zone: Eid::from_name("0f_oZ").expect("fixed Up the Creek handoff-zone EID is valid"),
-            index: 1,
+            index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 11_712);
+    assert_eq!(final_camera.progress.raw(), 5_120);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_087_440, 1_719_490, 24_972_968])
+        Some([2_191_656, 1_591_182, 25_880_936])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the 0g platform interaction must keep Crash alive");
     assert_eq!(
         trace.zone,
-        Eid::from_name("0g_oZ").expect("fixed Up the Creek platform-zone EID is valid")
+        Eid::from_name("0f_oZ").expect("fixed Up the Creek platform-zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_087_440, 1_719_490, 24_972_968]);
-    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.translation, [2_191_656, 1_591_182, 25_880_936]);
+    assert_eq!(trace.velocity, [0, -408_000, -170_000]);
     assert_eq!(trace.state, 2);
-    assert_ne!(trace.status_a & 1, 0);
-    assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(12)));
-    assert_eq!(survey.final_live_objects, 27);
+    assert_eq!(trace.status_a & 1, 0);
+    assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(11)));
+    assert_eq!(survey.final_live_objects, 30);
     assert_eq!(survey.max_live_objects, 35);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&176));
-    assert!(survey.spawn_flag_samples.contains(&(515, 44, 5)));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&174));
+    assert!(survey.spawn_flag_samples.contains(&(534, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -22873,23 +22922,23 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekRoute,
-        1_185,
+        1_250,
     )
     .expect("Up the Creek must execute through its first checkpoint handshake");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_185);
+    assert_eq!(survey.frames, 1_250);
     assert_eq!(survey.successful_spawns, 71);
-    assert_eq!(survey.spawn_attempts, 17_200);
-    assert_eq!(survey.expected_spawn_rejections, 17_129);
+    assert_eq!(survey.spawn_attempts, 18_111);
+    assert_eq!(survey.expected_spawn_rejections, 18_040);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 31_921);
+    assert_eq!(survey.executions, 33_634);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 12);
     assert_eq!(survey.camera_ranges.len(), 18);
     assert_eq!(survey.camera_path_changes, 19);
-    assert_eq!(survey.last_camera_path_change, 1_180);
-    assert_eq!(survey.last_camera_progress_change, 1_185);
+    assert_eq!(survey.last_camera_path_change, 1_241);
+    assert_eq!(survey.last_camera_progress_change, 1_250);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain its first-checkpoint camera");
@@ -22900,20 +22949,21 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 2_304);
+    assert_eq!(final_camera.progress.raw(), 3_782);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_143_520, 1_907_526, 19_411_536])
+        Some([2_016_752, 2_002_498, 19_352_864])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the first checkpoint bounce must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_143_520, 1_907_526, 19_411_536]);
-    assert_eq!(trace.velocity, [0, 803_200, -571_900]);
+    assert_eq!(trace.translation, [2_016_752, 2_002_498, 19_352_864]);
+    assert_eq!(trace.velocity, [-551_813, 444_636, -561_010]);
     assert_eq!(trace.state, 14);
+    assert_eq!(trace.status_a, 133_376);
     assert_eq!(survey.final_live_objects, 24);
-    assert_eq!(survey.max_live_objects, 35);
+    assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(
@@ -22922,21 +22972,21 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (904, -1, [2_148_864, 1_818_624, 21_605_376]),
-            (1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+            (965, -1, [2_148_864, 1_818_624, 21_605_376]),
+            (1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
-    for boundary in [(860, 71, 5), (903, 49, 3), (921, 50, 3), (1_185, 76, 9)] {
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    for boundary in [(921, 71, 5), (964, 49, 3), (982, 50, 3), (1_246, 76, 9)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the route must retain authored spawn-flag boundary {boundary:?}: {}",
@@ -22944,8 +22994,8 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&60));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&405));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&59));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&410));
     assert!(!survey.effect_counts.contains_key("load-state"));
 
     assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x500));
@@ -22974,7 +23024,7 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
     // before GoolUpdateObjects. The checkpoint's synchronous misc-12 save on
     // this frame must therefore sample the newly published camera progress,
     // not the stale fraction retained from the preceding path crossing.
-    assert_eq!(snapshot.location.progress.raw(), 2_304);
+    assert_eq!(snapshot.location.progress.raw(), 1_536);
     assert_eq!(snapshot.box_count, 0x400);
     assert!(!snapshot.death_resets_counter);
     assert!(survey.next_lid.is_none());
@@ -23017,15 +23067,15 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
 
     assert_eq!(survey.frames, 1_325);
     assert_eq!(survey.successful_spawns, 78);
-    assert_eq!(survey.spawn_attempts, 19_306);
-    assert_eq!(survey.expected_spawn_rejections, 19_228);
+    assert_eq!(survey.spawn_attempts, 19_177);
+    assert_eq!(survey.expected_spawn_rejections, 19_099);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 35_992);
+    assert_eq!(survey.executions, 35_766);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 13);
     assert_eq!(survey.camera_ranges.len(), 19);
     assert_eq!(survey.camera_path_changes, 20);
-    assert_eq!(survey.last_camera_path_change, 1_252);
+    assert_eq!(survey.last_camera_path_change, 1_317);
     assert_eq!(survey.last_camera_progress_change, 1_325);
     let final_camera = survey
         .final_camera
@@ -23038,16 +23088,16 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 11_776);
+    assert_eq!(final_camera.progress.raw(), 1_971);
     assert_eq!(
         survey.final_player_translation,
-        Some([1_929_456, 1_779_842, 18_342_880])
+        Some([2_037_176, 1_779_842, 18_727_112])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("moving platform 75 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [1_929_456, 1_779_842, 18_342_880]);
+    assert_eq!(trace.translation, [2_037_176, 1_779_842, 18_727_112]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_ne!(trace.status_a & 1, 0);
@@ -23055,10 +23105,10 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
     assert_eq!(
         spawned_entity_trace(&runtime, 75),
         Ok(Some(SpawnedEntityTrace {
-            translation: [1_933_488, 1_738_240, 18_339_408],
+            translation: [2_021_320, 1_738_240, 18_709_320],
             state: 9,
             path_progress: 3_072,
-            status_a: 131_092,
+            status_a: 131_072,
         }))
     );
     let player_arena = runtime.arena().main_object().expect("player arena handle");
@@ -23087,12 +23137,12 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
         Ok(-136_000)
     );
 
-    assert_eq!(survey.final_live_objects, 26);
-    assert_eq!(survey.max_live_objects, 35);
+    assert_eq!(survey.final_live_objects, 33);
+    assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&64));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&521));
-    for boundary in [(1_253, 86, 5), (1_253, 88, 5)] {
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&62));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&465));
+    for boundary in [(1_318, 86, 5), (1_318, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the 0l camera must expose authored neighboring-platform boundary {boundary:?}: {}",
@@ -23105,16 +23155,16 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23158,16 +23208,16 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
 
     assert_eq!(survey.frames, 1_575);
     assert_eq!(survey.successful_spawns, 90);
-    assert_eq!(survey.spawn_attempts, 23_170);
-    assert_eq!(survey.expected_spawn_rejections, 23_080);
+    assert_eq!(survey.spawn_attempts, 23_039);
+    assert_eq!(survey.expected_spawn_rejections, 22_949);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 42_344);
+    assert_eq!(survey.executions, 42_365);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 15);
-    assert_eq!(survey.camera_ranges.len(), 20);
-    assert_eq!(survey.camera_path_changes, 23);
-    assert_eq!(survey.last_camera_path_change, 1_518);
-    assert_eq!(survey.last_camera_progress_change, 1_536);
+    assert_eq!(survey.camera_ranges.len(), 19);
+    assert_eq!(survey.camera_path_changes, 22);
+    assert_eq!(survey.last_camera_path_change, 1_516);
+    assert_eq!(survey.last_camera_progress_change, 1_575);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain entity 80's camera bank");
@@ -23175,33 +23225,33 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
         final_camera.path,
         RetailPathId {
             zone: Eid::from_name("0l_oZ").expect("fixed Up the Creek entity-80 zone EID is valid"),
-            index: 1,
+            index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 6_912);
+    assert_eq!(final_camera.progress.raw(), 14_220);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_372_776, 1_719_394, 17_903_224])
+        Some([2_045_160, 1_967_235, 18_230_936])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("entity 80 must keep Crash alive");
     assert_eq!(
         trace.zone,
-        Eid::from_name("0m_oZ").expect("fixed Up the Creek post-platform zone EID is valid")
+        Eid::from_name("0l_oZ").expect("fixed Up the Creek post-platform zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_372_776, 1_719_394, 17_903_224]);
-    assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 1);
-    assert_eq!(trace.status_a, 2_230_273);
+    assert_eq!(trace.translation, [2_045_160, 1_967_235, 18_230_936]);
+    assert_eq!(trace.velocity, [554_878, 401_354, -554_879]);
+    assert_eq!(trace.state, 3);
+    assert_eq!(trace.status_a, 133_376);
 
     assert_eq!(
         spawned_entity_trace(&runtime, 80),
         Ok(Some(SpawnedEntityTrace {
             translation: [2_252_032, 1_661_440, 17_816_832],
-            state: 1,
+            state: 4,
             path_progress: 0,
-            status_a: 131_072,
+            status_a: 0,
         }))
     );
     let player_arena = runtime.arena().main_object().expect("player arena handle");
@@ -23215,13 +23265,10 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     let collider_reference = player_vm
         .register(PROCESS_LINK_COLLIDER)
         .expect("player collider link is readable");
-    assert_eq!(
-        referenced_entity_id(&runtime, collider_reference),
-        Ok(Some(80))
-    );
+    assert_eq!(referenced_entity_id(&runtime, collider_reference), Ok(None));
     assert_eq!(
         player_vm.register(process_register::FLOOR_IMPACT_STAMP),
-        Ok(1_574)
+        Ok(1_567)
     );
     assert_eq!(
         player_vm
@@ -23231,11 +23278,11 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     );
 
     assert_eq!(survey.final_live_objects, 26);
-    assert_eq!(survey.max_live_objects, 35);
+    assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&68));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&744));
-    for boundary in [(1_387, 71, 5), (1_455, 86, 5), (1_455, 88, 5)] {
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&65));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&708));
+    for boundary in [(1_448, 71, 5), (1_517, 86, 5), (1_517, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the complete platform cycle must retain authored boundary {boundary:?}: {}",
@@ -23248,16 +23295,16 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23294,23 +23341,23 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekRoute,
-        1_645,
+        1_675,
     )
     .expect("Up the Creek must execute through its 0m vertical-platform transfer");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_645);
+    assert_eq!(survey.frames, 1_675);
     assert_eq!(survey.successful_spawns, 95);
-    assert_eq!(survey.spawn_attempts, 24_290);
-    assert_eq!(survey.expected_spawn_rejections, 24_195);
+    assert_eq!(survey.spawn_attempts, 24_639);
+    assert_eq!(survey.expected_spawn_rejections, 24_544);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 44_160);
+    assert_eq!(survey.executions, 44_961);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 16);
     assert_eq!(survey.camera_ranges.len(), 21);
     assert_eq!(survey.camera_path_changes, 24);
-    assert_eq!(survey.last_camera_path_change, 1_598);
-    assert_eq!(survey.last_camera_progress_change, 1_607);
+    assert_eq!(survey.last_camera_path_change, 1_659);
+    assert_eq!(survey.last_camera_progress_change, 1_668);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain entity 88's 0m camera bank");
@@ -23325,22 +23372,22 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     assert_eq!(final_camera.progress.raw(), 4_288);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_372_776, 1_720_258, 17_415_800])
+        Some([2_372_840, 1_666_710, 17_415_832])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("vertical platform 88 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_372_776, 1_720_258, 17_415_800]);
+    assert_eq!(trace.translation, [2_372_840, 1_666_710, 17_415_832]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 1);
-    assert_eq!(trace.status_a, 2_230_273);
+    assert_eq!(trace.state, 13);
+    assert_eq!(trace.status_a, 2_099_201);
 
     assert_eq!(
         spawned_entity_trace(&runtime, 88),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_252_032, 1_683_968, 17_305_600],
-            state: 13,
+            translation: [2_252_032, 1_630_420, 17_305_600],
+            state: 12,
             path_progress: 0,
             status_a: 131_072,
         }))
@@ -23362,7 +23409,7 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     );
     assert_eq!(
         player_vm.register(process_register::FLOOR_IMPACT_STAMP),
-        Ok(1_644)
+        Ok(1_674)
     );
     assert_eq!(
         player_vm
@@ -23372,11 +23419,11 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     );
 
     assert_eq!(survey.final_live_objects, 26);
-    assert_eq!(survey.max_live_objects, 35);
+    assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&70));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&794));
-    for boundary in [(1_387, 71, 5), (1_455, 86, 5), (1_455, 88, 5)] {
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&69));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&759));
+    for boundary in [(1_448, 71, 5), (1_517, 86, 5), (1_517, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the 0m platform route must retain authored boundary {boundary:?}: {}",
@@ -23389,16 +23436,16 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23442,15 +23489,15 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
 
     assert_eq!(survey.frames, 2_608);
     assert_eq!(survey.successful_spawns, 135);
-    assert_eq!(survey.spawn_attempts, 39_125);
-    assert_eq!(survey.expected_spawn_rejections, 38_990);
+    assert_eq!(survey.spawn_attempts, 38_982);
+    assert_eq!(survey.expected_spawn_rejections, 38_847);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 71_403);
+    assert_eq!(survey.executions, 71_089);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 24);
-    assert_eq!(survey.camera_ranges.len(), 34);
-    assert_eq!(survey.camera_path_changes, 39);
-    assert_eq!(survey.last_camera_path_change, 2_591);
+    assert_eq!(survey.camera_ranges.len(), 33);
+    assert_eq!(survey.camera_path_changes, 38);
+    assert_eq!(survey.last_camera_path_change, 2_573);
     assert_eq!(survey.last_camera_progress_change, 2_608);
     let final_camera = survey
         .final_camera
@@ -23459,33 +23506,33 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
         final_camera.path,
         RetailPathId {
             zone: Eid::from_name("0u_oZ").expect("fixed Up the Creek right-bank zone EID is valid"),
-            index: 1,
+            index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 7_936);
+    assert_eq!(final_camera.progress.raw(), 8_108);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_285_840, 2_416_929, 6_394_544])
+        Some([2_186_684, 2_391_170, 7_115_260])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the 0u right bank must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_285_840, 2_416_929, 6_394_544]);
-    assert_eq!(trace.velocity, [0, -1_212_184, -593_150]);
-    assert_eq!(trace.state, 10);
-    assert_eq!(trace.status_a, 133_384);
+    assert_eq!(trace.translation, [2_186_684, 2_391_170, 7_115_260]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 2_099_209);
 
     assert_eq!(
         spawned_entity_trace(&runtime, 166),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_142_512, 2_349_568, 6_866_368],
+            translation: [2_179_788, 2_349_568, 7_112_332],
             state: 9,
             path_progress: 3_072,
-            status_a: 131_076,
+            status_a: 131_072,
         }))
     );
-    assert_eq!(player_collider_entity(&runtime), Ok(None));
+    assert_eq!(player_collider_entity(&runtime), Ok(Some(166)));
     let player_arena = runtime.arena().main_object().expect("player arena handle");
     let player_object = runtime
         .object_for_arena(player_arena)
@@ -23496,7 +23543,7 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
         .expect("player VM object");
     assert_eq!(
         player_vm.register(process_register::FLOOR_IMPACT_STAMP),
-        Ok(2_582)
+        Ok(2_607)
     );
     assert_eq!(
         player_vm
@@ -23505,28 +23552,28 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
         Ok(-136_000)
     );
 
-    assert_eq!(survey.final_live_objects, 36);
+    assert_eq!(survey.final_live_objects, 30);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&117));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_181));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&108));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_153));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23563,23 +23610,23 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekExtendedRoute,
-        3_012,
+        3_112,
     )
     .expect("Up the Creek must execute through its first 0y falling-platform landing");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_012);
-    assert_eq!(survey.successful_spawns, 157);
-    assert_eq!(survey.spawn_attempts, 47_258);
-    assert_eq!(survey.expected_spawn_rejections, 47_101);
+    assert_eq!(survey.frames, 3_112);
+    assert_eq!(survey.successful_spawns, 161);
+    assert_eq!(survey.spawn_attempts, 48_787);
+    assert_eq!(survey.expected_spawn_rejections, 48_626);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 85_356);
+    assert_eq!(survey.executions, 88_787);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 28);
-    assert_eq!(survey.camera_ranges.len(), 39);
-    assert_eq!(survey.camera_path_changes, 44);
-    assert_eq!(survey.last_camera_path_change, 3_012);
-    assert_eq!(survey.last_camera_progress_change, 3_012);
+    assert_eq!(survey.zone_transitions, 30);
+    assert_eq!(survey.camera_ranges.len(), 38);
+    assert_eq!(survey.camera_path_changes, 45);
+    assert_eq!(survey.last_camera_path_change, 3_052);
+    assert_eq!(survey.last_camera_progress_change, 3_108);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain its entity-136 camera");
@@ -23587,46 +23634,46 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
         final_camera.path,
         RetailPathId {
             zone: Eid::from_name("0y_oZ").expect("fixed Up the Creek entity-136 zone EID is valid"),
-            index: 1,
+            index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 0);
+    assert_eq!(final_camera.progress.raw(), 16_895);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_256_148, 2_943_938, 2_353_392])
+        Some([2_336_640, 2_926_333, 2_380_776])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("entity 136 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_256_148, 2_943_938, 2_353_392]);
-    assert_eq!(trace.velocity, [0, -136_000, -571_900]);
-    assert_eq!(trace.state, 10);
-    assert_eq!(trace.status_a, 2_246_921);
+    assert_eq!(trace.translation, [2_336_640, 2_926_333, 2_380_776]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 2_230_273);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(136)));
 
-    assert_eq!(survey.final_live_objects, 22);
+    assert_eq!(survey.final_live_objects, 33);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&143));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_223));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&129));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_221));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23663,23 +23710,23 @@ fn up_the_creek_direct_route_crosses_post_zero_y_bank_to_platform_140() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostZeroYRoute,
-        3_116,
+        3_223,
     )
     .expect("Up the Creek must cross the post-0y bank and settle on platform 140");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_116);
-    assert_eq!(survey.successful_spawns, 164);
-    assert_eq!(survey.spawn_attempts, 48_910);
-    assert_eq!(survey.expected_spawn_rejections, 48_746);
+    assert_eq!(survey.frames, 3_223);
+    assert_eq!(survey.successful_spawns, 168);
+    assert_eq!(survey.spawn_attempts, 50_584);
+    assert_eq!(survey.expected_spawn_rejections, 50_416);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 87_931);
+    assert_eq!(survey.executions, 91_963);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 29);
+    assert_eq!(survey.zone_transitions, 31);
     assert_eq!(survey.camera_ranges.len(), 41);
-    assert_eq!(survey.camera_path_changes, 46);
-    assert_eq!(survey.last_camera_path_change, 3_110);
-    assert_eq!(survey.last_camera_progress_change, 3_113);
+    assert_eq!(survey.camera_path_changes, 48);
+    assert_eq!(survey.last_camera_path_change, 3_193);
+    assert_eq!(survey.last_camera_progress_change, 3_199);
 
     let final_camera = survey
         .final_camera
@@ -23692,43 +23739,43 @@ fn up_the_creek_direct_route_crosses_post_zero_y_bank_to_platform_140() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 512);
+    assert_eq!(final_camera.progress.raw(), 1_792);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_256_148, 2_943_938, 1_069_296])
+        Some([2_154_368, 2_943_938, 1_014_760])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("platform 140 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_256_148, 2_943_938, 1_069_296]);
+    assert_eq!(trace.translation, [2_154_368, 2_943_938, 1_014_760]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
-    assert_eq!(trace.status_a, 2_230_281);
+    assert_eq!(trace.status_a, 2_230_273);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(140)));
 
-    assert_eq!(survey.final_live_objects, 29);
+    assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&147));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_246));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&133));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_238));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23765,23 +23812,23 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostZeroZRoute,
-        3_161,
+        3_255,
     )
     .expect("Up the Creek must transfer from platform 140 onto platform 139");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_161);
-    assert_eq!(survey.successful_spawns, 164);
-    assert_eq!(survey.spawn_attempts, 49_675);
-    assert_eq!(survey.expected_spawn_rejections, 49_511);
+    assert_eq!(survey.frames, 3_255);
+    assert_eq!(survey.successful_spawns, 168);
+    assert_eq!(survey.spawn_attempts, 51_128);
+    assert_eq!(survey.expected_spawn_rejections, 50_960);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 89_340);
+    assert_eq!(survey.executions, 93_051);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 29);
+    assert_eq!(survey.zone_transitions, 31);
     assert_eq!(survey.camera_ranges.len(), 41);
-    assert_eq!(survey.camera_path_changes, 46);
-    assert_eq!(survey.last_camera_path_change, 3_110);
-    assert_eq!(survey.last_camera_progress_change, 3_134);
+    assert_eq!(survey.camera_path_changes, 48);
+    assert_eq!(survey.last_camera_path_change, 3_193);
+    assert_eq!(survey.last_camera_progress_change, 3_231);
 
     let final_camera = survey
         .final_camera
@@ -23794,16 +23841,16 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 2_022);
+    assert_eq!(final_camera.progress.raw(), 3_328);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_137_364, 2_943_938, 1_009_904])
+        Some([2_035_584, 2_943_938, 955_368])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("platform 139 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_137_364, 2_943_938, 1_009_904]);
+    assert_eq!(trace.translation, [2_035_584, 2_943_938, 955_368]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_273);
@@ -23812,7 +23859,7 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
         spawned_entity_trace(&runtime, 139),
         Ok(Some(SpawnedEntityTrace {
             translation: [2_047_744, 2_907_648, 921_344],
-            state: 12,
+            state: 13,
             path_progress: 0,
             status_a: 131_072,
         }))
@@ -23821,25 +23868,25 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
     assert_eq!(survey.final_live_objects, 37);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&149));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_267));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&135));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_247));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -23876,23 +23923,23 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform139Route,
-        3_274,
+        3_344,
     )
     .expect("Up the Creek must cross entity 138 and settle on the 0A bank");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_274);
-    assert_eq!(survey.successful_spawns, 168);
-    assert_eq!(survey.spawn_attempts, 51_596);
-    assert_eq!(survey.expected_spawn_rejections, 51_428);
+    assert_eq!(survey.frames, 3_344);
+    assert_eq!(survey.successful_spawns, 172);
+    assert_eq!(survey.spawn_attempts, 52_641);
+    assert_eq!(survey.expected_spawn_rejections, 52_469);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 93_204);
+    assert_eq!(survey.executions, 96_119);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 30);
+    assert_eq!(survey.zone_transitions, 32);
     assert_eq!(survey.camera_ranges.len(), 42);
-    assert_eq!(survey.camera_path_changes, 47);
-    assert_eq!(survey.last_camera_path_change, 3_235);
-    assert_eq!(survey.last_camera_progress_change, 3_274);
+    assert_eq!(survey.camera_path_changes, 49);
+    assert_eq!(survey.last_camera_path_change, 3_285);
+    assert_eq!(survey.last_camera_progress_change, 3_332);
 
     let final_camera = survey
         .final_camera
@@ -23904,19 +23951,19 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 13_491);
+    assert_eq!(final_camera.progress.raw(), 16_384);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_006_292, 3_002_869, -69_392])
+        Some([2_004_864, 3_002_867, -171_032])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the 0A bank must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_006_292, 3_002_869, -69_392]);
-    assert_eq!(trace.velocity, [0, -136_000, -529_400]);
-    assert_eq!(trace.state, 2);
-    assert_eq!(trace.status_a, 395_521);
+    assert_eq!(trace.translation, [2_004_864, 3_002_867, -171_032]);
+    assert_eq!(trace.velocity, [0, -136_000, 0]);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 395_265);
     assert_eq!(player_collider_entity(&runtime), Ok(None));
     assert_eq!(
         spawned_entity_trace(&runtime, 138),
@@ -23924,32 +23971,32 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
             translation: [2_047_744, 2_885_120, 409_344],
             state: 2,
             path_progress: 0,
-            status_a: 0,
+            status_a: 32_768,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 39);
+    assert_eq!(survey.final_live_objects, 41);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&152));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_330));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&137));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_267));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24016,23 +24063,23 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostZeroARoute,
-        3_351,
+        3_408,
     )
     .expect("Up the Creek must ride shared platform 38 into 0B");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_351);
-    assert_eq!(survey.successful_spawns, 174);
-    assert_eq!(survey.spawn_attempts, 52_905);
-    assert_eq!(survey.expected_spawn_rejections, 52_731);
+    assert_eq!(survey.frames, 3_408);
+    assert_eq!(survey.successful_spawns, 178);
+    assert_eq!(survey.spawn_attempts, 53_729);
+    assert_eq!(survey.expected_spawn_rejections, 53_551);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 96_210);
+    assert_eq!(survey.executions, 98_802);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 31);
+    assert_eq!(survey.zone_transitions, 33);
     assert_eq!(survey.camera_ranges.len(), 43);
-    assert_eq!(survey.camera_path_changes, 48);
-    assert_eq!(survey.last_camera_path_change, 3_350);
-    assert_eq!(survey.last_camera_progress_change, 3_351);
+    assert_eq!(survey.camera_path_changes, 50);
+    assert_eq!(survey.last_camera_path_change, 3_398);
+    assert_eq!(survey.last_camera_progress_change, 3_408);
 
     let final_camera = survey
         .final_camera
@@ -24044,10 +24091,10 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 256);
+    assert_eq!(final_camera.progress.raw(), 2_035);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_050_384, 3_003_266, -764_776])
+        Some([2_047_060, 3_003_266, -832_756])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -24058,43 +24105,43 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
         trace.zone,
         Eid::from_name("0A_oZ").expect("fixed Up the Creek 0A EID is valid")
     );
-    assert_eq!(trace.translation, [2_050_384, 3_003_266, -764_776]);
+    assert_eq!(trace.translation, [2_047_060, 3_003_266, -832_756]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
-    assert_eq!(trace.status_a, 2_230_273);
+    assert_eq!(trace.status_a, 2_099_201);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(38)));
     assert_eq!(
         spawned_entity_trace(&runtime, 38),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_050_336, 2_961_664, -783_944],
+            translation: [2_076_196, 2_961_664, -858_724],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 46);
+    assert_eq!(survey.final_live_objects, 39);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&154));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_373));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&140));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_315));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24161,23 +24208,23 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform38Route,
-        3_440,
+        3_502,
     )
     .expect("Up the Creek must transfer from shared platform 38 to 39");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_440);
-    assert_eq!(survey.successful_spawns, 174);
-    assert_eq!(survey.spawn_attempts, 54_418);
-    assert_eq!(survey.expected_spawn_rejections, 54_244);
+    assert_eq!(survey.frames, 3_502);
+    assert_eq!(survey.successful_spawns, 178);
+    assert_eq!(survey.spawn_attempts, 55_327);
+    assert_eq!(survey.expected_spawn_rejections, 55_149);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 99_720);
+    assert_eq!(survey.executions, 102_599);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 31);
+    assert_eq!(survey.zone_transitions, 33);
     assert_eq!(survey.camera_ranges.len(), 44);
-    assert_eq!(survey.camera_path_changes, 49);
-    assert_eq!(survey.last_camera_path_change, 3_415);
-    assert_eq!(survey.last_camera_progress_change, 3_440);
+    assert_eq!(survey.camera_path_changes, 51);
+    assert_eq!(survey.last_camera_path_change, 3_468);
+    assert_eq!(survey.last_camera_progress_change, 3_502);
 
     let final_camera = survey
         .final_camera
@@ -24189,16 +24236,16 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 8_704);
+    assert_eq!(final_camera.progress.raw(), 11_520);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_178_336, 3_003_266, -1_786_912])
+        Some([2_219_872, 3_003_266, -1_901_016])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("shared platform 39 must keep Crash alive");
     assert_eq!(trace.zone, zero_b);
-    assert_eq!(trace.translation, [2_178_336, 3_003_266, -1_786_912]);
+    assert_eq!(trace.translation, [2_219_872, 3_003_266, -1_901_016]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
@@ -24206,35 +24253,35 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
     assert_eq!(
         spawned_entity_trace(&runtime, 39),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_130_976, 2_961_664, -1_822_944],
+            translation: [2_159_072, 2_961_664, -1_928_824],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 38);
+    assert_eq!(survey.final_live_objects, 40);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&158));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_437));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&142));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_384));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24305,23 +24352,23 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform39Route,
-        3_541,
+        3_598,
     )
     .expect("Up the Creek must transfer from shared platform 39 to platform 156");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_541);
-    assert_eq!(survey.successful_spawns, 179);
-    assert_eq!(survey.spawn_attempts, 56_135);
-    assert_eq!(survey.expected_spawn_rejections, 55_956);
+    assert_eq!(survey.frames, 3_598);
+    assert_eq!(survey.successful_spawns, 183);
+    assert_eq!(survey.spawn_attempts, 56_959);
+    assert_eq!(survey.expected_spawn_rejections, 56_776);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 103_408);
+    assert_eq!(survey.executions, 105_855);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 32);
+    assert_eq!(survey.zone_transitions, 34);
     assert_eq!(survey.camera_ranges.len(), 46);
-    assert_eq!(survey.camera_path_changes, 51);
-    assert_eq!(survey.last_camera_path_change, 3_521);
-    assert_eq!(survey.last_camera_progress_change, 3_530);
+    assert_eq!(survey.camera_path_changes, 53);
+    assert_eq!(survey.last_camera_path_change, 3_569);
+    assert_eq!(survey.last_camera_progress_change, 3_578);
 
     let final_camera = survey
         .final_camera
@@ -24333,16 +24380,16 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 4_064);
+    assert_eq!(final_camera.progress.raw(), 4_096);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_268_808, 2_943_074, -2_870_608])
+        Some([2_279_340, 2_943_074, -2_873_440])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("platform 156 must keep Crash alive");
     assert_eq!(trace.zone, zero_c);
-    assert_eq!(trace.translation, [2_268_808, 2_943_074, -2_870_608]);
+    assert_eq!(trace.translation, [2_279_340, 2_943_074, -2_873_440]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
@@ -24357,28 +24404,28 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 37);
+    assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_511));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&145));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_453));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24441,24 +24488,24 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform156Route,
-        3_582,
+        3_639,
     )
     .expect("Up the Creek must leave platform 156 for 0C's closing terrain bank");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_582);
-    assert_eq!(survey.successful_spawns, 184);
-    assert_eq!(survey.spawn_attempts, 56_820);
-    assert_eq!(survey.expected_spawn_rejections, 56_636);
+    assert_eq!(survey.frames, 3_639);
+    assert_eq!(survey.successful_spawns, 188);
+    assert_eq!(survey.spawn_attempts, 57_635);
+    assert_eq!(survey.expected_spawn_rejections, 57_447);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 104_732);
+    assert_eq!(survey.executions, 107_110);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 33);
+    assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 47);
-    assert_eq!(survey.camera_path_changes, 52);
-    assert_eq!(survey.last_camera_path_change, 3_570);
-    assert_eq!(survey.last_camera_progress_change, 3_571);
-    assert_eq!(survey.last_player_movement, 3_570);
+    assert_eq!(survey.camera_path_changes, 54);
+    assert_eq!(survey.last_camera_path_change, 3_618);
+    assert_eq!(survey.last_camera_progress_change, 3_619);
+    assert_eq!(survey.last_player_movement, 3_618);
 
     let final_camera = survey
         .final_camera
@@ -24470,16 +24517,16 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 768);
+    assert_eq!(final_camera.progress.raw(), 908);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_268_808, 3_002_866, -3_335_504])
+        Some([2_279_340, 3_002_866, -3_338_336])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("0C's closing terrain bank must keep Crash alive");
     assert_eq!(trace.zone, zero_c);
-    assert_eq!(trace.translation, [2_268_808, 3_002_866, -3_335_504]);
+    assert_eq!(trace.translation, [2_279_340, 3_002_866, -3_338_336]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 395_273);
@@ -24488,34 +24535,34 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
         spawned_entity_trace(&runtime, 156),
         Ok(Some(SpawnedEntityTrace {
             translation: [2_252_032, 2_885_120, -2_867_968],
-            state: 4,
+            state: 1,
             path_progress: 0,
-            status_a: 0,
+            status_a: 131_072,
         }))
     );
 
     assert_eq!(survey.final_live_objects, 27);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_515));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&145));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_448));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24580,24 +24627,24 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostZeroCBankRoute,
-        3_695,
+        3_714,
     )
     .expect("Up the Creek must jump from 0C's closing bank onto platform 161");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_695);
-    assert_eq!(survey.successful_spawns, 184);
-    assert_eq!(survey.spawn_attempts, 58_628);
-    assert_eq!(survey.expected_spawn_rejections, 58_444);
+    assert_eq!(survey.frames, 3_714);
+    assert_eq!(survey.successful_spawns, 188);
+    assert_eq!(survey.spawn_attempts, 58_835);
+    assert_eq!(survey.expected_spawn_rejections, 58_647);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 108_277);
+    assert_eq!(survey.executions, 109_362);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 33);
+    assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 47);
-    assert_eq!(survey.camera_path_changes, 52);
-    assert_eq!(survey.last_camera_path_change, 3_570);
-    assert_eq!(survey.last_camera_progress_change, 3_684);
-    assert_eq!(survey.last_player_movement, 3_695);
+    assert_eq!(survey.camera_path_changes, 54);
+    assert_eq!(survey.last_camera_path_change, 3_618);
+    assert_eq!(survey.last_camera_progress_change, 3_694);
+    assert_eq!(survey.last_player_movement, 3_709);
 
     let final_camera = survey
         .final_camera
@@ -24612,13 +24659,13 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
     assert_eq!(final_camera.progress.raw(), 13_312);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_268_808, 2_913_974, -3_835_216])
+        Some([2_267_052, 2_943_938, -3_836_000])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("platform 161 must keep Crash alive");
     assert_eq!(trace.zone, zero_d);
-    assert_eq!(trace.translation, [2_268_808, 2_913_974, -3_835_216]);
+    assert_eq!(trace.translation, [2_267_052, 2_943_938, -3_836_000]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
@@ -24626,35 +24673,35 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
     assert_eq!(
         spawned_entity_trace(&runtime, 161),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_149_888, 2_877_684, -3_891_200],
+            translation: [2_149_888, 2_907_648, -3_891_200],
             state: 12,
             path_progress: 0,
             status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 35);
+    assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&165));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_529));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&148));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_475));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24719,24 +24766,24 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform161Route,
-        3_782,
+        3_800,
     )
     .expect("Up the Creek must transfer from platform 161 to its paired platform 160");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_782);
-    assert_eq!(survey.successful_spawns, 184);
-    assert_eq!(survey.spawn_attempts, 60_020);
-    assert_eq!(survey.expected_spawn_rejections, 59_836);
+    assert_eq!(survey.frames, 3_800);
+    assert_eq!(survey.successful_spawns, 188);
+    assert_eq!(survey.spawn_attempts, 60_211);
+    assert_eq!(survey.expected_spawn_rejections, 60_023);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 111_091);
+    assert_eq!(survey.executions, 112_167);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 33);
+    assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 48);
-    assert_eq!(survey.camera_path_changes, 53);
-    assert_eq!(survey.last_camera_path_change, 3_753);
-    assert_eq!(survey.last_camera_progress_change, 3_771);
-    assert_eq!(survey.last_player_movement, 3_782);
+    assert_eq!(survey.camera_path_changes, 55);
+    assert_eq!(survey.last_camera_path_change, 3_762);
+    assert_eq!(survey.last_camera_progress_change, 3_780);
+    assert_eq!(survey.last_player_movement, 3_793);
 
     let final_camera = survey
         .final_camera
@@ -24751,13 +24798,13 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
     assert_eq!(final_camera.progress.raw(), 8_192);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_268_808, 2_926_391, -4_318_544])
+        Some([2_267_052, 2_943_938, -4_319_328])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("platform 160 must keep Crash alive");
     assert_eq!(trace.zone, zero_d);
-    assert_eq!(trace.translation, [2_268_808, 2_926_391, -4_318_544]);
+    assert_eq!(trace.translation, [2_267_052, 2_943_938, -4_319_328]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
@@ -24765,35 +24812,35 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
     assert_eq!(
         spawned_entity_trace(&runtime, 160),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_149_888, 2_890_101, -4_403_200],
+            translation: [2_149_888, 2_907_648, -4_403_200],
             state: 12,
             path_progress: 0,
             status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 35);
+    assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&168));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_595));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&151));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_539));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -24885,24 +24932,24 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform160Route,
-        3_860,
+        3_878,
     )
     .expect("Up the Creek must bounce from crate 162 onto 0E platform 8");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_860);
-    assert_eq!(survey.successful_spawns, 189);
-    assert_eq!(survey.spawn_attempts, 61_226);
-    assert_eq!(survey.expected_spawn_rejections, 61_037);
+    assert_eq!(survey.frames, 3_878);
+    assert_eq!(survey.successful_spawns, 193);
+    assert_eq!(survey.spawn_attempts, 61_408);
+    assert_eq!(survey.expected_spawn_rejections, 61_215);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 113_548);
+    assert_eq!(survey.executions, 114_711);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 34);
+    assert_eq!(survey.zone_transitions, 36);
     assert_eq!(survey.camera_ranges.len(), 50);
-    assert_eq!(survey.camera_path_changes, 55);
-    assert_eq!(survey.last_camera_path_change, 3_851);
-    assert_eq!(survey.last_camera_progress_change, 3_860);
-    assert_eq!(survey.last_player_movement, 3_859);
+    assert_eq!(survey.camera_path_changes, 57);
+    assert_eq!(survey.last_camera_path_change, 3_860);
+    assert_eq!(survey.last_camera_progress_change, 3_869);
+    assert_eq!(survey.last_player_movement, 3_868);
 
     let final_camera = survey
         .final_camera
@@ -24917,13 +24964,13 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
     assert_eq!(final_camera.progress.raw(), 4_352);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_207_368, 2_943_074, -5_414_224])
+        Some([2_205_612, 2_943_074, -5_415_008])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("0E platform 8 must keep Crash alive");
     assert_eq!(trace.zone, zero_e);
-    assert_eq!(trace.translation, [2_207_368, 2_943_074, -5_414_224]);
+    assert_eq!(trace.translation, [2_205_612, 2_943_074, -5_415_008]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 13);
     assert_eq!(trace.status_a, 2_099_209);
@@ -24938,29 +24985,29 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 35);
+    assert_eq!(survey.final_live_objects, 29);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&171));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_630));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&154));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_572));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_837, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_846, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -25040,24 +25087,24 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform8Route,
-        3_906,
+        3_923,
     )
     .expect("Up the Creek must settle on 0F's opening terrain bank");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_906);
-    assert_eq!(survey.successful_spawns, 192);
-    assert_eq!(survey.spawn_attempts, 61_904);
-    assert_eq!(survey.expected_spawn_rejections, 61_712);
+    assert_eq!(survey.frames, 3_923);
+    assert_eq!(survey.successful_spawns, 196);
+    assert_eq!(survey.spawn_attempts, 62_055);
+    assert_eq!(survey.expected_spawn_rejections, 61_859);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 115_097);
+    assert_eq!(survey.executions, 116_204);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 35);
+    assert_eq!(survey.zone_transitions, 38);
     assert_eq!(survey.camera_ranges.len(), 51);
-    assert_eq!(survey.camera_path_changes, 56);
-    assert_eq!(survey.last_camera_path_change, 3_900);
-    assert_eq!(survey.last_camera_progress_change, 3_906);
-    assert_eq!(survey.last_player_movement, 3_904);
+    assert_eq!(survey.camera_path_changes, 59);
+    assert_eq!(survey.last_camera_path_change, 3_923);
+    assert_eq!(survey.last_camera_progress_change, 3_923);
+    assert_eq!(survey.last_player_movement, 3_913);
 
     let final_camera = survey
         .final_camera
@@ -25065,58 +25112,50 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
     assert_eq!(
         final_camera.path,
         RetailPathId {
-            zone: zero_f,
-            index: 0,
+            zone: zero_e,
+            index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 2_048);
+    assert_eq!(final_camera.progress.raw(), 15_359);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_107_016, 3_002_869, -5_971_280])
+        Some([2_105_260, 3_002_869, -5_972_064])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("0F's opening bank must keep Crash alive");
     assert_eq!(trace.zone, zero_e);
-    assert_eq!(trace.translation, [2_107_016, 3_002_869, -5_971_280]);
+    assert_eq!(trace.translation, [2_105_260, 3_002_869, -5_972_064]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 395_265);
     assert_eq!(player_collider_entity(&runtime), Ok(None));
-    assert_eq!(
-        spawned_entity_trace(&runtime, 7),
-        Ok(Some(SpawnedEntityTrace {
-            translation: [-256, 1_792, 618_240],
-            state: 12,
-            path_progress: 0,
-            status_a: 0,
-        }))
-    );
+    assert_eq!(spawned_entity_trace(&runtime, 7), Ok(None));
 
-    assert_eq!(survey.final_live_objects, 30);
+    assert_eq!(survey.final_live_objects, 29);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&173));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_649));
-    assert_eq!(survey.effect_counts.get("reparent"), Some(&45));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&157));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_582));
+    assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_837, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_846, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -25235,24 +25274,24 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostZeroFBankRoute,
-        3_943,
+        3_953,
     )
     .expect("Up the Creek must clear entity 6 and land on 0F platform 12");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_943);
-    assert_eq!(survey.successful_spawns, 192);
-    assert_eq!(survey.spawn_attempts, 62_385);
-    assert_eq!(survey.expected_spawn_rejections, 62_193);
+    assert_eq!(survey.frames, 3_953);
+    assert_eq!(survey.successful_spawns, 196);
+    assert_eq!(survey.spawn_attempts, 62_445);
+    assert_eq!(survey.expected_spawn_rejections, 62_249);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 116_219);
+    assert_eq!(survey.executions, 117_260);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 35);
+    assert_eq!(survey.zone_transitions, 37);
     assert_eq!(survey.camera_ranges.len(), 52);
-    assert_eq!(survey.camera_path_changes, 57);
-    assert_eq!(survey.last_camera_path_change, 3_939);
-    assert_eq!(survey.last_camera_progress_change, 3_943);
-    assert_eq!(survey.last_player_movement, 3_942);
+    assert_eq!(survey.camera_path_changes, 59);
+    assert_eq!(survey.last_camera_path_change, 3_948);
+    assert_eq!(survey.last_camera_progress_change, 3_953);
+    assert_eq!(survey.last_player_movement, 3_951);
 
     let final_camera = survey
         .final_camera
@@ -25264,26 +25303,26 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 1_536);
+    assert_eq!(final_camera.progress.raw(), 1_280);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_254_472, 2_943_074, -6_573_392])
+        Some([2_252_716, 2_943_074, -6_574_176])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("0F platform 12 must keep Crash alive");
     assert_eq!(trace.zone, zero_f);
-    assert_eq!(trace.translation, [2_254_472, 2_943_074, -6_573_392]);
+    assert_eq!(trace.translation, [2_252_716, 2_943_074, -6_574_176]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 2);
+    assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(12)));
     assert_eq!(
         spawned_entity_trace(&runtime, 6),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_313_792, 2_949_120, -6_298_624],
+            translation: [2_018_464, 3_050_048, -6_298_624],
             state: 7,
-            path_progress: 2_384,
+            path_progress: 1_092,
             status_a: 0,
         }))
     );
@@ -25297,30 +25336,30 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 37);
+    assert_eq!(survey.final_live_objects, 29);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&176));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_652));
-    assert_eq!(survey.effect_counts.get("reparent"), Some(&45));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&159));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_586));
+    assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_837, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_846, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -25422,24 +25461,24 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::UpTheCreekPostPlatform12Route,
-        3_969,
+        3_986,
     )
     .expect("Up the Creek must transfer from platform 12 to orbiting platform 11");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 3_969);
-    assert_eq!(survey.successful_spawns, 192);
-    assert_eq!(survey.spawn_attempts, 62_723);
-    assert_eq!(survey.expected_spawn_rejections, 62_531);
+    assert_eq!(survey.frames, 3_986);
+    assert_eq!(survey.successful_spawns, 196);
+    assert_eq!(survey.spawn_attempts, 62_874);
+    assert_eq!(survey.expected_spawn_rejections, 62_678);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 117_181);
+    assert_eq!(survey.executions, 118_266);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 35);
+    assert_eq!(survey.zone_transitions, 37);
     assert_eq!(survey.camera_ranges.len(), 52);
-    assert_eq!(survey.camera_path_changes, 57);
-    assert_eq!(survey.last_camera_path_change, 3_939);
-    assert_eq!(survey.last_camera_progress_change, 3_968);
-    assert_eq!(survey.last_player_movement, 3_969);
+    assert_eq!(survey.camera_path_changes, 59);
+    assert_eq!(survey.last_camera_path_change, 3_948);
+    assert_eq!(survey.last_camera_progress_change, 3_986);
+    assert_eq!(survey.last_player_movement, 3_986);
 
     let final_camera = survey
         .final_camera
@@ -25451,24 +25490,24 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 13_024);
+    assert_eq!(final_camera.progress.raw(), 13_004);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_212_768, 3_003_522, -7_017_784])
+        Some([2_182_096, 3_003_522, -7_019_000])
     );
     assert_eq!(
         survey.player_minimum,
-        Some([1_911_632, 1_106_786, -7_017_860])
+        Some([1_919_376, 1_106_786, -7_019_000])
     );
     assert_eq!(
         survey.player_maximum,
-        Some([2_426_504, 3_294_856, 31_999_488])
+        Some([2_424_748, 3_294_856, 31_999_488])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("0F platform 11 must keep Crash alive");
     assert_eq!(trace.zone, zero_f);
-    assert_eq!(trace.translation, [2_212_768, 3_003_522, -7_017_784]);
+    assert_eq!(trace.translation, [2_182_096, 3_003_522, -7_019_000]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 13);
     assert_eq!(trace.status_a, 2_099_209);
@@ -25476,7 +25515,7 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
     assert_eq!(
         spawned_entity_trace(&runtime, 11),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_148_192, 2_961_920, -6_962_648],
+            translation: [2_141_856, 2_961_920, -6_956_840],
             state: 9,
             path_progress: 3_072,
             status_a: 131_076,
@@ -25486,36 +25525,36 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
         spawned_entity_trace(&runtime, 12),
         Ok(Some(SpawnedEntityTrace {
             translation: [2_149_632, 2_885_120, -6_554_368],
-            state: 4,
+            state: 1,
             path_progress: 0,
-            status_a: 0,
+            status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 37);
+    assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&178));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_655));
-    assert_eq!(survey.effect_counts.get("reparent"), Some(&45));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_596));
+    assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_837, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_846, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -25624,24 +25663,24 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     .expect("Up the Creek's authored WarpC must request Level Complete");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 4_173);
+    assert_eq!(survey.frames, 4_184);
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 4173 requested level transition to 0x2d")
+        Some("frame 4184 requested level transition to 0x2d")
     );
-    assert_eq!(survey.next_lid, Some((4_173, 0x2d)));
-    assert_eq!(survey.successful_spawns, 192);
-    assert_eq!(survey.spawn_attempts, 64_593);
-    assert_eq!(survey.expected_spawn_rejections, 64_401);
+    assert_eq!(survey.next_lid, Some((4_184, 0x2d)));
+    assert_eq!(survey.successful_spawns, 196);
+    assert_eq!(survey.spawn_attempts, 64_673);
+    assert_eq!(survey.expected_spawn_rejections, 64_477);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 122_183);
+    assert_eq!(survey.executions, 123_309);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 36);
+    assert_eq!(survey.zone_transitions, 38);
     assert_eq!(survey.camera_ranges.len(), 53);
-    assert_eq!(survey.camera_path_changes, 58);
-    assert_eq!(survey.last_camera_path_change, 4_018);
-    assert_eq!(survey.last_camera_progress_change, 4_084);
-    assert_eq!(survey.last_player_movement, 4_169);
+    assert_eq!(survey.camera_path_changes, 60);
+    assert_eq!(survey.last_camera_path_change, 4_029);
+    assert_eq!(survey.last_camera_progress_change, 4_095);
+    assert_eq!(survey.last_player_movement, 4_180);
 
     let final_camera = survey
         .final_camera
@@ -25653,24 +25692,24 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 23_500);
+    assert_eq!(final_camera.progress.raw(), 23_481);
     assert_eq!(
         survey.final_player_translation,
-        Some([1_988_128, 6_579_277, -8_133_248])
+        Some([1_988_960, 6_579_277, -8_132_480])
     );
     assert_eq!(
         survey.player_minimum,
-        Some([1_911_632, 1_106_786, -8_133_248])
+        Some([1_919_376, 1_106_786, -8_132_480])
     );
     assert_eq!(
         survey.player_maximum,
-        Some([2_428_716, 6_579_277, 31_999_488])
+        Some([2_424_748, 6_579_277, 31_999_488])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek completion player trace must resolve")
         .expect("WarpC must retain Crash through the Level Complete request");
     assert_eq!(trace.zone, zero_g);
-    assert_eq!(trace.translation, [1_988_128, 6_579_277, -8_133_248]);
+    assert_eq!(trace.translation, [1_988_960, 6_579_277, -8_132_480]);
     assert_eq!(trace.velocity, [0, 5_108_000, -614_400]);
     assert_eq!(trace.state, 32);
     assert_eq!(trace.status_a, 8);
@@ -25687,7 +25726,7 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert_eq!(
         spawned_entity_trace(&runtime, 22),
         Ok(Some(SpawnedEntityTrace {
-            translation: [1_862_616, 3_179_610, -7_578_649],
+            translation: [1_894_162, 3_214_787, -7_643_139],
             state: 1,
             path_progress: 1_370,
             status_a: 133_128,
@@ -25696,7 +25735,7 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert_eq!(
         spawned_entity_trace(&runtime, 23),
         Ok(Some(SpawnedEntityTrace {
-            translation: [1_988_128, 6_943_129, -8_133_248],
+            translation: [1_988_960, 6_943_129, -8_132_480],
             state: 1,
             path_progress: 0,
             status_a: 0,
@@ -25709,9 +25748,9 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert_eq!(survey.save_handshakes, 0);
     assert_eq!(survey.death_camera_frames, 0);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&180));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_743));
-    assert_eq!(survey.effect_counts.get("reparent"), Some(&45));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&165));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_677));
+    assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(
@@ -25720,18 +25759,18 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_835, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_846, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
     for state in 0..=4 {
         assert!(
             survey.observed_program_states.contains(&(warp, state)),
@@ -25744,7 +25783,7 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
-    assert_eq!(runtime.draw_count(), 4_173);
+    assert_eq!(runtime.draw_count(), 4_184);
     assert!(
         survey.is_clean(),
         "Up the Creek completion route must remain clean: {}",
@@ -25884,31 +25923,31 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         up_runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::UpTheCreekCompletionRoute,
-        4_300,
+        4_700,
     )
     .expect("carried Up the Creek route must execute");
-    assert_eq!(up_survey.frames, 4_188);
+    assert_eq!(up_survey.frames, 4_319);
     assert_eq!(
         up_survey.terminal.as_deref(),
-        Some("frame 4188 requested level transition to 0x2d")
+        Some("frame 4319 requested level transition to 0x2d")
     );
-    assert_eq!(up_survey.next_lid, Some((4_188, 0x2d)));
+    assert_eq!(up_survey.next_lid, Some((4_319, 0x2d)));
     assert_eq!(up_survey.final_live_objects, 22);
-    assert_eq!(up_survey.max_live_objects, 47);
+    assert_eq!(up_survey.max_live_objects, 46);
     assert_eq!(up_survey.successful_spawns, 192);
-    assert_eq!(up_survey.spawn_attempts, 64_848);
-    assert_eq!(up_survey.expected_spawn_rejections, 64_656);
+    assert_eq!(up_survey.spawn_attempts, 66_656);
+    assert_eq!(up_survey.expected_spawn_rejections, 66_464);
     assert_eq!(up_survey.unexpected_spawn_errors, 0);
-    assert_eq!(up_survey.executions, 122_894);
+    assert_eq!(up_survey.executions, 125_472);
     assert_eq!(up_survey.execution_errors, 0);
     assert_eq!(up_survey.zone_transitions, 36);
     assert_eq!(up_survey.restarts, 0);
     assert!(up_survey.restart_frames.is_empty());
     assert_eq!(up_survey.save_handshakes, 0);
     assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(up_survey.effect_counts.get("send-event"), Some(&189));
-    assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_758));
-    assert_eq!(up_survey.effect_counts.get("reparent"), Some(&51));
+    assert_eq!(up_survey.effect_counts.get("send-event"), Some(&180));
+    assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_688));
+    assert_eq!(up_survey.effect_counts.get("reparent"), Some(&49));
     assert_eq!(up_survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(up_survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(
@@ -25917,21 +25956,21 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
             (1, 0),
             (69, 0x100),
             (76, 0x200),
-            (903, 0x300),
-            (921, 0x400),
-            (1_185, 0x500),
-            (1_811, 0x600),
-            (3_850, 0x700),
+            (964, 0x300),
+            (982, 0x400),
+            (1_246, 0x500),
+            (1_878, 0x600),
+            (3_981, 0x700),
         ]
     );
     assert_eq!(
         up_survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (1_185, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+            (1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
         ]
     );
-    assert_eq!(up_survey.saved_box_count_samples, [(1_185, 0x400)]);
+    assert_eq!(up_survey.saved_box_count_samples, [(1_246, 0x400)]);
     assert!(
         up_survey.is_clean(),
         "carried Up the Creek route must remain clean: {}",
@@ -25941,9 +25980,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| up_runtime.global_word(index).unwrap()),
         [0x500, 15, 15, 10, 10, 11, 0]
     );
-    assert_eq!(up_runtime.machine().random_seed(), 0xb034_ae64);
+    assert_eq!(up_runtime.machine().random_seed(), 0x6fd2_e612);
     assert_eq!(up_runtime.random_seed_b(), 0);
-    assert_eq!(up_runtime.draw_count(), 4_319);
+    assert_eq!(up_runtime.draw_count(), 4_450);
     assert_eq!(up_runtime.card_save_data(), Ok(card_save));
     let completion_carry = {
         let mut host = NsfProgramHost::new(&up_nsd, &up_nsf, &up_nsf_bytes);
@@ -25964,9 +26003,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
             TRACKED_GLOBALS.map(|index| report.carry.globals[index]),
             [0x500, 15, 15, 10, 10, 11, 0]
         );
-        assert_eq!(report.carry.random_seed, 0xb034_ae64);
+        assert_eq!(report.carry.random_seed, 0x6fd2_e612);
         assert_eq!(report.carry.random_seed_b(), 0);
-        assert_eq!(report.carry.draw_count, 4_319);
+        assert_eq!(report.carry.draw_count, 4_450);
         report.carry
     };
 
@@ -25979,9 +26018,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| completion_runtime.global_word(index).unwrap()),
         [0x500, 15, 15, 10, 10, 11, 0]
     );
-    assert_eq!(completion_runtime.machine().random_seed(), 0xb034_ae64);
+    assert_eq!(completion_runtime.machine().random_seed(), 0x6fd2_e612);
     assert_eq!(completion_runtime.random_seed_b(), 0);
-    assert_eq!(completion_runtime.draw_count(), 4_319);
+    assert_eq!(completion_runtime.draw_count(), 4_450);
     assert_eq!(completion_runtime.card_save_data(), Ok(card_save));
     let (completion_survey, mut completion_runtime) = survey_pair_with_runtime(
         "Level Complete",
@@ -26045,9 +26084,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| completion_runtime.global_word(index).unwrap()),
         [0x300, 15, 15, 10, 10, 11, 0]
     );
-    assert_eq!(completion_runtime.machine().random_seed(), 0xee4f_2ec4);
+    assert_eq!(completion_runtime.machine().random_seed(), 0x54a6_d572);
     assert_eq!(completion_runtime.random_seed_b(), 0);
-    assert_eq!(completion_runtime.draw_count(), 4_504);
+    assert_eq!(completion_runtime.draw_count(), 4_635);
     assert_eq!(completion_runtime.card_save_data(), Ok(card_save));
     let title_carry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -26068,9 +26107,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
             TRACKED_GLOBALS.map(|index| report.carry.globals[index]),
             [0x300, 15, 15, 10, 10, 11, 0]
         );
-        assert_eq!(report.carry.random_seed, 0xee4f_2ec4);
+        assert_eq!(report.carry.random_seed, 0x54a6_d572);
         assert_eq!(report.carry.random_seed_b(), 0);
-        assert_eq!(report.carry.draw_count, 4_504);
+        assert_eq!(report.carry.draw_count, 4_635);
         report.carry
     };
 
@@ -26095,9 +26134,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| post_map.runtime.global_word(index).unwrap()),
         [0x300, 15, 15, 10, 10, 11, 1]
     );
-    assert_eq!(post_map.runtime.machine().random_seed(), 0xee4f_2ec4);
+    assert_eq!(post_map.runtime.machine().random_seed(), 0x54a6_d572);
     assert_eq!(post_map.runtime.random_seed_b(), 0);
-    assert_eq!(post_map.runtime.draw_count(), 4_514);
+    assert_eq!(post_map.runtime.draw_count(), 4_645);
     assert_eq!(post_map.runtime.card_save_data(), Ok(card_save));
     assert_eq!(post_map.runtime.faulted_object_count(), 0);
     for _ in 0..120 {
@@ -26123,9 +26162,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| post_map.runtime.global_word(index).unwrap()),
         [0, 15, 15, 11, 10, 11, 1]
     );
-    assert_eq!(post_map.runtime.machine().random_seed(), 0x9485_8965);
+    assert_eq!(post_map.runtime.machine().random_seed(), 0x76fa_8d58);
     assert_eq!(post_map.runtime.random_seed_b(), 0);
-    assert_eq!(post_map.runtime.draw_count(), 4_757);
+    assert_eq!(post_map.runtime.draw_count(), 4_888);
     assert_eq!(post_map.runtime.card_save_data(), Ok(card_save));
     assert_eq!(post_map.runtime.faulted_object_count(), 0);
     assert_eq!(
@@ -26155,9 +26194,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
             TRACKED_GLOBALS.map(|index| report.carry.globals[index]),
             [0, 15, 15, 11, 10, 11, 1]
         );
-        assert_eq!(report.carry.random_seed, 0x9485_8965);
+        assert_eq!(report.carry.random_seed, 0x76fa_8d58);
         assert_eq!(report.carry.random_seed_b(), 0);
-        assert_eq!(report.carry.draw_count, 4_757);
+        assert_eq!(report.carry.draw_count, 4_888);
         report.carry
     };
     let (ripper_nsd, ripper_nsf, ripper_nsf_bytes) =
@@ -26168,9 +26207,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| ripper_runtime.global_word(index).unwrap()),
         [0, 15, 15, 11, 10, 11, 0]
     );
-    assert_eq!(ripper_runtime.machine().random_seed(), 0x9485_8965);
+    assert_eq!(ripper_runtime.machine().random_seed(), 0x76fa_8d58);
     assert_eq!(ripper_runtime.random_seed_b(), 0);
-    assert_eq!(ripper_runtime.draw_count(), 4_757);
+    assert_eq!(ripper_runtime.draw_count(), 4_888);
     assert_eq!(ripper_runtime.card_save_data(), Ok(card_save));
     let (ripper_survey, mut ripper_runtime) = survey_pair_with_runtime(
         "Ripper Roo",
@@ -26196,7 +26235,7 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
     assert_eq!(ripper_survey.spawn_attempts, 10_320);
     assert_eq!(ripper_survey.expected_spawn_rejections, 10_315);
     assert_eq!(ripper_survey.unexpected_spawn_errors, 0);
-    assert_eq!(ripper_survey.executions, 46_671);
+    assert_eq!(ripper_survey.executions, 46_690);
     assert_eq!(ripper_survey.execution_errors, 0);
     assert_eq!(ripper_survey.zone_transitions, 0);
     assert_eq!(ripper_survey.restarts, 0);
@@ -26234,7 +26273,7 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
     );
     assert_eq!(
         ripper_survey.entity_counter_samples,
-        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_866, 8, 3)]
+        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_868, 8, 3)]
     );
     let crash = Eid::from_name("WillC").expect("fixed Crash program EID is valid");
     let roo = Eid::from_name("RooOC").expect("fixed RooOC EID is valid");
@@ -26247,26 +26286,26 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         })
         .map(|sample| sample.frame)
         .collect::<BTreeSet<_>>();
-    assert_eq!(activation_frames, [919, 1_371, 1_785].into_iter().collect());
+    assert_eq!(activation_frames, [919, 1_371, 1_787].into_iter().collect());
     let boss_event_frames = ripper_survey
         .direct_send_program_samples
         .iter()
         .filter(|sample| sample.event == 0x300 && sample.recipient == Some(ripper))
         .map(|sample| sample.frame)
         .collect::<BTreeSet<_>>();
-    for frame in [999, 1_451, 1_865] {
+    for frame in [999, 1_451, 1_867] {
         assert!(boss_event_frames.contains(&frame));
     }
     assert_eq!(ripper_survey.effect_counts.get("transition"), Some(&1));
-    assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&84));
-    assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&83));
+    assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&106));
+    assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&107));
     assert_eq!(
         TRACKED_GLOBALS.map(|index| ripper_runtime.global_word(index).unwrap()),
         [0x300, 15, 15, 11, 10, 12, 0]
     );
-    assert_eq!(ripper_runtime.machine().random_seed(), 0xd8e0_6bf8);
+    assert_eq!(ripper_runtime.machine().random_seed(), 0x57e2_f952);
     assert_eq!(ripper_runtime.random_seed_b(), 0);
-    assert_eq!(ripper_runtime.draw_count(), 6_821);
+    assert_eq!(ripper_runtime.draw_count(), 6_952);
     assert_eq!(ripper_runtime.card_save_data(), Ok(card_save));
 
     let ripper_title_report = {
@@ -26289,9 +26328,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| ripper_title_report.carry.globals[index]),
         [0x300, 15, 15, 11, 10, 12, 0]
     );
-    assert_eq!(ripper_title_report.carry.random_seed, 0xd8e0_6bf8);
+    assert_eq!(ripper_title_report.carry.random_seed, 0x57e2_f952);
     assert_eq!(ripper_title_report.carry.random_seed_b(), 0);
-    assert_eq!(ripper_title_report.carry.draw_count, 6_821);
+    assert_eq!(ripper_title_report.carry.draw_count, 6_952);
 
     let mut post_ripper_map = AuthoredTitleMapHarness::from_session(
         &title_nsd,
@@ -26314,9 +26353,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| post_ripper_map.runtime.global_word(index).unwrap()),
         [0x300, 15, 15, 11, 10, 12, 1]
     );
-    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xd8e0_6bf8);
+    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0x57e2_f952);
     assert_eq!(post_ripper_map.runtime.random_seed_b(), 0);
-    assert_eq!(post_ripper_map.runtime.draw_count(), 6_831);
+    assert_eq!(post_ripper_map.runtime.draw_count(), 6_962);
     assert_eq!(post_ripper_map.runtime.card_save_data(), Ok(card_save));
     assert_eq!(post_ripper_map.runtime.faulted_object_count(), 0);
     for _ in 0..120 {
@@ -26342,9 +26381,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| post_ripper_map.runtime.global_word(index).unwrap()),
         [0, 15, 15, 12, 10, 12, 1]
     );
-    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xfd30_c210);
+    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xd0eb_d795);
     assert_eq!(post_ripper_map.runtime.random_seed_b(), 0);
-    assert_eq!(post_ripper_map.runtime.draw_count(), 7_074);
+    assert_eq!(post_ripper_map.runtime.draw_count(), 7_205);
     assert_eq!(post_ripper_map.runtime.card_save_data(), Ok(card_save));
     assert_eq!(post_ripper_map.runtime.faulted_object_count(), 0);
     assert_eq!(
@@ -26375,9 +26414,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
             TRACKED_GLOBALS.map(|index| report.carry.globals[index]),
             [0, 15, 15, 12, 10, 12, 1]
         );
-        assert_eq!(report.carry.random_seed, 0xfd30_c210);
+        assert_eq!(report.carry.random_seed, 0xd0eb_d795);
         assert_eq!(report.carry.random_seed_b(), 0);
-        assert_eq!(report.carry.draw_count, 7_074);
+        assert_eq!(report.carry.draw_count, 7_205);
         report.carry
     };
     let (_lost_city_nsd, _lost_city_nsf, _lost_city_nsf_bytes) =
@@ -26389,9 +26428,9 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
         TRACKED_GLOBALS.map(|index| lost_city_runtime.global_word(index).unwrap()),
         [0, 15, 15, 12, 10, 12, 0]
     );
-    assert_eq!(lost_city_runtime.machine().random_seed(), 0xfd30_c210);
+    assert_eq!(lost_city_runtime.machine().random_seed(), 0xd0eb_d795);
     assert_eq!(lost_city_runtime.random_seed_b(), 0);
-    assert_eq!(lost_city_runtime.draw_count(), 7_074);
+    assert_eq!(lost_city_runtime.draw_count(), 7_205);
     assert_eq!(lost_city_runtime.card_save_data(), Ok(card_save));
     assert_eq!(lost_city_runtime.faulted_object_count(), 0);
 }

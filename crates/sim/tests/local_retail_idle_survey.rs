@@ -26236,9 +26236,12 @@ fn ripper_roo_ordinary_pad_completion_route() {
         [(2, 8, 0), (152, 8, 1), (1_932, 8, 2)],
         "the authored boss must progress from setup through combat and defeat"
     );
+    // Matching the native transform-vector writeback order delays only the third
+    // excursion: Crash arms the TNT at 1787, RooOC starts its event cluster at
+    // 1867, and the counter is visible to the following pre-frame sample at 1868.
     assert_eq!(
         survey.entity_counter_samples,
-        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_867, 8, 3),],
+        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_868, 8, 3),],
         "only RooOC's authored explosion event may advance Ripper Roo's hit counter"
     );
 
@@ -26255,7 +26258,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         activation_frames,
-        [919, 1_371, 1_786].into_iter().collect(),
+        [919, 1_371, 1_787].into_iter().collect(),
         "the route must arm the authored TNT objects through Crash collision events"
     );
     let boss_event_frames = survey
@@ -26264,7 +26267,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .filter(|sample| sample.event == 0x300 && sample.recipient == Some(ripper))
         .map(|sample| sample.frame)
         .collect::<BTreeSet<_>>();
-    for frame in [999, 1_451, 1_866] {
+    for frame in [999, 1_451, 1_867] {
         assert!(
             boss_event_frames.contains(&frame),
             "missing authored RooOC-to-RRooC event cluster at frame {frame}: {boss_event_frames:?}"

@@ -183,6 +183,145 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn boulder_dash_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x13);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Boulder Dash");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Boulder Dash pair must parse");
+    let graph = graph_for_pair(level, &nsd, &nsf, &nsf_bytes)
+        .expect("Boulder Dash's zone graph must parse");
+    let (zones, _) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, level)
+        .expect("Boulder Dash's zones must parse");
+    let end_zone = Eid::from_name("0a_jZ").expect("fixed Boulder Dash end-zone EID is valid");
+    let warp_entity = zones[&end_zone]
+        .entities
+        .iter()
+        .find(|entity| entity.id == 156)
+        .expect("0a must serialize the normal end WarpC");
+    assert_eq!(
+        (
+            warp_entity.executable,
+            warp_entity.subtype,
+            warp_entity.group,
+        ),
+        (32, 1, 3)
+    );
+
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::BoulderDashCompletionRoute,
+        3_100,
+    )
+    .expect("Boulder Dash's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 3_085, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((3_085, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3085 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.zone_transitions, 38);
+    assert_eq!(survey.camera_ranges.len(), 71);
+    assert_eq!(survey.camera_path_changes, 70);
+    assert_eq!(survey.last_camera_path_change, 2_925);
+    let final_camera = survey
+        .final_camera
+        .expect("Boulder Dash must retain the end-zone camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: end_zone,
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 20_479);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (734, 20_224, [2_303_232, 6_861_568, -5_171_968]),
+            (1_637, 26_112, [2_201_600, 4_095_488, 11_007_232]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (717, 0x100),
+            (734, 0x200),
+            (749, 0x300),
+            (757, 0x400),
+            (766, 0x500),
+            (1_637, 0x600),
+            (1_659, 0x700),
+        ]
+    );
+    assert_eq!(
+        survey.saved_box_count_samples,
+        [(734, 0x100), (1_637, 0x500)]
+    );
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.observed_player_states.contains(&32));
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_DOWN)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_242_624, 4_753_692, 32_124_160])
+    );
+    let player = player_trace(&runtime)
+        .expect("Boulder Dash completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [2_242_624, 4_753_692, 32_124_160]);
+    assert_eq!(runtime.draw_count(), 3_085);
+    assert!(
+        survey.is_clean(),
+        "Boulder Dash end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn high_road_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -274,6 +413,7 @@ enum SurveyInputProfile {
     GreatGateYellowGemExactCarry,
     LocalPbakPrefix,
     BouldersCompletionRoute,
+    BoulderDashCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
@@ -333,6 +473,7 @@ impl SurveyInputProfile {
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
+            Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -378,6 +519,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
                 | Self::BouldersCompletionRoute
+                | Self::BoulderDashCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
@@ -10075,6 +10217,128 @@ impl BouldersCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Boulder Dash from a fresh
+/// level boot through its normal `WarpC` transition. The route contains no
+/// state injection or proprietary recording data: each entry is an inclusive
+/// frame window and the retail pad bits held during that window.
+struct BoulderDashCompletionRouteController;
+
+impl BoulderDashCompletionRouteController {
+    fn held(frame: u32) -> u32 {
+        const ALTERNATING_STEERING: &[(u32, u32, u32, u32)] = &[
+            (1_050, 1_130, 6, 0),
+            (1_150, 1_200, 12, 0),
+            (1_215, 1_225, 12, 0),
+            (1_250, 1_265, 16, 0),
+            (1_260, 1_270, 10, 0),
+            (1_300, 1_320, 6, 6),
+            (1_495, 1_524, 7, 7),
+        ];
+        const ROUTE_INPUTS: &[(u32, u32, u32)] = &[
+            (890, 905, PAD_RIGHT),
+            (936, 939, PAD_RIGHT),
+            (964, 969, PAD_RIGHT),
+            (969, 969, PAD_CROSS),
+            (970, 981, PAD_LEFT),
+            (1_030, 1_030, PAD_SQUARE),
+            (1_482, 1_482, PAD_CROSS),
+            (1_486, 1_494, PAD_RIGHT),
+            (1_519, 1_519, PAD_CROSS),
+            (1_525, 1_532, PAD_LEFT),
+            (1_533, 1_536, PAD_RIGHT),
+            (1_541, 1_541, PAD_CROSS),
+            (1_595, 1_613, PAD_LEFT),
+            (1_602, 1_602, PAD_CROSS),
+            (1_635, 1_635, PAD_SQUARE),
+            (1_636, 1_665, PAD_RIGHT),
+            (1_651, 1_651, PAD_SQUARE),
+            (1_875, 1_875, PAD_CROSS),
+            (2_077, 2_077, PAD_SQUARE),
+            (2_098, 2_098, PAD_SQUARE),
+            (2_106, 2_115, PAD_RIGHT),
+            (2_180, 2_180, PAD_CROSS),
+            (2_197, 2_197, PAD_LEFT),
+            (2_199, 2_199, PAD_LEFT),
+            (2_209, 2_209, PAD_CROSS),
+            (2_256, 2_256, PAD_CROSS),
+            (2_260, 2_263, PAD_RIGHT),
+            (2_271, 2_271, PAD_LEFT),
+            (2_288, 2_288, PAD_CROSS),
+            (2_317, 2_317, PAD_CROSS),
+            (2_318, 2_318, PAD_LEFT),
+            (2_320, 2_320, PAD_LEFT),
+            (2_344, 2_344, PAD_CROSS),
+            (2_345, 2_345, PAD_RIGHT),
+            (2_347, 2_347, PAD_RIGHT),
+            (2_362, 2_362, PAD_LEFT),
+            (2_380, 2_380, PAD_CROSS),
+            (2_381, 2_381, PAD_RIGHT),
+            (2_383, 2_383, PAD_RIGHT),
+            (2_385, 2_385, PAD_RIGHT),
+            (2_387, 2_387, PAD_RIGHT),
+            (2_389, 2_389, PAD_RIGHT),
+            (2_391, 2_391, PAD_RIGHT),
+            (2_393, 2_393, PAD_RIGHT),
+            (2_395, 2_395, PAD_RIGHT),
+            (2_402, 2_402, PAD_CROSS),
+            (2_403, 2_405, PAD_LEFT),
+            (2_462, 2_462, PAD_CROSS),
+            (2_463, 2_465, PAD_RIGHT),
+            (2_520, 2_520, PAD_CROSS),
+            (2_565, 2_565, PAD_CROSS),
+            (2_580, 2_580, PAD_LEFT),
+            (2_581, 2_586, PAD_RIGHT),
+            (2_615, 2_615, PAD_CROSS),
+            (2_628, 2_633, PAD_LEFT),
+            (2_656, 2_656, PAD_CROSS),
+            (2_760, 2_760, PAD_CROSS),
+            (2_792, 2_792, PAD_CROSS),
+            (2_793, 2_796, PAD_LEFT),
+            (2_826, 2_826, PAD_CROSS),
+            (2_831, 2_834, PAD_RIGHT),
+            (2_857, 2_857, PAD_CROSS),
+            (2_870, 2_871, PAD_LEFT),
+            (2_888, 2_888, PAD_CROSS),
+            (2_917, 2_917, PAD_CROSS),
+            // Align the final landing with entity 156's normal WarpC lane.
+            (2_946, 2_949, PAD_RIGHT),
+            (2_955, 2_955, PAD_CROSS),
+            (2_982, 2_982, PAD_CROSS),
+        ];
+
+        let mut held = PAD_DOWN;
+        if ((187..=435).contains(&frame) && frame.wrapping_add(30).is_multiple_of(31))
+            || ((449..=585).contains(&frame) && frame.wrapping_add(27).is_multiple_of(34))
+            || ((612..=1_452).contains(&frame) && frame.wrapping_add(18).is_multiple_of(30))
+            || frame == 664
+        {
+            held |= PAD_CROSS;
+        }
+        if (720..=1_019).contains(&frame) && frame.is_multiple_of(12) {
+            held |= PAD_SQUARE;
+        }
+        for &(start, end, block, phase) in ALTERNATING_STEERING {
+            if (start..=end).contains(&frame) {
+                held |= if frame
+                    .wrapping_add(phase)
+                    .wrapping_div(block)
+                    .is_multiple_of(2)
+                {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+        }
+        for &(start, end, buttons) in ROUTE_INPUTS {
+            if (start..=end).contains(&frame) {
+                held |= buttons;
+            }
+        }
+        held
+    }
+}
+
 const UPSTREAM_PBAK_FRAMES: u32 = 934;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -14794,6 +15058,9 @@ impl SurveyInputController {
             SurveyInputProfile::BouldersCompletionRoute => {
                 self.boulders.held(frame, camera, player, local_pbak_held)
             }
+            SurveyInputProfile::BoulderDashCompletionRoute => {
+                BoulderDashCompletionRouteController::held(frame)
+            }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {
                     local_pbak_held
@@ -17307,6 +17574,7 @@ fn survey_pair_with_runtime(
         if matches!(
             input_profile,
             SurveyInputProfile::RollingStonesCheckpoint
+                | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
                 | SurveyInputProfile::WholeHogCompletionRoute
                 | SurveyInputProfile::RipperRooCompletionRoute

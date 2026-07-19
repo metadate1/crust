@@ -346,6 +346,15 @@ through four and requests Level Complete `0x2d` on frame 3,085. The route covers
 LoadState, VM fault, faulted object, or execution error. Its final camera is
 `0a_jZ:0@20479`, and Crash remains live in warp state 32 at
 `[2242624, 4753692, 32124160]`.
+Jungle Rollers now has a complete fresh-boot ordinary-pad route that includes the reported failure
+case. Holding Up produces the authored opening terminal fall on frame 190 and its sole LoadState
+restart on frame 200. The respawned Crash breaks the first Aku crate on frames 269–270, observes
+the surviving DoctC mask in collected/following state one, then rejoins the normal path. Checkpoint
+46 saves on frame 1,904, the live box count reaches `0xc00`, and `0O_cZ`'s WarpC executes states
+zero through four before requesting Level Complete `0x2d` on frame 3,391. The final camera is
+`0O_cZ:0@17836`, Crash remains live in state 32 at `[2193152, 7732275, -2147072]`, and RNG is
+`0x085c5705` at draw 3,191. The run has no unexpected spawn error, execution error, faulted object,
+or checked issue, and `LEVEL_END` resolves cleanly to Level Complete.
 Native Fortress now has one authoritative ordinary-pad route from the opening grease platforms
 through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher
 sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted controller crosses

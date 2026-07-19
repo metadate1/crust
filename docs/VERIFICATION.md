@@ -686,13 +686,19 @@ legally local data:
   frame-start world/filter membership plus per-object live Pager replay, including same-slot
   `A → B → A`: cached A regions survive, uncached regions follow the current mapping, and returning
   A reuses its frozen generation.
-- A legally local Jungle Rollers regression drives an authored death and same-level restart, breaks
-  the first Aku Aku crate afterward, and verifies that the crate is gone and the surviving null-zone
-  `DoctC` object accepts the pickup. The checked Doctor global still names executable five in state
-  one with animation offset zero and all five live texture bindings. This catches the stale-collider
-  regression that previously made Aku uncollectable after death. A clean browser replay of the same
-  sequence rendered both textured mask-face primitives from the object's live display-boundary Pager
-  snapshot, with no skipped primitive or runtime fault.
+- A complete legally local Jungle Rollers ordinary-pad route now includes the reported post-death
+  Aku case. Holding Up enters the authored `0c_cZ` terminal fall in state 22 on frame 190 and
+  performs the sole LoadState restart on frame 200. The respawned Crash breaks the first Aku crate
+  on frames 269–270; the crate disappears and the surviving null-zone `DoctC` enters its
+  collected/following state one. Checkpoint 46 activates on frame 1,904 with source-ordered saved
+  box count `0x400`; live boxes reach `0xc00`. `0O_cZ`'s WarpC executes states zero through four
+  and requests Level Complete `0x2d` on frame 3,391. The final camera is `0O_cZ:0@17836`, Crash
+  remains live in state 32 at `[2193152, 7732275, -2147072]`, and RNG is `0x085c5705` at draw
+  3,191. There is no unexpected spawn error, execution error, faulted object, or checked issue;
+  `LEVEL_END` resolves cleanly to Level Complete. This route directly catches the stale-collider
+  regression that previously made Aku uncollectable after death. A clean browser replay of the
+  pickup sequence separately rendered both textured mask-face primitives from the object's live
+  display-boundary Pager snapshot, with no skipped primitive or runtime fault.
 - Normal and hard-restart transitions were audited for old-protection TERM handling, idempotent
   closes, VM/Pager reference reconciliation, and no-core title/special-stream seeding. Normal
   transitions install destination protection before close/open work; hard restart retains old
@@ -1365,8 +1371,8 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,093 tests: 958 default-active and 135
-  legally-local ignored tests. The complete 958-test default gate and the complete 135-test
+- The locked all-target workspace currently enumerates 1,094 tests: 958 default-active and 136
+  legally-local ignored tests. The complete 958-test default gate and the complete 136-test
   owned-data sweep pass with zero failures, including the complete Native Fortress and Up the
   Creek route goldens. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm

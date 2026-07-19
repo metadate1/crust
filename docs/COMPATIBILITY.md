@@ -662,6 +662,16 @@ gameplay path.
   queued placeholder, and retains ignored handler failures as browser-visible diagnostics.
   Native process-global smooth-stop memory and the bounds-invalidated `cur_zone_query` cache are
   shared across objects and frames and reset together at `LevelInitMisc`.
+  Jungle Rollers now has a complete fresh-boot ordinary-pad route through its normal WarpC that
+  directly includes the reported post-death Aku case. It enters the authored opening terminal fall
+  on frame 190, performs its sole LoadState restart on frame 200, breaks the first Aku crate on
+  frames 269–270, and observes the surviving null-zone DoctC in collected/following state one.
+  Checkpoint 46 activates on frame 1,904 with source-ordered saved box count `0x400`; the live count
+  reaches `0xc00`. `0O_cZ`'s WarpC executes states zero through four and requests Level Complete
+  `0x2d` on frame 3,391. The final camera is `0O_cZ:0@17836`, Crash remains live in state 32 at
+  `[2193152, 7732275, -2147072]`, and RNG is `0x085c5705` at draw 3,191. There is no unexpected
+  spawn error, execution error, faulted object, or checked issue, and its `LEVEL_END` resolves
+  cleanly to Level Complete.
   Native Fortress has one authoritative exact ordinary-pad route through the grease segment,
   `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher sequence.
   It reaches a clean `c6_qZ` checkpoint on frame 2,548, then continues through the `c7`/`c8` wall
@@ -721,9 +731,10 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Ten deterministic retail-authored levels now reach their real end warps and request Level
-  Complete, including the independent Hog Wild, Whole Hog, Boulder Dash, Native Fortress, and
-  Rolling Stones routes. The carried chain executes the complete legally local Upstream PBAK input,
+- Eleven deterministic retail-authored levels now reach their real end warps and request Level
+  Complete, including the independent Jungle Rollers, Hog Wild, Whole Hog, Boulder Dash, Native
+  Fortress, and Rolling Stones routes. The carried chain executes the complete legally local
+  Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
   carries Rolling Stones from the post-boss Map handoff through its normal end. The independent
   Rolling Stones direct boot reaches the same end on its own deterministic phase.

@@ -331,6 +331,13 @@ from 5,857 attempts with 5,818 expected rejections and 24,311 clean executions, 
 LoadState, fatal-surface state, death camera, terminal fall, VM fault, execution error, or checked
 issue. Its RNG is `0xc3448148` at draw 1,950. A separate strict idle characterization pins the
 authored fall/load-state cadence at frames 178 and 355.
+Whole Hog now has a complete direct-boot ordinary-pad route as well. It traverses 62 camera paths,
+advances live boxes to `0xa00`, observes WarpC states zero through four, and requests Level
+Complete `0x2d` on frame 1,785. The route performs 43 successful spawns from 6,199 attempts with
+6,156 expected rejections and 23,436 clean executions, with no restart, LoadState, fatal-surface
+state, death camera, terminal fall, VM fault, execution error, or checked issue. Its final camera
+is `1M_uZ:0@10239`, Crash reaches `1O_uZ` in warp state 32 at
+`[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` at draw 1,785.
 Native Fortress now has one authoritative ordinary-pad route from the opening grease platforms
 through `a7_qZ`/`a8_qZ`, the rotating-log banks, both plant hazards, and the `c0`–`c5` launcher
 sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted controller crosses

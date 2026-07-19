@@ -1251,6 +1251,14 @@ is 1,322,866 bytes with SHA-256
   1,950 draws. It has no restart, LoadState, fatal-surface state 39, death camera, below-zero or
   terminal fall, VM fault, execution error, or checked issue. A separate 360-frame idle route pins
   its authored restart frames at 178 and 355.
+- Whole Hog (`0x1e`) has a complete direct-boot route using ordinary 30 Hz pad words. It traverses
+  62 camera paths/61 changes and 51 lifecycle transitions, advances live boxes to `0xa00`,
+  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 1,785. It
+  records 43 successful spawns, 6,199 attempts, 6,156 source-expected rejections, and 23,436 clean
+  executions. The final camera is `1M_uZ:0@10239`; Crash reaches `1O_uZ` in warp state 32 at
+  `[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` after 1,785 draws. It has no restart,
+  LoadState, fatal-surface state 39, death camera, below-zero or terminal fall, VM fault, execution
+  error, or checked issue.
 - A separate card-to-map regression restores the retail 128-byte payload at level count eight,
   mounts Hog Wild's `1e_pZ` node, and boots `0x11` through the authored Cross transition. It then
   carries the complete Hog Wild route into Level Complete, returns to Title/Map after 273 frames,

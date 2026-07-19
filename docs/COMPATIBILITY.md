@@ -641,10 +641,18 @@ gameplay path.
   count `0x700`, observes WarpC states zero through four, and requests Level Complete `0x2d` on
   frame 1,950. Its 24,311 executions complete with no restart, LoadState, fatal-surface state,
   death camera, terminal fall, VM error, faulted object, or checked issue. A separate idle trace
-  pins its authored fall/load-state restarts at frames 178 and 355. A separate active Cortex Power
-  regression covers 117 consecutive vertex-follow death-camera frames and the count-nine
-  alignment boundary. These characterize the observed death/restart paths;
-  it does not establish steering, enemy, bonus or level-completion parity. Collision-generated
+  pins its authored fall/load-state restarts at frames 178 and 355. Whole Hog now also has a
+  complete ordinary-pad direct-boot route. It traverses 62 camera paths and 51 lifecycle
+  transitions, advances its live box count to `0xa00`,
+  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 1,785. Its
+  23,436 executions complete with no restart, LoadState, fatal-surface state, death camera,
+  terminal fall, VM fault, faulted object, execution error, or checked issue. The final camera is
+  `1M_uZ:0@10239`, Crash reaches `1O_uZ` in state 32 at
+  `[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` after 1,785 draws. A separate active
+  Cortex Power regression characterizes 117 consecutive vertex-follow death-camera frames and the
+  count-nine alignment boundary. That focused trace characterizes the observed Cortex Power
+  death/restart path; it does not establish steering, enemy, bonus or level-completion parity for
+  that level. Collision-generated
   ceiling, outside-zone, water and final-surface events now dispatch synchronously at their native
   `solid.c` call sites. Ordered status/link effects and the mover's current process fields are live
   before each nested handler; handler mutations are refreshed before the remaining collision work.
@@ -711,9 +719,9 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Seven deterministic retail-authored normal levels now reach their real end warps and request
-  Level Complete, including the independent Hog Wild and Rolling Stones routes. The carried chain
-  executes the complete legally local Upstream PBAK input,
+- Eight deterministic retail-authored levels now reach their real end warps and request Level
+  Complete, including the independent Hog Wild, Whole Hog, and Rolling Stones routes. The carried
+  chain executes the complete legally local Upstream PBAK input,
   completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
   carries Rolling Stones from the post-boss Map handoff through its normal end. The independent
   Rolling Stones direct boot reaches the same end on its own deterministic phase.

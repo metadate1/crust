@@ -236,7 +236,7 @@ enum SurveyInputProfile {
     NativeFortressPostB7Route,
     NativeFortressPostB8Route,
     NativeFortressPostB9Route,
-    NativeFortressC6Route,
+    NativeFortressD6Route,
     LostCityCompletionRoute,
     RoadToNowhereCompletionRoute,
     PapuPapuCompletionRoute,
@@ -271,7 +271,7 @@ impl SurveyInputProfile {
                 | Self::NativeFortressPostB7Route
                 | Self::NativeFortressPostB8Route
                 | Self::NativeFortressPostB9Route
-                | Self::NativeFortressC6Route
+                | Self::NativeFortressD6Route
         )
     }
 
@@ -322,7 +322,7 @@ impl SurveyInputProfile {
             Self::NativeFortressPostB7Route => "native-fortress-post-b7-route",
             Self::NativeFortressPostB8Route => "native-fortress-post-b8-route",
             Self::NativeFortressPostB9Route => "native-fortress-post-b9-route",
-            Self::NativeFortressC6Route => "native-fortress-c6-route",
+            Self::NativeFortressD6Route => "native-fortress-d6-route",
             Self::LostCityCompletionRoute => "lost-city-completion-route",
             Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
@@ -378,7 +378,7 @@ impl SurveyInputProfile {
                 | Self::NativeFortressPostB7Route
                 | Self::NativeFortressPostB8Route
                 | Self::NativeFortressPostB9Route
-                | Self::NativeFortressC6Route
+                | Self::NativeFortressD6Route
                 | Self::LostCityCompletionRoute
                 | Self::RoadToNowhereCompletionRoute
                 | Self::PapuPapuCompletionRoute
@@ -5136,7 +5136,7 @@ enum NativeFortressRouteTarget {
     B8,
     B9,
     C0,
-    C6,
+    D6,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -5155,10 +5155,12 @@ impl NativeFortressRouteController {
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         player_collider_entity: Option<u16>,
+        route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         let Some(player) = player else {
             return 0;
         };
+        let d6_route = self.target == NativeFortressRouteTarget::D6;
         // WillC exposes the player before retail's level-start handshake has
         // finished. Do not let state 0/40 loading frames consume route
         // counters. State 1 is the settled idle and needs one ordinary
@@ -5215,24 +5217,40 @@ impl NativeFortressRouteController {
                 }
                 let mut held = 0;
                 if self.target >= NativeFortressRouteTarget::B0 {
-                    // The bounce-climb route preserves the longer authored
-                    // phase used to reach b0: hop back to the preceding shelf,
-                    // reverse on the grounded samples, then carry a running
-                    // jump across the first grease segment.
-                    if self.route_tick <= 3 {
-                        held |= PAD_LEFT;
-                    }
-                    if self.route_tick <= 16 {
-                        held |= PAD_CROSS;
-                    }
-                    if (30..46).contains(&self.route_tick) {
-                        held |= PAD_RIGHT | PAD_CROSS;
-                    }
-                    if (46..90).contains(&self.route_tick) {
-                        held |= PAD_LEFT;
-                    }
-                    if (50..58).contains(&self.route_tick) || (60..90).contains(&self.route_tick) {
-                        held |= PAD_CROSS;
+                    if d6_route {
+                        if self.route_tick <= 150 {
+                            held |= PAD_LEFT;
+                        }
+                        if self.route_tick <= 20
+                            || (35..=60).contains(&self.route_tick)
+                            || (80..=90).contains(&self.route_tick)
+                            || (106..=131).contains(&self.route_tick)
+                        {
+                            held |= PAD_CROSS;
+                        }
+                        if (106..=130).contains(&self.route_tick) {
+                            held |= PAD_SQUARE;
+                        }
+                    } else {
+                        // Preserve the characterized route used by all existing
+                        // Native Fortress targets through c6.
+                        if self.route_tick <= 3 {
+                            held |= PAD_LEFT;
+                        }
+                        if self.route_tick <= 16 {
+                            held |= PAD_CROSS;
+                        }
+                        if (30..46).contains(&self.route_tick) {
+                            held |= PAD_RIGHT | PAD_CROSS;
+                        }
+                        if (46..90).contains(&self.route_tick) {
+                            held |= PAD_LEFT;
+                        }
+                        if (50..58).contains(&self.route_tick)
+                            || (60..90).contains(&self.route_tick)
+                        {
+                            held |= PAD_CROSS;
+                        }
                     }
                 } else {
                     let left_end = if self.target >= NativeFortressRouteTarget::A7 {
@@ -5261,7 +5279,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                let mut held = if self.route_tick <= 15 {
+                let mut held = if self.route_tick <= if d6_route { 25 } else { 15 } {
                     PAD_LEFT
                 } else if self.route_tick <= 31 {
                     PAD_RIGHT
@@ -5283,7 +5301,7 @@ impl NativeFortressRouteController {
             }
             if self.stage == 7 {
                 if self.target >= NativeFortressRouteTarget::B0 {
-                    let tap_tick = 28;
+                    let tap_tick = if d6_route { 34 } else { 28 };
                     if self.route_tick > tap_tick + 12 && grounded {
                         self.stage = 8;
                         self.route_tick = 0;
@@ -5294,6 +5312,9 @@ impl NativeFortressRouteController {
                         || (tap_tick..=tap_tick + 12).contains(&self.route_tick)
                     {
                         held |= PAD_CROSS;
+                    }
+                    if d6_route && (tap_tick..=tap_tick + 12).contains(&self.route_tick) {
+                        held |= PAD_SQUARE;
                     }
                     return held;
                 }
@@ -5323,7 +5344,8 @@ impl NativeFortressRouteController {
                 return PAD_LEFT;
             }
             if self.stage == 9 {
-                let jump_end = 22;
+                let jump_at = if d6_route { 6 } else { 0 };
+                let jump_end = jump_at + 22;
                 if self.route_tick > jump_end && grounded {
                     self.stage = 10;
                     self.route_tick = 0;
@@ -5338,8 +5360,11 @@ impl NativeFortressRouteController {
                 } else {
                     0
                 };
-                if self.route_tick <= jump_end {
+                if (jump_at..=jump_end).contains(&self.route_tick) {
                     held |= PAD_CROSS;
+                    if d6_route {
+                        held |= PAD_SQUARE;
+                    }
                 }
                 return held;
             }
@@ -5362,7 +5387,19 @@ impl NativeFortressRouteController {
             }
 
             if self.stage == 11 {
-                if self.route_tick > 70 && grounded {
+                let reached_handoff = if d6_route {
+                    let b0 = Eid::from_name("b0_qZ")
+                        .expect("fixed Native Fortress bounce-climb EID is valid");
+                    self.route_tick > 30
+                        && grounded
+                        && camera.path.zone == b0
+                        && camera.path.index == 1
+                        && (1_400_000..=1_700_000).contains(&player.translation[0])
+                        && player.translation[1] < -10_800_000
+                } else {
+                    self.route_tick > 70 && grounded
+                };
+                if reached_handoff {
                     self.stage = 12;
                     self.route_tick = 0;
                     return 0;
@@ -5441,12 +5478,35 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_CROSS;
                 }
-                return PAD_RIGHT
-                    | if (5..=12).contains(&self.route_tick) {
-                        PAD_CROSS
-                    } else {
-                        0
-                    };
+                if !d6_route {
+                    return PAD_RIGHT
+                        | if (5..=12).contains(&self.route_tick) {
+                            PAD_CROSS
+                        } else {
+                            0
+                        };
+                }
+                let direction = if (19..=60).contains(&self.route_tick) {
+                    PAD_LEFT
+                } else if self.route_tick >= 65 || self.route_tick < 19 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let jump = if (13..=20).contains(&self.route_tick)
+                    || (42..=58).contains(&self.route_tick)
+                    || (70..=86).contains(&self.route_tick)
+                {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+                let spin = if (13..=20).contains(&self.route_tick) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+                return direction | jump | spin;
             }
             if self.stage == 16 {
                 // Spin the upper WalOC while its vertical face is within jump
@@ -5662,7 +5722,7 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                if self.route_tick <= 13 {
+                if self.route_tick <= if d6_route { 11 } else { 13 } {
                     return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
                 // Brake back onto the low launcher instead of carrying the
@@ -5700,19 +5760,27 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                if self.route_tick <= 16 {
+                let action_tick = if d6_route {
+                    if self.route_tick < 14 {
+                        return PAD_RIGHT;
+                    }
+                    self.route_tick - 14
+                } else {
+                    self.route_tick
+                };
+                if action_tick <= 16 {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                if self.route_tick <= 25 {
+                if action_tick <= 25 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= 37 {
-                    return PAD_RIGHT | PAD_SQUARE;
+                if action_tick <= 37 {
+                    return PAD_RIGHT | PAD_SQUARE | if d6_route { PAD_CROSS } else { 0 };
                 }
-                if self.route_tick <= 50 {
+                if action_tick <= 50 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= 68 {
+                if action_tick <= 68 {
                     return PAD_RIGHT | PAD_CROSS;
                 }
                 return PAD_RIGHT;
@@ -5723,7 +5791,8 @@ impl NativeFortressRouteController {
                 }
                 if self.route_tick >= 20
                     && grounded
-                    && (4_600_000..=4_750_000).contains(&player.translation[0])
+                    && (if d6_route { 4_500_000 } else { 4_600_000 }..=4_750_000)
+                        .contains(&player.translation[0])
                 {
                     self.stage = 29;
                     self.route_tick = 0;
@@ -5735,7 +5804,8 @@ impl NativeFortressRouteController {
                 // Separate Cross edges clear the falling log and land on the
                 // b5 checkpoint crate; a held first jump skips the second
                 // edge and falls short of BoxsC's narrow collision face.
-                if grounded && player.translation[0] >= 5_450_000 {
+                if grounded && player.translation[0] >= if d6_route { 5_400_000 } else { 5_450_000 }
+                {
                     self.stage = 30;
                     self.route_tick = 0;
                     return PAD_LEFT;
@@ -5746,7 +5816,7 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 25 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= 52 {
+                if self.route_tick <= if d6_route { 53 } else { 52 } {
                     return PAD_RIGHT | PAD_CROSS;
                 }
                 return PAD_RIGHT;
@@ -5759,7 +5829,11 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                return if self.route_tick <= 8 { PAD_LEFT } else { 0 };
+                return if !d6_route && self.route_tick <= 8 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
             }
             if self.stage == 31 {
                 let b6 =
@@ -5776,7 +5850,7 @@ impl NativeFortressRouteController {
                     return PAD_RIGHT;
                 }
                 if self.route_tick <= 45 {
-                    return PAD_RIGHT | PAD_CROSS;
+                    return PAD_RIGHT | PAD_CROSS | if d6_route { PAD_SQUARE } else { 0 };
                 }
                 // Brake the launcher arc back over the returning WalOC
                 // instead of carrying past its narrow collision face.
@@ -5786,7 +5860,7 @@ impl NativeFortressRouteController {
                 if self.target < NativeFortressRouteTarget::B7 {
                     return if self.route_tick <= 8 { PAD_LEFT } else { 0 };
                 }
-                if self.route_tick >= 20
+                if (self.route_tick >= 20 || d6_route)
                     && grounded
                     && (6_000_000..=6_200_000).contains(&player.translation[0])
                 {
@@ -5840,7 +5914,7 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 10 {
                     return PAD_RIGHT;
                 }
-                if self.route_tick <= 35 {
+                if self.route_tick <= if d6_route { 38 } else { 35 } {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
                 return PAD_RIGHT;
@@ -5880,7 +5954,9 @@ impl NativeFortressRouteController {
                 return PAD_LEFT;
             }
             if self.stage == 38 {
-                if self.target >= NativeFortressRouteTarget::B9 && self.route_tick >= 20 && grounded
+                if self.target >= NativeFortressRouteTarget::B9
+                    && (d6_route || self.route_tick >= 20)
+                    && grounded
                 {
                     self.stage = 39;
                     self.route_tick = 0;
@@ -5900,7 +5976,8 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return 0;
                 }
-                let lane = if player.translation[0] < 8_800_000 {
+                let lane_boundary = if d6_route { 9_350_000 } else { 8_800_000 };
+                let lane = if player.translation[0] < lane_boundary {
                     168_000
                 } else {
                     123_000
@@ -5913,13 +5990,15 @@ impl NativeFortressRouteController {
                     0
                 };
                 let jump = if (10..=25).contains(&self.route_tick)
-                    || (35..=55).contains(&self.route_tick)
+                    || (if d6_route { 32..=52 } else { 35..=55 }).contains(&self.route_tick)
                 {
                     PAD_CROSS
                 } else {
                     0
                 };
-                let horizontal = if self.route_tick >= 56 {
+                let horizontal = if d6_route && (20..=36).contains(&self.route_tick) {
+                    PAD_LEFT
+                } else if self.route_tick >= 56 {
                     if player.velocity[0] > 70_000 {
                         PAD_LEFT
                     } else if player.velocity[0] < -70_000 {
@@ -5940,7 +6019,7 @@ impl NativeFortressRouteController {
                 // during coyote time carries Crash across the following floor
                 // break. Require two grounded frames before braking so the
                 // route cannot stop on a transient one-frame contact.
-                if self.route_tick < 60 {
+                if !d6_route && self.route_tick < 60 {
                     return 0;
                 }
                 if camera.path.zone == b9
@@ -5951,8 +6030,9 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
+                let jump_tick = if d6_route { 9 } else { 68 };
                 return PAD_RIGHT
-                    | if self.route_tick - 60 == 8 {
+                    | if self.route_tick == jump_tick {
                         PAD_CROSS
                     } else {
                         0
@@ -5975,8 +6055,13 @@ impl NativeFortressRouteController {
                 // WalOC entity 42. Brake on the solid ledge between entities 41 and
                 // 42 so this checkpoint does not depend on a moving collider.
                 if camera.path.zone == c0
-                    && self.grounded_frames >= 2
+                    && if d6_route {
+                        grounded
+                    } else {
+                        self.grounded_frames >= 2
+                    }
                     && player.translation[0] >= 11_300_000
+                    && (!d6_route || player_collider_entity != Some(42))
                 {
                     self.stage = 43;
                     self.route_tick = 0;
@@ -5987,15 +6072,20 @@ impl NativeFortressRouteController {
                 // from entity 41 before its authored falling-platform path drops.
                 return PAD_RIGHT
                     | if (20..=42).contains(&self.route_tick)
-                        || (68..=88).contains(&self.route_tick)
+                        || (if d6_route { 45..=65 } else { 68..=88 }).contains(&self.route_tick)
                     {
                         PAD_CROSS
+                    } else {
+                        0
+                    }
+                    | if d6_route && (20..=42).contains(&self.route_tick) {
+                        PAD_SQUARE
                     } else {
                         0
                     };
             }
             if self.stage == 43 {
-                if self.target >= NativeFortressRouteTarget::C6 {
+                if d6_route {
                     let c1 =
                         Eid::from_name("c1_qZ").expect("fixed Native Fortress c1 EID is valid");
                     if camera.path.zone == c1 && grounded && player.translation[0] >= 11_980_000 {
@@ -6007,11 +6097,19 @@ impl NativeFortressRouteController {
                     // vertical-to-horizontal phase before committing to the
                     // crossing. A running Cross edge then clears its collision
                     // face and enters c1 without invoking WillC's HIT death.
-                    return match self.route_tick {
-                        1..=10 => PAD_LEFT,
-                        11..=30 => 0,
-                        46..=67 => PAD_RIGHT | PAD_CROSS,
-                        _ => PAD_RIGHT,
+                    return if d6_route {
+                        match self.route_tick {
+                            0 => PAD_LEFT,
+                            5..=26 => PAD_RIGHT | PAD_CROSS,
+                            _ => PAD_RIGHT,
+                        }
+                    } else {
+                        match self.route_tick {
+                            1..=10 => PAD_LEFT,
+                            11..=30 => 0,
+                            46..=67 => PAD_RIGHT | PAD_CROSS,
+                            _ => PAD_RIGHT,
+                        }
                     };
                 }
                 return 0;
@@ -6041,10 +6139,16 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 8 {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
-                if self.route_tick <= 40 {
+                if self.route_tick <= if d6_route { 112 } else { 40 } {
                     return 0;
                 }
-                return PAD_RIGHT | if self.route_tick == 48 { PAD_CROSS } else { 0 };
+                let jump_tick = if d6_route { 120 } else { 48 };
+                return PAD_RIGHT
+                    | if self.route_tick == jump_tick {
+                        PAD_CROSS
+                    } else {
+                        0
+                    };
             }
             if self.stage == 46 {
                 let c3 = Eid::from_name("c3_qZ")
@@ -6059,7 +6163,7 @@ impl NativeFortressRouteController {
             if self.stage == 47 {
                 let c5 = Eid::from_name("c5_qZ")
                     .expect("fixed Native Fortress launcher-approach EID is valid");
-                if self.route_tick >= 105
+                if self.route_tick >= if d6_route { 95 } else { 105 }
                     && camera.path.zone == c5
                     && grounded
                     && (16_900_000..=17_000_000).contains(&player.translation[0])
@@ -6071,11 +6175,20 @@ impl NativeFortressRouteController {
                 // Land across c3's floor break, then take a fresh Cross edge
                 // over c4's approaching SheNC shield instead of running into
                 // its authored knockback face.
-                return match self.route_tick {
-                    0..=22 | 30..=78 | 80 => PAD_RIGHT | PAD_CROSS,
-                    23..=29 | 79 | 81..=99 => PAD_RIGHT,
-                    100 => PAD_LEFT,
-                    _ => 0,
+                return if d6_route {
+                    match self.route_tick {
+                        0..=22 | 33..=81 => PAD_RIGHT | PAD_CROSS,
+                        23..=32 | 82..=99 => PAD_RIGHT,
+                        100 => PAD_LEFT,
+                        _ => 0,
+                    }
+                } else {
+                    match self.route_tick {
+                        0..=22 | 30..=78 | 80 => PAD_RIGHT | PAD_CROSS,
+                        23..=29 | 79 | 81..=99 => PAD_RIGHT,
+                        100 => PAD_LEFT,
+                        _ => 0,
+                    }
                 };
             }
             if self.stage == 48 {
@@ -6090,14 +6203,590 @@ impl NativeFortressRouteController {
                 // entity 114 from above. Its authored launcher state supplies
                 // the vertical impulse that carries Crash over entity 115.
                 return match self.route_tick {
-                    4..=23 => PAD_RIGHT | PAD_CROSS,
+                    tick if (if d6_route { 1..=20 } else { 4..=23 }).contains(&tick) => {
+                        PAD_RIGHT | PAD_CROSS
+                    }
                     _ => PAD_RIGHT,
                 };
             }
             if self.stage == 49 {
+                if !d6_route {
+                    return 0;
+                }
+                // The extended route instead takes the rear lane used to
+                // catch WalOC 116's next raised face.
+                if player.translation[2] < 169_000 {
+                    return PAD_DOWN;
+                }
+                let raised = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 116)
+                        && object.state == 7
+                        && object.translation[1] >= -6_920_000
+                });
+                if raised {
+                    self.stage = 50;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
                 return 0;
             }
-
+            if self.stage == 50 {
+                if player.translation[0] >= 18_600_000 {
+                    self.stage = 51;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 51 {
+                let c7 = Eid::from_name("c7_qZ")
+                    .expect("fixed Native Fortress final route EID is valid");
+                if camera.path.zone == c7 && grounded && player.translation[0] >= 19_150_000 {
+                    self.stage = 52;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let second_box_gone = !route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 118)
+                });
+                if second_box_gone && grounded && self.route_tick >= 27 {
+                    self.stage = 54;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return match self.route_tick {
+                    1..=7 => PAD_RIGHT | PAD_CROSS,
+                    8..=11 => PAD_RIGHT | PAD_CROSS | PAD_SQUARE,
+                    12..=16 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    17..=22 => PAD_LEFT,
+                    23..=25 => PAD_RIGHT,
+                    _ => 0,
+                };
+            }
+            if matches!(self.stage, 54..=56) {
+                let target_box = u16::from(self.stage) + 66;
+                let target_gone = !route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == target_box)
+                });
+                if target_gone && grounded && self.route_tick >= 25 {
+                    self.stage += 1;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return match self.route_tick {
+                    1..=7 => PAD_RIGHT | PAD_CROSS,
+                    8..=11 => PAD_RIGHT | PAD_CROSS | PAD_SQUARE,
+                    12..=16 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    17..=22 => PAD_LEFT,
+                    23..=25 => PAD_RIGHT,
+                    _ => 0,
+                };
+            }
+            if self.stage == 57 {
+                if self.route_tick >= 8
+                    && grounded
+                    && matches!(player.state, 1 | 2)
+                    && player.translation[0] >= 19_000_000
+                {
+                    self.stage = 52;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=8 => PAD_RIGHT | PAD_CROSS,
+                    _ => PAD_LEFT,
+                };
+            }
+            if self.stage == 52 {
+                let raised = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 123)
+                        && object.state == 7
+                        && object.translation[1] >= -6_820_000
+                });
+                if raised {
+                    self.stage = 53;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return PAD_RIGHT
+                    | if (9..=30).contains(&self.route_tick) {
+                        PAD_CROSS
+                    } else {
+                        0
+                    };
+            }
+            if self.stage == 53 {
+                let c8 = Eid::from_name("c8_qZ")
+                    .expect("fixed Native Fortress vertical-platform EID is valid");
+                if camera.path.zone == c8
+                    && camera.path.index == 1
+                    && grounded
+                    && player.translation[0] >= 21_580_000
+                {
+                    self.stage = 58;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return match self.route_tick {
+                    7..=31 | 40..=65 => {
+                        PAD_RIGHT
+                            | PAD_CROSS
+                            | if (28..=42).contains(&self.route_tick)
+                                || (48..=56).contains(&self.route_tick)
+                            {
+                                PAD_SQUARE
+                            } else {
+                                0
+                            }
+                    }
+                    _ => PAD_RIGHT,
+                };
+            }
+            if self.stage == 58 {
+                if self.route_tick >= 18
+                    && grounded
+                    && player.translation[0] >= 21_900_000
+                    && player.translation[1] >= -7_400_000
+                {
+                    self.stage = 59;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=40 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 59 {
+                if self.route_tick >= 8
+                    && grounded
+                    && (21_350_000..=21_500_000).contains(&player.translation[0])
+                    && player.translation[1] <= -7_500_000
+                {
+                    self.stage = 60;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=40 => PAD_LEFT | PAD_UP,
+                    _ => 0,
+                };
+            }
+            if self.stage == 60 {
+                let first_wall_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 125)
+                        && object.state == 2
+                });
+                if first_wall_is_horizontal {
+                    self.stage = 61;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=24 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => 0,
+                };
+            }
+            if self.stage == 61 {
+                if self.route_tick >= 15 && grounded {
+                    self.stage = 62;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 62 {
+                if grounded && player.translation[0] >= 21_550_000 {
+                    self.stage = 66;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT | PAD_DOWN;
+            }
+            if self.stage == 66 {
+                if self.route_tick >= 10
+                    && grounded
+                    && player.translation[0] >= 21_650_000
+                    && player.translation[1] >= -7_400_000
+                {
+                    self.stage = 63;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return match self.route_tick {
+                    1..=34 => PAD_RIGHT | PAD_DOWN | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 63 {
+                if grounded && player.translation[0] >= 21_900_000 {
+                    self.stage = 64;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT;
+            }
+            if self.stage == 64 {
+                if grounded && player_collider_entity == Some(125) {
+                    self.stage = 65;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=8 => PAD_RIGHT | PAD_CROSS,
+                    9..=14 => PAD_LEFT | PAD_UP | PAD_CROSS,
+                    15..=24 | 51..=70 => PAD_LEFT | PAD_CROSS,
+                    25..=50 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => 0,
+                };
+            }
+            if self.stage == 65 {
+                let second_wall_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 126)
+                        && object.state == 2
+                });
+                if second_wall_is_horizontal {
+                    self.stage = 67;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=24 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => 0,
+                };
+            }
+            if self.stage == 67 {
+                if grounded
+                    && player.translation[0] <= 21_100_000
+                    && player.translation[1] >= -7_050_000
+                {
+                    self.stage = 68;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    17..=26 => PAD_LEFT,
+                    27..=34 => PAD_CROSS,
+                    35..=60 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 68 {
+                if grounded && player_collider_entity == Some(126) {
+                    self.stage = 69;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=42 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 69 {
+                let third_wall_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 127)
+                        && object.state == 2
+                });
+                if third_wall_is_horizontal {
+                    self.stage = 70;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=36 => PAD_RIGHT | PAD_CROSS | PAD_SQUARE,
+                    _ => 0,
+                };
+            }
+            if self.stage == 70 {
+                let third_wall_is_ready = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 127)
+                        && object.state == 2
+                });
+                if third_wall_is_ready && grounded && player_collider_entity == Some(126) {
+                    self.stage = 71;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 71 {
+                if grounded
+                    && player.translation[0] >= 21_600_000
+                    && player.translation[1] >= -6_650_000
+                {
+                    self.stage = 72;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=10 => PAD_RIGHT,
+                    11..=18 => PAD_CROSS,
+                    19..=46 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 72 {
+                if grounded && player_collider_entity == Some(127) {
+                    self.stage = 73;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=42 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 73 {
+                let fourth_wall_is_horizontal = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 129)
+                        && object.state == 2
+                });
+                if fourth_wall_is_horizontal {
+                    self.stage = 74;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=36 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => 0,
+                };
+            }
+            if self.stage == 74 {
+                let fourth_wall_is_ready = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 129)
+                        && object.state == 2
+                });
+                if fourth_wall_is_ready && grounded && player_collider_entity == Some(127) {
+                    self.stage = 75;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.stage == 75 {
+                if grounded
+                    && player.translation[0] <= 21_150_000
+                    && player.translation[1] >= -6_200_000
+                {
+                    self.stage = 76;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=10 => PAD_LEFT,
+                    11..=18 => PAD_CROSS,
+                    19..=46 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 76 {
+                if grounded && player_collider_entity == Some(129) {
+                    self.stage = 77;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=42 => PAD_RIGHT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 77 {
+                if player_collider_entity == Some(131) {
+                    self.stage = 78;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    11..=20 => PAD_RIGHT,
+                    21..=34 => PAD_RIGHT | PAD_CROSS,
+                    35..=56 => PAD_LEFT | PAD_CROSS,
+                    _ => 0,
+                };
+            }
+            if self.stage == 78 {
+                if player_collider_entity == Some(130) {
+                    self.stage = 79;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return match self.route_tick {
+                    1..=19 => PAD_LEFT | PAD_CROSS,
+                    20..=48 => PAD_RIGHT | PAD_CROSS,
+                    _ => PAD_CROSS,
+                };
+            }
+            if self.stage == 79 {
+                if player_collider_entity == Some(136) {
+                    self.stage = 80;
+                    self.route_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if self.route_tick >= 35 {
+                    PAD_RIGHT | PAD_CROSS
+                } else {
+                    PAD_LEFT | PAD_CROSS
+                };
+            }
+            if self.stage == 80 {
+                if player_collider_entity == Some(151) {
+                    self.stage = 81;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.stage == 81 {
+                if grounded && player.translation[0] < 20_800_000 {
+                    self.stage = 82;
+                    self.route_tick = 0;
+                    return PAD_LEFT;
+                }
+                return match self.route_tick {
+                    1..=42 => PAD_LEFT | PAD_CROSS,
+                    50..=70 => PAD_LEFT | PAD_SQUARE,
+                    _ => PAD_LEFT,
+                };
+            }
+            if self.stage == 82 {
+                let d4 = Eid::from_name("d4_qZ")
+                    .expect("fixed Native Fortress post-checkpoint route EID is valid");
+                if camera.path.zone == d4 && grounded {
+                    self.stage = 83;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                if grounded && player.translation[0] < 19_600_000 {
+                    self.stage = 84;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                if player_collider_entity == Some(169) {
+                    // Release Cross while clearing PlanC so the following
+                    // ledge launch is a distinct retail tap rather than one
+                    // continuous held sample.
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                if self.route_tick <= 5 {
+                    return PAD_LEFT;
+                }
+                if self.route_tick <= 25 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.route_tick <= 33 {
+                    return PAD_LEFT;
+                }
+                if self.route_tick <= 58 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.route_tick <= 69 {
+                    return PAD_LEFT;
+                }
+                if self.route_tick <= 90 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if self.route_tick <= 95 {
+                    return PAD_LEFT;
+                }
+                if self.route_tick <= 102 {
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                if self.route_tick <= 105 {
+                    return PAD_LEFT;
+                }
+                let mut held = PAD_LEFT;
+                if matches!(self.route_tick % 52, 6..=25) {
+                    held |= PAD_CROSS;
+                }
+                if matches!(self.route_tick % 24, 0..=6) {
+                    held |= PAD_SQUARE;
+                }
+                return held;
+            }
+            if self.stage == 84 {
+                let d4 = Eid::from_name("d4_qZ")
+                    .expect("fixed Native Fortress post-checkpoint route EID is valid");
+                if self.route_tick > 100 && grounded && player.translation[0] < 18_700_000 {
+                    self.stage = 83;
+                    self.route_tick = 0;
+                    return PAD_RIGHT;
+                }
+                if camera.path.zone == d4 && grounded {
+                    self.stage = 83;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                return match self.route_tick {
+                    1..=8 => PAD_RIGHT,
+                    9..=24 => 0,
+                    25..=50 => PAD_LEFT | PAD_CROSS,
+                    76..=100 => PAD_LEFT | PAD_CROSS | PAD_SQUARE,
+                    _ => PAD_LEFT,
+                };
+            }
+            if self.stage == 85 {
+                let d5 = Eid::from_name("d5_qZ")
+                    .expect("fixed Native Fortress post-checkpoint route EID is valid");
+                if camera.path.zone == d5 && grounded {
+                    self.stage = 86;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let mut held = PAD_LEFT;
+                if self.route_tick % 42 < 20 {
+                    held |= PAD_CROSS;
+                }
+                if self.route_tick % 20 < 8 {
+                    held |= PAD_SQUARE;
+                }
+                return held;
+            }
+            if self.stage == 83 {
+                if self.route_tick > 100 && grounded {
+                    self.stage = 85;
+                    self.route_tick = 0;
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                return if self.route_tick <= 20 {
+                    PAD_RIGHT | PAD_DOWN
+                } else if self.route_tick <= 28 {
+                    PAD_DOWN
+                } else if (49..=75).contains(&self.route_tick) {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+            }
+            if self.stage == 86 {
+                let d6 = Eid::from_name("d6_qZ")
+                    .expect("fixed Native Fortress post-checkpoint route EID is valid");
+                if camera.path.zone == d6 && grounded {
+                    self.stage = 87;
+                    self.route_tick = 0;
+                    return 0;
+                }
+                let mut held = PAD_LEFT;
+                if matches!(self.route_tick, 1..=20 | 28..=55)
+                    || matches!(self.route_tick % 42, 4..=22)
+                {
+                    held |= PAD_CROSS;
+                }
+                if self.route_tick % 20 < 8 {
+                    held |= PAD_SQUARE;
+                }
+                return held;
+            }
+            if self.stage == 87 {
+                // Hold the first d6 floor face without entering WalOC 57's
+                // sweep. This is a deterministic hand-off point for the next
+                // ordinary-pad vertical slice.
+                if player.translation[0] > 15_930_000 {
+                    return PAD_LEFT;
+                }
+                if player.translation[0] < 15_880_000 {
+                    return PAD_RIGHT;
+                }
+                return 0;
+            }
             let mut held = PAD_LEFT;
             if self.route_tick % 42 < 18 {
                 held |= PAD_CROSS;
@@ -13587,7 +14276,7 @@ impl SurveyInputController {
                     SurveyInputProfile::NativeFortressPostB7Route => NativeFortressRouteTarget::B8,
                     SurveyInputProfile::NativeFortressPostB8Route => NativeFortressRouteTarget::B9,
                     SurveyInputProfile::NativeFortressPostB9Route => NativeFortressRouteTarget::C0,
-                    SurveyInputProfile::NativeFortressC6Route => NativeFortressRouteTarget::C6,
+                    SurveyInputProfile::NativeFortressD6Route => NativeFortressRouteTarget::D6,
                     _ => NativeFortressRouteTarget::GreaseBoundary,
                 },
                 started: false,
@@ -13768,9 +14457,9 @@ impl SurveyInputController {
             | SurveyInputProfile::NativeFortressPostB7Route
             | SurveyInputProfile::NativeFortressPostB8Route
             | SurveyInputProfile::NativeFortressPostB9Route
-            | SurveyInputProfile::NativeFortressC6Route => {
+            | SurveyInputProfile::NativeFortressD6Route => {
                 self.native_fortress
-                    .held(camera, player, player_collider_entity)
+                    .held(camera, player, player_collider_entity, route_objects)
             }
             SurveyInputProfile::LostCityCompletionRoute => self.lost_city.held(
                 frame,
@@ -16256,7 +16945,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::NativeFortressPostB7Route
                 | SurveyInputProfile::NativeFortressPostB8Route
                 | SurveyInputProfile::NativeFortressPostB9Route
-                | SurveyInputProfile::NativeFortressC6Route
+                | SurveyInputProfile::NativeFortressD6Route
         ) && survey
             .pad_change_samples
             .last()
@@ -18550,11 +19239,11 @@ fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {
         &nsf_bytes,
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
-        SurveyInputProfile::NativeFortressC6Route,
-        2_620,
+        SurveyInputProfile::NativeFortressD6Route,
+        2_548,
     )
     .expect("Native Fortress's route through the c5 launcher must execute");
-    assert_eq!(survey.frames, 2_620);
+    assert_eq!(survey.frames, 2_548);
     assert!(survey.terminal.is_none());
     let final_camera = survey
         .final_camera
@@ -18567,18 +19256,18 @@ fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 1_017);
+    assert_eq!(final_camera.progress.raw(), 22_505);
     assert_eq!(
         survey.final_player_translation,
-        Some([17_987_328, -7_540_650, 100_352])
+        Some([18_846_860, -7_560_205, 169_984])
     );
     let final_player = player_trace(&runtime)
         .expect("Native Fortress's c6 player trace must resolve")
         .expect("Native Fortress's c6 route must retain the player");
     assert_eq!(final_player.zone, final_camera.path.zone);
-    assert_eq!(final_player.translation, [17_987_328, -7_540_650, 100_352]);
+    assert_eq!(final_player.translation, [18_846_860, -7_560_205, 169_984]);
     assert_eq!(final_player.velocity, [0, -136_000, 0]);
-    assert_eq!(final_player.state, 1);
+    assert_eq!(final_player.state, 2);
     assert_ne!(final_player.status_a & 1, 0);
     assert_eq!(player_collider_entity(&runtime), Ok(None));
     assert_eq!(survey.restarts, 0);
@@ -18588,12 +19277,20 @@ fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {
     assert!(survey.next_lid.is_none());
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(survey.execution_errors, 0);
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 122);
     assert_eq!(survey.zone_transitions, 31);
-    assert_eq!(survey.executions, 51_633);
-    assert_eq!(survey.last_player_movement, 2_565);
-    assert_eq!(runtime.draw_count(), 2_620);
+    assert_eq!(survey.executions, 50_212);
+    assert_eq!(survey.last_player_movement, 2_547);
+    assert_eq!(survey.box_count_samples.last(), Some(&(2_540, 1_024)));
+    assert_eq!(
+        survey.checkpoint_samples.last(),
+        Some(&(2_013, 27_136, [12_083_200, -7_680_256, 128_000]))
+    );
+    assert_eq!(runtime.draw_count(), 2_548);
     let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
     assert!(
         survey
             .pad_change_samples
@@ -18604,6 +19301,86 @@ fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {
     assert!(
         survey.is_clean(),
         "Native Fortress's authored launcher route into c6 must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_ordinary_pad_route_reaches_d6_handoff() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Native Fortress",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NativeFortressD6Route,
+        4_200,
+    )
+    .expect("Native Fortress's route to the d6 hand-off must execute");
+    assert_eq!(survey.frames, 4_200);
+    assert!(survey.terminal.is_none());
+    let final_camera = survey
+        .final_camera
+        .expect("Native Fortress's d6 route must retain its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("d6_qZ")
+                .expect("fixed Native Fortress d6 hand-off zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 1_623);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([15_938_712, -2_202_144, 167_936])
+    );
+    let final_player = player_trace(&runtime)
+        .expect("Native Fortress's d6 player trace must resolve")
+        .expect("Native Fortress's d6 route must retain the player");
+    assert_eq!(final_player.translation, [15_938_712, -2_202_144, 167_936]);
+    assert_eq!(final_player.state, 2);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.next_lid.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert!(survey.issue_counts.is_empty());
+    assert!(survey.first_issue.is_none());
+    assert_eq!(survey.successful_spawns, 200);
+    assert_eq!(survey.zone_transitions, 43);
+    assert_eq!(survey.executions, 98_003);
+    assert_eq!(survey.last_player_movement, 4_200);
+    assert_eq!(survey.box_count_samples.last(), Some(&(3_421, 2_560)));
+    assert_eq!(
+        survey.checkpoint_samples.last(),
+        Some(&(3_421, 37_888, [20_888_832, -2_048_000, 128_000]))
+    );
+    assert_eq!(runtime.draw_count(), 4_200);
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the d6 hand-off route must use ordinary directional, Cross, and Square input only"
+    );
+    assert!(
+        survey.is_clean(),
+        "Native Fortress's ordinary-pad route into d6 must remain clean: {}",
         survey.summary()
     );
 }

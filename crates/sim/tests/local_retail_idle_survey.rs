@@ -484,6 +484,7 @@ enum SurveyInputProfile {
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
     HeavyMachineryCompletionRoute,
+    ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
@@ -546,6 +547,7 @@ impl SurveyInputProfile {
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
+            Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
@@ -595,6 +597,7 @@ impl SurveyInputProfile {
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
+                | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
@@ -11175,6 +11178,174 @@ impl BoulderDashCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Toxic Waste from a fresh
+/// level boot through its normal `WarpC` transition.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ToxicWasteCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+}
+
+impl ToxicWasteCompletionRouteController {
+    fn held(&mut self, player: Option<PlayerTrace>, objects: &[ProgramObjectTrace]) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let mut held = PAD_UP;
+        let fat = Eid::from_name("FatsC").expect("fixed Toxic Waste enemy EID is valid");
+        if self.tick % 6 == 5
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    object.program == fat
+                        && object.translation[2] <= player.translation[2]
+                        && player.translation[2] - object.translation[2] <= 300_000
+                        && object.translation[0].abs_diff(player.translation[0]) <= 300_000
+                })
+            })
+        {
+            held |= PAD_SQUARE;
+        }
+
+        // The opening barrel pair shares Crash's center lane. Cross the right
+        // shoulder while airborne, then return to center after it passes.
+        if (61..=78).contains(&self.tick) {
+            held |= PAD_RIGHT;
+        } else if (84..=98).contains(&self.tick) {
+            held |= PAD_LEFT;
+        }
+        // c6's low bouncing barrel occupies the center line even at Crash's
+        // maximum jump height. Briefly use the left shoulder, then recenter
+        // before the following waste channel.
+        if (1_988..=1_996).contains(&self.tick) {
+            held |= PAD_LEFT;
+        } else if (1_997..=2_009).contains(&self.tick) {
+            held |= PAD_RIGHT;
+        }
+
+        // Hold through the checkpoint bounce to cross the type-four waste
+        // trench immediately beyond it.
+        if (675..=685).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+        // Take the b3 jump on its first grounded tick; one cadence frame later
+        // intersects the next rising barrel's collision bound.
+        if (975..=985).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+        // Sustain the delayed b6 takeoff long enough to clear its full-width
+        // type-four waste trench.
+        if (1_157..=1_179).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+        // Delay the c3 takeoff to the trench lip, then sustain the jump over
+        // the final full-width waste channel.
+        if (1_739..=1_763).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+        // Re-phase c4's first jump so the opening bouncing barrel is below
+        // Crash when their paths cross.
+        if (1_857..=1_881).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+        // Apply the same low-barrel timing to c5's center lane.
+        if (1_939..=1_963).contains(&self.tick) {
+            held |= PAD_CROSS;
+        }
+
+        // Pause on the b1 landing until the fast center barrel passes, then
+        // resume the ordinary jump cadence behind it.
+        if (884..=888).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+
+        // The b4 center barrel reaches the current landing during a default
+        // arc. Wait for its descending half, then jump behind its collision
+        // tail.
+        if (1_040..=1_044).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Approach the b6 trench on foot so the following full jump starts at
+        // its lip instead of descending into Toxic Waste's drowning surface.
+        if (1_148..=1_156).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Walk the last few c3 frames before taking the sustained trench jump.
+        if (1_736..=1_738).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Re-phase c4's first low barrel from the preceding landing.
+        if (1_848..=1_856).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Re-phase the corresponding c5 barrel from its preceding landing.
+        if (1_930..=1_938).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Release Cross immediately after c6's takeoff. The lower arc enters
+        // WarpC's authored trigger volume instead of sailing over it into the
+        // surrounding waste.
+        if (2_100..=2_120).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        // Stop in b8's solid center lane while the final fast barrel rolls
+        // past. Sidestepping here enters the adjacent waste channels.
+        if (1_350..=1_360).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        // Give c0's last center barrel the same solid-lane right of way before
+        // resuming the final ascent.
+        if (1_470..=1_480).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+
+        // The opening section's final lane has a rolling barrel that meets the
+        // default jump arc at its apex. Let it advance briefly before taking
+        // off so Crash clears it without leaving the safe center roadway.
+        if (548..=552).contains(&self.tick) {
+            return held;
+        }
+
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return if held & PAD_SQUARE != 0 {
+                held
+            } else {
+                held | PAD_CROSS
+            };
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if self.tick >= 61
+            && player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+        {
+            self.jump_frames = if self.tick >= 600 { 10 } else { 19 };
+            self.release_frames = if self.tick >= 600 { 1 } else { 5 };
+            return held | PAD_CROSS;
+        }
+        held
+    }
+}
+
 /// Deterministic ordinary-pad characterization of Heavy Machinery from a
 /// fresh level boot through its normal `WarpC` transition. The route contains
 /// no state injection or proprietary recording data: each entry is an
@@ -15999,6 +16170,7 @@ struct SurveyInputController {
     jungle_restart_tick: u16,
     great_gate: GreatGateRouteController,
     boulders: BouldersCompletionRouteController,
+    toxic_waste: ToxicWasteCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
     hog_wild: HogWildCompletionRouteController,
@@ -16071,6 +16243,11 @@ impl SurveyInputController {
             boulders: BouldersCompletionRouteController {
                 zero_t_takeoff_fired: false,
                 post_checkpoint_spin_ticks: 0,
+            },
+            toxic_waste: ToxicWasteCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
             },
             upstream: UpstreamRecoveryRouteController {
                 stage: UpstreamRecoveryStage::SettleAtSpawn,
@@ -16351,6 +16528,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 HeavyMachineryCompletionRouteController::held(frame)
+            }
+            SurveyInputProfile::ToxicWasteCompletionRoute => {
+                self.toxic_waste.held(player, route_objects)
             }
             SurveyInputProfile::LightsOutCompletionRoute => {
                 LightsOutCompletionRouteController::held(frame)
@@ -18814,6 +18994,7 @@ fn survey_pair_with_runtime(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
             )?,
+            SurveyInputProfile::ToxicWasteCompletionRoute => program_object_traces(&runtime, &[])?,
             _ => Vec::new(),
         };
         let pinstripe_boss_state =
@@ -18873,6 +19054,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
+                | SurveyInputProfile::ToxicWasteCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
                 | SurveyInputProfile::WholeHogCompletionRoute
                 | SurveyInputProfile::RipperRooCompletionRoute
@@ -26119,6 +26301,139 @@ fn requested_survey_level() -> Option<LevelId> {
     let value = u32::from_str_radix(digits, 16)
         .unwrap_or_else(|error| panic!("C1_SURVEY_LEVEL {raw:?} is not hexadecimal: {error}"));
     Some(LevelId::new(value).expect("C1_SURVEY_LEVEL fits the retail filename field"))
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn toxic_waste_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x07);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Toxic Waste");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Toxic Waste pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::ToxicWasteCompletionRoute,
+        2_500,
+    )
+    .expect("Toxic Waste's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 2_204, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_204, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2204 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(!survey.observed_player_states.contains(&28));
+    assert!(!survey.observed_player_states.contains(&31));
+
+    assert_eq!(survey.zone_transitions, 25);
+    assert_eq!(survey.camera_ranges.len(), 26);
+    assert_eq!(survey.camera_path_changes, 25);
+    assert_eq!(survey.last_camera_path_change, 1_989);
+    assert_eq!(survey.last_camera_progress_change, 2_091);
+    let final_camera = survey
+        .final_camera
+        .expect("Toxic Waste must retain its final camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("c6_7Z").expect("fixed Toxic Waste end camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 24_319);
+
+    assert_eq!(survey.successful_spawns, 207);
+    assert_eq!(survey.spawn_attempts, 51_729);
+    assert_eq!(survey.expected_spawn_rejections, 51_522);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 85_039);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.final_live_objects, 38);
+    assert_eq!(survey.max_live_objects, 50);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (686, 0x4b00, [2_048_000, 3_123_200, 20_479_488]),
+            (1_668, 0x8e00, [2_047_744, 6_194_944, 2_661_888]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [(1, 0), (123, 0x100), (686, 0x200), (1_668, 0x300)]
+    );
+    assert_eq!(
+        survey.saved_box_count_samples,
+        [(686, 0x100), (1_668, 0x200)]
+    );
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_UP)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_025_216, 10_938_449, -5_626_624])
+    );
+    let player = player_trace(&runtime)
+        .expect("Toxic Waste completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(
+        player.zone,
+        Eid::from_name("c7_7Z").expect("fixed Toxic Waste end-warp EID is valid")
+    );
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [2_025_216, 10_938_449, -5_626_624]);
+    assert_eq!(runtime.machine().random_seed(), 0x8687_a955);
+    assert_eq!(runtime.draw_count(), 2_204);
+    assert!(
+        survey.is_clean(),
+        "Toxic Waste end-warp route must remain clean: {}",
+        survey.summary()
+    );
 }
 
 #[test]

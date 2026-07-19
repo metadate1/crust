@@ -405,7 +405,7 @@ enum SurveyInputProfile {
     DirectionAndButtonSweep,
     DirectionAndButtonSweepToTransition,
     JungleDeathAkuCompletionRoute,
-    ForwardWithActions,
+    NSanityCompletionRoute,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
     GreatGatePhaseRobust,
@@ -465,7 +465,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweep => "direction-and-button-sweep",
             Self::DirectionAndButtonSweepToTransition => "direction-and-button-sweep-to-transition",
             Self::JungleDeathAkuCompletionRoute => "jungle-death-aku-completion-route",
-            Self::ForwardWithActions => "forward-with-actions",
+            Self::NSanityCompletionRoute => "n-sanity-completion-route",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
             Self::GreatGatePhaseRobust => "great-gate-phase-robust",
@@ -514,7 +514,7 @@ impl SurveyInputProfile {
             self,
             Self::DirectionAndButtonSweepToTransition
                 | Self::JungleDeathAkuCompletionRoute
-                | Self::ForwardWithActions
+                | Self::NSanityCompletionRoute
                 | Self::JunglePhaseRobust
                 | Self::GreatGatePhaseRobust
                 | Self::GreatGateTawnaBonus
@@ -8212,6 +8212,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert_eq!(controller.post_bank_tick, None);
 }
 
+/// Path- and grounded-state-anchored ordinary-pad route through N. Sanity
+/// Beach's checkpoint and normal end `WarpC`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct NSanityRouteController {
     opening_stage: u8,
@@ -15673,7 +15675,7 @@ impl SurveyInputController {
                     0
                 }
             }
-            SurveyInputProfile::ForwardWithActions => self.n_sanity.held(camera, player),
+            SurveyInputProfile::NSanityCompletionRoute => self.n_sanity.held(camera, player),
             SurveyInputProfile::ForwardThroughCheckpointThenA8Hit => {
                 let a8 = Eid::from_name("a8_9Z").expect("fixed N. Sanity route EID is valid");
                 if checkpoint_id > 0 && camera.path.zone == a8 {
@@ -18213,7 +18215,8 @@ fn survey_pair_with_runtime(
         );
         if matches!(
             input_profile,
-            SurveyInputProfile::RollingStonesCheckpoint
+            SurveyInputProfile::NSanityCompletionRoute
+                | SurveyInputProfile::RollingStonesCheckpoint
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
@@ -18518,7 +18521,7 @@ fn survey_pair_with_runtime(
             previous_checkpoint = Some(checkpoint);
         }
         if std::env::var_os("C1_INTERACTION_TRACE").is_some()
-            && matches!(input_profile, SurveyInputProfile::ForwardWithActions)
+            && matches!(input_profile, SurveyInputProfile::NSanityCompletionRoute)
         {
             let read_global = |index| {
                 runtime
@@ -18550,7 +18553,7 @@ fn survey_pair_with_runtime(
         if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
             && matches!(
                 input_profile,
-                SurveyInputProfile::ForwardWithActions
+                SurveyInputProfile::NSanityCompletionRoute
                     | SurveyInputProfile::GreatGatePhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
@@ -26883,6 +26886,153 @@ fn n_sanity_idle_paging_matches_the_legal_360_frame_trace() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::N_SANITY_BEACH;
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("N. Sanity Beach pair must parse");
+    let (survey, mut runtime) = survey_pair_with_runtime(
+        "N. Sanity Beach",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::NSanityCompletionRoute,
+        2_100,
+    )
+    .expect("N. Sanity Beach fresh completion route must execute");
+    assert_eq!(survey.frames, 1_900, "{}", survey.summary());
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 1900 requested level transition to 0x2d")
+    );
+    assert_eq!(
+        survey.next_lid,
+        Some((1_900, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+    );
+    assert_eq!(survey.zone_transitions, 18);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (861, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (207, 0x100),
+            (334, 0x200),
+            (512, 0x300),
+            (644, 0x400),
+            (651, 0x500),
+            (683, 0x600),
+            (685, 0x700),
+            (762, 0x800),
+            (787, 0x900),
+            (861, 0xa00),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(861, 0x900)]);
+    assert_eq!(survey.effect_counts.get("save-state").copied(), Some(1));
+    assert_eq!(survey.effect_counts.get("transition").copied(), Some(1));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    for expected in [(207, 7, 3), (312, 14, 3), (334, 12, 3), (861, 19, 9)] {
+        assert!(survey.spawn_flag_samples.contains(&expected));
+    }
+
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before Level Complete"
+        );
+    }
+    let ordinary_pad_bits = PAD_UP | PAD_DOWN | PAD_LEFT | PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_bits == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(19 << 8));
+    assert_eq!(
+        CHECKPOINT_TRANSLATION_GLOBALS.map(|index| {
+            runtime
+                .global_word(index)
+                .expect("checkpoint translation global is readable")
+                .cast_signed()
+        }),
+        [1_945_600, 4_135_168, 24_165_632]
+    );
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xa00));
+    let final_camera = survey
+        .final_camera
+        .expect("N. Sanity end warp must retain a camera location");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("b7_9Z").expect("fixed N. Sanity end-warp EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 2_017);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([3_908_352, 9_051_438, 10_669_312])
+    );
+    let player = player_trace(&runtime)
+        .expect("N. Sanity completion player trace must resolve")
+        .expect("WarpC must retain Crash through its transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(runtime.machine().random_seed(), 0x4258_7668);
+    assert_eq!(runtime.draw_count(), 1_900);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(
+        survey.is_clean(),
+        "N. Sanity completion route must remain clean: {}",
+        survey.summary()
+    );
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let report = runtime
+        .finish_level_transition(
+            &mut host,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+        )
+        .expect("N. Sanity LEVEL_END must resolve Level Complete");
+    assert!(
+        report.event_failures.is_empty(),
+        "N. Sanity LEVEL_END handlers must finish cleanly: {:?}",
+        report.event_failures
+    );
+    assert_eq!(report.requested_lid, 0x2d);
+    assert_eq!(report.next_lid_after_event, 0x2d);
+    assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+    assert!(!report.resolved.bonus_return);
+    assert!(report.effects.is_empty());
+    assert_eq!(report.carry.random_seed, 0x4258_7668);
+    assert_eq!(report.carry.draw_count, 1_900);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn n_sanity_goal_directed_input_characterizes_progression() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -26902,7 +27052,7 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
         &nsd,
         &nsf,
         &nsf_bytes,
-        SurveyInputProfile::ForwardWithActions,
+        SurveyInputProfile::NSanityCompletionRoute,
         frames,
     )
     .unwrap();
@@ -27287,7 +27437,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         &n_sanity_nsf_bytes,
         n_sanity_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::ForwardWithActions,
+        SurveyInputProfile::NSanityCompletionRoute,
         N_SANITY_FRAMES,
     )
     .expect("N. Sanity authored route must execute");

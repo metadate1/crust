@@ -661,11 +661,14 @@ gameplay path.
   authored low-stop state of the moving `d6` wall, jumps its top face, crosses the paired `d7`
   launchers, breaks the obstructing `d8` crate, and activates the next checkpoint on frame 4,482.
   It then clears the `d9` monk, waits for the second moving wall's authored low stop, jumps its top
-  face, and reaches `e0_qZ:0@4681` on frame 4,620 at `[10796680, -2194457, 167936]`. The route
-  records 218 successful spawns, 49 lifecycle/zone transitions, 109,079 executions, 509 solid
-  effects, and RNG `0xcfee9303`, with no restart, death camera, terminal fall, VM fault, faulted
-  object, execution error, or checked issue. The remaining Native Fortress route from `e0_qZ` to
-  its normal end and a browser playthrough are still unproved.
+  face, and reaches `e0_qZ:0@4681` on frame 4,620. The same controller brakes onto launcher 180,
+  lands on the `e1_qZ` waiting floor, waits until the synchronized subtype-six flame child is in
+  state 16 with no collision bound, then chains launchers 183 and 182 into `e2_qZ:0@12580` on
+  frame 4,855 at `[8147552, -2305043, 167936]`. The route records 233 successful spawns, 53
+  lifecycle/zone transitions, 114,182 executions, 515 solid effects, and RNG `0x1000df0e`, with
+  no restart, death camera, terminal fall, VM fault, faulted object, execution error, or checked
+  issue. The remaining Native Fortress route from `e2_qZ` to its normal end and a browser
+  playthrough are still unproved.
 
   The Great Gate's card-backed Yellow Gem route now completes from the owned raw BIN. It restores
   the retail payload and entitlement bit, crosses the live-phase `c4`/`c5` logs, rides both

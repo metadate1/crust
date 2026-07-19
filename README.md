@@ -337,11 +337,14 @@ sequence. Its clean `c6_qZ` checkpoint is frame 2,548; the same uninterrupted co
 the `c7`/`c8` wall sequence, activates checkpoint entity 148 on frame 3,421, clears `d4`/`d5`,
 waits for and jumps the moving `d6` wall, crosses the paired `d7` launchers, breaks the obstructing
 `d8` crate, activates the next checkpoint on frame 4,482, clears the `d9` monk, waits for and jumps
-the second moving wall, and reaches `e0_qZ` on frame 4,620. The complete slice performs 218
-successful spawns, 49 lifecycle/zone transitions, 109,079 executions, and 509 solid effects, with
-RNG `0xcfee9303`. Crash finishes at `[10796680, -2194457, 167936]` in state two with no restart,
-death camera, terminal fall, VM fault, faulted object, execution error, or checked issue. The route
-from `e0_qZ` to Native Fortress's normal end and a browser playthrough remain unproved.
+the second moving wall, and reaches `e0_qZ` on frame 4,620. It then brakes onto launcher 180,
+lands on the `e1_qZ` waiting floor, waits for the synchronized flame child to enter its authored
+safe state, and chains launchers 183 and 182 into `e2_qZ` on frame 4,855. The complete slice
+performs 233 successful spawns, 53 lifecycle/zone transitions, 114,182 executions, and 515 solid
+effects, with RNG `0x1000df0e`. Crash finishes at `[8147552, -2305043, 167936]` in state two with
+no restart, death camera, terminal fall, VM fault, faulted object, execution error, or checked
+issue. The route from `e2_qZ` to Native Fortress's normal end and a browser playthrough remain
+unproved.
 
 The Great Gate also has a complete card-backed Yellow Gem route from the owned raw BIN. It restores
 the exact retail payload and entitlement bit, crosses the phase-sensitive `c4`/`c5` logs, rides

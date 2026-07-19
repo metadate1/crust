@@ -414,6 +414,7 @@ enum SurveyInputProfile {
     LocalPbakPrefix,
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
+    HeavyMachineryCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
@@ -474,6 +475,7 @@ impl SurveyInputProfile {
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
+            Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -521,6 +523,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateYellowGemExactCarry
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
+                | Self::HeavyMachineryCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
@@ -11100,6 +11103,164 @@ impl BoulderDashCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Heavy Machinery from a
+/// fresh level boot through its normal `WarpC` transition. The route contains
+/// no state injection or proprietary recording data: each entry is an
+/// inclusive frame window and the retail pad bits held during that window.
+struct HeavyMachineryCompletionRouteController;
+
+impl HeavyMachineryCompletionRouteController {
+    fn held(frame: u32) -> u32 {
+        // Windows are ordered because later overlays intentionally add to or
+        // replace broad movement spans. The final Down/Up cornering pulse
+        // enters WarpC's authored lane beyond the top machinery shaft.
+        const ROUTE_INPUTS: &[(u32, u32, bool, u32)] = &[
+            (60, 60, false, PAD_CROSS),
+            (72, 72, false, PAD_SQUARE),
+            (84, 123, true, 0),
+            (131, 131, false, PAD_CROSS),
+            (144, 144, false, PAD_SQUARE),
+            (150, 159, true, PAD_LEFT),
+            (160, 197, true, 0),
+            (212, 219, false, PAD_CROSS),
+            (212, 212, false, PAD_SQUARE),
+            (220, 227, false, PAD_DOWN),
+            (230, 237, false, PAD_UP),
+            (240, 240, false, PAD_SQUARE),
+            (254, 254, false, PAD_SQUARE),
+            (282, 282, false, PAD_CROSS),
+            (306, 306, false, PAD_CROSS),
+            (330, 333, false, PAD_CROSS),
+            (374, 377, false, PAD_DOWN),
+            (390, 397, false, PAD_UP),
+            (374, 381, false, PAD_CROSS),
+            (412, 415, false, PAD_CROSS | PAD_SQUARE),
+            (418, 429, false, PAD_DOWN),
+            (430, 437, false, PAD_UP),
+            (443, 545, true, 0),
+            (560, 565, false, PAD_CROSS),
+            (565, 573, false, PAD_UP),
+            (574, 582, false, PAD_DOWN),
+            (594, 601, false, PAD_CROSS),
+            (635, 642, false, PAD_CROSS),
+            (659, 667, false, PAD_CROSS),
+            (760, 768, false, PAD_CROSS),
+            (768, 774, false, PAD_SQUARE),
+            (791, 799, false, PAD_CROSS),
+            (830, 939, true, 0),
+            (940, 948, false, PAD_CROSS),
+            (948, 954, false, PAD_SQUARE),
+            (960, 968, false, PAD_CROSS),
+            (985, 994, false, PAD_CROSS),
+            (1_038, 1_047, false, PAD_CROSS),
+            (1_080, 1_081, false, PAD_DOWN),
+            (1_130, 1_139, false, PAD_CROSS),
+            (1_154, 1_163, false, PAD_CROSS),
+            (1_192, 1_201, false, PAD_CROSS),
+            (1_236, 1_245, false, PAD_CROSS),
+            (1_280, 1_289, false, PAD_CROSS),
+            (1_288, 1_295, false, PAD_SQUARE),
+            (1_302, 1_311, false, PAD_CROSS),
+            (1_320, 1_321, false, PAD_DOWN),
+            (1_364, 3_600, true, 0),
+            (1_394, 3_600, false, PAD_LEFT),
+            (1_450, 1_459, false, PAD_CROSS),
+            (1_490, 1_499, false, PAD_CROSS),
+            (1_490, 1_497, false, PAD_SQUARE),
+            (1_518, 1_527, false, PAD_CROSS),
+            (1_532, 1_533, false, PAD_UP),
+            (1_540, 1_549, false, PAD_CROSS),
+            (1_562, 1_571, false, PAD_CROSS),
+            (1_586, 1_595, false, PAD_CROSS),
+            (1_614, 1_623, false, PAD_CROSS),
+            (1_656, 1_665, false, PAD_CROSS),
+            (1_684, 1_693, false, PAD_CROSS),
+            (1_708, 1_715, false, PAD_UP),
+            (1_716, 1_725, false, PAD_CROSS),
+            (1_752, 1_761, false, PAD_CROSS),
+            (1_774, 1_781, false, PAD_SQUARE),
+            (1_798, 1_807, false, PAD_CROSS),
+            (1_820, 1_829, false, PAD_CROSS),
+            (1_844, 1_851, false, PAD_DOWN),
+            (1_852, 1_861, false, PAD_CROSS),
+            (1_894, 1_903, false, PAD_CROSS),
+            (1_910, 6_000, true, 0),
+            (1_932, 1_947, false, PAD_LEFT | PAD_CROSS),
+            (2_000, 2_035, false, PAD_LEFT),
+            (2_060, 2_065, false, PAD_UP),
+            (2_132, 2_155, false, PAD_LEFT | PAD_CROSS),
+            (2_500, 2_535, false, PAD_LEFT),
+            (2_600, 2_611, false, PAD_LEFT | PAD_CROSS),
+            (2_900, 2_907, false, PAD_RIGHT | PAD_SQUARE),
+            (3_100, 3_130, false, PAD_RIGHT),
+            (3_131, 3_170, false, PAD_DOWN),
+            (3_171, 3_240, false, PAD_LEFT),
+            (3_241, 3_256, false, PAD_UP),
+            (3_257, 3_276, false, PAD_LEFT),
+            (3_263, 3_282, false, PAD_CROSS),
+            (3_301, 3_312, false, PAD_LEFT),
+            (3_301, 3_320, false, PAD_CROSS),
+            (3_338, 3_347, false, PAD_LEFT),
+            (3_338, 3_357, false, PAD_CROSS),
+            (3_420, 3_431, false, PAD_LEFT),
+            (3_420, 3_439, false, PAD_CROSS),
+            (3_510, 3_523, false, PAD_LEFT),
+            (3_510, 3_529, false, PAD_CROSS),
+            (3_620, 4_224, false, PAD_RIGHT),
+            (3_620, 3_640, false, PAD_CROSS),
+            (3_664, 3_684, false, PAD_CROSS),
+            (3_692, 3_712, false, PAD_CROSS),
+            (3_724, 3_760, false, PAD_DOWN),
+            (3_803, 3_840, false, PAD_UP),
+            (3_813, 3_833, false, PAD_CROSS),
+            (3_973, 3_993, false, PAD_CROSS),
+            (4_023, 4_043, false, PAD_CROSS),
+            (4_077, 4_097, false, PAD_CROSS),
+            (4_102, 4_122, false, PAD_CROSS),
+            (4_136, 4_143, false, PAD_DOWN),
+            (4_148, 4_168, false, PAD_CROSS),
+            (4_174, 4_194, false, PAD_CROSS),
+            (4_220, 4_228, false, PAD_UP),
+            (4_316, 4_336, false, PAD_RIGHT | PAD_CROSS),
+            (4_337, 4_344, false, PAD_RIGHT),
+            (4_401, 6_000, true, 0),
+            (4_400, 4_420, false, PAD_RIGHT | PAD_CROSS),
+            (4_444, 4_464, false, PAD_RIGHT | PAD_CROSS),
+            (4_468, 4_475, false, PAD_RIGHT | PAD_CROSS),
+            (4_508, 4_520, false, PAD_RIGHT | PAD_CROSS),
+            (4_558, 4_598, false, PAD_RIGHT),
+            (4_564, 4_588, false, PAD_CROSS),
+            (4_704, 4_728, false, PAD_RIGHT | PAD_CROSS),
+            (4_745, 4_841, false, PAD_RIGHT),
+            (4_768, 4_788, false, PAD_CROSS),
+            (4_815, 4_835, false, PAD_CROSS),
+            (4_843, 4_855, false, PAD_LEFT),
+            (4_860, 4_872, false, PAD_RIGHT),
+            (4_880, 4_900, false, PAD_LEFT),
+            (4_910, 4_935, false, PAD_RIGHT),
+            (4_939, 4_971, false, PAD_LEFT),
+            (4_972, 5_005, false, PAD_RIGHT),
+            (5_006, 5_040, false, PAD_LEFT),
+            (5_041, 5_041, false, PAD_RIGHT | PAD_DOWN),
+            (5_042, 5_300, false, PAD_RIGHT),
+            (5_071, 5_087, false, PAD_CROSS),
+            (5_071, 5_072, false, PAD_DOWN),
+            (5_073, 5_076, false, PAD_UP),
+        ];
+
+        let mut held = PAD_RIGHT;
+        for &(start, end, clear, buttons) in ROUTE_INPUTS {
+            if (start..=end).contains(&frame) {
+                if clear {
+                    held = 0;
+                }
+                held |= buttons;
+            }
+        }
+        held
+    }
+}
+
 const UPSTREAM_PBAK_FRAMES: u32 = 934;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15886,6 +16047,9 @@ impl SurveyInputController {
             SurveyInputProfile::BoulderDashCompletionRoute => {
                 BoulderDashCompletionRouteController::held(frame)
             }
+            SurveyInputProfile::HeavyMachineryCompletionRoute => {
+                HeavyMachineryCompletionRouteController::held(frame)
+            }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {
                     local_pbak_held
@@ -18403,6 +18567,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::RollingStonesCheckpoint
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
+                | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
                 | SurveyInputProfile::WholeHogCompletionRoute
                 | SurveyInputProfile::RipperRooCompletionRoute
@@ -25649,6 +25814,83 @@ fn requested_survey_level() -> Option<LevelId> {
     let value = u32::from_str_radix(digits, 16)
         .unwrap_or_else(|error| panic!("C1_SURVEY_LEVEL {raw:?} is not hexadecimal: {error}"));
     Some(LevelId::new(value).expect("C1_SURVEY_LEVEL fits the retail filename field"))
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x06);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Heavy Machinery");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Heavy Machinery pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::HeavyMachineryCompletionRoute,
+        5_300,
+    )
+    .expect("Heavy Machinery's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 5_178, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((5_178, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 5178 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.zone_transitions, 43);
+    assert_eq!(survey.camera_ranges.len(), 77);
+    assert_eq!(survey.camera_path_changes, 83);
+    assert_eq!(survey.successful_spawns, 223);
+    assert_eq!(survey.executions, 118_023);
+    assert_eq!(survey.final_live_objects, 19);
+    assert_eq!(survey.max_live_objects, 49);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_RIGHT)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let player = player_trace(&runtime)
+        .expect("Heavy Machinery completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(runtime.draw_count(), 5_178);
+    assert!(
+        survey.is_clean(),
+        "Heavy Machinery end-warp route must remain clean: {}",
+        survey.summary()
+    );
 }
 
 #[test]

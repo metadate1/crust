@@ -99,6 +99,98 @@ fn survey_frame_count() -> u32 {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn slippery_climb_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x2e);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Slippery Climb");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Slippery Climb pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        6_000,
+    )
+    .expect("Slippery Climb's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 5_575, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((5_575, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 5575 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.zone_transitions, 60);
+    assert_eq!(survey.camera_ranges.len(), 48);
+    assert_eq!(survey.camera_path_changes, 61);
+    assert_eq!(survey.last_camera_path_change, 5_382);
+    assert_eq!(survey.last_camera_progress_change, 5_460);
+    let final_camera = survey
+        .final_camera
+        .expect("Slippery Climb must retain the end-zone camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("i3_KZ").expect("fixed Slippery Climb end-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 17_919);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.first_terminal_fall.is_none());
+    assert!(survey.observed_player_states.contains(&32));
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([28_624_000, 752_728, 171_776])
+    );
+    let player = player_trace(&runtime)
+        .expect("Slippery Climb completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [28_624_000, 752_728, 171_776]);
+    assert_eq!(runtime.draw_count(), 5_575);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(
+        survey.is_clean(),
+        "Slippery Climb end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -585,6 +677,7 @@ enum SurveyInputProfile {
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
     FumblingInTheDarkCompletionRoute,
+    SlipperyClimbCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
@@ -651,6 +744,7 @@ impl SurveyInputProfile {
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
+            Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -704,6 +798,7 @@ impl SurveyInputProfile {
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
                 | Self::FumblingInTheDarkCompletionRoute
+                | Self::SlipperyClimbCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
@@ -16406,6 +16501,1379 @@ impl UpstreamRecoveryRouteController {
     }
 }
 
+/// Ordinary-pad completion route for Slippery Climb.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+struct SlipperyClimbCompletionRouteController {
+    jump_hold: u8,
+    second_lift_spin: bool,
+    second_lift_wait: u8,
+    second_lift_square_released: bool,
+    third_lift_spin: bool,
+    rotating_block_staged: bool,
+    rotating_block_wait: u8,
+    second_rotating_block_staged: bool,
+    second_rotating_block_wait: u8,
+    barrier_jump_released: bool,
+    lift_brake_complete: bool,
+    corner_staged: bool,
+    corner_wait: u8,
+    vertical_jump_released: bool,
+    vertical_lift_staged: bool,
+    vertical_rightward: bool,
+    tower_staged: bool,
+    tower_wait: u8,
+    tower_leftward: bool,
+    tower_bounce_staged: bool,
+    tower_second_lift_staged: bool,
+    tower_second_lift_rightward: bool,
+    tower_third_leftward: bool,
+    tower_third_spin_released: bool,
+    tower_third_spin_tick: u8,
+    tower_wall_step: u8,
+    tower_wall_wait: u8,
+    tower_platform_launch_released: bool,
+    tower_top_lift_staged: bool,
+    tower_top_lift_leftward: bool,
+    tower_b1_crate_staged: bool,
+    tower_b1_crate_wait: u8,
+    tower_b1_rightward: bool,
+    tower_b1_launch_staged: bool,
+    tower_b1_launch_wait: u8,
+    tower_b1_wall_crossed: bool,
+    tower_b1_step_reached: bool,
+    tower_b2_exit_leftward: bool,
+    tower_b2_checkpoint_rightward: bool,
+    tower_b2_first_step_leftward: bool,
+    tower_b2_first_step_wait: u8,
+    tower_b2_second_step_staged: bool,
+    tower_b2_second_step_wait: u8,
+    tower_b2_row_target: Option<VmObjectHandle>,
+    tower_b2_row_launched: bool,
+    tower_b2_row_landed: bool,
+    tower_b2_row_stage: u8,
+    tower_b2_row_tick: u8,
+    upper_m2_flip_bounced: bool,
+    upper_l4_wait_started: bool,
+    upper_l4_wait: u8,
+    upper_i2_waited: bool,
+}
+
+impl SlipperyClimbCompletionRouteController {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if matches!(player.state, 22 | 40) {
+            self.jump_hold = 0;
+            return 0;
+        }
+
+        let c3 = Eid::from_name("c3_KZ").expect("fixed Slippery Climb corner EID is valid");
+        let zone_name = camera.path.zone.name();
+        let lower = zone_name.as_ref().is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                "g4_KZ"
+                    | "g3_KZ"
+                    | "g2_KZ"
+                    | "g1_KZ"
+                    | "f5_KZ"
+                    | "f4_KZ"
+                    | "f3_KZ"
+                    | "f2_KZ"
+                    | "f1_KZ"
+                    | "e4_KZ"
+                    | "e3_KZ"
+                    | "e2_KZ"
+                    | "e1_KZ"
+                    | "d4_KZ"
+                    | "d3_KZ"
+                    | "d2_KZ"
+                    | "d1_KZ"
+                    | "c4_KZ"
+            )
+        }) || (camera.path.zone == c3 && camera.path.index == 0);
+        let vertical = (camera.path.zone == c3 && camera.path.index == 1)
+            || zone_name.as_ref().is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "a1_KZ" | "a2_KZ" | "a3_KZ" | "a4_KZ" | "b1_KZ" | "b2_KZ" | "b3_KZ" | "b4_KZ"
+                )
+            });
+        let upper = zone_name.as_ref().is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                "c1_KZ"
+                    | "o2_KZ"
+                    | "o1_KZ"
+                    | "n5_KZ"
+                    | "n4_KZ"
+                    | "n3_KZ"
+                    | "n2_KZ"
+                    | "n1_KZ"
+                    | "m4_KZ"
+                    | "m3_KZ"
+                    | "m2_KZ"
+                    | "m1_KZ"
+                    | "l4_KZ"
+                    | "l3_KZ"
+                    | "l2_KZ"
+                    | "l1_KZ"
+                    | "h3_KZ"
+                    | "i1_KZ"
+                    | "i2_KZ"
+                    | "i3_KZ"
+            )
+        });
+        if !(lower || vertical || upper) {
+            return 0;
+        }
+        if !self.corner_staged
+            && player.status_a & 1 != 0
+            && (4_800_000..5_100_000).contains(&player.translation[0])
+        {
+            self.corner_staged = true;
+            self.corner_wait = 28;
+        }
+        if self.corner_wait > 0
+            && player.status_a & 1 != 0
+            && (4_700_000..5_200_000).contains(&player.translation[0])
+        {
+            self.corner_wait -= 1;
+            self.jump_hold = 0;
+            return PAD_RIGHT;
+        }
+        let vertical_lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 66)
+        });
+        let tower_second_lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 67)
+        });
+        let tower_top_lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 59)
+        });
+        if vertical && self.vertical_rightward && !self.tower_leftward && player.state == 7 {
+            self.vertical_rightward = false;
+        }
+        if vertical
+            && !self.vertical_lift_staged
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_050_000
+            && player.translation[1] >= -13_100_000
+        {
+            self.vertical_lift_staged = true;
+        }
+        if self.vertical_lift_staged && !self.vertical_rightward {
+            if vertical_lift.is_some_and(|lift| lift.translation[1] >= -12_340_000)
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 4_040_000
+            {
+                self.vertical_rightward = true;
+            } else {
+                self.jump_hold = 0;
+                return if vertical_lift.is_some_and(|lift| lift.translation[1] >= -12_400_000)
+                    || player.translation[0] < 3_920_000
+                {
+                    PAD_RIGHT
+                } else if player.translation[0] > 3_950_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if vertical
+            && self.vertical_rightward
+            && !self.tower_staged
+            && !self.tower_leftward
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_200_000
+            && player.translation[1] >= -11_600_000
+        {
+            self.tower_staged = true;
+            self.tower_wait = 38;
+        }
+        if self.tower_staged && !self.tower_leftward {
+            if self.tower_wait == 0 {
+                self.tower_leftward = true;
+            } else {
+                self.tower_wait -= 1;
+                self.jump_hold = 0;
+                return if player.translation[0] > 5_180_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 5_100_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.tower_leftward
+            && !self.tower_bounce_staged
+            && player.translation[0] <= 4_300_000
+            && player.velocity[1] >= 1_000_000
+        {
+            self.tower_bounce_staged = true;
+        }
+        if self.tower_bounce_staged && !self.tower_second_lift_staged {
+            if player.status_a & 1 != 0
+                && player.translation[0].abs_diff(4_096_000) <= 150_000
+                && tower_second_lift.is_some_and(|lift| {
+                    player.translation[1].abs_diff(lift.translation[1]) <= 100_000
+                })
+            {
+                self.tower_second_lift_staged = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 4_060_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 4_130_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.tower_second_lift_staged && !self.tower_second_lift_rightward {
+            if player.status_a & 1 != 0
+                && tower_second_lift.is_some_and(|lift| lift.translation[1] >= -10_570_000)
+            {
+                self.tower_second_lift_rightward = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 4_060_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 4_130_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.tower_second_lift_rightward
+            && !self.tower_third_leftward
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_200_000
+            && player.translation[1] >= -9_700_000
+        {
+            self.tower_third_leftward = true;
+        }
+        if self.tower_third_leftward && player.status_a & 1 != 0 {
+            let landed_step = [
+                (4_812_800, -9_428_736),
+                (4_505_600, -9_223_936),
+                (4_198_400, -9_019_136),
+                (3_993_600, -8_814_336),
+            ]
+            .iter()
+            .position(|&(x, y)| {
+                player.translation[0].abs_diff(x) <= 120_000
+                    && player.translation[1].abs_diff(y) <= 8_192
+            })
+            .map(|index| u8::try_from(index).expect("four wall steps fit u8") + 1);
+            if let Some(step) = landed_step {
+                let tower_wall_landed = step > self.tower_wall_step;
+                self.tower_wall_step = self.tower_wall_step.max(step);
+                if tower_wall_landed && step >= 2 {
+                    self.tower_wall_wait = 4;
+                }
+            }
+        }
+        let tower_wall_direction = [4_812_800, 4_580_000, 4_275_000, 4_070_000]
+            .get(usize::from(self.tower_wall_step))
+            .map_or(
+                if self.tower_b2_row_stage >= 5 {
+                    PAD_RIGHT
+                } else if self.tower_b2_row_stage >= 2 {
+                    PAD_LEFT
+                } else if self.tower_b2_checkpoint_rightward {
+                    PAD_RIGHT
+                } else if self.tower_b2_exit_leftward {
+                    PAD_LEFT
+                } else if self.tower_b1_rightward {
+                    PAD_RIGHT
+                } else if zone_name.as_deref() == Some("b1_KZ") || self.tower_top_lift_leftward {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                },
+                |&target_x| {
+                    if player.translation[0] > target_x + 24_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < target_x - 24_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    }
+                },
+            );
+        if !self.tower_b2_exit_leftward
+            && zone_name.as_deref() == Some("b2_KZ")
+            && player.status_a & 1 != 0
+            && player.translation[1] >= -6_120_000
+        {
+            self.tower_b2_exit_leftward = true;
+        }
+        if self.tower_b2_exit_leftward
+            && !self.tower_b2_checkpoint_rightward
+            && zone_name.as_deref() == Some("b2_KZ")
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_150_000
+            && player.translation[1] >= -6_120_000
+        {
+            self.tower_b2_checkpoint_rightward = true;
+        }
+        if self.tower_b2_checkpoint_rightward
+            && !self.tower_b2_first_step_leftward
+            && zone_name.as_deref() == Some("b2_KZ")
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_400_000
+            && player.translation[1] >= -5_950_000
+        {
+            self.tower_b2_first_step_leftward = true;
+            self.tower_b2_first_step_wait = 8;
+        }
+        if self.tower_b2_first_step_wait > 0 && player.status_a & 1 != 0 {
+            self.tower_b2_first_step_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return if player.translation[0] < 4_220_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 4_280_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if self.tower_b2_first_step_leftward
+            && !self.tower_b2_second_step_staged
+            && zone_name.as_deref() == Some("b2_KZ")
+            && player.status_a & 1 != 0
+            && (4_300_000..=4_600_000).contains(&player.translation[0])
+            && player.translation[1] >= -5_700_000
+        {
+            self.tower_b2_second_step_staged = true;
+            self.tower_b2_second_step_wait = 0;
+            let rwaoc = Eid::from_name("RWaOC").expect("fixed Slippery Climb platform EID");
+            self.tower_b2_row_target = objects
+                .iter()
+                .filter(|object| object.program == rwaoc && object.state == 2)
+                .filter(|object| matches!(object.origin, ObjectOrigin::Runtime { .. }))
+                .filter(|object| (-6_300_000..=-5_500_000).contains(&object.translation[1]))
+                .max_by_key(|object| object.translation[0])
+                .map(|object| object.object);
+        }
+        if self.tower_b2_second_step_wait > 0 && player.status_a & 1 != 0 {
+            self.tower_b2_second_step_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_second_step_staged
+            && !self.tower_b2_row_landed
+            && let Some(target) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            if self.tower_b2_row_launched
+                && player.status_a & 1 != 0
+                && player.translation[0].abs_diff(target.translation[0]) <= 180_000
+            {
+                self.tower_b2_row_landed = true;
+                self.tower_b2_row_stage = 1;
+                self.jump_hold = 0;
+                return 0;
+            }
+            let direction = if player.translation[0] < target.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > target.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            } | PAD_UP;
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                return direction | PAD_CROSS;
+            }
+            if player.status_a & 1 != 0 {
+                self.tower_b2_row_launched = true;
+                self.jump_hold = 30;
+                return direction | PAD_CROSS;
+            }
+            return direction;
+        }
+        if self.tower_b2_row_stage == 1
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 4_800_000
+            && player.translation[1] >= -5_550_000
+        {
+            self.tower_b2_row_stage = 2;
+            let rwaoc = Eid::from_name("RWaOC").expect("fixed Slippery Climb platform EID");
+            self.tower_b2_row_target = objects
+                .iter()
+                .filter(|object| object.program == rwaoc && object.state == 1)
+                .filter(|object| matches!(object.origin, ObjectOrigin::Runtime { .. }))
+                .min_by_key(|object| {
+                    player.translation[0].abs_diff(object.translation[0])
+                        + player.translation[1].abs_diff(object.translation[1])
+                })
+                .map(|object| object.object);
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_UP;
+        }
+        if self.tower_b2_row_stage == 2
+            && let Some(target) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            let direction = if player.translation[0] < target.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > target.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            } | PAD_UP;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if target.translation[1] < -4_850_000 {
+                return direction;
+            }
+            self.tower_b2_row_stage = 3;
+            let rwaoc = Eid::from_name("RWaOC").expect("fixed Slippery Climb platform EID");
+            self.tower_b2_row_target = objects
+                .iter()
+                .filter(|object| object.program == rwaoc && object.state == 2)
+                .filter(|object| matches!(object.origin, ObjectOrigin::Runtime { .. }))
+                .filter(|object| (-5_000_000..=-4_400_000).contains(&object.translation[1]))
+                .min_by_key(|object| {
+                    player.translation[0].abs_diff(object.translation[0])
+                        + player.translation[1].abs_diff(object.translation[1])
+                })
+                .map(|object| object.object);
+            self.vertical_jump_released = false;
+            return PAD_LEFT | PAD_UP;
+        }
+        if self.tower_b2_row_stage == 3
+            && let Some(target) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            if player.status_a & 1 != 0
+                && player.translation[0].abs_diff(target.translation[0]) <= 180_000
+                && player.translation[1] >= -4_900_000
+            {
+                self.tower_b2_row_stage = 4;
+                self.jump_hold = 0;
+                return 0;
+            }
+            let direction = if player.translation[0] < target.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > target.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            } | PAD_UP;
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                return direction | PAD_CROSS;
+            }
+            if player.status_a & 1 != 0 {
+                self.jump_hold = 30;
+                return direction | PAD_CROSS;
+            }
+            return direction;
+        }
+        if self.tower_b2_row_stage == 4
+            && let Some(target) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            let direction = if player.translation[0] < target.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > target.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            } | PAD_UP;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if target.translation[1] < -4_080_000 {
+                return direction;
+            }
+            self.tower_b2_row_stage = 5;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 30;
+            return PAD_LEFT | PAD_UP | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage == 5 {
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if self.tower_b2_row_tick > 5
+                && player.status_a & 1 != 0
+                && player.translation[1] >= -4_300_000
+            {
+                self.tower_b2_row_stage = 6;
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 0;
+                return PAD_LEFT | PAD_DOWN;
+            }
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                return PAD_LEFT | PAD_UP | PAD_CROSS;
+            }
+            return PAD_LEFT | PAD_UP;
+        }
+        if self.tower_b2_row_stage == 6 {
+            let direction = PAD_LEFT;
+            let depth = PAD_DOWN;
+            if self.tower_b2_row_tick == 0 {
+                self.tower_b2_row_tick = 1;
+                self.jump_hold = 30;
+                return direction | depth | PAD_CROSS;
+            }
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if self.tower_b2_row_tick > 5
+                && player.status_a & 1 != 0
+                && player.translation[1] >= -4_300_000
+            {
+                self.tower_b2_row_stage = 7;
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return 0;
+            }
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                return direction | depth | PAD_CROSS;
+            }
+            return direction | depth;
+        }
+        if self.tower_b2_row_stage == 7
+            && let Some(lift) = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 21)
+            })
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if lift.translation[1] < -3_320_000 {
+                return if player.translation[0] < 3_960_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 4_030_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            self.tower_b2_row_stage = 8;
+            self.jump_hold = 30;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        let upper_slide = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 22)
+        });
+        if self.tower_b2_row_stage == 8
+            && player.status_a & 1 != 0
+            && upper_slide.is_some_and(|slide| {
+                player.translation[0].abs_diff(slide.translation[0]) <= 160_000
+                    && player.translation[1] >= slide.translation[1] + 80_000
+            })
+        {
+            self.tower_b2_row_stage = 9;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 9 {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if self.tower_b2_row_tick > 5 && player.status_a & 1 != 0 {
+                self.tower_b2_row_stage = 10;
+                self.tower_b2_row_tick = 0;
+                return 0;
+            }
+            return PAD_CROSS;
+        }
+        if self.tower_b2_row_stage == 10
+            && upper
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_250_000
+        {
+            self.tower_b2_row_stage = 11;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage == 11
+            && upper
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_750_000
+        {
+            self.tower_b2_row_stage = 12;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage == 12
+            && upper
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 6_250_000
+        {
+            self.tower_b2_row_stage = 13;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage == 12 && upper {
+            let tick = self.tower_b2_row_tick;
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if tick < 90 {
+                return 0;
+            }
+            return PAD_RIGHT | PAD_CROSS | if tick == 90 { PAD_SQUARE } else { 0 };
+        }
+        if self.tower_b2_row_stage == 13
+            && player.status_a & 1 != 0
+            && let Some(platform) = objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("RWaOC")
+                    && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && object.bound.is_some_and(|bound| {
+                        (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 8_192
+                    })
+            })
+        {
+            self.tower_b2_row_stage = 14;
+            self.tower_b2_row_target = Some(platform.object);
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 14
+            && let Some(platform) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if platform.translation[0] >= 7_450_000
+                && platform.translation[1] >= -3_000_000
+                && player.status_a & 1 != 0
+            {
+                self.tower_b2_row_stage = 15;
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 30;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return if player.translation[0] < platform.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > platform.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if self.tower_b2_row_stage == 15
+            && player.translation[0] >= 7_900_000
+            && player.translation[1] <= -2_880_000
+            && player.velocity[1] < 0
+        {
+            self.tower_b2_row_stage = 16;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 16 {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if player.status_a & 1 != 0 && player.translation[1] >= -3_100_000 {
+                self.tower_b2_row_stage = 17;
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 30;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage == 17
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 8_400_000
+            && player.translation[1] >= -3_100_000
+        {
+            self.tower_b2_row_stage = 18;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage >= 18
+            && self.tower_b2_row_stage != 19
+            && player.status_a & 1 != 0
+            && let Some(platform) = objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("RWaOC")
+                    && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && object.bound.is_some_and(|bound| {
+                        (if player.translation[0] >= 19_000_000 {
+                            (bound.min.x.saturating_sub(100_000)
+                                ..=bound.max.x.saturating_add(100_000))
+                                .contains(&player.translation[0])
+                        } else {
+                            (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        }) && player.translation[1].abs_diff(bound.max.y) <= 8_192
+                    })
+            })
+        {
+            self.tower_b2_row_stage = 19;
+            self.tower_b2_row_target = Some(platform.object);
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return if player.translation[0] >= 19_000_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.tower_b2_row_stage == 19
+            && let Some(platform) = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            let next_ledge = objects
+                .iter()
+                .filter(|object| object.program.name().as_deref() == Some("CasOC"))
+                .filter(|object| object.translation[0] > platform.translation[0] + 300_000)
+                .min_by_key(|object| object.translation[0]);
+            let launch_distance = if player.translation[0] >= 20_500_000 {
+                600_000
+            } else {
+                700_000
+            };
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if next_ledge.is_some_and(|ledge| {
+                ledge.translation[0] - platform.translation[0] <= launch_distance
+                    && platform.translation[1] >= ledge.translation[1] - 100_000
+            }) && player.status_a & 1 != 0
+            {
+                self.tower_b2_row_stage = 20;
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 30;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return if player.translation[0] < platform.translation[0] - 20_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > platform.translation[0] + 20_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if self.tower_b2_row_stage >= 18
+            && upper
+            && !self.upper_m2_flip_bounced
+            && player.state == 14
+            && player.translation[0] >= 16_500_000
+        {
+            self.upper_m2_flip_bounced = true;
+        }
+        if self.tower_b2_row_stage >= 18
+            && upper
+            && self.upper_m2_flip_bounced
+            && player.translation[0] < 17_350_000
+        {
+            self.jump_hold = 30;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage >= 18
+            && upper
+            && (16_200_000..17_200_000).contains(&player.translation[0])
+            && ((player.state == 14
+                && player.velocity[1] > 300_000
+                && player.velocity[0] > 300_000)
+                || (!self.upper_m2_flip_bounced
+                    && player.translation[0] >= 16_500_000
+                    && player.velocity[1] < 0))
+        {
+            self.jump_hold = 30;
+            return PAD_LEFT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage >= 18
+            && upper
+            && !self.upper_l4_wait_started
+            && player.status_a & 1 != 0
+            && (18_300_000..18_600_000).contains(&player.translation[0])
+        {
+            self.upper_l4_wait_started = true;
+            self.upper_l4_wait = 100;
+        }
+        if self.upper_l4_wait > 0 {
+            self.upper_l4_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 23 {
+            if self.tower_b2_row_tick < 64 {
+                self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return 0;
+            }
+            self.tower_b2_row_stage = 20;
+            self.jump_hold = 30;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage == 21 {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if player.status_a & 1 != 0 {
+                if !self.upper_i2_waited
+                    && (24_700_000..25_000_000).contains(&player.translation[0])
+                {
+                    self.upper_i2_waited = true;
+                    self.tower_b2_row_stage = 23;
+                    self.tower_b2_row_tick = 0;
+                    return 0;
+                }
+                self.tower_b2_row_stage = if player.translation[0] >= 25_200_000 {
+                    22
+                } else {
+                    20
+                };
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 30;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if player.velocity[1] > 0 {
+                self.tower_b2_row_stage = 20;
+                self.tower_b2_row_tick = 0;
+                self.jump_hold = 30;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage == 22 {
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if player.status_a & 1 != 0 && player.translation[0] >= 25_700_000 {
+                self.tower_b2_row_stage = 20;
+                self.jump_hold = 30;
+            }
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage >= 18
+            && self.tower_b2_row_stage != 19
+            && player.translation[0] >= 18_000_000
+            && player.velocity[1] < 0
+            && objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("RWaOC")
+                    && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && object.bound.is_some_and(|bound| {
+                        (bound.min.x.saturating_sub(120_000)..=bound.max.x.saturating_add(120_000))
+                            .contains(&player.translation[0])
+                            && player.translation[0] <= bound.max.x
+                            && player.translation[1] >= bound.max.y
+                            && player.translation[1].abs_diff(bound.max.y) <= 100_000
+                    })
+            })
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        if self.tower_b2_row_stage >= 18
+            && player.velocity[1] < 0
+            && objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && object.bound.is_some_and(|bound| {
+                        (if player.translation[0] >= 18_000_000 {
+                            (bound.min.x.saturating_sub(180_000)
+                                ..=bound.max.x.saturating_add(180_000))
+                                .contains(&player.translation[0])
+                        } else {
+                            (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                        }) && player.translation[1] >= bound.max.y
+                            && player.translation[1].abs_diff(bound.max.y) <= 100_000
+                    })
+            })
+        {
+            self.tower_b2_row_stage = 21;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage >= 18 && player.status_a & 1 != 0 {
+            self.tower_b2_row_stage = 21;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return if player.translation[0] >= 18_000_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.tower_b2_row_stage >= 10 && upper {
+            let tick = self.tower_b2_row_tick;
+            self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+            if tick < 60 {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                let target_depth = if player.translation[0] >= 15_600_000 {
+                    220_000
+                } else {
+                    120_000
+                };
+                let depth = if player.translation[0] < 15_000_000 {
+                    0
+                } else if player.translation[2] > target_depth {
+                    PAD_UP
+                } else if player.translation[2] < target_depth {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return PAD_RIGHT
+                    | PAD_CROSS
+                    | depth
+                    | if tick.is_multiple_of(6) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            return 0;
+        }
+        if self.tower_b1_rightward
+            && !self.tower_b1_step_reached
+            && player.status_a & 1 != 0
+            && player.translation[1] >= -6_750_000
+            && player.translation[2] >= 100_000
+        {
+            self.tower_b1_step_reached = true;
+        }
+        let b1_depth_direction =
+            if (self.tower_b2_row_stage >= 10 && upper) || self.tower_b2_row_stage >= 8 {
+                0
+            } else if (self.tower_b2_second_step_staged || self.tower_b2_checkpoint_rightward)
+                && zone_name.as_deref() == Some("b2_KZ")
+            {
+                PAD_UP
+            } else if self.tower_top_lift_leftward && zone_name.as_deref() == Some("b1_KZ") {
+                if self.tower_b1_step_reached {
+                    PAD_UP
+                } else if self.tower_b1_wall_crossed {
+                    PAD_DOWN
+                } else if self.tower_b1_launch_staged {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                }
+            } else {
+                0
+            };
+        let course_direction = if upper {
+            PAD_RIGHT | b1_depth_direction
+        } else if vertical && self.tower_third_leftward {
+            tower_wall_direction | b1_depth_direction
+        } else if vertical && self.tower_second_lift_rightward {
+            PAD_RIGHT
+        } else if vertical && self.tower_leftward {
+            PAD_LEFT
+        } else if vertical && self.vertical_rightward {
+            PAD_RIGHT
+        } else {
+            PAD_LEFT
+        };
+        if self.tower_third_leftward && !self.tower_third_spin_released {
+            self.tower_third_spin_released = true;
+            self.jump_hold = 0;
+            return PAD_LEFT;
+        }
+        if self.tower_third_leftward
+            && player.status_a & 1 != 0
+            && player.translation[0] > 5_150_000
+        {
+            self.jump_hold = 0;
+            return PAD_LEFT;
+        }
+        if self.tower_third_leftward
+            && self.tower_wall_step > 0
+            && let Some(&target_y) = [-9_223_936, -9_019_136, -8_814_336]
+                .get(usize::from(self.tower_wall_step.saturating_sub(1)))
+            && player.velocity[1] < 0
+            && player.translation[1] <= target_y - 16_000
+        {
+            self.jump_hold = 0;
+        }
+        if self.tower_wall_wait > 0 && player.status_a & 1 != 0 {
+            self.tower_wall_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            let current_x = [4_812_800, 4_505_600, 4_198_400, 3_993_600]
+                [usize::from(self.tower_wall_step.saturating_sub(1).min(3))];
+            return if player.translation[0] > current_x + 20_000 {
+                PAD_LEFT
+            } else if player.translation[0] < current_x - 20_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.tower_wall_step >= 4
+            && player.status_a & 1 != 0
+            && (-8_500_000..=-8_450_000).contains(&player.translation[1])
+        {
+            if !self.tower_platform_launch_released {
+                self.tower_platform_launch_released = true;
+                self.tower_third_spin_tick = 23;
+                self.jump_hold = 0;
+                return PAD_RIGHT;
+            }
+            self.jump_hold = 29;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_wall_step >= 4
+            && !self.tower_top_lift_staged
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 5_100_000
+            && (-8_450_000..=-8_350_000).contains(&player.translation[1])
+        {
+            self.tower_top_lift_staged = true;
+        }
+        if self.tower_top_lift_staged && !self.tower_top_lift_leftward {
+            if player.status_a & 1 != 0
+                && tower_top_lift.is_some_and(|lift| lift.translation[1] >= -7_750_000)
+            {
+                self.tower_top_lift_leftward = true;
+            } else {
+                self.jump_hold = 0;
+                self.vertical_jump_released = false;
+                return if player.translation[0] < 5_180_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 5_260_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.tower_top_lift_leftward
+            && !self.tower_b1_crate_staged
+            && zone_name.as_deref() == Some("b1_KZ")
+            && player.status_a & 1 != 0
+            && (4_650_000..=4_850_000).contains(&player.translation[0])
+            && (-7_250_000..=-7_100_000).contains(&player.translation[1])
+        {
+            self.tower_b1_crate_staged = true;
+            self.tower_b1_crate_wait = 5;
+        }
+        if self.tower_b1_crate_wait > 0 && player.status_a & 1 != 0 {
+            self.tower_b1_crate_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_LEFT;
+        }
+        if self.tower_b1_crate_staged && !self.tower_b1_rightward && player.state == 14 {
+            return PAD_LEFT | PAD_CROSS;
+        }
+        if self.tower_top_lift_leftward
+            && !self.tower_b1_rightward
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_250_000
+            && player.translation[1] >= -7_180_000
+        {
+            self.tower_b1_rightward = true;
+        }
+        if self.tower_b1_rightward
+            && !self.tower_b1_launch_staged
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_100_000
+            && player.translation[1] >= -7_000_000
+        {
+            self.tower_b1_launch_staged = true;
+            self.tower_b1_launch_wait = 3;
+        }
+        if self.tower_b1_launch_wait > 0 && player.status_a & 1 != 0 {
+            self.tower_b1_launch_wait -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT | PAD_UP;
+        }
+        if self.tower_b1_launch_staged
+            && !self.tower_b1_wall_crossed
+            && player.translation[0] >= 4_250_000
+            && player.translation[2] <= 60_000
+        {
+            self.tower_b1_wall_crossed = true;
+        }
+        if vertical && player.status_a & 1 == 0 {
+            self.vertical_jump_released = false;
+        }
+        if vertical && player.status_a & 1 != 0 && !self.vertical_jump_released {
+            self.vertical_jump_released = true;
+            self.jump_hold = 0;
+            return course_direction;
+        }
+        let platform = objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.executable == 11 && descriptor.subtype == 2
+                )
+            })
+            .filter(|object| player.translation[0].abs_diff(object.translation[0]) <= 160_000)
+            .filter(|object| player.translation[1].abs_diff(object.translation[1]) <= 80_000)
+            .min_by_key(|object| player.translation[0].abs_diff(object.translation[0]));
+        let next_platform = platform.and_then(|platform| {
+            objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.executable == 11 && descriptor.subtype == 2
+                    )
+                })
+                .filter(|object| object.translation[0] < platform.translation[0])
+                .max_by_key(|object| object.translation[0])
+        });
+        let platform_id = platform.and_then(|platform| match platform.origin {
+            ObjectOrigin::Entity(descriptor) => Some(descriptor.id),
+            ObjectOrigin::Runtime { .. } => None,
+        });
+        let next_platform_id = next_platform.and_then(|platform| match platform.origin {
+            ObjectOrigin::Entity(descriptor) => Some(descriptor.id),
+            ObjectOrigin::Runtime { .. } => None,
+        });
+        let long_f5_transfer = platform_id == Some(30) && next_platform_id == Some(43);
+        if player.status_a & 1 != 0
+            && platform_id == Some(43)
+            && let Some(platform) = platform
+            && platform.translation[0] > 20_950_000
+        {
+            return if player.translation[0] < platform.translation[0] - 24_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > platform.translation[0] + 24_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if player.status_a & 1 != 0
+            && let (Some(platform), Some(next_platform)) = (platform, next_platform)
+            && platform.translation[0] - next_platform.translation[0]
+                > if long_f5_transfer { 1_050_000 } else { 700_000 }
+        {
+            return if player.translation[0] < platform.translation[0] - 24_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > platform.translation[0] + 24_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if (long_f5_transfer || platform_id == Some(43))
+            && player.status_a & 1 != 0
+            && let Some(platform) = platform
+            && player.translation[0] > platform.translation[0] - 70_000
+        {
+            return PAD_LEFT;
+        }
+        let first_lift_jump = camera.path.zone.name().as_deref() == Some("f1_KZ")
+            && (16_500_000..17_000_000).contains(&player.translation[0]);
+        if !self.second_lift_spin
+            && player.status_a & 1 != 0
+            && (15_500_000..15_900_000).contains(&player.translation[0])
+        {
+            self.second_lift_spin = true;
+            self.second_lift_wait = 20;
+            self.second_lift_square_released = false;
+        }
+        if self.second_lift_spin
+            && player.status_a & 1 != 0
+            && (14_200_000..15_100_000).contains(&player.translation[0])
+            && player.translation[2] > -80_000
+        {
+            self.third_lift_spin = true;
+            self.jump_hold = 0;
+            return PAD_UP;
+        }
+        if !self.rotating_block_staged
+            && player.status_a & 1 != 0
+            && (12_400_000..12_800_000).contains(&player.translation[0])
+        {
+            self.rotating_block_staged = true;
+            self.rotating_block_wait = 4;
+        }
+        if self.rotating_block_wait > 0
+            && player.status_a & 1 != 0
+            && (12_300_000..12_900_000).contains(&player.translation[0])
+        {
+            self.rotating_block_wait -= 1;
+            self.jump_hold = 0;
+            return PAD_RIGHT;
+        }
+        if !self.second_rotating_block_staged
+            && player.status_a & 1 != 0
+            && (11_300_000..11_700_000).contains(&player.translation[0])
+        {
+            self.second_rotating_block_staged = true;
+            self.second_rotating_block_wait = 1;
+        }
+        if self.second_rotating_block_wait > 0
+            && player.status_a & 1 != 0
+            && (11_200_000..11_800_000).contains(&player.translation[0])
+        {
+            self.second_rotating_block_wait -= 1;
+            self.jump_hold = 0;
+            return PAD_RIGHT;
+        }
+        if !self.barrier_jump_released
+            && player.status_a & 1 != 0
+            && (9_100_000..9_400_000).contains(&player.translation[0])
+        {
+            self.barrier_jump_released = true;
+            self.jump_hold = 0;
+            return PAD_LEFT;
+        }
+        if self.second_lift_spin
+            && player.status_a & 1 != 0
+            && (14_200_000..15_100_000).contains(&player.translation[0])
+        {
+            self.third_lift_spin = true;
+        }
+        let second_lift_jump = self.second_lift_spin;
+        if self.second_lift_wait > 0
+            && player.status_a & 1 != 0
+            && (15_500_000..15_900_000).contains(&player.translation[0])
+        {
+            self.second_lift_wait -= 1;
+            return if player.translation[0] < 15_750_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 15_820_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if first_lift_jump && player.status_a & 1 != 0 && player.translation[0] > 16_750_000 {
+            return PAD_LEFT;
+        }
+        if second_lift_jump && player.status_a & 1 != 0 && player.translation[0] > 15_700_000 {
+            return PAD_LEFT;
+        }
+        if second_lift_jump
+            && player.status_a & 1 != 0
+            && (14_200_000..15_100_000).contains(&player.translation[0])
+            && player.translation[0] > 14_740_000
+        {
+            return PAD_LEFT;
+        }
+        let second_lift_square = if vertical {
+            false
+        } else if self.third_lift_spin && player.state == 18 {
+            self.second_lift_square_released = true;
+            false
+        } else if self.third_lift_spin && player.status_a & 1 != 0 {
+            false
+        } else if second_lift_jump && player.state == 11 {
+            let pressed = self.second_lift_square_released;
+            self.second_lift_square_released = !self.second_lift_square_released;
+            pressed
+        } else {
+            self.second_lift_square_released = false;
+            second_lift_jump
+        };
+        if player.status_a & 1 != 0 && (5_700_000..6_100_000).contains(&player.translation[0]) {
+            self.lift_brake_complete = true;
+        }
+        let direction = if !self.lift_brake_complete
+            && player.status_a & 1 == 0
+            && (5_600_000..5_950_000).contains(&player.translation[0])
+        {
+            PAD_RIGHT
+        } else {
+            course_direction
+                | if self.third_lift_spin
+                    && player.status_a & 1 == 0
+                    && (14_200_000..14_700_000).contains(&player.translation[0])
+                {
+                    PAD_UP
+                } else {
+                    0
+                }
+        };
+        let tower_third_square = if self.tower_third_leftward && !self.tower_top_lift_leftward {
+            if self.tower_wall_step >= 2
+                && let Some(&target_y) = [-9_019_136, -8_814_336]
+                    .get(usize::from(self.tower_wall_step.saturating_sub(2)))
+            {
+                player.velocity[1] < 0 && player.translation[1] <= target_y + 100_000
+            } else {
+                let pressed = self.tower_third_spin_tick < 23;
+                self.tower_third_spin_tick = (self.tower_third_spin_tick + 1) % 24;
+                pressed
+            }
+        } else {
+            false
+        };
+        let lab_assistant = Eid::from_name("LabAC").expect("fixed laboratory-assistant EID");
+        let upper_attack_square = self.tower_b2_row_stage >= 10
+            && matches!(zone_name.as_deref(), Some("c1_KZ" | "o2_KZ"))
+            && objects.iter().any(|object| {
+                object.program == lab_assistant
+                    && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                    && player.translation[0].abs_diff(object.translation[0]) <= 500_000
+                    && player.translation[1].abs_diff(object.translation[1]) <= 350_000
+            });
+        let held = direction
+            | if first_lift_jump
+                || second_lift_square
+                || (self.tower_leftward && !self.tower_third_leftward)
+                || tower_third_square
+                || upper_attack_square
+            {
+                PAD_SQUARE
+            } else {
+                0
+            };
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            return held | PAD_CROSS;
+        }
+        if player.status_a & 1 != 0 {
+            self.jump_hold = if vertical {
+                30
+            } else if first_lift_jump {
+                14
+            } else if self.third_lift_spin {
+                20
+            } else if second_lift_jump {
+                14
+            } else {
+                15
+            };
+            return held | PAD_CROSS;
+        }
+        held
+    }
+}
+
 /// Ordinary-pad completion route for The High Road.
 ///
 /// The right outside rope is authored walkable collision and avoids the
@@ -24713,6 +26181,7 @@ struct SurveyInputController {
     cortex_power: CortexPowerCompletionRouteController,
     generator_room: GeneratorRoomCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
+    slippery_climb: SlipperyClimbCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
     hog_wild: HogWildCompletionRouteController,
@@ -24845,6 +26314,60 @@ impl SurveyInputController {
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
+            },
+            slippery_climb: SlipperyClimbCompletionRouteController {
+                jump_hold: 0,
+                second_lift_spin: false,
+                second_lift_wait: 0,
+                second_lift_square_released: false,
+                third_lift_spin: false,
+                rotating_block_staged: false,
+                rotating_block_wait: 0,
+                second_rotating_block_staged: false,
+                second_rotating_block_wait: 0,
+                barrier_jump_released: false,
+                lift_brake_complete: false,
+                corner_staged: false,
+                corner_wait: 0,
+                vertical_jump_released: false,
+                vertical_lift_staged: false,
+                vertical_rightward: false,
+                tower_staged: false,
+                tower_wait: 0,
+                tower_leftward: false,
+                tower_bounce_staged: false,
+                tower_second_lift_staged: false,
+                tower_second_lift_rightward: false,
+                tower_third_leftward: false,
+                tower_third_spin_released: false,
+                tower_third_spin_tick: 0,
+                tower_wall_step: 0,
+                tower_wall_wait: 0,
+                tower_platform_launch_released: false,
+                tower_top_lift_staged: false,
+                tower_top_lift_leftward: false,
+                tower_b1_crate_staged: false,
+                tower_b1_crate_wait: 0,
+                tower_b1_rightward: false,
+                tower_b1_launch_staged: false,
+                tower_b1_launch_wait: 0,
+                tower_b1_wall_crossed: false,
+                tower_b1_step_reached: false,
+                tower_b2_exit_leftward: false,
+                tower_b2_checkpoint_rightward: false,
+                tower_b2_first_step_leftward: false,
+                tower_b2_first_step_wait: 0,
+                tower_b2_second_step_staged: false,
+                tower_b2_second_step_wait: 0,
+                tower_b2_row_target: None,
+                tower_b2_row_launched: false,
+                tower_b2_row_landed: false,
+                tower_b2_row_stage: 0,
+                tower_b2_row_tick: 0,
+                upper_m2_flip_bounced: false,
+                upper_l4_wait_started: false,
+                upper_l4_wait: 0,
+                upper_i2_waited: false,
             },
             upstream: UpstreamRecoveryRouteController {
                 stage: UpstreamRecoveryStage::SettleAtSpawn,
@@ -25035,6 +26558,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
             self.cortex_power = CortexPowerCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::SlipperyClimbCompletionRoute {
+            self.slippery_climb = SlipperyClimbCompletionRouteController::default();
+        }
     }
 
     fn held(
@@ -25152,6 +26678,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::FumblingInTheDarkCompletionRoute => {
                 FumblingInTheDarkCompletionRouteController::held(frame)
+            }
+            SurveyInputProfile::SlipperyClimbCompletionRoute => {
+                self.slippery_climb.held(camera, player, route_objects)
             }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {
@@ -27539,6 +29068,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::TempleRuinsCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
+                    | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) {
             player_collider_entity(&runtime)?
         } else {
@@ -27625,7 +29155,8 @@ fn survey_pair_with_runtime(
             SurveyInputProfile::LostCityCompletionRoute
             | SurveyInputProfile::TempleRuinsCompletionRoute
             | SurveyInputProfile::GeneratorRoomCompletionRoute
-            | SurveyInputProfile::ToxicWasteCompletionRoute => {
+            | SurveyInputProfile::ToxicWasteCompletionRoute
+            | SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 program_object_traces(&runtime, &[])?
             }
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
@@ -27692,6 +29223,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
+                | SurveyInputProfile::SlipperyClimbCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
@@ -28036,6 +29568,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
+                    | SurveyInputProfile::SlipperyClimbCompletionRoute
             )
             && (matches!(
                 input_profile,
@@ -28046,6 +29579,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
+                    | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) || frame >= 300
                 || frame <= 120)
             && (input_profile != SurveyInputProfile::GeneratorRoomCompletionRoute || frame <= 1_500)
@@ -35507,6 +37041,10 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
                 && std::env::var_os("C1_SURVEY_CORTEX_POWER_ROUTE").is_some()
             {
                 SurveyInputProfile::CortexPowerCompletionRoute
+            } else if known.id == LevelId::new_const(0x2e)
+                && std::env::var_os("C1_SURVEY_SLIPPERY_CLIMB_ROUTE").is_some()
+            {
+                SurveyInputProfile::SlipperyClimbCompletionRoute
             } else if known.id == LevelId::new_const(0x21)
                 && std::env::var_os("C1_SURVEY_KOALA_ROUTE").is_some()
             {

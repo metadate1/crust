@@ -484,6 +484,7 @@ enum SurveyInputProfile {
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
     CortexPowerCompletionRoute,
+    GeneratorRoomCompletionRoute,
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
@@ -548,6 +549,7 @@ impl SurveyInputProfile {
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
             Self::CortexPowerCompletionRoute => "cortex-power-completion-route",
+            Self::GeneratorRoomCompletionRoute => "generator-room-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
@@ -599,6 +601,7 @@ impl SurveyInputProfile {
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
                 | Self::CortexPowerCompletionRoute
+                | Self::GeneratorRoomCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
@@ -11466,6 +11469,1573 @@ impl BoulderDashCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Generator Room from a fresh
+/// level boot. This controller deliberately derives every action from live
+/// player/object observations; it never installs or mutates runtime state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+// These flags record independent one-way route milestones; combining them into
+// one enum would erase valid overlaps such as a platform departure during a jump.
+#[allow(clippy::struct_excessive_bools)]
+struct GeneratorRoomCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    corner_jump_started: bool,
+    right_route_started: bool,
+    side_jump_started: bool,
+    platform_departed: bool,
+    route_stage: u8,
+    a7_platform_seen: bool,
+    a7_platform_departed: bool,
+    a8_checkpoint_airborne_seen: bool,
+    a8_checkpoint_departed: bool,
+    a8_checkpoint_crate_hit: bool,
+    a8_question_crate_broken: bool,
+    a8_hazard_waiting: bool,
+    a8_hazard_high_seen: bool,
+    a8_hazard_crossing: bool,
+    a9_hazard_waiting: bool,
+    a9_hazard_high_seen: bool,
+    a9_hazard_runup: bool,
+    a9_platform_departed: bool,
+    a9_platform_depart_frames: u8,
+    a9_platform_seen: bool,
+    a9_target_high_seen: bool,
+    b0_source_landed: bool,
+    b0_platform_runup: bool,
+    b0_platform_departed: bool,
+    b1_side_route_started: bool,
+    b1_second_crate_hit: bool,
+    b1_platform_landed: bool,
+    b2_first_platform_landed: bool,
+    b2_target_high_seen: bool,
+    b2_depart_runup: bool,
+    b2_depart_runup_frames: u8,
+    b2_second_platform_landed: bool,
+    b2_third_platform_landed: bool,
+    b3_source_landed: bool,
+    b4_turn_started: bool,
+    b7_brake_airborne_seen: bool,
+    b7_wall_airborne_seen: bool,
+    b8_platform_wait_frames: u8,
+    c0_depart_airborne_seen: bool,
+    c2_depart_airborne_seen: bool,
+    c3_gap_airborne_seen: bool,
+    bridge_hit: bool,
+    bridge_returned: bool,
+}
+
+impl GeneratorRoomCompletionRouteController {
+    fn held(
+        &mut self,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let pause_end = 120_u32;
+        let maneuver_start = pause_end.saturating_add(1);
+        let left_end = 138_u32;
+        let left_start = 134_u32;
+        let jump_hold = 19_u8;
+        let turn_z = -2_850_000;
+        let dodge_z = -3_050_000;
+        let return_x = 2_250_000;
+        let a7_turn_z = -5_420_000;
+        if objects.iter().any(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 33)
+                && matches!(object.state, 3 | 9)
+        }) {
+            self.bridge_hit = true;
+        }
+        if objects.iter().any(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 40)
+                && object.state != 0
+        }) {
+            self.a8_question_crate_broken = true;
+        }
+        if self.bridge_hit
+            && player.is_some_and(|player| {
+                player.translation[2] >= -3_100_000 && player.status_a & 1 != 0
+            })
+        {
+            self.bridge_returned = true;
+        }
+        if self.route_stage == 3 && player_collider_entity == Some(39) {
+            self.a8_hazard_waiting = true;
+        }
+        if !self.right_route_started && player.is_some_and(|player| player.translation[2] <= turn_z)
+        {
+            self.right_route_started = true;
+            self.route_stage = 1;
+        }
+        if let Some(player) = player {
+            match self.route_stage {
+                1 if player.translation[0] >= 3_900_000 => self.route_stage = 2,
+                2 if player.translation[2] <= a7_turn_z => self.route_stage = 3,
+                3 if player.translation[0] <= 600_000 => self.route_stage = 4,
+                _ => {}
+            }
+        }
+        if self.a8_hazard_waiting {
+            let hazard_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 38)
+                    .then_some(object.translation[1])
+            });
+            if hazard_y.is_some_and(|y| y >= 350_000) {
+                self.a8_hazard_high_seen = true;
+            }
+            if self.a8_hazard_high_seen && hazard_y.is_some_and(|y| y <= 80_000) {
+                self.a8_hazard_waiting = false;
+                self.a8_hazard_crossing = true;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return match player.map(|player| player.velocity[0]) {
+                Some(velocity) if velocity < -50_000 => PAD_RIGHT,
+                Some(velocity) if velocity > 50_000 => PAD_LEFT,
+                _ => 0,
+            };
+        }
+        if self.a8_hazard_crossing {
+            if player.is_some_and(|player| player.translation[0] > 1_800_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.a8_hazard_crossing = false;
+            self.a9_hazard_waiting = true;
+        }
+        if self.a9_hazard_waiting {
+            let hazard_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 44)
+                    .then_some(object.translation[1])
+            });
+            if hazard_y.is_some_and(|y| y >= 350_000) {
+                self.a9_hazard_high_seen = true;
+            }
+            if self.a9_hazard_high_seen && hazard_y.is_some_and(|y| y <= 300_000) {
+                self.a9_hazard_waiting = false;
+                self.a9_hazard_runup = true;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return match player.map(|player| player.velocity[0]) {
+                Some(velocity) if velocity < -50_000 => PAD_RIGHT,
+                Some(velocity) if velocity > 50_000 => PAD_LEFT,
+                _ => 0,
+            };
+        }
+        if self.a9_hazard_runup {
+            if player.is_some_and(|player| player.translation[0] > 1_705_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.a9_hazard_runup = false;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_LEFT | PAD_CROSS;
+        }
+        if self.route_stage == 3 && player_collider_entity == Some(42) {
+            self.a9_platform_seen = true;
+            self.route_stage = 4;
+            self.a9_platform_depart_frames = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 4 && self.a9_platform_seen && !self.a9_platform_departed {
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 68)
+                    .then_some(object.translation[1])
+            });
+            if target_y.is_some_and(|y| y >= -500_000) {
+                self.a9_target_high_seen = true;
+            }
+            if self.a9_target_high_seen
+                && player.is_some_and(|player| {
+                    player.translation[0] <= 1_050_000
+                        && player.translation[2] <= -5_690_000
+                        && player.status_a & 1 != 0
+                })
+            {
+                self.a9_platform_departed = true;
+                self.a9_platform_depart_frames = 0;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.a9_target_high_seen {
+                return PAD_LEFT | PAD_UP;
+            }
+            return 0;
+        }
+        if self.route_stage == 4 && (self.b0_source_landed || player_collider_entity == Some(68)) {
+            self.b0_source_landed = true;
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 66)
+                    .then_some(object.translation[1])
+            });
+            let hazard_x = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 67)
+                    .then_some(object.translation[0])
+            });
+            if self.b0_platform_runup
+                && player_collider_entity == Some(68)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= -6_380_000
+                })
+            {
+                self.b0_platform_departed = true;
+                self.route_stage = 5;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            if !self.b0_platform_runup
+                && target_y.is_some_and(|y| y <= -580_000)
+                && hazard_x.is_some_and(|x| x >= 580_000)
+            {
+                self.b0_platform_runup = true;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.b0_platform_runup {
+                return PAD_UP;
+            }
+            return match player.map(|player| player.translation[2]) {
+                Some(z) if z > -6_270_000 => PAD_UP,
+                Some(z) if z < -6_300_000 => PAD_DOWN,
+                _ => 0,
+            };
+        }
+        if self.route_stage == 5 && player_collider_entity == Some(69) {
+            self.b1_side_route_started = true;
+            self.route_stage = 6;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.route_stage == 6 && player_collider_entity == Some(71) {
+            self.b1_second_crate_hit = true;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.route_stage == 6 && player_collider_entity == Some(72) {
+            self.b1_platform_landed = true;
+            self.route_stage = 7;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.route_stage == 7
+            && player_collider_entity == Some(73)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.b2_first_platform_landed = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 75)
+                    .then_some(object.translation[1])
+            });
+            if target_y.is_some_and(|y| y >= 190_000) {
+                self.b2_target_high_seen = true;
+            }
+            if self.b2_depart_runup {
+                self.b2_depart_runup_frames = self.b2_depart_runup_frames.saturating_add(1);
+                if self.b2_depart_runup_frames >= 6 {
+                    self.route_stage = 8;
+                    self.jump_frames = jump_hold;
+                    self.release_frames = 5;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if player.is_some_and(|player| player.translation[0] < 1_680_000) {
+                return PAD_RIGHT;
+            }
+            if self.b2_target_high_seen && target_y.is_some_and(|y| y <= 150_000) {
+                self.b2_depart_runup = true;
+                self.b2_depart_runup_frames = 0;
+                return PAD_RIGHT;
+            }
+            return if player.is_some_and(|player| player.translation[0] > 1_700_000) {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if self.route_stage == 8
+            && player_collider_entity == Some(75)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.b2_second_platform_landed = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let hazard_z = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 76)
+                    .then_some(object.translation[2])
+            });
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 77)
+                    .then_some(object.translation[1])
+            });
+            if hazard_z.is_some_and(|z| z <= -9_000_000 || z >= -8_600_000)
+                && target_y.is_some_and(|y| y <= 200_000)
+            {
+                if player.is_some_and(|player| player.translation[0] < 2_210_000) {
+                    return PAD_RIGHT;
+                }
+                self.route_stage = 9;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return 0;
+        }
+        if self.route_stage == 9 && player_collider_entity == Some(77) {
+            self.b2_third_platform_landed = true;
+        }
+        if self.route_stage == 9 && player_collider_entity == Some(78) {
+            self.b3_source_landed = true;
+        }
+        if self.route_stage == 9 && player_collider_entity == Some(84) {
+            self.b4_turn_started = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 9 && self.b4_turn_started {
+            let hazard = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 80)
+                    .then_some(object.translation)
+            });
+            if hazard.is_some_and(|[x, y, _]| x >= 4_180_000 && y <= 100_000) {
+                self.route_stage = 10;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_DOWN | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 10 && player_collider_entity == Some(87) {
+            self.route_stage = 11;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 11 {
+            let target_x = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 86)
+                    .then_some(object.translation[0])
+            });
+            if player.is_some_and(|player| player.translation[0] > 3_960_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            if player.is_some_and(|player| player.translation[0] < 3_920_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if player.is_some_and(|player| player.translation[2] >= -6_860_000)
+                && target_x.is_some_and(|x| x >= 3_500_000)
+            {
+                self.route_stage = 12;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 12 && player_collider_entity == Some(86) {
+            self.route_stage = 13;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 13 {
+            let hazard_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 93)
+                    .then_some(object.translation[1])
+            });
+            if player.is_some_and(|player| player.translation[0] <= 3_200_000)
+                && hazard_y.is_some_and(|y| y <= -700_000)
+            {
+                self.route_stage = 14;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 14 && player_collider_entity == Some(91) {
+            self.route_stage = 15;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 15 {
+            if player.is_some_and(|player| player.translation[0] <= 1_820_000) {
+                self.route_stage = 16;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 16
+            && player.is_some_and(|player| {
+                player.translation[0] <= 1_500_000 && player.status_a & 1 != 0
+            })
+        {
+            self.route_stage = 17;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 17 {
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 100)
+                    .then_some(object.translation[1])
+            });
+            if target_y.is_some_and(|y| y <= -900_000)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.route_stage = 18;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return match player.map(|player| player.translation[0]) {
+                Some(x) if x > 1_270_000 => PAD_LEFT,
+                Some(x) if x < 1_190_000 => PAD_RIGHT,
+                _ => 0,
+            };
+        }
+        if self.route_stage == 18
+            && matches!(player_collider_entity, Some(94..=99 | 103 | 104 | 117))
+        {
+            self.route_stage = 19;
+        }
+        if self.route_stage == 19 && player_collider_entity == Some(117) {
+            self.route_stage = 22;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_DOWN;
+        }
+        if self.route_stage == 22 {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.b7_brake_airborne_seen = true;
+            }
+            if self.b7_brake_airborne_seen && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.route_stage = 23;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_DOWN
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_300_000 => PAD_RIGHT,
+                    Some(x) if x > 1_360_000 => PAD_LEFT,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 23 {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.b7_wall_airborne_seen = true;
+            }
+            if self.b7_wall_airborne_seen
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= -8_930_000
+                })
+            {
+                self.route_stage = 24;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+        }
+        if self.route_stage == 24 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= -9_130_000
+            }) {
+                self.route_stage = 25;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_200_000 => PAD_RIGHT,
+                    Some(x) if x > 1_260_000 => PAD_LEFT,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 25 && player_collider_entity == Some(121) {
+            self.route_stage = 26;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 26 {
+            if player_collider_entity == Some(121)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= -9_690_000
+                })
+            {
+                self.route_stage = 27;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
+        }
+        if self.route_stage == 27
+            && player_collider_entity.is_none()
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.translation[1] >= -950_000
+                    && (-10_390_000..=-10_090_000).contains(&player.translation[2])
+            })
+        {
+            self.route_stage = 28;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if self.route_stage == 28 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 1_370_000
+            }) {
+                self.route_stage = 29;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if self.route_stage == 29
+            && player_collider_entity == Some(122)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.route_stage = 30;
+            self.b8_platform_wait_frames = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 30 && player_collider_entity == Some(122) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.b8_platform_wait_frames < 8 {
+                self.b8_platform_wait_frames += 1;
+                let mut held = match player.map(|player| player.translation[0]) {
+                    Some(x) if x > 1_780_000 => PAD_LEFT,
+                    Some(x) if x < 1_700_000 => PAD_RIGHT,
+                    _ => 0,
+                };
+                held |= match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+                return held;
+            }
+            self.route_stage = 31;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT
+                | PAD_CROSS
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 31
+            && player_collider_entity == Some(123)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.route_stage = 32;
+            self.b8_platform_wait_frames = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 32 && player_collider_entity == Some(123) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.b8_platform_wait_frames < 8 {
+                self.b8_platform_wait_frames += 1;
+                let mut held = match player.map(|player| player.translation[0]) {
+                    Some(x) if x > 2_090_000 => PAD_LEFT,
+                    Some(x) if x < 2_010_000 => PAD_RIGHT,
+                    _ => 0,
+                };
+                held |= match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+                return held;
+            }
+            self.route_stage = 33;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT
+                | PAD_CROSS
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 33
+            && player_collider_entity == Some(124)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.route_stage = 34;
+            self.b8_platform_wait_frames = 0;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 34 && player_collider_entity == Some(124) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if self.b8_platform_wait_frames < 8 {
+                self.b8_platform_wait_frames += 1;
+                let mut held = match player.map(|player| player.translation[0]) {
+                    Some(x) if x > 2_390_000 => PAD_LEFT,
+                    Some(x) if x < 2_310_000 => PAD_RIGHT,
+                    _ => 0,
+                };
+                held |= match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+                return held;
+            }
+            self.route_stage = 35;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT
+                | PAD_CROSS
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 35
+            && player_collider_entity == Some(125)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.route_stage = 36;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 36 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 125)
+                    .then_some(object.translation)
+            });
+            if player_collider_entity == Some(125)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+                && target.is_some_and(|translation| translation[0] >= 3_120_000)
+            {
+                self.route_stage = 37;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([target_x, _, target_z])) => {
+                    let mut held = 0;
+                    if x < target_x - 35_000 {
+                        held |= PAD_RIGHT;
+                    } else if x > target_x + 35_000 {
+                        held |= PAD_LEFT;
+                    }
+                    if z < target_z - 35_000 {
+                        held |= PAD_DOWN;
+                    } else if z > target_z + 35_000 {
+                        held |= PAD_UP;
+                    }
+                    held
+                }
+                _ => 0,
+            };
+        }
+        if self.route_stage == 37
+            && player_collider_entity.is_none()
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.translation[1] >= -150_000
+                    && player.translation[2] <= -10_420_000
+            })
+        {
+            self.route_stage = 38;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_DOWN | PAD_CROSS;
+        }
+        if self.route_stage == 38
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.translation[0] >= 3_250_000
+                    && player.translation[2] >= -10_360_000
+            })
+        {
+            self.route_stage = 39;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if self.route_stage == 39 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| player.translation[0] >= 3_370_000) {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (3_350_000..=3_450_000).contains(&player.translation[0])
+                }) {
+                    self.route_stage = 40;
+                    self.jump_frames = 7;
+                    self.release_frames = 5;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return match player.map(|player| player.translation) {
+                    Some([x, _, _]) if x > 3_450_000 => PAD_LEFT,
+                    Some([x, _, _]) if x < 3_350_000 => PAD_RIGHT,
+                    Some([_, _, z]) if z < -10_280_000 => PAD_DOWN,
+                    Some([_, _, z]) if z > -10_200_000 => PAD_UP,
+                    _ => 0,
+                };
+            }
+            return PAD_RIGHT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_280_000 => PAD_DOWN,
+                    Some(z) if z > -10_200_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 40
+            && player_collider_entity != Some(129)
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 3_680_000
+            })
+        {
+            self.route_stage = 41;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
+        }
+        if self.route_stage == 41
+            && player.is_some_and(|player| player.translation[2] <= -11_900_000)
+        {
+            self.route_stage = 42;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 42 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 46)
+                    .then_some(object.translation[1])
+            });
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (3_720_000..=3_840_000).contains(&player.translation[0])
+                    && (-11_850_000..=-11_720_000).contains(&player.translation[2])
+            }) && target_y.is_some_and(|y| y >= -650_000)
+            {
+                self.route_stage = 43;
+                return PAD_LEFT;
+            }
+            return match player.map(|player| player.translation) {
+                Some([x, _, z]) => {
+                    (if x < 3_720_000 {
+                        PAD_RIGHT
+                    } else if x > 3_840_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < -11_850_000 {
+                        PAD_DOWN
+                    } else if z > -11_720_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            };
+        }
+        if self.route_stage == 43 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player_collider_entity == Some(46) {
+                self.route_stage = 44;
+                return 0;
+            }
+            return PAD_LEFT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -11_830_000 => PAD_DOWN,
+                    Some(z) if z > -11_720_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 44 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 46)
+                    .then_some(object.translation[1])
+            });
+            if player_collider_entity == Some(46) && target_y.is_some_and(|y| y <= -940_000) {
+                self.route_stage = 45;
+                return PAD_LEFT;
+            }
+            return match player.map(|player| player.translation) {
+                Some([x, _, z]) => {
+                    (if x < 3_440_000 {
+                        PAD_RIGHT
+                    } else if x > 3_520_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < -11_830_000 {
+                        PAD_DOWN
+                    } else if z > -11_720_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            };
+        }
+        if self.route_stage == 45 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player_collider_entity == Some(45) {
+                self.route_stage = 46;
+                return 0;
+            }
+            return PAD_LEFT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -11_830_000 => PAD_DOWN,
+                    Some(z) if z > -11_720_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 46 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 45)
+                    .then_some(object.translation)
+            });
+            if player_collider_entity == Some(45)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+                && target.is_some_and(|[x, _, _]| x <= 2_600_000)
+            {
+                self.route_stage = 47;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([target_x, _, target_z])) => {
+                    (if x < target_x - 35_000 {
+                        PAD_RIGHT
+                    } else if x > target_x + 35_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < target_z - 35_000 {
+                        PAD_DOWN
+                    } else if z > target_z + 35_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+        }
+        if self.route_stage == 47 {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.c0_depart_airborne_seen = true;
+            }
+            if self.c0_depart_airborne_seen
+                && player_collider_entity == Some(45)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.route_stage = 48;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 45)
+                    .then_some(object.translation)
+            });
+            let mut held = match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([_, _, target_z])) => {
+                    (if x > 2_190_000 { PAD_LEFT } else { PAD_RIGHT })
+                        | if z < target_z - 35_000 {
+                            PAD_DOWN
+                        } else if z > target_z + 35_000 {
+                            PAD_UP
+                        } else {
+                            0
+                        }
+                }
+                _ => 0,
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.route_stage == 48 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 45)
+                    .then_some(object.translation)
+            });
+            if player_collider_entity == Some(45) && target.is_some_and(|[x, _, _]| x <= 2_070_000)
+            {
+                self.route_stage = 49;
+                return PAD_LEFT;
+            }
+            return match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([target_x, _, target_z])) => {
+                    (if x < target_x - 35_000 {
+                        PAD_RIGHT
+                    } else if x > target_x + 35_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < target_z - 35_000 {
+                        PAD_DOWN
+                    } else if z > target_z + 35_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+        }
+        if self.route_stage == 49 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player_collider_entity != Some(45)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.route_stage = 50;
+            }
+            return PAD_LEFT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -11_830_000 => PAD_DOWN,
+                    Some(z) if z > -11_720_000 => PAD_UP,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 50 && player.is_some_and(|player| player.translation[0] <= 1_600_000)
+        {
+            self.route_stage = 51;
+        }
+        if self.route_stage == 51 && player_collider_entity == Some(12) {
+            self.route_stage = 52;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 52 {
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 12)
+                    .then_some(object.translation)
+            });
+            if player_collider_entity == Some(12)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+                && target.is_some_and(|[_, _, z]| z <= -12_760_000)
+            {
+                self.route_stage = 53;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([target_x, _, target_z])) => {
+                    (if x < target_x - 5_000 {
+                        PAD_RIGHT
+                    } else if x > target_x + 5_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < target_z - 5_000 {
+                        PAD_DOWN
+                    } else if z > target_z + 5_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            };
+        }
+        if self.route_stage == 53 {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.c2_depart_airborne_seen = true;
+            }
+            if self.c2_depart_airborne_seen
+                && player_collider_entity != Some(12)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= -14_500_000
+                })
+            {
+                self.route_stage = 54;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            } else if self.c2_depart_airborne_seen
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.c2_depart_airborne_seen = false;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+            }
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 12)
+                    .then_some(object.translation)
+            });
+            let mut held = match (player.map(|player| player.translation), target) {
+                (Some([x, _, z]), Some([target_x, _, target_z])) => {
+                    (if x < target_x - 20_000 {
+                        PAD_RIGHT
+                    } else if x > target_x + 20_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < target_z - 20_000 {
+                        PAD_DOWN
+                    } else if z > target_z + 20_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                _ => PAD_UP,
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.route_stage == 54 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= -14_900_000
+            }) {
+                self.route_stage = 55;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_500_000 => PAD_RIGHT,
+                    Some(x) if x > 1_580_000 => PAD_LEFT,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 55 {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.c3_gap_airborne_seen = true;
+            }
+            if self.c3_gap_airborne_seen
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= -15_280_000
+                })
+            {
+                self.route_stage = 56;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            let mut held = PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_500_000 => PAD_RIGHT,
+                    Some(x) if x > 1_580_000 => PAD_LEFT,
+                    _ => 0,
+                };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.route_stage == 56 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= -16_100_000
+            }) {
+                self.route_stage = 57;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_500_000 => PAD_RIGHT,
+                    Some(x) if x > 1_580_000 => PAD_LEFT,
+                    _ => 0,
+                };
+        }
+        if self.route_stage == 57 {
+            let mut held = PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_500_000 => PAD_RIGHT,
+                    Some(x) if x > 1_580_000 => PAD_LEFT,
+                    _ => 0,
+                };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        let mut held = if self.route_stage == 4 && self.a9_platform_departed {
+            self.a9_platform_depart_frames = self.a9_platform_depart_frames.saturating_add(1);
+            match player.map(|player| player.translation) {
+                Some([_, _, z]) if z > -5_900_000 => PAD_LEFT | PAD_UP,
+                Some([x, _, _]) if x > 600_000 => PAD_LEFT | PAD_DOWN,
+                Some([x, _, _]) if x > 480_000 => PAD_LEFT | PAD_UP,
+                Some([_, _, z]) if z > -6_320_000 => PAD_UP,
+                Some([_, _, z]) if z < -6_380_000 => PAD_DOWN,
+                _ => 0,
+            }
+        } else if self.route_stage == 8 {
+            match player.map(|player| player.translation) {
+                Some([x, _, _]) if x < 1_860_000 => PAD_RIGHT | PAD_DOWN,
+                Some([_, _, z]) if z > -8_780_000 => PAD_RIGHT | PAD_UP,
+                _ => PAD_RIGHT,
+            }
+        } else if self.route_stage == 9 {
+            if self.b3_source_landed {
+                PAD_RIGHT
+                    | if self.tick.is_multiple_of(7) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    }
+            } else {
+                PAD_RIGHT
+            }
+        } else if self.route_stage == 10 {
+            if player.is_some_and(|player| player.translation[2] >= -8_400_000) {
+                0
+            } else {
+                PAD_DOWN
+                    | if self.tick.is_multiple_of(7) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    }
+            }
+        } else if self.route_stage == 12 {
+            let target = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 86)
+                    .then_some(object.translation)
+            });
+            match (player.map(|player| player.translation), target) {
+                (Some([x, _, _]), Some([target_x, _, _])) if x > target_x + 400_000 => PAD_LEFT,
+                _ => PAD_LEFT | PAD_DOWN,
+            }
+        } else if self.route_stage == 14 {
+            PAD_LEFT
+                | if self.tick.is_multiple_of(7) {
+                    PAD_SQUARE
+                } else {
+                    0
+                }
+        } else if self.route_stage == 16 {
+            PAD_LEFT
+        } else if self.route_stage == 18 {
+            PAD_UP
+                | if self.tick.is_multiple_of(7) {
+                    PAD_SQUARE
+                } else {
+                    0
+                }
+        } else if self.route_stage == 19 {
+            let target_x = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 120)
+                    .then_some(object.translation[0])
+            });
+            PAD_UP
+                | match (player.map(|player| player.translation[0]), target_x) {
+                    (Some(x), Some(target)) if x < target - 180_000 => PAD_RIGHT,
+                    (Some(x), Some(target)) if x > target - 140_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 23 {
+            PAD_UP
+        } else if self.route_stage == 25 {
+            let target_x = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 121)
+                    .then_some(object.translation[0])
+            });
+            PAD_UP
+                | match (player.map(|player| player.translation[0]), target_x) {
+                    (Some(x), Some(target)) if x < target - 20_000 => PAD_RIGHT,
+                    (Some(x), Some(target)) if x > target + 20_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 27 {
+            match player.map(|player| player.translation) {
+                Some([x, _, z]) if z > -10_210_000 => {
+                    PAD_UP
+                        | if x < 1_190_000 {
+                            PAD_RIGHT
+                        } else if x > 1_270_000 {
+                            PAD_LEFT
+                        } else {
+                            0
+                        }
+                }
+                Some([x, _, _]) => {
+                    PAD_DOWN
+                        | if x < 1_190_000 {
+                            PAD_RIGHT
+                        } else if x > 1_270_000 {
+                            PAD_LEFT
+                        } else {
+                            0
+                        }
+                }
+                None => 0,
+            }
+        } else if self.route_stage == 29 {
+            PAD_RIGHT | PAD_UP
+        } else if matches!(self.route_stage, 31 | 33 | 35) {
+            PAD_RIGHT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -10_270_000 => PAD_DOWN,
+                    Some(z) if z > -10_210_000 => PAD_UP,
+                    _ => 0,
+                }
+        } else if self.route_stage == 37 {
+            PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 3_090_000 => PAD_RIGHT,
+                    Some(x) if x > 3_190_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 38 {
+            match player.map(|player| player.translation) {
+                Some([x, _, z]) => {
+                    (if x < 3_330_000 {
+                        PAD_RIGHT
+                    } else if x > 3_410_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < -10_280_000 {
+                        PAD_DOWN
+                    } else if z > -10_200_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                None => 0,
+            }
+        } else if self.route_stage == 40 {
+            match player.map(|player| player.translation) {
+                Some([x, _, z]) => {
+                    (if x < 3_720_000 {
+                        PAD_RIGHT
+                    } else if x > 3_800_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    }) | if z < -10_280_000 {
+                        PAD_DOWN
+                    } else if z > -10_200_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                }
+                _ => 0,
+            }
+        } else if self.route_stage == 41 {
+            PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 3_760_000 => PAD_RIGHT,
+                    Some(x) if x > 3_840_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 50 {
+            PAD_LEFT
+                | match player.map(|player| player.translation[2]) {
+                    Some(z) if z < -11_830_000 => PAD_DOWN,
+                    Some(z) if z > -11_720_000 => PAD_UP,
+                    _ => 0,
+                }
+        } else if self.route_stage == 51 {
+            PAD_UP
+                | match player.map(|player| player.translation[0]) {
+                    Some(x) if x < 1_500_000 => PAD_RIGHT,
+                    Some(x) if x > 1_580_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 6 && self.b1_second_crate_hit {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x < 1_100_000 => PAD_RIGHT,
+                Some(x) if x > 1_160_000 => PAD_LEFT,
+                _ => 0,
+            }
+        } else {
+            match self.route_stage {
+                1 | 6..=9 => PAD_RIGHT,
+                3 | 11 => PAD_LEFT,
+                _ => PAD_UP,
+            }
+        };
+        if self.route_stage == 1 && self.bridge_hit && !self.bridge_returned {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_DOWN;
+        }
+        if self.route_stage == 1 && self.bridge_returned {
+            held |= PAD_SQUARE;
+        }
+        if self.route_stage >= 2
+            && self.route_stage <= 3
+            && (self.a7_platform_departed || self.a8_checkpoint_departed)
+            && self.tick.is_multiple_of(7)
+        {
+            held |= PAD_SQUARE;
+        }
+        if (left_start..=left_end).contains(&self.tick) {
+            held |= PAD_LEFT;
+        }
+        if self.route_stage == 1
+            && player.is_some_and(|player| {
+                (1_800_000..2_250_000).contains(&player.translation[0])
+                    && player.translation[2] > dodge_z
+            })
+        {
+            held |= PAD_UP;
+        }
+        if self.route_stage == 1
+            && player.is_some_and(|player| {
+                (return_x..2_650_000).contains(&player.translation[0])
+                    && player.translation[2] < -2_950_000
+            })
+        {
+            held |= PAD_DOWN;
+        }
+        if self.route_stage == 1 && !self.bridge_hit {
+            if player.is_some_and(|player| {
+                (2_750_000..3_350_000).contains(&player.translation[0])
+                    && player.translation[2] > -3_320_000
+            }) {
+                held |= PAD_UP;
+            }
+            if player.is_some_and(|player| (2_900_000..3_550_000).contains(&player.translation[0]))
+            {
+                held |= PAD_SQUARE | PAD_CROSS;
+            }
+            if player.is_some_and(|player| player.translation[0] >= 3_350_000) {
+                held |= PAD_UP;
+            }
+        }
+        let jump_lead_start = pause_end.saturating_sub(3);
+        if self.tick == jump_lead_start {
+            self.jump_frames = 9;
+            self.release_frames = 5;
+            return PAD_CROSS;
+        }
+        if (jump_lead_start.saturating_add(1)..=pause_end).contains(&self.tick) {
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return PAD_CROSS;
+        }
+        if (100..jump_lead_start).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.tick > 160 && !self.corner_jump_started {
+            if player.is_some_and(|player| {
+                player.translation[2] <= -2_000_000 && player.status_a & 1 != 0
+            }) {
+                self.corner_jump_started = true;
+                self.jump_frames = 9;
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if self.corner_jump_started && held == PAD_RIGHT && !self.side_jump_started {
+            if player
+                .is_some_and(|player| player.translation[0] >= 900_000 && player.status_a & 1 != 0)
+            {
+                self.side_jump_started = true;
+                self.jump_frames = 9;
+                self.release_frames = 5;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if self.side_jump_started && !self.platform_departed && player_collider_entity == Some(31) {
+            self.platform_departed = true;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.route_stage == 2
+            && !self.a7_platform_departed
+            && (self.a7_platform_seen || player_collider_entity == Some(13))
+        {
+            self.a7_platform_seen = true;
+            if player.is_some_and(|player| player.translation[2] > -4_760_000) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            if player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.a7_platform_departed = true;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return PAD_UP;
+        }
+        if self.route_stage == 3 && player_collider_entity == Some(37) {
+            self.a8_checkpoint_crate_hit = true;
+            self.a8_checkpoint_airborne_seen = true;
+            self.a8_checkpoint_departed = false;
+        }
+        if self.route_stage == 3 && !self.a8_checkpoint_departed {
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.a8_checkpoint_airborne_seen = true;
+            }
+            if self.a8_checkpoint_airborne_seen
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                if self.a8_checkpoint_crate_hit
+                    && player.is_some_and(|player| player.translation[0] > 3_850_000)
+                {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_LEFT;
+                }
+                self.a8_checkpoint_departed = true;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if self.route_stage == 3
+            && player.is_some_and(|player| (2_350_000..=2_950_000).contains(&player.translation[0]))
+        {
+            if !self.a8_question_crate_broken {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT
+                    | if self.tick.is_multiple_of(7) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
+            }
+            if player
+                .is_some_and(|player| player.status_a & 1 != 0 && player.translation[0] > 2_470_000)
+            {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+        }
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return held | PAD_CROSS;
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if player.is_some_and(|player| player.status_a & 1 != 0) {
+            self.jump_frames = if self.tick >= maneuver_start {
+                jump_hold
+            } else {
+                10
+            };
+            self.release_frames = 5;
+            held |= PAD_CROSS;
+        }
+        held
+    }
+}
+
 /// Deterministic ordinary-pad characterization of Toxic Waste from a fresh
 /// level boot through its normal `WarpC` transition.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -17166,6 +18736,7 @@ struct SurveyInputController {
     great_gate: GreatGateRouteController,
     boulders: BouldersCompletionRouteController,
     cortex_power: CortexPowerCompletionRouteController,
+    generator_room: GeneratorRoomCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
@@ -17246,6 +18817,54 @@ impl SurveyInputController {
                 release_frames: 0,
                 hazard_stage: 0,
                 hazard_tick: 0,
+            },
+            generator_room: GeneratorRoomCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
+                corner_jump_started: false,
+                right_route_started: false,
+                side_jump_started: false,
+                platform_departed: false,
+                route_stage: 0,
+                a7_platform_seen: false,
+                a7_platform_departed: false,
+                a8_checkpoint_airborne_seen: false,
+                a8_checkpoint_departed: false,
+                a8_checkpoint_crate_hit: false,
+                a8_question_crate_broken: false,
+                a8_hazard_waiting: false,
+                a8_hazard_high_seen: false,
+                a8_hazard_crossing: false,
+                a9_hazard_waiting: false,
+                a9_hazard_high_seen: false,
+                a9_hazard_runup: false,
+                a9_platform_departed: false,
+                a9_platform_depart_frames: 0,
+                a9_platform_seen: false,
+                a9_target_high_seen: false,
+                b0_source_landed: false,
+                b0_platform_runup: false,
+                b0_platform_departed: false,
+                b1_side_route_started: false,
+                b1_second_crate_hit: false,
+                b1_platform_landed: false,
+                b2_first_platform_landed: false,
+                b2_target_high_seen: false,
+                b2_depart_runup: false,
+                b2_depart_runup_frames: 0,
+                b2_second_platform_landed: false,
+                b2_third_platform_landed: false,
+                b3_source_landed: false,
+                b4_turn_started: false,
+                b7_brake_airborne_seen: false,
+                b7_wall_airborne_seen: false,
+                b8_platform_wait_frames: 0,
+                c0_depart_airborne_seen: false,
+                c2_depart_airborne_seen: false,
+                c3_gap_airborne_seen: false,
+                bridge_hit: false,
+                bridge_returned: false,
             },
             toxic_waste: ToxicWasteCompletionRouteController {
                 tick: 0,
@@ -17536,6 +19155,10 @@ impl SurveyInputController {
             }
             SurveyInputProfile::CortexPowerCompletionRoute => {
                 self.cortex_power.held(camera, player, route_objects)
+            }
+            SurveyInputProfile::GeneratorRoomCompletionRoute => {
+                self.generator_room
+                    .held(player, player_collider_entity, route_objects)
             }
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 HeavyMachineryCompletionRouteController::held(frame)
@@ -19923,6 +21546,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::UpTheCreekCompletionRoute
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::TempleRuinsCompletionRoute
+                    | SurveyInputProfile::GeneratorRoomCompletionRoute
             ) {
             player_collider_entity(&runtime)?
         } else {
@@ -20007,14 +21631,15 @@ fn survey_pair_with_runtime(
                 ],
             )?,
             SurveyInputProfile::LostCityCompletionRoute
-            | SurveyInputProfile::TempleRuinsCompletionRoute => {
+            | SurveyInputProfile::TempleRuinsCompletionRoute
+            | SurveyInputProfile::GeneratorRoomCompletionRoute
+            | SurveyInputProfile::ToxicWasteCompletionRoute => {
                 program_object_traces(&runtime, &[])?
             }
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
             )?,
-            SurveyInputProfile::ToxicWasteCompletionRoute => program_object_traces(&runtime, &[])?,
             _ => Vec::new(),
         };
         let pinstripe_boss_state =
@@ -20074,6 +21699,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::CortexPowerCompletionRoute
+                | SurveyInputProfile::GeneratorRoomCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
@@ -20416,6 +22042,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::CortexPowerCompletionRoute
+                    | SurveyInputProfile::GeneratorRoomCompletionRoute
             )
             && (matches!(
                 input_profile,
@@ -20424,8 +22051,10 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::CortexPowerCompletionRoute
+                    | SurveyInputProfile::GeneratorRoomCompletionRoute
             ) || frame >= 300
                 || frame <= 120)
+            && (input_profile != SurveyInputProfile::GeneratorRoomCompletionRoute || frame <= 1_500)
         {
             eprintln!(
                 "route[{}] f{frame} held={held:#06x} camera={:?} player={player:?}",
@@ -27387,6 +29016,176 @@ fn cortex_power_direct_boot_reaches_authored_end_warp() {
     assert!(
         survey.is_clean(),
         "Cortex Power end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn generator_room_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x05);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Generator Room");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Generator Room pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::GeneratorRoomCompletionRoute,
+        3_600,
+    )
+    .expect("Generator Room's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 3_227, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((3_227, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3227 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.death_camera_pose_changes, 0);
+    assert_eq!(survey.death_camera_max_count, 0);
+    assert!(survey.first_death_camera_pose.is_none());
+    assert!(survey.last_death_camera_pose.is_none());
+    assert_eq!(
+        survey.first_below_zero.as_ref().map(|(frame, _)| *frame),
+        Some(278),
+        "negative Y is an authored part of Generator Room, not a death"
+    );
+    assert!(survey.first_terminal_fall.is_none());
+
+    assert_eq!(survey.zone_transitions, 24);
+    assert_eq!(survey.camera_ranges.len(), 41);
+    assert_eq!(survey.camera_path_changes, 42);
+    assert_eq!(survey.last_camera_path_change, 3_012);
+    assert_eq!(survey.last_camera_progress_change, 3_126);
+    let initial_camera = survey
+        .initial_camera
+        .expect("Generator Room must retain its opening camera path");
+    assert_eq!(
+        initial_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a1_5Z")
+                .expect("fixed Generator Room opening camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(initial_camera.progress.raw(), 256);
+    let final_camera = survey
+        .final_camera
+        .expect("Generator Room must retain its final camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("c3_5Z").expect("fixed Generator Room end camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 46_079);
+
+    assert_eq!(survey.successful_spawns, 133);
+    assert_eq!(survey.spawn_attempts, 48_354);
+    assert_eq!(survey.expected_spawn_rejections, 48_221);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 80_243);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.final_live_objects, 20);
+    assert_eq!(survey.max_live_objects, 50);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_926, 0x5a00, [1_227_520, -1_024_512, -7_987_968]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (562, 0x100),
+            (695, 0x200),
+            (1_111, 0x300),
+            (1_395, 0x400),
+            (1_926, 0x500),
+            (1_997, 0x700),
+            (1_998, 0x800),
+            (2_019, 0x900),
+            (2_029, 0xa00),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_926, 0x400)]);
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_UP)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([818_944, 409_088, -179_200])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([1_532_860, 2_697_807, -16_503_172])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([454_400, -1_090_649, -16_503_172])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([4_101_888, 2_697_807, -179_200])
+    );
+    assert_eq!(survey.last_player_movement, 3_223);
+    let player = player_trace(&runtime)
+        .expect("Generator Room completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(
+        player.zone,
+        Eid::from_name("c3_5Z").expect("fixed Generator Room end-warp EID is valid")
+    );
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [1_532_860, 2_697_807, -16_503_172]);
+    assert_eq!(runtime.machine().random_seed(), 0xa28b_a315);
+    assert_eq!(runtime.draw_count(), 3_227);
+    assert!(
+        survey.is_clean(),
+        "Generator Room end-warp route must remain clean: {}",
         survey.summary()
     );
 }

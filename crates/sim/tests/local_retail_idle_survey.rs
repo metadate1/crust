@@ -483,6 +483,7 @@ enum SurveyInputProfile {
     LocalPbakPrefix,
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
+    CortexPowerCompletionRoute,
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
@@ -546,6 +547,7 @@ impl SurveyInputProfile {
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
+            Self::CortexPowerCompletionRoute => "cortex-power-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
@@ -596,6 +598,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateYellowGemExactCarry
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
+                | Self::CortexPowerCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
@@ -11583,6 +11586,713 @@ impl ToxicWasteCompletionRouteController {
     }
 }
 
+/// Deterministic ordinary-pad characterization of Cortex Power from a fresh
+/// level boot through its normal `WarpC` transition. It reacts only to retail
+/// camera, player, door, reactor-rod, and moving-platform state; it neither
+/// injects runtime state nor embeds proprietary recording data.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CortexPowerCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    hazard_stage: u8,
+    hazard_tick: u8,
+}
+
+impl CortexPowerCompletionRouteController {
+    fn centerline_x(camera: RetailCameraLocation, player_z: i32) -> Option<i64> {
+        let path = camera.path;
+        if path.zone == Eid::from_name("a5_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+            && i64::from(player_z) < 97_416_i64 * 256
+        {
+            let start_x = 10_899_i64 * 256;
+            let end_x = 12_800_i64 * 256;
+            let start_z = 97_376_i64 * 256;
+            let end_z = 93_416_i64 * 256;
+            let progress = (start_z - i64::from(player_z)).clamp(0, start_z - end_z);
+            return Some(start_x + progress * (end_x - start_x) / (start_z - end_z));
+        }
+        if path.zone == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+            && i64::from(player_z) < 79_000_i64 * 256
+        {
+            let start_x = 12_800_i64 * 256;
+            let end_x = 11_844_i64 * 256;
+            let start_z = 79_000_i64 * 256;
+            let end_z = 78_216_i64 * 256;
+            let progress = (start_z - i64::from(player_z)).clamp(0, start_z - end_z);
+            return Some(start_x + progress * (end_x - start_x) / (start_z - end_z));
+        }
+        let segment = if path.zone
+            == Eid::from_name("a3_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((8_000_i64, 10_015_i64, 108_576_i64, 106_216_i64))
+        } else if path.zone
+            == Eid::from_name("a4_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((10_040, 10_400, 106_176, 102_216))
+        } else if path.zone
+            == Eid::from_name("a5_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((10_400, 10_858, 102_176, 97_416))
+        } else if path.zone
+            == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((10_899, 12_800, 97_376, 93_416))
+        } else if path.zone
+            == Eid::from_name("a7_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((12_800, 12_800, 93_376, 88_856))
+        } else if path.zone
+            == Eid::from_name("a7_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((12_800, 12_800, 88_816, 86_216))
+        } else if path.zone
+            == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((12_800, 12_800, 86_176, 83_896))
+        } else if path.zone
+            == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((12_800, 12_800, 83_856, 81_416))
+        } else if path.zone
+            == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((12_800, 12_800, 81_376, 78_216))
+        } else if path.zone
+            == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 2
+        {
+            Some((12_800, 11_844, 78_176, 76_976))
+        } else if path.zone
+            == Eid::from_name("0b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((11_844, 10_400, 76_976, 71_416))
+        } else if path.zone
+            == Eid::from_name("1b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((10_400, 9_201, 71_376, 69_816))
+        } else if path.zone
+            == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((9_165, 8_026, 69_776, 68_216))
+        } else if path.zone
+            == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((8_000, 8_000, 68_176, 63_816))
+        } else if path.zone
+            == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 2
+        {
+            Some((6_834, 7_971, 69_776, 68_216))
+        } else if path.zone
+            == Eid::from_name("3b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((8_000, 8_000, 63_776, 57_016))
+        } else if path.zone
+            == Eid::from_name("4b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((8_000, 8_000, 56_976, 51_816))
+        } else if path.zone
+            == Eid::from_name("5b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((8_000, 8_000, 51_776, 47_416))
+        } else if path.zone
+            == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((8_000, 8_000, 47_376, 44_136))
+        } else if path.zone
+            == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((8_000, 8_000, 44_096, 41_016))
+        } else if path.zone
+            == Eid::from_name("7b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((8_000, 7_599, 40_976, 37_816))
+        } else if path.zone
+            == Eid::from_name("8b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((4_434, 5_571, 36_976, 35_416))
+        } else if path.zone
+            == Eid::from_name("8b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 1
+        {
+            Some((5_600, 5_600, 35_376, 31_816))
+        } else if path.zone
+            == Eid::from_name("8b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 2
+        {
+            Some((7_562, 5_628, 37_776, 35_416))
+        } else if path.zone
+            == Eid::from_name("9b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((5_600, 5_600, 31_776, 24_616))
+        } else if path.zone
+            == Eid::from_name("c0_3Z").expect("fixed Cortex Power camera EID is valid")
+            && path.index == 0
+        {
+            Some((5_600, 5_600, 24_576, 21_016))
+        } else {
+            None
+        }?;
+        let (start_x, end_x, start_z, end_z) = segment;
+        let start_x = start_x * 256;
+        let end_x = end_x * 256;
+        let start_z = start_z * 256;
+        let end_z = end_z * 256;
+        let progress = (start_z - i64::from(player_z)).clamp(0, start_z - end_z);
+        Some(start_x + progress * (end_x - start_x) / (start_z - end_z))
+    }
+
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        route_objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let mut held = if self.tick >= 150 { PAD_UP } else { PAD_RIGHT };
+        if let Some(player) = player
+            && let Some(target_x) = Self::centerline_x(camera, player.translation[2])
+        {
+            if i64::from(player.translation[0]) < target_x - 10_000 {
+                held |= PAD_RIGHT;
+            } else if i64::from(player.translation[0]) > target_x + 10_000 {
+                held |= PAD_LEFT;
+            }
+        }
+        if (321..=380).contains(&self.tick) {
+            held |= PAD_RIGHT;
+        }
+        if (543..=590).contains(&self.tick) {
+            held |= PAD_LEFT;
+        }
+        if self.tick > 80 && self.tick.is_multiple_of(24) {
+            held |= PAD_SQUARE;
+        }
+        if camera.path.zone
+            == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.progress.raw() >= 18_000
+        {
+            held |= PAD_SQUARE;
+        }
+        if (276..=320).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if (520..=542).contains(&self.tick) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_LEFT;
+        }
+        let at_first_pit = camera.path.zone
+            == Eid::from_name("a2_3Z").expect("fixed Cortex Power camera EID is valid")
+            && player.is_some_and(|player| player.translation[2] <= 29_750_000);
+        if self.hazard_stage == 0 && at_first_pit {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player_is_grounded = player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2));
+            if !player_is_grounded {
+                return 0;
+            }
+            self.hazard_stage = 1;
+            return PAD_UP;
+        }
+        if self.hazard_stage == 1 {
+            let door_is_opening = route_objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 16)
+                    && object.program
+                        == Eid::from_name("PoDoC").expect("fixed Cortex Power door EID is valid")
+                    && object.state >= 10
+            });
+            let player_is_grounded = player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2));
+            let player_is_at_barrier =
+                player.is_some_and(|player| player.translation[2] <= 29_600_000);
+            if !door_is_opening || !player_is_grounded || !player_is_at_barrier {
+                return PAD_UP;
+            }
+            self.hazard_stage = 2;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 2 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 18 {
+                return PAD_UP | PAD_CROSS;
+            }
+            self.hazard_stage = 3;
+        }
+        let at_second_beam = camera.path.zone
+            == Eid::from_name("a2_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.path.index == 1
+            && player.is_some_and(|player| player.translation[2] <= 29_170_000);
+        if self.hazard_stage == 3 && at_second_beam {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player_is_grounded = player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2));
+            let beam_is_left = route_objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 26)
+                    && object.program
+                        == Eid::from_name("PoRoC")
+                            .expect("fixed Cortex Power reactor-rod EID is valid")
+                    && object.translation[0] <= 1_900_000
+            });
+            if !player_is_grounded || !beam_is_left {
+                return 0;
+            }
+            self.hazard_stage = 4;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 4 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 32 {
+                return PAD_UP | PAD_CROSS;
+            }
+            self.hazard_stage = 5;
+        }
+        let at_a4_exit = camera.path.zone
+            == Eid::from_name("a4_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.progress.raw() >= 14_000;
+        if self.hazard_stage == 5
+            && at_a4_exit
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.hazard_stage = 6;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 6 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 32 {
+                return held | PAD_CROSS;
+            }
+            self.hazard_stage = 7;
+        }
+        let at_a5_launch = camera.path.zone
+            == Eid::from_name("a5_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.progress.raw() >= 14_000;
+        if self.hazard_stage == 7 && at_a5_launch {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let Some(player) = player else {
+                return 0;
+            };
+            if player.translation[2] > 25_120_000 {
+                return held;
+            }
+            if player.status_a & 1 == 0 || !matches!(player.state, 1 | 2) {
+                return 0;
+            }
+            self.hazard_stage = 8;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 8 {
+            let landed_in_a6 = camera.path.zone
+                == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
+                && self.hazard_tick >= 5
+                && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed_in_a6 {
+                self.hazard_stage = 9;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return held;
+            }
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 45 {
+                return held | PAD_CROSS;
+            }
+            self.hazard_stage = 9;
+        }
+        let near_a6_burn_hazard = camera.path.zone
+            == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.progress.raw() >= 15_000;
+        if self.hazard_stage == 9 && near_a6_burn_hazard {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_none_or(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            self.hazard_stage = 10;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 10 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let Some(player) = player else {
+                return 0;
+            };
+            if player.translation[2] > 23_950_000 {
+                return held;
+            }
+            if player.status_a & 1 == 0 || !matches!(player.state, 1 | 2) {
+                return 0;
+            }
+            self.hazard_stage = 11;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 11 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 32 {
+                return held | PAD_CROSS;
+            }
+            self.hazard_stage = 12;
+        }
+        let near_second_a7_beam = camera.path.zone
+            == Eid::from_name("a7_3Z").expect("fixed Cortex Power camera EID is valid")
+            && (camera.path.index == 1 || camera.progress.raw() >= 20_000);
+        if self.hazard_stage == 12 && near_second_a7_beam {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_none_or(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            self.hazard_stage = 13;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 13 {
+            let Some(player) = player else {
+                return 0;
+            };
+            if player.translation[2] > 22_680_000 {
+                return held;
+            }
+            let beam = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 90)
+                    .then_some(object)
+                    .filter(|object| {
+                        object.program
+                            == Eid::from_name("PoRoC")
+                                .expect("fixed Cortex Power reactor-rod EID is valid")
+                    })
+                    .map(|object| (object.state, object.translation[0]))
+            });
+            if self.hazard_tick == 0 {
+                if beam.is_some_and(|(state, x)| state == 6 && x >= 3_500_000) {
+                    self.hazard_tick = 1;
+                }
+                return 0;
+            }
+            if !beam.is_some_and(|(state, x)| state == 7 && x >= 3_500_000) {
+                return 0;
+            }
+            if player.status_a & 1 == 0 || !matches!(player.state, 1 | 2) {
+                return 0;
+            }
+            self.hazard_stage = 14;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 14 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            let landed_beyond_beam = self.hazard_tick >= 20
+                && camera.path.zone
+                    == Eid::from_name("a7_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 1
+                && player.is_some_and(|player| player.status_a & 1 != 0);
+            if !landed_beyond_beam && self.hazard_tick <= 32 {
+                return held | PAD_CROSS;
+            }
+            self.hazard_stage = 15;
+            self.hazard_tick = 0;
+            return held;
+        }
+        if self.hazard_stage == 15 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.hazard_tick <= 24 {
+                return held | PAD_CROSS;
+            }
+            self.hazard_stage = 16;
+        }
+        let at_a8_exit = camera.path.zone
+            == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.path.index == 1;
+        if self.hazard_stage == 16 && at_a8_exit {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let Some(player) = player else {
+                return 0;
+            };
+            if player.translation[2] > 20_950_000 {
+                return held;
+            }
+            if player.status_a & 1 == 0 || !matches!(player.state, 1 | 2) {
+                return held;
+            }
+            self.hazard_stage = 17;
+            self.hazard_tick = 0;
+        }
+        if self.hazard_stage == 17 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            let on_power_floor = (camera.path.zone
+                == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 1)
+                || (camera.path.zone
+                    == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+                    && matches!(camera.path.index, 0 | 2))
+                || [
+                    "0b_3Z", "1b_3Z", "2b_3Z", "3b_3Z", "4b_3Z", "5b_3Z", "6b_3Z", "7b_3Z",
+                    "8b_3Z", "9b_3Z", "c0_3Z",
+                ]
+                .into_iter()
+                .any(|name| {
+                    camera.path.zone
+                        == Eid::from_name(name).expect("fixed Cortex Power camera EID is valid")
+                });
+            if !on_power_floor {
+                self.hazard_stage = 19;
+                self.hazard_tick = 0;
+                return held;
+            }
+            let landed =
+                self.hazard_tick >= 5 && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed {
+                let approaching_lower_branch = camera.path.zone
+                    == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+                    && camera.path.index == 0
+                    && player.is_some_and(|player| player.translation[2] < 20_100_000);
+                if approaching_lower_branch {
+                    self.hazard_stage = 19;
+                    self.hazard_tick = 0;
+                    return held;
+                }
+                self.hazard_stage = 18;
+                self.hazard_tick = 0;
+                return held;
+            }
+            return held | PAD_CROSS;
+        }
+        if self.hazard_stage == 18 {
+            self.hazard_stage = 17;
+            self.hazard_tick = 0;
+            return held | PAD_CROSS;
+        }
+        if self.hazard_stage == 19 {
+            let on_lower_turn = camera.path.zone
+                == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
+                && matches!(camera.path.index, 0 | 2);
+            if on_lower_turn {
+                return held;
+            }
+            let at_lower_gap = camera.path.zone
+                == Eid::from_name("0b_3Z").expect("fixed Cortex Power camera EID is valid");
+            if at_lower_gap {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let Some(player) = player else {
+                    return 0;
+                };
+                if player.translation[2] > 19_150_000 {
+                    return held;
+                }
+                if player.status_a & 1 == 0 {
+                    return held;
+                }
+                self.hazard_stage = 20;
+                self.hazard_tick = 0;
+            } else {
+                self.hazard_stage = 21;
+            }
+        }
+        if self.hazard_stage == 20 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            let landed =
+                self.hazard_tick >= 5 && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed {
+                self.hazard_stage = 21;
+                self.hazard_tick = 0;
+                return held;
+            }
+            if self.hazard_tick >= 18 {
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            return held | PAD_CROSS;
+        }
+        if self.hazard_stage == 21 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            let landed =
+                self.hazard_tick >= 5 && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed {
+                self.hazard_stage = 22;
+                self.hazard_tick = 0;
+                return held;
+            }
+            if self.hazard_tick <= 6 {
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            return held | PAD_CROSS;
+        }
+        if self.hazard_stage == 22 {
+            let in_second_lower_corridor = camera.path.zone
+                == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 1;
+            if in_second_lower_corridor
+                && player.is_some_and(|player| player.translation[2] > 16_985_000)
+            {
+                return held;
+            }
+            let in_third_corridor = camera.path.zone
+                == Eid::from_name("3b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 0;
+            let moving_platform_z = route_objects.iter().find_map(|object| {
+                (object.program
+                    == Eid::from_name("PoPlC")
+                        .expect("fixed Cortex Power moving-platform EID is valid")
+                    && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 61))
+                .then_some(object.translation[2])
+            });
+            let riding_third_corridor_platform = in_third_corridor
+                && player.is_some_and(|player| {
+                    (15_000_000..15_750_000).contains(&player.translation[2])
+                });
+            if riding_third_corridor_platform
+                && moving_platform_z.is_some_and(|platform_z| platform_z > 15_100_000)
+            {
+                let Some(player) = player else {
+                    return 0;
+                };
+                let platform_z = moving_platform_z.expect("checked moving-platform position");
+                let predicted_player_z =
+                    i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+                if predicted_player_z < i64::from(platform_z) - 12_000 {
+                    return PAD_DOWN;
+                }
+                if predicted_player_z > i64::from(platform_z) + 12_000 {
+                    return PAD_UP;
+                }
+                return 0;
+            }
+            if let Some(player) =
+                player.filter(|player| (14_600_000..=14_900_000).contains(&player.translation[2]))
+            {
+                return PAD_UP
+                    | if player.translation[0] > 2_060_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 2_036_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+            }
+            let approaching_six_b_power_strip = camera.path.zone
+                == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 0
+                && player.is_some_and(|player| {
+                    (11_350_000..=11_750_000).contains(&player.translation[2])
+                });
+            if approaching_six_b_power_strip {
+                return held;
+            }
+            let probing_eight_b_gap = camera.path.zone
+                == Eid::from_name("8b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && player
+                    .is_some_and(|player| (8_720_000..=9_100_000).contains(&player.translation[2]));
+            if probing_eight_b_gap {
+                return held;
+            }
+            let probing_nine_b_gap = camera.path.zone
+                == Eid::from_name("9b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && player
+                    .is_some_and(|player| (6_670_000..=6_900_000).contains(&player.translation[2]));
+            if probing_nine_b_gap {
+                return held;
+            }
+            self.hazard_stage = 23;
+            self.hazard_tick = 0;
+            return held | PAD_CROSS;
+        }
+        if self.hazard_stage == 23 {
+            self.hazard_tick = self.hazard_tick.saturating_add(1);
+            let landed =
+                self.hazard_tick >= 5 && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed {
+                self.hazard_stage = 22;
+                self.hazard_tick = 0;
+                return held;
+            }
+            if camera.path.zone
+                == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && let Some(player) = player
+                    .filter(|player| (10_800_000..=11_350_000).contains(&player.translation[2]))
+            {
+                let target_x = if player.translation[2] > 11_100_000 {
+                    2_060_000
+                } else {
+                    1_980_000
+                };
+                return PAD_UP
+                    | if player.translation[0] > target_x + 8_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < target_x - 8_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    }
+                    | PAD_CROSS;
+            }
+            if player.is_some_and(|player| {
+                (15_900_000..=16_300_000).contains(&player.translation[2])
+                    && player.translation[0] < 2_100_000
+            }) {
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            if let Some(player) =
+                player.filter(|player| (14_500_000..=15_200_000).contains(&player.translation[2]))
+            {
+                return PAD_UP
+                    | if player.translation[0] > 1_980_000 {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    }
+                    | PAD_CROSS;
+            }
+            return held | PAD_CROSS;
+        }
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return held | PAD_CROSS;
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if self.tick >= 55
+            && player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+        {
+            self.jump_frames = 10;
+            self.release_frames = 4;
+            return held | PAD_CROSS;
+        }
+        held
+    }
+}
+
 /// Deterministic ordinary-pad characterization of Heavy Machinery from a
 /// fresh level boot through its normal `WarpC` transition. The route contains
 /// no state injection or proprietary recording data: each entry is an
@@ -16407,6 +17117,7 @@ struct SurveyInputController {
     jungle_restart_tick: u16,
     great_gate: GreatGateRouteController,
     boulders: BouldersCompletionRouteController,
+    cortex_power: CortexPowerCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
@@ -16480,6 +17191,13 @@ impl SurveyInputController {
             boulders: BouldersCompletionRouteController {
                 zero_t_takeoff_fired: false,
                 post_checkpoint_spin_ticks: 0,
+            },
+            cortex_power: CortexPowerCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
+                hazard_stage: 0,
+                hazard_tick: 0,
             },
             toxic_waste: ToxicWasteCompletionRouteController {
                 tick: 0,
@@ -16665,6 +17383,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::HighRoadCompletionRoute {
             self.high_road.jump_hold = 0;
         }
+        if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
+            self.cortex_power = CortexPowerCompletionRouteController::default();
+        }
     }
 
     fn held(
@@ -16763,6 +17484,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::BoulderDashCompletionRoute => {
                 BoulderDashCompletionRouteController::held(frame)
+            }
+            SurveyInputProfile::CortexPowerCompletionRoute => {
+                self.cortex_power.held(camera, player, route_objects)
             }
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 HeavyMachineryCompletionRouteController::held(frame)
@@ -19181,6 +19905,15 @@ fn survey_pair_with_runtime(
                     Eid::from_name("PillC").expect("fixed Jungle roller EID is valid"),
                 ],
             )?,
+            SurveyInputProfile::CortexPowerCompletionRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("PoRoC").expect("fixed Cortex Power reactor-rod EID is valid"),
+                    Eid::from_name("PoPlC")
+                        .expect("fixed Cortex Power moving-platform EID is valid"),
+                    Eid::from_name("PoDoC").expect("fixed Cortex Power door EID is valid"),
+                ],
+            )?,
             SurveyInputProfile::KoalaKongCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("KonOC").expect("fixed Koala Kong boulder EID is valid")],
@@ -19291,6 +20024,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::RollingStonesCheckpoint
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
                 | SurveyInputProfile::BoulderDashCompletionRoute
+                | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute
@@ -19632,6 +20366,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::CortexPowerCompletionRoute
             )
             && (matches!(
                 input_profile,
@@ -19639,6 +20374,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::CortexPowerCompletionRoute
             ) || frame >= 300
                 || frame <= 120)
         {
@@ -26543,6 +27279,81 @@ fn requested_survey_level() -> Option<LevelId> {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn cortex_power_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x03);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Cortex Power");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Cortex Power pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::CortexPowerCompletionRoute,
+        2_400,
+    )
+    .expect("Cortex Power's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 2_199, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_199, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2199 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.zone_transitions, 21);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_RIGHT)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let player = player_trace(&runtime)
+        .expect("Cortex Power completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(runtime.draw_count(), 2_199);
+    assert!(
+        survey.is_clean(),
+        "Cortex Power end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -26855,7 +27666,11 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
         let result = read_pair(&root, known.id).and_then(|(nsd_bytes, nsf_bytes)| {
             let nsd = parse_nsd(&nsd_bytes, known.id).map_err(|error| error.to_string())?;
             let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
-            let input_profile = if known.id == LevelId::new_const(0x21)
+            let input_profile = if known.id == LevelId::new_const(0x03)
+                && std::env::var_os("C1_SURVEY_CORTEX_POWER_ROUTE").is_some()
+            {
+                SurveyInputProfile::CortexPowerCompletionRoute
+            } else if known.id == LevelId::new_const(0x21)
                 && std::env::var_os("C1_SURVEY_KOALA_ROUTE").is_some()
             {
                 SurveyInputProfile::KoalaKongCompletionRoute

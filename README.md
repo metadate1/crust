@@ -391,25 +391,31 @@ authored right rope, centers across the `b2_mZ` seam and again on the `d0_mZ` en
 WarpC states zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming
 a life.
 
+Cortex Power now has a complete fresh direct-boot ordinary-pad golden. It crosses 21 zone
+transitions, emits one authored save-state, drives WarpC through states zero to four, and requests
+Level Complete `0x2d` on frame 2,199. The route has no death, restart, terminal fall, VM-faulted
+object, unexpected spawn error, execution error, or checked issue. Bonus-path coverage and a
+browser-driven completion remain unproved.
+
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
-checkpoint entity 76 on frame 1,057, preserving saved box count `0x200` before the live count
+checkpoint entity 76 on frame 1,246, preserving saved box count `0x400` before the live count
 advances, then traverses the complete authored `RivOC` chain through `0F_oZ` platforms 12 and 11.
 The final running jump enters `0G_oZ`'s authored `WarpC`; states zero through four execute and
-request Level Complete `0x2d` on frame 4,035. The route performs 191 successful spawns and 119,408
-clean executions across 36 lifecycle transitions, 53 camera ranges and 60 path changes, with no
+request Level Complete `0x2d` on frame 4,184. The route performs 196 successful spawns and 123,309
+clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path changes, with no
 restart, LoadState, death camera, terminal fall, VM fault, faulted object, execution error, or
 checked issue. Bonus-path coverage and a browser-driven completion remain separate gaps.
 A separate carried-session golden starts from the authored island-two map, selects Up the Creek,
-completes the same route, crosses the 225-frame Level Complete graph, returns to the map, and uses
-ordinary Up/Cross input to boot Ripper Roo (`0x17`). Its first arena frame mounts cleanly while
-preserving the exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map
-globals across every `LEVEL_END` handoff.
+completes it on gameplay frame 4,319, crosses the 185-frame Level Complete graph, and uses ordinary
+Up/Cross input to select and complete Ripper Roo (`0x17`) before selecting The Lost City (`0x20`).
+The exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map globals remain
+preserved across every `LEVEL_END` handoff.
 
 The current native schedule therefore includes deterministic normal-route completions for
 N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
-Temple Ruins, Road to Nowhere, The High Road, and Up the Creek, plus authored Papu Papu and later boss
-completions. These are not a full retail
-playthrough or a browser-playthrough claim.
+Temple Ruins, Road to Nowhere, The High Road, Cortex Power, and Up the Creek, plus authored Papu
+Papu and later boss completions. These are not a full retail playthrough or a browser-playthrough
+claim.
 Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
 mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each

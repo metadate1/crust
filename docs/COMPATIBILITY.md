@@ -651,10 +651,11 @@ gameplay path.
   terminal fall, VM fault, faulted object, execution error, or checked issue. The final camera is
   `1M_uZ:0@10239`, Crash reaches `1O_uZ` in state 32 at
   `[5310032, 13171424, -31824488]`, and RNG is `0xa49cade2` after 1,785 draws. A separate active
-  Cortex Power regression characterizes 117 consecutive vertex-follow death-camera frames and the
-  count-nine alignment boundary. That focused trace characterizes the observed Cortex Power
-  death/restart path; it does not establish steering, enemy, bonus or level-completion parity for
-  that level. Collision-generated
+  Cortex Power regression now completes the fresh direct-boot normal route with ordinary pad input.
+  It crosses 21 zone transitions, emits one authored save-state, observes WarpC states zero through
+  four, and requests Level Complete `0x2d` on frame 2,199. There is no death, restart, terminal fall,
+  VM fault, faulted object, unexpected spawn error, execution error, or checked issue. This proves
+  the native normal route, not its bonus paths or a browser playthrough. Collision-generated
   ceiling, outside-zone, water and final-surface events now dispatch synchronously at their native
   `solid.c` call sites. Ordered status/link effects and the mover's current process fields are live
   before each nested handler; handler mutations are refreshed before the remaining collision work.
@@ -710,18 +711,18 @@ gameplay path.
   `0x2d` on frame 2,274 without a death, restart, load-state, VM fault, or execution error.
 
   Up the Creek has a complete normal-route direct-boot ordinary-pad golden. Checkpoint entity 76
-  emits `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]` and saved box
-  count `0x200`; the live count then becomes `0x300`. The route crosses the remaining river chain,
+  emits `SaveState` on frame 1,246 with translation `[2048000, 1738240, 19455744]` and saved box
+  count `0x400`; the live count then becomes `0x500`. The route crosses the remaining river chain,
   lands on `0F_oZ` platforms 12 and 11, enters `0G_oZ`, and drives the authored `WarpC` through
-  states zero through four. It requests Level Complete `0x2d` on frame 4,035 after 191 successful
-  spawns and 119,408 clean executions across 36 lifecycle transitions, 53 camera ranges and 60 path
+  states zero through four. It requests Level Complete `0x2d` on frame 4,184 after 196 successful
+  spawns and 123,309 clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path
   changes. There is no restart, LoadState, death camera, terminal fall, VM fault, faulted object,
   execution error, or checked issue. This proves the normal native route, not its bonus paths or a
   browser playthrough. A separate carried-session golden begins on island two, selects Up the
-  Creek through the authored map, completes the same route, crosses the 225-frame Level Complete
-  graph, returns to Title/Map, and selects Ripper Roo (`0x17`) with ordinary Up/Cross input. The
-  first Ripper Roo arena frame mounts cleanly with exact primary/secondary RNG, draw-count, card,
-  and tracked map-global carry across every `LEVEL_END` report.
+  Creek through the authored map, completes it on gameplay frame 4,319, crosses the 185-frame Level
+  Complete graph, and selects and completes Ripper Roo (`0x17`) before selecting The Lost City
+  (`0x20`) with ordinary Up/Cross input. Exact primary/secondary RNG, draw-count, card, and tracked
+  map-global carry remain asserted across every `LEVEL_END` report.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
   authored graph cannot be spawned, the browser remains on its loading/error presentation rather

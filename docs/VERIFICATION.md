@@ -597,11 +597,15 @@ The focused checks below were also completed:
   signed negative zoom deltas, nine-frame alignment, cooperative-tick rotation, spin acceleration
   and checked overflow; three
   resolver tests cover live/stale tagged objects, animation/frame/vertex validation and exact
-  world-space focus. A renderer golden consumes an explicit non-path Y/X/Z camera pose. Against the
-  legally local Cortex Power pair, the active-input 1,300-frame survey observed 117 consecutive
-  spin-death frames, 116 pose changes and a maximum count of nine, with exact first and last poses;
-  the 1,800-frame Papu Papu survey exercised six ordinary authored restarts and correctly observed
-  no spin-death frames.
+  world-space focus. A renderer golden consumes an explicit non-path Y/X/Z camera pose. The legally
+  local Cortex Power direct-boot golden now completes the normal route with ordinary pad input on
+  frame 2,199, after 21 zone transitions and one authored save-state. It observes WarpC states zero
+  through four and requests Level Complete `0x2d` with no death, restart, terminal fall, VM fault,
+  faulted object, unexpected spawn error, execution error, or checked issue. This does not claim
+  bonus-path or browser-playthrough parity. A separate 1,300-frame survey retains the focused
+  CamDeath evidence: 117 consecutive spin-death frames, 116 pose changes and a maximum count of
+  nine, with exact first and last poses. The 1,800-frame Papu Papu survey exercised six ordinary
+  authored restarts and correctly observed no spin-death frames.
 - Browser-card persistence merge tests prove that writing one physical slot refreshes only that
   slot's `updatedAt`, identical-byte writes still refresh the selected slot, passive snapshots retain
   unchanged envelope/slot timestamps, changed passive snapshots update only changed slots, and
@@ -1324,24 +1328,29 @@ is 1,322,866 bytes with SHA-256
   `0x2d` on frame 2,274. Crash remains live in state 32 at
   `[-6144, 3722328, -45838336]`; the route has no death, restart, terminal fall, load-state, VM
   fault, faulted object, or execution error.
+- Cortex Power (`0x03`) now has a complete fresh direct-boot ordinary-pad golden. It crosses 21 zone
+  transitions, emits one authored save-state, observes WarpC states zero through four, and requests
+  Level Complete `0x2d` on frame 2,199. The route has no death, restart, terminal fall, VM fault,
+  faulted object, unexpected spawn error, execution error, or checked issue. This proves the native
+  normal route, not its bonus paths or a browser playthrough.
 - Up the Creek (`0x18`) has a complete normal-route direct-boot ordinary-pad golden. It crosses the
   opening moving logs, orbiters, sinking-platform handoff, and later `RivOC` chain. Checkpoint entity
-  76 executes `SaveState` on frame 1,057 with translation `[2048000, 1738240, 19455744]`, camera
-  progress 249, and source-ordered saved box count `0x200`; the live count then becomes `0x300`.
+  76 executes `SaveState` on frame 1,246 with translation `[2048000, 1738240, 19455744]`, camera
+  progress 1,171, and source-ordered saved box count `0x400`; the live count then becomes `0x500`.
   The controller continues through `0F_oZ` platforms 12 and 11, enters the authored `0G_oZ`
-  `WarpC`, observes states zero through four, and requests Level Complete `0x2d` on frame 4,035.
-  The complete run performs 191 successful spawns and 119,408 clean executions across 36 lifecycle
+  `WarpC`, observes states zero through four, and requests Level Complete `0x2d` on frame 4,184.
+  The complete run performs 196 successful spawns and 123,309 clean executions across 38 lifecycle
   transitions, 53 camera ranges, and 60 path changes, with no restart, LoadState, death camera,
   terminal fall, VM fault, faulted object, execution error, or checked issue. This proves the normal
   native route, not its bonus paths or a browser-driven completion.
   A separate carried-session golden begins with a retail card at level count ten and the authored
   island-two map. Cross selects Up the Creek on map frame 131; the carried route requests Level
-  Complete on gameplay frame 4,035; the completion graph returns to Title/Map on its frame 225;
-  and ordinary Up/Cross selects Ripper Roo (`0x17`) on post-map frame 253. A one-frame Ripper Roo
-  survey then mounts 16 clean live objects and the authored `a__nZ` arena camera at progress
-  `0x0100`. Every `LEVEL_END` report has no event failures or residual effects, and exact primary
-  RNG, secondary RNG, draw count, retail 128-byte card data, and seven tracked map globals remain
-  asserted across the complete chain.
+  Complete on gameplay frame 4,319; the completion graph returns to Title/Map on its frame 185;
+  and ordinary Up/Cross selects Ripper Roo (`0x17`) on post-map frame 253. Ripper Roo completes on
+  gameplay frame 2,064; a second post-map frame 253 then selects The Lost City (`0x20`), whose
+  runtime imports the carried session cleanly. Every `LEVEL_END` report has no event failures or
+  residual effects, and exact primary RNG, secondary RNG, draw count, retail 128-byte card data,
+  and seven tracked map globals remain asserted across the complete chain.
 - The Lost City (`0x20`) now has a complete legally local route golden through its authored Title
   transition. It combines the mounted recording prefix with deterministic ordinary-pad recovery,
   activates checkpoint `0x8000` on frame 5,753, deliberately proves the checkpoint reload on frame
@@ -1479,6 +1488,10 @@ C1_STREAM_DIR=/path/to/streams \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  cortex_power_direct_boot_reaches_authored_end_warp \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
   up_the_creek_direct_route_reaches_second_moving_log \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
@@ -1488,6 +1501,14 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   up_the_creek_direct_route_activates_zero_g_platform \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_runtime --locked \

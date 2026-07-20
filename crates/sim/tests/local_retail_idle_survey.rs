@@ -24,6 +24,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU16,
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use crust_formats::{
@@ -16143,6 +16144,56 @@ impl UpstreamRecoveryRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HighRoadCompletionRouteController {
     jump_hold: u8,
+    sunset_tick: u32,
+    sunset_wait: u16,
+    sunset_stage: u8,
+    sunset_attack_tick: u8,
+}
+
+fn sunset_tas_input(tick: u32) -> u32 {
+    static INPUTS: OnceLock<Vec<u32>> = OnceLock::new();
+    let inputs = INPUTS.get_or_init(|| {
+        let path = std::env::var("C1_SUNSET_TAS_INPUT")
+            .expect("C1_SUNSET_TAS_INPUT points to the temporary local TAS oracle");
+        std::fs::read_to_string(path)
+            .expect("temporary local TAS oracle is readable")
+            .lines()
+            .skip(2)
+            .filter(|line| line.starts_with('|'))
+            .map(|line| {
+                let buttons = line
+                    .rsplit_once(',')
+                    .and_then(|(_, tail)| tail.split_once('|'))
+                    .map(|(buttons, _)| buttons)
+                    .expect("TAS pad row has a button field");
+                buttons
+                    .bytes()
+                    .take(10)
+                    .enumerate()
+                    .fold(0, |held, (index, button)| {
+                        if button == b'.' {
+                            held
+                        } else {
+                            held | match index {
+                                0 => PAD_UP,
+                                1 => PAD_DOWN,
+                                2 => PAD_LEFT,
+                                3 => PAD_RIGHT,
+                                6 | 8 => PAD_SQUARE,
+                                9 => PAD_CROSS,
+                                _ => 0,
+                            }
+                        }
+                    })
+            })
+            .collect()
+    });
+    let start_line = std::env::var("C1_SUNSET_TAS_START")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(53_127);
+    let source_line = start_line + tick as usize * 2;
+    inputs.get(source_line - 3).copied().unwrap_or_default()
 }
 
 impl HighRoadCompletionRouteController {
@@ -16150,6 +16201,5651 @@ impl HighRoadCompletionRouteController {
         let Some(player) = player else {
             return 0;
         };
+        if camera
+            .path
+            .zone
+            .name()
+            .is_some_and(|name| name.ends_with("_zZ"))
+        {
+            if self.sunset_wait > 0 {
+                self.sunset_wait -= 1;
+                return 0;
+            }
+            if self.sunset_stage == 0 && player.translation[0] >= 2_800_000 {
+                self.sunset_stage = 1;
+                self.sunset_wait = 95;
+                return 0;
+            }
+            if self.sunset_stage == 1 {
+                self.sunset_stage = 2;
+            }
+            if self.sunset_stage == 2 && player.translation[0] >= 2_800_000 {
+                if player.translation[0] >= 3_500_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 3;
+                    self.sunset_tick = 140;
+                    return 0;
+                }
+                return if player.translation[0] < 3_000_000 {
+                    PAD_RIGHT
+                } else {
+                    PAD_RIGHT | PAD_CROSS | PAD_SQUARE
+                };
+            }
+            let b2 = Eid::from_name("b2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            if self.sunset_stage == 3
+                && camera.path.zone == b2
+                && player.translation[0] >= 6_380_000
+            {
+                self.sunset_stage = 4;
+                return 0;
+            }
+            if self.sunset_stage == 4 && camera.path.zone == b2 {
+                if player.translation[2] > 45_000 {
+                    return PAD_UP;
+                }
+                self.sunset_stage = 5;
+                self.sunset_wait = 150;
+                return 0;
+            }
+            if self.sunset_stage == 5 {
+                self.sunset_stage = 6;
+                self.jump_hold = 0;
+                return 0;
+            }
+            if self.sunset_stage == 6 && camera.path.zone == b2 {
+                if player.translation[0] >= 7_400_000 {
+                    self.sunset_stage = 3;
+                    self.sunset_tick = 478;
+                    return 0;
+                }
+                let lane = if player.translation[0] >= 7_180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 55_000 {
+                    PAD_UP
+                } else if player.translation[2] < 10_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let held = PAD_RIGHT | lane | PAD_SQUARE;
+                if player.status_a & 1 != 0 && self.jump_hold == 0 {
+                    self.jump_hold = 8;
+                    return held | PAD_CROSS;
+                }
+                if self.jump_hold > 0 {
+                    self.jump_hold -= 1;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
+            let b3 = Eid::from_name("b3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            if camera.path.zone == b3 {
+                if self.sunset_stage < 7
+                    && player.translation[0] >= 7_780_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 7;
+                    self.sunset_wait = 40;
+                    return 0;
+                }
+                if self.sunset_stage == 7 {
+                    self.sunset_stage = 8;
+                    self.jump_hold = 8;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 8 && player.translation[0] >= 7_950_000 {
+                    self.sunset_stage = 9;
+                }
+                if self.sunset_stage == 9 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 13;
+                    self.jump_hold = 8;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 13
+                    && player.translation[0] >= 8_650_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 14;
+                    self.sunset_attack_tick = 5;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.sunset_stage == 14 {
+                    if self.sunset_attack_tick > 0 {
+                        self.sunset_attack_tick -= 1;
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 15;
+                    self.jump_hold = 8;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                let (lane_min, lane_max) = (180_000, 240_000);
+                let lane = if player.translation[2] > lane_max {
+                    PAD_UP
+                } else if player.translation[2] < lane_min {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let held = PAD_RIGHT | lane | PAD_SQUARE;
+                if (self.sunset_stage == 8 || self.sunset_stage == 13)
+                    && player.translation[0] >= 7_720_000
+                    && player.status_a & 1 != 0
+                    && self.jump_hold == 0
+                {
+                    self.jump_hold = 8;
+                    return held | PAD_CROSS;
+                }
+                if self.jump_hold > 0 {
+                    self.jump_hold -= 1;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
+            let c2 = Eid::from_name("c2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let c3 = Eid::from_name("c3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let c4 = Eid::from_name("c4_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let d1 = Eid::from_name("d1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let d2 = Eid::from_name("d2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let d3 = Eid::from_name("d3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let e1 = Eid::from_name("e1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let e2 = Eid::from_name("e2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let e3 = Eid::from_name("e3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let f1 = Eid::from_name("f1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let f2 = Eid::from_name("f2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let f3 = Eid::from_name("f3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let f4 = Eid::from_name("f4_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let g1 = Eid::from_name("g1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let g2 = Eid::from_name("g2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let g3 = Eid::from_name("g3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let g4 = Eid::from_name("g4_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let h1 = Eid::from_name("h1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let h2 = Eid::from_name("h2_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let h3 = Eid::from_name("h3_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let h4 = Eid::from_name("h4_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let h5 = Eid::from_name("h5_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let right_route = camera.path.zone.name().is_some_and(|name| {
+                matches!(
+                    name.as_str(),
+                    "c1_zZ"
+                        | "c2_zZ"
+                        | "c3_zZ"
+                        | "c4_zZ"
+                        | "d1_zZ"
+                        | "d2_zZ"
+                        | "d3_zZ"
+                        | "e1_zZ"
+                        | "e2_zZ"
+                        | "e3_zZ"
+                        | "f1_zZ"
+                        | "f2_zZ"
+                        | "f3_zZ"
+                        | "f4_zZ"
+                        | "g1_zZ"
+                        | "g2_zZ"
+                        | "g3_zZ"
+                )
+            });
+            if self.sunset_stage == 79
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                if player.translation[1] < -16_550_000
+                    && player.status_a & 1 != 0
+                    && player.state == 1
+                {
+                    self.sunset_stage = 80;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if std::env::var_os("C1_SUNSET_STAGE79_ALT").is_some() {
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let wait_frames = std::env::var("C1_SUNSET_STAGE79_ALT_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait_frames {
+                        return 0;
+                    }
+                    let phase = std::env::var("C1_SUNSET_STAGE79_ALT_PHASE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    return PAD_LEFT
+                        | if (tick.wrapping_sub(wait_frames).wrapping_add(phase) / 2) % 2 == 0 {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        }
+                        | PAD_CROSS;
+                }
+                if let Ok(script) = std::env::var("C1_SUNSET_STAGE79_SCRIPT") {
+                    let mut fields = script.split(',');
+                    let press = fields
+                        .next()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(16);
+                    let hold = fields
+                        .next()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(1);
+                    let direction = fields
+                        .next()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    return direction
+                        | if (press..press.saturating_add(hold)).contains(&tick) {
+                            PAD_CROSS
+                        } else {
+                            0
+                        };
+                }
+                return std::env::var("C1_SUNSET_STAGE79_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 80
+                && (camera.path.zone == g2
+                    || camera.path.zone == g3
+                    || camera.path.zone
+                        == Eid::from_name("g4_zZ").expect("fixed Sunset Vista zone EID is valid"))
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                if tick > 20
+                    && (29_050_000..29_300_000).contains(&player.translation[0])
+                    && player.translation[1] < -16_700_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 81;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if let Ok(run_frames) = std::env::var("C1_SUNSET_STAGE80_RUN") {
+                    let run_frames = run_frames.parse::<u8>().unwrap_or(10);
+                    return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
+                }
+                return std::env::var("C1_SUNSET_STAGE80_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 81 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+                let tick = self.sunset_attack_tick;
+                if tick > 10
+                    && (28_700_000..29_000_000).contains(&player.translation[0])
+                    && player.translation[1] < -16_550_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 82;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let run_frames = std::env::var("C1_SUNSET_STAGE81_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 82 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+                let tick = self.sunset_attack_tick;
+                if tick > 15
+                    && (28_450_000..28_560_000).contains(&player.translation[0])
+                    && (-16_450_000..-16_300_000).contains(&player.translation[1])
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 83;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let run_frames = std::env::var("C1_SUNSET_STAGE82_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 83 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait_frames = std::env::var("C1_SUNSET_STAGE83_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait_frames {
+                    return 0;
+                }
+                let run_frames = std::env::var("C1_SUNSET_STAGE83_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let direction = if std::env::var_os("C1_SUNSET_STAGE83_ALT").is_some() {
+                    let phase = std::env::var("C1_SUNSET_STAGE83_ALT_PHASE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    PAD_LEFT
+                        | if (tick.wrapping_add(phase) / 2) % 2 == 0 {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        }
+                } else {
+                    std::env::var("C1_SUNSET_STAGE83_DIR")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_LEFT)
+                };
+                return direction
+                    | if tick - wait_frames < run_frames {
+                        0
+                    } else {
+                        PAD_CROSS
+                    };
+            }
+            if self.sunset_stage == 84
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == g3 && camera.path.index == 1 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 85;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS;
+                }
+                return PAD_LEFT | lane;
+            }
+            if self.sunset_stage == 85
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8
+                    && (28_450_000..28_620_000).contains(&player.translation[0])
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 86;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane;
+                }
+                return PAD_LEFT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 86
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == g4 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 87;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS;
+                }
+                return PAD_LEFT | lane;
+            }
+            if self.sunset_stage == 87
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8
+                    && (27_900_000..28_200_000).contains(&player.translation[0])
+                    && player.translation[1] > -15_700_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 88;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick <= 9 {
+                    return PAD_LEFT | lane | PAD_CROSS;
+                }
+                if tick <= 12 {
+                    return 0;
+                }
+                return PAD_CROSS;
+            }
+            if self.sunset_stage == 88
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let run_frames = std::env::var("C1_SUNSET_STAGE88_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(8);
+                if tick >= run_frames {
+                    self.sunset_stage = 89;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS;
+                }
+                return PAD_LEFT | lane;
+            }
+            if self.sunset_stage == 89
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8
+                    && (27_300_000..27_520_000).contains(&player.translation[0])
+                    && player.translation[1] > -15_720_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 90;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane;
+                }
+                return PAD_LEFT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 90
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if player.translation[0] < 27_180_000 {
+                    self.sunset_stage = 91;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS;
+                }
+                return PAD_LEFT | lane;
+            }
+            if self.sunset_stage == 91
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h1 {
+                    self.sunset_stage = 92;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane;
+                }
+                return PAD_LEFT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 92
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let jump_x = std::env::var("C1_SUNSET_STAGE92_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(26_550_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 93;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 93
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h2
+                    || (tick > 8 && player.translation[0] < 26_000_000 && player.status_a & 1 != 0)
+                {
+                    self.sunset_stage = 94;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 94
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h2
+                    && player.translation[0] < 25_000_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 95;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_SQUARE;
+                }
+                let cycle = std::env::var("C1_SUNSET_STAGE94_CYCLE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(30)
+                    .max(1);
+                let hold = std::env::var("C1_SUNSET_STAGE94_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(20);
+                return PAD_LEFT
+                    | lane
+                    | PAD_SQUARE
+                    | if tick % cycle < hold { PAD_CROSS } else { 0 };
+            }
+            if self.sunset_stage == 95
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let jump_x = std::env::var("C1_SUNSET_STAGE95_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(24_200_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 96;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 96
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8
+                    && (camera.path.zone == h3 || camera.path.zone == h4)
+                    && player.translation[0] < 24_000_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 97;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 97
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let jump_x = std::env::var("C1_SUNSET_STAGE97_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(23_700_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 98;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 98
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8 && player.translation[0] < 23_500_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 99;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 99
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let jump_x = std::env::var("C1_SUNSET_STAGE99_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(22_900_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 100;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 100
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if tick > 8 && camera.path.zone == h4 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 101;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 101
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h4 && camera.path.index == 1 {
+                    self.sunset_stage = 103;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let jump_x = std::env::var("C1_SUNSET_STAGE101_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(22_500_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 102;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 102
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h4 && camera.path.index == 1 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 105;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick > 8 && player.translation[0] < 22_200_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 103;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 103
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                let jump_x = std::env::var("C1_SUNSET_STAGE103_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(21_950_000);
+                if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    self.sunset_stage = 104;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | lane | PAD_SQUARE;
+            }
+            if self.sunset_stage == 104
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if (tick / 2) % 2 == 0 {
+                    PAD_UP
+                } else {
+                    PAD_DOWN
+                };
+                if camera.path.zone == h4 && camera.path.index == 1 {
+                    self.sunset_stage = 107;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick > 8 && player.translation[0] < 21_200_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 105;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 105
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if camera.path.zone == h4 && camera.path.index == 1 {
+                    self.sunset_stage = 107;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.translation[2] < 145_000 || player.velocity[2] < -100_000 {
+                    return PAD_DOWN;
+                }
+                if player.translation[2] > 165_000 || player.velocity[2] > 100_000 {
+                    return PAD_UP;
+                }
+                let wait_frames = std::env::var("C1_SUNSET_STAGE105_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if self.sunset_attack_tick < wait_frames {
+                    return 0;
+                }
+                self.sunset_stage = 106;
+                self.sunset_attack_tick = 0;
+                let direction = std::env::var("C1_SUNSET_STAGE106_DIR")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT);
+                return direction | PAD_CROSS;
+            }
+            if self.sunset_stage == 106
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if camera.path.zone == h4 && camera.path.index == 1 {
+                    self.sunset_stage = 107;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick > 8 && player.translation[1] > -15_520_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 107;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let direction = std::env::var("C1_SUNSET_STAGE106_DIR")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT);
+                let run_frames = std::env::var("C1_SUNSET_STAGE106_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                return if tick < run_frames { direction } else { 0 } | PAD_CROSS;
+            }
+            if self.sunset_stage == 107
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if camera.path.zone == h5 {
+                    self.sunset_stage = 108;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (-15_200_000..=-15_100_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 108;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if let Some(start) = std::env::var("C1_SUNSET_STAGE107_TAS_TICK")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                {
+                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                }
+                let target_x = std::env::var("C1_SUNSET_STAGE107_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(21_400_000);
+                let target_z = std::env::var("C1_SUNSET_STAGE107_Z")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(153_000);
+                let horizontal = if player.translation[0] < target_x - 50_000
+                    || player.velocity[0] < -100_000
+                {
+                    PAD_RIGHT
+                } else if player.translation[0] > target_x + 50_000 || player.velocity[0] > 100_000
+                {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < target_z - 30_000
+                    || player.velocity[2] < -100_000
+                {
+                    PAD_DOWN
+                } else if player.translation[2] > target_z + 30_000 || player.velocity[2] > 100_000
+                {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 108
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -15_200_000
+                    && player.translation[0] >= 21_450_000
+                {
+                    self.sunset_stage = 109;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 109
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[1] > -15_020_000 {
+                    self.sunset_stage = 110;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 2 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 21_760_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 21_860_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 110
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -15_020_000
+                    && player.translation[0] >= 21_880_000
+                {
+                    self.sunset_stage = 111;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 111
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[1] > -14_820_000 {
+                    self.sunset_stage = 112;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 2 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_170_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_270_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 112
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[1] > -14_650_000 {
+                    self.sunset_stage = 113;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 2 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_460_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_560_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] > 20_000 {
+                    PAD_UP
+                } else if player.translation[2] < -20_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 113
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[1] > -14_400_000 {
+                    self.sunset_stage = 114;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 2 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] > 22_050_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_950_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 100_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 160_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 114
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[0] <= 22_100_000 {
+                    self.sunset_stage = 115;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT;
+            }
+            if self.sunset_stage == 115
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -14_280_000
+                    && player.translation[0] < 21_750_000
+                {
+                    self.sunset_stage = 116;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 1 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] > 21_650_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_570_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] > 100_000 {
+                    PAD_UP
+                } else if player.translation[2] < 50_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 116
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -14_100_000
+                    && (21_250_000..21_550_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 117;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 2 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] > 21_460_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_380_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < -20_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 20_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 117
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -13_900_000
+                    && player.translation[0] > 21_650_000
+                {
+                    self.sunset_stage = 118;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 21_730_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 21_830_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 70_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 130_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 118
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait_frames = std::env::var("C1_SUNSET_STAGE118_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < 4 {
+                    return PAD_RIGHT;
+                }
+                if tick < wait_frames {
+                    return 0;
+                }
+                if player.status_a & 1 != 0 && player.translation[0] >= 21_850_000 {
+                    self.sunset_stage = 119;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return if tick < 8 {
+                    PAD_RIGHT
+                } else {
+                    PAD_RIGHT | PAD_SQUARE
+                };
+            }
+            if self.sunset_stage == 119
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -13_700_000
+                    && (21_980_000..22_250_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 120;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if tick < 1 {
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_100_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_200_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 70_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 130_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 120
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -13_500_000
+                    && (22_280_000..22_550_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 121;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_380_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_480_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 70_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 130_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 121
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if std::env::var_os("C1_SUNSET_STAGE121_BYPASS").is_some() {
+                    if player.translation[2] < 180_000 {
+                        return PAD_DOWN;
+                    }
+                    if player.status_a & 1 != 0 && player.translation[0] > 22_700_000 {
+                        self.sunset_stage = 122;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if let Ok(square_start) = std::env::var("C1_SUNSET_STAGE121_SQUARE") {
+                    let square_start = square_start.parse::<u8>().unwrap_or(0);
+                    let runup = std::env::var("C1_SUNSET_STAGE121_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < runup {
+                        return PAD_RIGHT;
+                    }
+                    let action_tick = tick.saturating_sub(runup);
+                    if player.status_a & 1 != 0
+                        && player.translation[1] > -13_350_000
+                        && player.translation[0] > 22_470_000
+                    {
+                        self.sunset_stage = 122;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let brake = std::env::var("C1_SUNSET_STAGE121_BRAKE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(u8::MAX);
+                    return if action_tick >= brake {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    } | PAD_CROSS
+                        | if action_tick == square_start {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        };
+                }
+                let wait_frames = std::env::var("C1_SUNSET_STAGE121_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait_frames {
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -13_300_000
+                    && player.translation[0] > 22_450_000
+                {
+                    self.sunset_stage = 122;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_550_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_650_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 70_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 130_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 122
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE122_CENTER").is_some() {
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    if player.status_a & 1 != 0
+                        && player.translation[1] > -13_150_000
+                        && player.translation[0] < 22_450_000
+                    {
+                        self.sunset_stage = 123;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    if let Ok(release) = std::env::var("C1_SUNSET_STAGE122_RELEASE") {
+                        let release = release.parse::<u8>().unwrap_or(u8::MAX);
+                        if tick >= release {
+                            let target = std::env::var("C1_SUNSET_STAGE122_TARGET")
+                                .ok()
+                                .and_then(|value| value.parse::<i32>().ok())
+                                .unwrap_or(22_200_000);
+                            let horizontal = if player.translation[0] > target + 30_000 {
+                                PAD_LEFT
+                            } else if player.translation[0] < target - 30_000 {
+                                PAD_RIGHT
+                            } else {
+                                0
+                            };
+                            return horizontal | PAD_CROSS;
+                        }
+                    }
+                    let horizontal = if player.translation[0] < 22_550_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 22_610_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    return horizontal | PAD_CROSS;
+                }
+                if std::env::var_os("C1_SUNSET_STAGE122_LEFT").is_some() {
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let delay = std::env::var("C1_SUNSET_STAGE122_DELAY")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < delay {
+                        return 0;
+                    }
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 123
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -12_600_000
+                    && player.translation[0] > 22_000_000
+                {
+                    self.sunset_stage = 124;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 124
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -12_500_000
+                    && (22_050_000..22_400_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 125;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 22_150_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_300_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 125
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if let Ok(wait) = std::env::var("C1_SUNSET_STAGE125_WAIT") {
+                    let wait = wait.parse::<u8>().unwrap_or(40);
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    if tick > wait
+                        && player.status_a & 1 != 0
+                        && player.translation[1] > -12_250_000
+                    {
+                        self.sunset_stage = 126;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    return if tick < wait { 0 } else { PAD_CROSS };
+                }
+                if let Ok(start) = std::env::var("C1_SUNSET_STAGE125_TAS_TICK") {
+                    let start = start.parse::<u32>().unwrap_or(4_217);
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                }
+                return 0;
+            }
+            if self.sunset_stage == 126
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -11_590_000
+                    && player.translation[0] < 22_120_000
+                {
+                    self.sunset_stage = 127;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 127
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -11_420_000
+                    && (21_450_000..22_000_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 128;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] > 21_650_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_550_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 128
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -11_420_000
+                    && (21_520_000..21_850_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 129;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] > 21_740_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_650_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 129
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -11_220_000
+                    && (21_120_000..21_480_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 130;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let runup = std::env::var("C1_SUNSET_STAGE129_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                if tick < runup {
+                    return PAD_LEFT;
+                }
+                let horizontal = if player.translation[0] > 21_350_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_250_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 130
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -11_010_000
+                    && (21_520_000..21_900_000).contains(&player.translation[0])
+                {
+                    self.sunset_stage = 131;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let horizontal = if player.translation[0] < 21_650_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 21_780_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_CROSS;
+            }
+            if self.sunset_stage == 131
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0
+                    && player.translation[1] > -10_800_000
+                    && player.translation[0] > 22_000_000
+                    && player.translation[2] > 130_000
+                {
+                    self.sunset_stage = 132;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let runup = std::env::var("C1_SUNSET_STAGE131_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(5);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let horizontal = if player.translation[0] < 22_150_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_280_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 132
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[0] > 22_350_000 {
+                    self.sunset_stage = 133;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | if tick == 0 { PAD_SQUARE } else { 0 };
+            }
+            if self.sunset_stage == 133
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if camera.path.zone
+                    == Eid::from_name("i4_zZ").expect("fixed Sunset Vista zone EID is valid")
+                {
+                    self.sunset_stage = 134;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane;
+            }
+            if self.sunset_stage == 134
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 23_150_000 {
+                    self.sunset_stage = 135;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane;
+            }
+            if self.sunset_stage == 135
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if player.status_a & 1 != 0 && player.translation[0] > 23_500_000 {
+                    self.sunset_stage = 136;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS | if tick == 6 { PAD_SQUARE } else { 0 };
+            }
+            if self.sunset_stage == 136
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 23_750_000 {
+                    self.sunset_stage = 137;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 137
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 24_050_000 {
+                    self.sunset_stage = 138;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 138
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE138_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(10);
+                if tick >= runup {
+                    self.sunset_stage = 139;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane;
+            }
+            if self.sunset_stage == 139
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 24_400_000 {
+                    self.sunset_stage = 140;
+                    self.sunset_attack_tick = 0;
+                    return PAD_LEFT;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 140
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE140_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(29);
+                if tick < wait {
+                    return if player.translation[0] > 24_320_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                }
+                self.sunset_stage = 141;
+                self.sunset_attack_tick = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.sunset_stage == 141
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 24_620_000 {
+                    self.sunset_stage = 142;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 142
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                self.sunset_stage = 143;
+                self.sunset_attack_tick = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.sunset_stage == 143
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 24_850_000 {
+                    self.sunset_stage = 144;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.sunset_stage == 144
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 25_200_000 {
+                    self.sunset_stage = 145;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 145
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if player.status_a & 1 != 0 && player.translation[0] > 25_650_000 {
+                    self.sunset_stage = 146;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 146
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if let Ok(test) = std::env::var("C1_SUNSET_STAGE146_TEST") {
+                    return test.parse::<u32>().unwrap_or(0);
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if let Ok(start) = std::env::var("C1_SUNSET_STAGE146_TAS_TICK") {
+                    let start = start.parse::<u32>().unwrap_or(4_330);
+                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                }
+                let wait = std::env::var("C1_SUNSET_STAGE146_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(65);
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if tick < wait {
+                        return 0;
+                    }
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 26_100_000
+                        && player.translation[1] > -10_770_000
+                    {
+                        self.sunset_stage = 147;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if tick < wait {
+                    return if player.translation[2] < 180_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 230_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                }
+                if let Ok(test) = std::env::var("C1_SUNSET_STAGE146_AFTER_WAIT_TEST") {
+                    return test.parse::<u32>().unwrap_or(0);
+                }
+                if player.status_a & 1 != 0 && player.translation[0] > 25_880_000 {
+                    self.sunset_stage = 147;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 147
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 26_600_000
+                        && player.translation[1] > -10_800_000
+                    {
+                        self.sunset_stage = 148;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let wait = std::env::var("C1_SUNSET_STAGE147_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    return std::env::var("C1_SUNSET_STAGE147_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                }
+                if player.status_a & 1 != 0 && player.translation[0] > 26_600_000 {
+                    self.sunset_stage = 148;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 148
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 27_080_000
+                        && player.translation[1] > -11_000_000
+                    {
+                        self.sunset_stage = 149;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let run = std::env::var("C1_SUNSET_STAGE148_RUN")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(8);
+                    return std::env::var("C1_SUNSET_STAGE148_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT | if tick < run { 0 } else { PAD_CROSS });
+                }
+                self.sunset_stage = 149;
+                self.sunset_attack_tick = 0;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.sunset_stage == 149
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 27_500_000
+                        && player.translation[1] > -10_800_000
+                    {
+                        self.sunset_stage = 150;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    return std::env::var("C1_SUNSET_STAGE149_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                }
+                if player.status_a & 1 != 0 && player.translation[0] > 26_600_000 {
+                    self.sunset_stage = 150;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 150
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 27_850_000
+                        && player.translation[1] > -10_900_000
+                    {
+                        self.sunset_stage = 151;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    return std::env::var("C1_SUNSET_STAGE150_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT);
+                }
+                if player.status_a & 1 != 0 && player.translation[0] > 26_750_000 {
+                    self.sunset_stage = 151;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_stage == 151
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 28_150_000
+                        && player.translation[1] > -10_900_000
+                    {
+                        self.sunset_stage = 152;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    if let Ok(lane_ticks) = std::env::var("C1_SUNSET_STAGE151_LANE_TICKS") {
+                        let lane_ticks = lane_ticks.parse::<u8>().unwrap_or(8);
+                        let lane = std::env::var("C1_SUNSET_STAGE151_LANE_DIR")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(PAD_DOWN);
+                        if tick < lane_ticks {
+                            return lane;
+                        }
+                        let brake = if lane == PAD_UP { PAD_DOWN } else { PAD_UP };
+                        return PAD_RIGHT | brake | PAD_CROSS;
+                    }
+                    let wait = std::env::var("C1_SUNSET_STAGE151_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    return std::env::var("C1_SUNSET_STAGE151_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                }
+                if player.status_a & 1 != 0 && player.translation[0] > 27_050_000 {
+                    self.sunset_stage = 152;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 152
+                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    if player.status_a & 1 != 0
+                        && player.translation[0] > 28_680_000
+                        && player.translation[1] > -11_000_000
+                    {
+                        self.sunset_stage = 153;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let wait = std::env::var("C1_SUNSET_STAGE152_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(32);
+                    if tick < wait {
+                        return 0;
+                    }
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 153 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 29_500_000
+                    && player.translation[1] > -10_500_000
+                {
+                    self.sunset_stage = 154;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.sunset_stage == 154 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 30_040_000
+                    && player.translation[1] > -10_800_000
+                {
+                    self.sunset_stage = 155;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE154_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 155 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 30_500_000
+                    && player.translation[1] > -10_500_000
+                {
+                    self.sunset_stage = 156;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE155_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 156 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 31_000_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 157;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return std::env::var("C1_SUNSET_STAGE156_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 157 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 31_350_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 158;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE157_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT);
+            }
+            if self.sunset_stage == 158 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 32_300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 159;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE158_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 159 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 33_400_000
+                    && player.translation[1] > -11_100_000
+                {
+                    self.sunset_stage = 160;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE159_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(5);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let lane_ticks = std::env::var("C1_SUNSET_STAGE159_LANE_TICKS")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let lane = if tick.saturating_sub(runup) < lane_ticks {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return std::env::var("C1_SUNSET_STAGE159_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | lane | PAD_CROSS);
+            }
+            if self.sunset_stage == 160 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 33_800_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 161;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE160_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 161 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 35_350_000
+                    && player.translation[1] > -11_100_000
+                {
+                    self.sunset_stage = 162;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE161_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 162 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 35_700_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 163;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE162_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 163 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] < -120_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 164;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE163_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP | PAD_CROSS);
+            }
+            if self.sunset_stage == 164 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] < -350_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 165;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE164_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP | PAD_SQUARE);
+            }
+            if self.sunset_stage == 165 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] > -300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 166;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE165_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_SQUARE);
+            }
+            if self.sunset_stage == 166 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.state == 2
+                    && player.status_a & 1 != 0
+                    && player.translation[2] > -300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 167;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE166_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_SQUARE);
+            }
+            if self.sunset_stage == 167 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] > 160_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 168;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE167_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_CROSS);
+            }
+            if self.sunset_stage == 168 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 36_230_000
+                    && player.translation[1] > -11_100_000
+                {
+                    self.sunset_stage = 169;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE168_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 169 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 36_750_000
+                    && player.translation[1] > -11_200_000
+                {
+                    self.sunset_stage = 170;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE169_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 170 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 37_080_000
+                    && player.translation[1] > -11_250_000
+                {
+                    self.sunset_stage = 171;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE170_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 171 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 37_300_000
+                    && player.translation[1] > -11_100_000
+                {
+                    self.sunset_stage = 172;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE171_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(5);
+                if tick < wait {
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE171_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 172 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 37_650_000
+                    && player.translation[1] > -11_100_000
+                {
+                    self.sunset_stage = 173;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE172_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 173 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_000_000
+                    && player.translation[1] > -11_300_000
+                {
+                    self.sunset_stage = 174;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE173_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(20);
+                if tick < wait {
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE173_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 174 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_000_000
+                    && player.translation[2] < 150_000
+                    && player.translation[1] > -11_300_000
+                {
+                    self.sunset_stage = 175;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE174_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP | PAD_CROSS);
+            }
+            if self.sunset_stage == 175 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_300_000
+                    && player.translation[2] < -350_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 176;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE175_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(10);
+                if tick < wait {
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE175_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP | PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 176 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] < 37_050_000
+                    && player.translation[2] < -300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 177;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE176_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT | PAD_CROSS);
+            }
+            if self.sunset_stage == 177 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] < 36_750_000
+                    && player.translation[2] < -300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 178;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE177_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT | PAD_SQUARE);
+            }
+            if self.sunset_stage == 178 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] < 36_800_000
+                    && player.translation[2] > -300_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 179;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE178_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_CROSS);
+            }
+            if self.sunset_stage == 179 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_420_000
+                    && player.translation[2] > -350_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 180;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE179_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 180 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_400_000
+                    && player.translation[2] > -50_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 181;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE180_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let right_tick = std::env::var("C1_SUNSET_STAGE180_RIGHT_TICK")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(16);
+                if tick.saturating_sub(runup) >= right_tick {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return std::env::var("C1_SUNSET_STAGE180_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 181 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 38_680_000
+                    && player.translation[2] > 200_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 182;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE181_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN | PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 182 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 39_050_000
+                    && player.translation[2] > 100_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 183;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE182_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 183 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 39_520_000
+                    && player.translation[2] > 100_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 184;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE183_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                return std::env::var("C1_SUNSET_STAGE183_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 184 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 40_800_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 185;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE184_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT);
+            }
+            if self.sunset_stage == 185 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] < 50_000
+                    && player.translation[1] > -10_900_000
+                {
+                    self.sunset_stage = 186;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE185_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP);
+            }
+            if self.sunset_stage == 186 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 41_150_000
+                    && player.translation[1] > -10_700_000
+                {
+                    self.sunset_stage = 187;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE186_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 187 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 41_500_000
+                    && player.translation[1] > -10_450_000
+                {
+                    self.sunset_stage = 188;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE187_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 188 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] > 250_000
+                    && player.translation[1] > -10_450_000
+                {
+                    self.sunset_stage = 189;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE188_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_DOWN);
+            }
+            if self.sunset_stage == 189 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[2] > 300_000
+                    && player.translation[1] > -10_350_000
+                {
+                    self.sunset_stage = 190;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE189_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 190 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let z_min = std::env::var("C1_SUNSET_STAGE190_Z_MIN")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(180_000);
+                let z_max = std::env::var("C1_SUNSET_STAGE190_Z_MAX")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(230_000);
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 41_450_000
+                    && (z_min..z_max).contains(&player.translation[2])
+                    && player.translation[1] > -10_450_000
+                {
+                    self.sunset_stage = 191;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE190_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait {
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE190_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP);
+            }
+            if self.sunset_stage == 191 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let z_min = std::env::var("C1_SUNSET_STAGE191_Z_MIN")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(100_000);
+                let z_max = std::env::var("C1_SUNSET_STAGE191_Z_MAX")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(250_000);
+                if player.status_a & 1 != 0
+                    && (40_800_000..41_150_000).contains(&player.translation[0])
+                    && (z_min..z_max).contains(&player.translation[2])
+                    && (-10_200_000..-10_000_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 192;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE191_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait {
+                    return 0;
+                }
+                let runup = std::env::var("C1_SUNSET_STAGE191_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                if tick.saturating_sub(wait) < runup {
+                    return PAD_LEFT;
+                }
+                return std::env::var("C1_SUNSET_STAGE191_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT | PAD_CROSS);
+            }
+            if self.sunset_stage == 192 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_400_000..40_750_000).contains(&player.translation[0])
+                    && (-10_000_000..-9_850_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 193;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && player.translation[0] < 40_600_000
+                    && player.translation[2] > 270_000
+                    && player.translation[1] > -10_850_000
+                {
+                    self.sunset_stage = 193;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE192_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                if tick < runup {
+                    return std::env::var("C1_SUNSET_STAGE192_RUNUP_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_DOWN);
+                }
+                if let Ok(turn_after) = std::env::var("C1_SUNSET_STAGE192_TURN_AFTER") {
+                    let turn_after = turn_after.parse::<u8>().unwrap_or(u8::MAX);
+                    if tick.saturating_sub(runup) >= turn_after {
+                        return std::env::var("C1_SUNSET_STAGE192_TURN_TEST")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(PAD_LEFT | PAD_UP | PAD_CROSS);
+                    }
+                }
+                if std::env::var_os("C1_SUNSET_STAGE192_ALTERNATE").is_some() {
+                    let phase = std::env::var("C1_SUNSET_STAGE192_ALT_PHASE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let period = std::env::var("C1_SUNSET_STAGE192_ALT_PERIOD")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(2)
+                        .max(1);
+                    let up_count = std::env::var("C1_SUNSET_STAGE192_ALT_UP_COUNT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(1)
+                        .min(period);
+                    return PAD_LEFT
+                        | if tick.wrapping_add(phase) % period < up_count {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        }
+                        | PAD_CROSS;
+                }
+                return std::env::var("C1_SUNSET_STAGE192_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT | PAD_CROSS);
+            }
+            if self.sunset_stage == 193 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_000_000..40_400_000).contains(&player.translation[0])
+                    && (-9_800_000..-9_650_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 197;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_150_000..40_450_000).contains(&player.translation[0])
+                    && (-10_450_000..-10_150_000).contains(&player.translation[1])
+                    && player.translation[2] > 180_000
+                {
+                    self.sunset_stage = 196;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (41_100_000..41_300_000).contains(&player.translation[0])
+                    && (-10_650_000..-10_450_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 194;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_400_000..40_900_000).contains(&player.translation[0])
+                    && (-9_650_000..-9_400_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 194;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && player.translation[2] < 50_000
+                    && player.translation[1] > -10_850_000
+                {
+                    self.sunset_stage = 194;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let stage_tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if std::env::var_os("C1_SUNSET_STAGE193_EDGE_JUMP").is_some() {
+                    let jump_x = std::env::var("C1_SUNSET_STAGE193_JUMP_X")
+                        .ok()
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .unwrap_or(39_650_000);
+                    if player.translation[0] <= jump_x {
+                        return std::env::var("C1_SUNSET_STAGE193_JUMP_TEST")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(PAD_LEFT | PAD_CROSS);
+                    }
+                    return PAD_LEFT;
+                }
+                if let Ok(flatten_z) = std::env::var("C1_SUNSET_STAGE193_FLATTEN_Z") {
+                    let flatten_z = flatten_z.parse::<i32>().unwrap_or(i32::MAX);
+                    if player.translation[2] >= flatten_z {
+                        return std::env::var("C1_SUNSET_STAGE193_FLATTEN_TEST")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(PAD_LEFT | PAD_CROSS);
+                    }
+                }
+                if let Ok(start) = std::env::var("C1_SUNSET_STAGE193_TAS_TICK") {
+                    let start = start.parse::<u32>().unwrap_or(2_140);
+                    return sunset_tas_input(start.saturating_add(u32::from(stage_tick)));
+                }
+                if std::env::var_os("C1_SUNSET_STAGE193_ALTERNATE").is_some() {
+                    let phase = std::env::var("C1_SUNSET_STAGE193_ALT_PHASE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    return PAD_LEFT
+                        | if stage_tick.wrapping_add(phase) % 2 == 0 {
+                            PAD_UP
+                        } else {
+                            PAD_DOWN
+                        }
+                        | PAD_CROSS;
+                }
+                return std::env::var("C1_SUNSET_STAGE193_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP);
+            }
+            if self.sunset_stage == 194 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (41_450_000..41_650_000).contains(&player.translation[0])
+                    && (-10_450_000..-10_200_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 195;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let phase1 = std::env::var("C1_SUNSET_STAGE194_PHASE1")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let phase2 = std::env::var("C1_SUNSET_STAGE194_PHASE2")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let phase3 = std::env::var("C1_SUNSET_STAGE194_PHASE3")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let phase4 = std::env::var("C1_SUNSET_STAGE194_PHASE4")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let variable = if tick < phase1 {
+                    "C1_SUNSET_STAGE194_TEST"
+                } else if tick < phase2 {
+                    "C1_SUNSET_STAGE194_TEST2"
+                } else if tick < phase3 {
+                    "C1_SUNSET_STAGE194_TEST3"
+                } else if tick < phase4 {
+                    "C1_SUNSET_STAGE194_TEST4"
+                } else {
+                    "C1_SUNSET_STAGE194_TEST5"
+                };
+                return std::env::var(variable)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 195 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE195_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait {
+                    return 0;
+                }
+                let tick = tick.saturating_sub(wait);
+                let phase1 = std::env::var("C1_SUNSET_STAGE195_PHASE1")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let flatten_z = std::env::var("C1_SUNSET_STAGE195_FLATTEN_Z")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok());
+                let variable = if tick < phase1 {
+                    "C1_SUNSET_STAGE195_TEST"
+                } else if flatten_z.is_some_and(|threshold| player.translation[2] <= threshold) {
+                    "C1_SUNSET_STAGE195_TEST3"
+                } else {
+                    "C1_SUNSET_STAGE195_TEST2"
+                };
+                return std::env::var(variable)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 196 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let jump_x = std::env::var("C1_SUNSET_STAGE196_JUMP_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(39_600_000);
+                let attack_x = std::env::var("C1_SUNSET_STAGE196_ATTACK_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok());
+                let flatten_z = std::env::var("C1_SUNSET_STAGE196_FLATTEN_Z")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok());
+                let variable = if flatten_z
+                    .is_some_and(|threshold| player.translation[2] >= threshold)
+                    || attack_x.is_some_and(|threshold| player.translation[0] <= threshold)
+                {
+                    "C1_SUNSET_STAGE196_TEST3"
+                } else if player.translation[0] <= jump_x {
+                    "C1_SUNSET_STAGE196_TEST2"
+                } else {
+                    "C1_SUNSET_STAGE196_TEST"
+                };
+                return std::env::var(variable)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT);
+            }
+            if self.sunset_stage == 197 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_500_000..40_800_000).contains(&player.translation[0])
+                    && (-9_620_000..-9_430_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 198;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE197_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < runup {
+                    return std::env::var("C1_SUNSET_STAGE197_RUNUP_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT);
+                }
+                return std::env::var("C1_SUNSET_STAGE197_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 198 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_900_000..41_250_000).contains(&player.translation[0])
+                    && (-9_420_000..-9_220_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 199;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE198_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < runup {
+                    return std::env::var("C1_SUNSET_STAGE198_RUNUP_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT);
+                }
+                return std::env::var("C1_SUNSET_STAGE198_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 199 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (41_200_000..41_650_000).contains(&player.translation[0])
+                    && (-9_180_000..-9_000_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 200;
+                    self.sunset_attack_tick = 0;
+                    if std::env::var_os("C1_SUNSET_STAGE199_CONTINUE_HELD").is_some() {
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE199_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < runup {
+                    return std::env::var("C1_SUNSET_STAGE199_RUNUP_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_RIGHT);
+                }
+                if std::env::var("C1_SUNSET_STAGE199_LANE_Z")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .is_some_and(|target| player.translation[2] > target)
+                {
+                    return PAD_RIGHT | PAD_UP | PAD_CROSS;
+                }
+                return std::env::var("C1_SUNSET_STAGE199_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 200 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && player.translation[0] > 41_500_000
+                    && (-9_180_000..-9_000_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 201;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return std::env::var("C1_SUNSET_STAGE200_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 201 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_825_000..=41_075_000).contains(&player.translation[0])
+                    && (-8_930_000..=-8_870_000).contains(&player.translation[1])
+                    && (25_000..=200_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 205;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_250_000..=40_550_000).contains(&player.translation[0])
+                    && (-10_850_000..=-10_650_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 202;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if std::env::var_os("C1_SUNSET_STAGE201_UPPER").is_some() {
+                    if tick < 5 {
+                        return PAD_UP;
+                    }
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if std::env::var_os("C1_SUNSET_STAGE201_SOURCE_WALL").is_some() {
+                    if std::env::var_os("C1_SUNSET_STAGE201_TAS_CONTINUATION").is_some() {
+                        let base = std::env::var("C1_SUNSET_STAGE201_TAS_BASE")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(2_283);
+                        let mut held = sunset_tas_input(base + u32::from(tick));
+                        let spin_tick = std::env::var("C1_SUNSET_STAGE201_TAS_SPIN_TICK")
+                            .ok()
+                            .and_then(|value| value.parse::<u8>().ok());
+                        if spin_tick == Some(tick) {
+                            held |= PAD_SQUARE;
+                        }
+                        return held;
+                    }
+                    return match tick {
+                        0..=1 => 0,
+                        2..=18 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_UP").is_some() => {
+                            PAD_UP | PAD_CROSS
+                        }
+                        2..=18 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                            PAD_DOWN | PAD_CROSS
+                        }
+                        2..=18 => PAD_CROSS,
+                        19..=25 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                            PAD_LEFT | PAD_DOWN | PAD_CROSS
+                        }
+                        26 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                            PAD_LEFT | PAD_DOWN
+                        }
+                        19..=22 => PAD_LEFT | PAD_UP | PAD_CROSS,
+                        23 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
+                        24 => PAD_LEFT | PAD_UP | PAD_CROSS,
+                        25 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
+                        26 => PAD_LEFT | PAD_UP,
+                        _ => PAD_LEFT | PAD_CROSS,
+                    };
+                }
+                let wait = std::env::var("C1_SUNSET_STAGE201_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(1);
+                if tick < wait {
+                    return std::env::var("C1_SUNSET_STAGE201_WAIT_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0);
+                }
+                return std::env::var("C1_SUNSET_STAGE201_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+            }
+            if self.sunset_stage == 202 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (39_800_000..=40_100_000).contains(&player.translation[0])
+                    && (-10_850_000..=-10_650_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 203;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.sunset_stage == 203 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (39_500_000..=39_850_000).contains(&player.translation[0])
+                    && (-10_850_000..=-10_650_000).contains(&player.translation[1])
+                    && (150_000..=350_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 204;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.sunset_stage == 204 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if std::env::var_os("C1_SUNSET_STAGE204_TAS").is_some() {
+                    let wait = std::env::var("C1_SUNSET_STAGE204_TAS_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    let runup = std::env::var("C1_SUNSET_STAGE204_TAS_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait.saturating_add(runup) {
+                        return PAD_LEFT;
+                    }
+                    let base = std::env::var("C1_SUNSET_STAGE204_TAS_BASE")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(2_360);
+                    let source_tick = tick - wait.saturating_add(runup);
+                    let mut held = sunset_tas_input(base + u32::from(source_tick));
+                    let force_down = std::env::var("C1_SUNSET_STAGE204_TAS_FORCE_DOWN")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    let force_up = std::env::var("C1_SUNSET_STAGE204_TAS_FORCE_UP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if source_tick < force_down {
+                        held = (held & !(PAD_UP | PAD_DOWN)) | PAD_DOWN;
+                    } else if source_tick < force_down.saturating_add(force_up) {
+                        held = (held & !(PAD_UP | PAD_DOWN)) | PAD_UP;
+                    }
+                    let spin_tick = std::env::var("C1_SUNSET_STAGE204_TAS_SPIN_TICK")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok());
+                    if spin_tick == Some(source_tick) {
+                        held |= PAD_SQUARE;
+                    }
+                    return held;
+                }
+                let depth_hold = std::env::var("C1_SUNSET_STAGE204_DOWN_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let depth_brake = std::env::var("C1_SUNSET_STAGE204_UP_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < depth_hold {
+                    return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                }
+                if tick < depth_hold.saturating_add(depth_brake) {
+                    return PAD_LEFT | PAD_UP | PAD_CROSS;
+                }
+                return std::env::var("C1_SUNSET_STAGE204_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 205 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (41_200_000..=41_500_000).contains(&player.translation[0])
+                    && (-8_340_000..=-8_280_000).contains(&player.translation[1])
+                    && (25_000..=250_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 206;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_650_000..=40_900_000).contains(&player.translation[0])
+                    && (-8_850_000..=-8_650_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 207;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if let Ok(base) = std::env::var("C1_SUNSET_STAGE205_TAS_BASE") {
+                    let base = base.parse::<u32>().unwrap_or(1_982);
+                    let wait = std::env::var("C1_SUNSET_STAGE205_TAS_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    let source_tick = tick.saturating_sub(wait);
+                    let held = sunset_tas_input(base.saturating_add(u32::from(source_tick)));
+                    return held;
+                }
+                return std::env::var("C1_SUNSET_STAGE205_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_LEFT | PAD_CROSS);
+            }
+            if self.sunset_stage == 207 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (41_200_000..=41_500_000).contains(&player.translation[0])
+                    && (-8_340_000..=-8_280_000).contains(&player.translation[1])
+                    && (25_000..=250_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 206;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_550_000..=40_800_000).contains(&player.translation[0])
+                    && (-8_100_000..=-7_980_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 208;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if let Ok(base) = std::env::var("C1_SUNSET_STAGE207_TAS_BASE") {
+                    let base = base.parse::<u32>().unwrap_or(1_994);
+                    let wait = std::env::var("C1_SUNSET_STAGE207_TAS_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    let source_tick = tick.saturating_sub(wait);
+                    let held = sunset_tas_input(base.saturating_add(u32::from(source_tick)));
+                    if let Ok(left_hold) = std::env::var("C1_SUNSET_STAGE207_TAS_LEFT_HOLD") {
+                        let left_hold = left_hold.parse::<u8>().unwrap_or(6);
+                        if source_tick < left_hold {
+                            return held;
+                        }
+                        let right_hold = std::env::var("C1_SUNSET_STAGE207_TAS_RIGHT_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse::<u8>().ok())
+                            .unwrap_or(20);
+                        if source_tick < left_hold.saturating_add(right_hold) {
+                            return (held & (PAD_UP | PAD_DOWN | PAD_CROSS)) | PAD_RIGHT;
+                        }
+                        return 0;
+                    }
+                    return held;
+                }
+                let wait = std::env::var("C1_SUNSET_STAGE207_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(34);
+                let down = std::env::var("C1_SUNSET_STAGE207_DOWN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(5);
+                let up = std::env::var("C1_SUNSET_STAGE207_UP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(5);
+                if tick < wait {
+                    if tick < down {
+                        return PAD_DOWN;
+                    }
+                    if tick < down.saturating_add(up) {
+                        return PAD_UP;
+                    }
+                    return 0;
+                }
+                let runup = std::env::var("C1_SUNSET_STAGE207_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(3);
+                if tick < wait.saturating_add(runup) {
+                    return PAD_RIGHT;
+                }
+                let jump_hold = std::env::var("C1_SUNSET_STAGE207_JUMP_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                if tick < wait.saturating_add(runup).saturating_add(jump_hold) {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE207_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick
+                    < wait
+                        .saturating_add(runup)
+                        .saturating_add(jump_hold)
+                        .saturating_add(brake)
+                {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 206 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                return 0;
+            }
+            if self.sunset_stage == 208 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_700_000..=41_200_000).contains(&player.translation[0])
+                    && (-7_950_000..=-7_450_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 209;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = std::env::var("C1_SUNSET_STAGE208_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait {
+                    return 0;
+                }
+                let right_hold = std::env::var("C1_SUNSET_STAGE208_RIGHT_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(14);
+                if tick < wait.saturating_add(right_hold) {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                let left_brake = std::env::var("C1_SUNSET_STAGE208_LEFT_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(20);
+                if tick < wait.saturating_add(right_hold).saturating_add(left_brake) {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 209 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = std::env::var("C1_SUNSET_STAGE209_TRIGGER_Y")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(-7_380_000);
+                let trigger_x_max = std::env::var("C1_SUNSET_STAGE209_TRIGGER_X_MAX")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(41_150_000);
+                if player.status_a & 1 != 0
+                    && (40_550_000..=trigger_x_max).contains(&player.translation[0])
+                    && player.translation[1] >= trigger_y
+                {
+                    self.sunset_stage = 210;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 210 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if !std::env::var_os("C1_SUNSET_STAGE210_DIRECT_H12")
+                    .is_some_and(|value| value == "0")
+                    && player.status_a & 1 != 0
+                    && (40_200_000..=41_000_000).contains(&player.translation[0])
+                    && (-7_250_000..=-6_950_000).contains(&player.translation[1])
+                    && (-150_000..=150_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 212;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (40_050_000..=40_450_000).contains(&player.translation[0])
+                    && (-7_560_000..=-7_450_000).contains(&player.translation[1])
+                {
+                    self.sunset_stage = 211;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE210_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < runup {
+                    return PAD_LEFT;
+                }
+                let tick = tick.saturating_sub(runup);
+                let left_hold = std::env::var("C1_SUNSET_STAGE210_LEFT_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(1);
+                let depth = std::env::var("C1_SUNSET_STAGE210_DEPTH")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+                let depth_hold = std::env::var("C1_SUNSET_STAGE210_DEPTH_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(left_hold);
+                let depth_input = if tick < depth_hold { depth } else { 0 };
+                if tick < left_hold {
+                    return if std::env::var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0")
+                    {
+                        PAD_RIGHT | PAD_CROSS | depth_input
+                    } else {
+                        PAD_LEFT | PAD_CROSS | depth_input
+                    };
+                }
+                let right_brake = std::env::var("C1_SUNSET_STAGE210_RIGHT_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                if tick < left_hold.saturating_add(right_brake) {
+                    return if std::env::var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0")
+                    {
+                        PAD_LEFT | PAD_CROSS | depth_input
+                    } else {
+                        PAD_RIGHT | PAD_CROSS | depth_input
+                    };
+                }
+                return 0;
+            }
+            if self.sunset_stage == 211 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_250_000..=40_850_000).contains(&player.translation[0])
+                    && (-7_250_000..=-6_850_000).contains(&player.translation[1])
+                    && (-150_000..=150_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 212;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if std::env::var_os("C1_SUNSET_STAGE211_CUSTOM").is_some() {
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let wait = std::env::var("C1_SUNSET_STAGE211_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(100);
+                    if tick < wait {
+                        return 0;
+                    }
+                    let action_tick = tick.saturating_sub(wait);
+                    let hold = std::env::var("C1_SUNSET_STAGE211_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(20);
+                    let depth = std::env::var("C1_SUNSET_STAGE211_DEPTH")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(PAD_UP);
+                    let action = if std::env::var_os("C1_SUNSET_STAGE211_CIRCLE").is_some() {
+                        0x20
+                    } else {
+                        0
+                    };
+                    let runup = std::env::var("C1_SUNSET_STAGE211_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if action_tick < runup {
+                        return PAD_RIGHT | depth;
+                    }
+                    let jump_tick = action_tick.saturating_sub(runup);
+                    if jump_tick < hold {
+                        return PAD_RIGHT | PAD_CROSS | depth | action;
+                    }
+                    let brake = std::env::var("C1_SUNSET_STAGE211_BRAKE")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(12);
+                    if jump_tick < hold.saturating_add(brake) {
+                        return PAD_LEFT | PAD_CROSS | depth | action;
+                    }
+                    return 0;
+                }
+                if let Ok(base) = std::env::var("C1_SUNSET_STAGE211_TAS_BASE") {
+                    let base = base.parse::<u32>().unwrap_or(2_026);
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let wait = std::env::var("C1_SUNSET_STAGE211_TAS_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if tick < wait {
+                        return 0;
+                    }
+                    return sunset_tas_input(
+                        base.saturating_add(u32::from(tick.saturating_sub(wait))),
+                    );
+                }
+                return 0;
+            }
+            if self.sunset_stage == 212 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = std::env::var("C1_SUNSET_STAGE212_TRIGGER_Y")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(-6_410_000);
+                if player.status_a & 1 != 0
+                    && (40_650_000..=40_950_000).contains(&player.translation[0])
+                    && player.translation[1] >= trigger_y
+                {
+                    self.sunset_stage = 213;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 213 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_700_000..=41_100_000).contains(&player.translation[0])
+                    && (-6_260_000..=-6_100_000).contains(&player.translation[1])
+                    && (-150_000..=150_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 214;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.status_a & 1 != 0
+                    && (41_150_000..=41_300_000).contains(&player.translation[0])
+                    && (-6_720_000..=-6_620_000).contains(&player.translation[1])
+                    && (20_000..=130_000).contains(&player.translation[2])
+                {
+                    self.sunset_stage = 214;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let hold = std::env::var("C1_SUNSET_STAGE213_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(8);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE213_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 214 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = std::env::var("C1_SUNSET_STAGE214_TRIGGER_Y")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(-5_700_000);
+                if player.status_a & 1 != 0
+                    && (40_700_000..=41_050_000).contains(&player.translation[0])
+                    && player.translation[1] >= trigger_y
+                {
+                    self.sunset_stage = 215;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 215 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_350_000..=41_100_000).contains(&player.translation[0])
+                    && (-5_600_000..=-5_250_000).contains(&player.translation[1])
+                    && (-150_000..=150_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 216;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let hold = std::env::var("C1_SUNSET_STAGE215_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(8);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE215_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 216 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_550_000..=40_950_000).contains(&player.translation[0])
+                    && player.translation[1] >= -4_780_000
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 217;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 217 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_300_000..=40_620_000).contains(&player.translation[0])
+                    && (-4_650_000..=-4_550_000).contains(&player.translation[1])
+                    && (20_000..=130_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 218;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let hold = std::env::var("C1_SUNSET_STAGE217_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(18);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE217_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 218 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_080_000..=40_400_000).contains(&player.translation[0])
+                    && (-4_440_000..=-4_340_000).contains(&player.translation[1])
+                    && (20_000..=130_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 219;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let hold = std::env::var("C1_SUNSET_STAGE218_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE218_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 219 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_630_000..=40_880_000).contains(&player.translation[0])
+                    && (-4_330_000..=-4_220_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 220;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE219_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(2);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE219_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(20);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE219_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 220 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_940_000..=41_190_000).contains(&player.translation[0])
+                    && (-4_130_000..=-4_020_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 221;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE220_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(2);
+                let depth = std::env::var("C1_SUNSET_STAGE220_DEPTH")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP);
+                let depth_hold = std::env::var("C1_SUNSET_STAGE220_DEPTH_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(6);
+                let depth_input = if tick < depth_hold { depth } else { 0 };
+                if tick < runup {
+                    return PAD_RIGHT | depth_input;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE220_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS | depth_input;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE220_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_LEFT | PAD_CROSS | depth_input;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 221 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (41_245_000..=41_500_000).contains(&player.translation[0])
+                    && (-3_930_000..=-3_820_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 222;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE221_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                let depth = std::env::var("C1_SUNSET_STAGE221_DEPTH")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(PAD_UP);
+                let depth_hold = std::env::var("C1_SUNSET_STAGE221_DEPTH_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                let depth_input = if tick < depth_hold { depth } else { 0 };
+                if tick < runup {
+                    return PAD_RIGHT | depth_input;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE221_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS | depth_input;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE221_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_LEFT | PAD_CROSS | depth_input;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 222 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_835_000..=41_085_000).contains(&player.translation[0])
+                    && (-3_720_000..=-3_610_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 223;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE222_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                let depth_input = if player.translation[2] > -50_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if tick < runup {
+                    return PAD_LEFT | depth_input;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE222_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(14);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS | depth_input;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE222_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS | depth_input;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 223 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_530_000..=40_780_000).contains(&player.translation[0])
+                    && (-3_520_000..=-3_400_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 224;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE223_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                let depth_input = if player.translation[2] > 50_000 {
+                    PAD_UP
+                } else if player.translation[2] < -50_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if tick < runup {
+                    return PAD_LEFT | depth_input;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE223_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS | depth_input;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE223_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS | depth_input;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 224 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (39_970_000..=40_490_000).contains(&player.translation[0])
+                    && (-3_340_000..=-3_210_000).contains(&player.translation[1])
+                    && (-180_000..=160_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 225;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE224_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                let depth_input = if player.translation[2] > 50_000 {
+                    PAD_UP
+                } else if player.translation[2] < -50_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if tick < runup {
+                    return PAD_LEFT | depth_input;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE224_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(14);
+                if tick < hold {
+                    return PAD_LEFT | PAD_CROSS | depth_input;
+                }
+                let brake = std::env::var("C1_SUNSET_STAGE224_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < hold.saturating_add(brake) {
+                    return PAD_RIGHT | PAD_CROSS | depth_input;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 225 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_600_000..=40_900_000).contains(&player.translation[0])
+                    && (-3_130_000..=-3_000_000).contains(&player.translation[1])
+                    && (-180_000..=180_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 226;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE225_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(2);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE225_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(14);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 226 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_770_000..=41_130_000).contains(&player.translation[0])
+                    && (-3_030_000..=-2_900_000).contains(&player.translation[1])
+                    && (-180_000..=180_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 227;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let runup = std::env::var("C1_SUNSET_STAGE226_RUNUP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(2);
+                if tick < runup {
+                    return PAD_RIGHT;
+                }
+                let tick = tick.saturating_sub(runup);
+                let hold = std::env::var("C1_SUNSET_STAGE226_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 227 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (40_750_000..=41_300_000).contains(&player.translation[0])
+                    && (-2_930_000..=-2_800_000).contains(&player.translation[1])
+                    && (-180_000..=180_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 228;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let hold = std::env::var("C1_SUNSET_STAGE227_HOLD")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(6);
+                if tick < hold {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 228 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.status_a & 1 != 0
+                    && (43_450_000..=44_950_000).contains(&player.translation[0])
+                    && (-2_930_000..=-2_800_000).contains(&player.translation[1])
+                    && (-250_000..=250_000).contains(&player.translation[2])
+                    && player.velocity[1] == -136_000
+                {
+                    self.sunset_stage = 229;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if player.translation[2] < 170_000 {
+                    return PAD_DOWN;
+                }
+                if player.translation[2] > 240_000 {
+                    return PAD_UP;
+                }
+                let x = player.translation[0];
+                let jump = matches!(
+                    x,
+                    42_000_000..=42_400_000
+                        | 42_540_000..=42_900_000
+                        | 43_040_000..=43_650_000
+                );
+                return PAD_RIGHT | if jump { PAD_CROSS } else { 0 };
+            }
+            if self.sunset_stage == 229 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if player.state == 32 || player.event == 5_632 {
+                    self.sunset_stage = 230;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let depth_input = if player.translation[2] < 170_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 240_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let x = player.translation[0];
+                let jump = matches!(
+                    x,
+                    43_580_000..=44_120_000 | 45_000_000..=45_400_000
+                );
+                return PAD_RIGHT | depth_input | if jump { PAD_CROSS } else { 0 };
+            }
+            if self.sunset_stage == 230 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                return 0;
+            }
+            if self.sunset_stage == 78
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && player.translation[0] > 29_850_000
+                && (-16_500_000..-16_100_000).contains(&player.translation[1])
+                && player.status_a & 1 != 0
+            {
+                self.sunset_stage = 79;
+                self.sunset_attack_tick = 0;
+                return 0;
+            }
+            if self.sunset_stage == 78
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE78_CLEAN").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                if std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some() {
+                    if tick > 20
+                        && (29_150_000..29_400_000).contains(&player.translation[0])
+                        && player.translation[1] > -15_700_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 84;
+                        self.sunset_attack_tick = 0;
+                        return PAD_LEFT | PAD_UP;
+                    }
+                    if tick < 17 {
+                        return PAD_CROSS;
+                    }
+                    return match tick {
+                        17..=20 | 22 => PAD_LEFT | PAD_UP | PAD_CROSS,
+                        21 | 23 | 25..=27 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
+                        24 => PAD_LEFT | PAD_UP,
+                        _ => PAD_LEFT | if tick % 2 == 0 { PAD_UP } else { PAD_DOWN } | PAD_CROSS,
+                    };
+                }
+                if let Ok(start) = std::env::var("C1_SUNSET_STAGE78_TAS_TICK") {
+                    let start = start.parse::<u32>().unwrap_or(2_297);
+                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                }
+                let run_frames = std::env::var("C1_SUNSET_STAGE78_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                let direction = std::env::var("C1_SUNSET_STAGE78_BRAKE")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .map_or(
+                        PAD_RIGHT,
+                        |brake| if tick < brake { PAD_RIGHT } else { PAD_LEFT },
+                    );
+                let lane_start = std::env::var("C1_SUNSET_STAGE78_LANE_START")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let lane = if tick >= lane_start {
+                    std::env::var("C1_SUNSET_STAGE78_LANE")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .unwrap_or(0)
+                } else {
+                    0
+                };
+                return direction | lane | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 77
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                if std::env::var_os("C1_SUNSET_STAGE77_WAIT_ONLY").is_some() {
+                    return 0;
+                }
+                if self.sunset_attack_tick > 6
+                    && (29_480_000..29_700_000).contains(&player.translation[0])
+                    && player.translation[1] > -15_900_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 78;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait_frames = std::env::var("C1_SUNSET_STAGE77_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if tick < wait_frames {
+                    return 0;
+                }
+                let run_frames = std::env::var("C1_SUNSET_STAGE77_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                return PAD_RIGHT
+                    | PAD_UP
+                    | if tick - wait_frames < run_frames {
+                        0
+                    } else {
+                        PAD_CROSS
+                    };
+            }
+            if self.sunset_stage == 76
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                if self.sunset_attack_tick > 8
+                    && (29_250_000..29_520_000).contains(&player.translation[0])
+                    && player.translation[1] > -16_100_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 77;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let run_frames = std::env::var("C1_SUNSET_STAGE76_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(4);
+                return PAD_RIGHT | PAD_UP | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 75
+                && (camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && (28_750_000..29_100_000).contains(&player.translation[0])
+                && player.translation[1] > -16_300_000
+                && player.status_a & 1 != 0
+            {
+                self.sunset_stage = 76;
+                self.sunset_attack_tick = 0;
+                return 0;
+            }
+            if self.sunset_stage == 74
+                && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                if self.sunset_attack_tick > 8
+                    && (28_450_000..28_720_000).contains(&player.translation[0])
+                    && player.translation[1] > -16_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 75;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let run_frames = std::env::var("C1_SUNSET_STAGE72_SECOND_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(8);
+                return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 73
+                && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
+                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait_frames = std::env::var("C1_SUNSET_STAGE72_SECOND_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(12);
+                if tick < wait_frames {
+                    return 0;
+                }
+                self.sunset_stage = 74;
+                self.sunset_attack_tick = 1;
+                return PAD_LEFT;
+            }
+            if self.sunset_stage == 73
+                && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
+            {
+                return 0;
+            }
+            if self.sunset_stage == 72
+                && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
+            {
+                if std::env::var_os("C1_SUNSET_STAGE72_TAS").is_some() {
+                    let held = sunset_tas_input(self.sunset_tick);
+                    self.sunset_tick = self.sunset_tick.saturating_add(1);
+                    return held;
+                }
+                if std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+                    if self.sunset_attack_tick > 10
+                        && (28_740_000..29_000_000).contains(&player.translation[0])
+                        && player.translation[1] > -16_700_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 73;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let left_frames = std::env::var("C1_SUNSET_STAGE72_HOP_LEFT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(6);
+                    return if tick < left_frames {
+                        PAD_LEFT | PAD_CROSS
+                    } else {
+                        0
+                    };
+                }
+                if self.sunset_attack_tick > 0
+                    && (28_400_000..28_750_000).contains(&player.translation[0])
+                    && player.translation[1] > -16_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 73;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                let run_frames = std::env::var("C1_SUNSET_STAGE72_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let brake_x = std::env::var("C1_SUNSET_STAGE72_BRAKE_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok());
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let horizontal = if brake_x.is_some_and(|x| player.translation[0] <= x) {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+                return horizontal | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 71 && (camera.path.zone == g1 || camera.path.zone == g2) {
+                if let Some((wait_frames, run_frames)) = std::env::var("C1_SUNSET_STAGE71_WAIT_RUN")
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .split_once(',')
+                            .map(|(wait, run)| (wait.to_owned(), run.to_owned()))
+                    })
+                    .and_then(|(wait, run)| {
+                        Some((wait.parse::<u16>().ok()?, run.parse::<u16>().ok()?))
+                    })
+                {
+                    let tick = u16::from(self.sunset_attack_tick);
+                    if tick > wait_frames + run_frames
+                        && (28_650_000..29_000_000).contains(&player.translation[0])
+                        && player.translation[1] > -16_700_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 72;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    if tick < wait_frames {
+                        return 0;
+                    }
+                    return PAD_LEFT
+                        | if tick < wait_frames + run_frames {
+                            0
+                        } else {
+                            PAD_CROSS
+                        };
+                }
+                return std::env::var("C1_SUNSET_STAGE71_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .unwrap_or(0);
+            }
+            if self.sunset_stage == 70
+                && (camera.path.zone == g1 || camera.path.zone == g2)
+                && let Some(run_frames) = std::env::var("C1_SUNSET_STAGE70_RUN")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+            {
+                let tick = self.sunset_attack_tick;
+                if tick > run_frames
+                    && player.translation[1] > -16_800_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 71;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane =
+                    if tick >= run_frames && std::env::var_os("C1_SUNSET_STAGE70_UP").is_some() {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                return PAD_LEFT | lane | if tick < run_frames { 0 } else { PAD_CROSS };
+            }
+            if self.sunset_stage == 70
+                && (camera.path.zone == g1 || camera.path.zone == g2)
+                && let Some(down_frames) = std::env::var("C1_SUNSET_STAGE70_DOWN_FRAMES")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+            {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let lane = if tick < down_frames { PAD_DOWN } else { 0 };
+                return PAD_LEFT | lane | PAD_CROSS;
+            }
+            if self.sunset_stage == 70
+                && (camera.path.zone == g1 || camera.path.zone == g2)
+                && let Some(held) = std::env::var("C1_SUNSET_STAGE70_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+            {
+                return held;
+            }
+            if self.sunset_stage == 69
+                && (camera.path.zone == g1 || camera.path.zone == g2)
+                && std::env::var_os("C1_SUNSET_STAGE69_RIDE_EXIT").is_some()
+            {
+                if player.translation[1] > -17_100_000 && player.status_a & 1 != 0 {
+                    self.sunset_stage = 70;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.sunset_stage == 69
+                && (camera.path.zone == g1 || camera.path.zone == g2)
+                && let Some(held) = std::env::var("C1_SUNSET_STAGE69_TEST")
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+            {
+                return held;
+            }
+            if right_route && std::env::var_os("C1_SUNSET_ALL_TAS").is_none() {
+                if self.sunset_stage == 68 && camera.path.zone == g1 {
+                    if self.sunset_attack_tick > 0
+                        && player.translation[1] > -18_050_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 69;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let wait = std::env::var("C1_SUNSET_STAGE68_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if self.sunset_attack_tick < wait {
+                        self.sunset_attack_tick += 1;
+                        return 0;
+                    }
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage >= 62 && std::env::var_os("C1_SUNSET_F4_CONTINUOUS").is_some()
+                {
+                    let held = sunset_tas_input(self.sunset_tick);
+                    self.sunset_tick = self.sunset_tick.saturating_add(1);
+                    return held;
+                }
+                if self.sunset_stage == 67 && camera.path.zone == g1 {
+                    if let Some((run_frames, down_frames)) =
+                        std::env::var("C1_SUNSET_STAGE67_RUN_DIAG")
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .split_once(',')
+                                    .map(|(run, down)| (run.to_owned(), down.to_owned()))
+                            })
+                            .and_then(|(run, down)| {
+                                Some((run.parse::<u16>().ok()?, down.parse::<u16>().ok()?))
+                            })
+                    {
+                        let tick = u16::from(self.sunset_attack_tick);
+                        if tick > run_frames + down_frames
+                            && player.translation[1] > -18_250_000
+                            && player.status_a & 1 != 0
+                        {
+                            self.sunset_stage = 68;
+                            self.sunset_attack_tick = 0;
+                            return 0;
+                        }
+                        self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                        if tick < run_frames {
+                            return PAD_LEFT;
+                        }
+                        if tick < run_frames + down_frames {
+                            return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                        }
+                        let lane = if std::env::var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
+                            0
+                        } else {
+                            PAD_UP
+                        };
+                        return PAD_LEFT | lane | PAD_CROSS;
+                    }
+                    if let Some(down_frames) = std::env::var("C1_SUNSET_STAGE67_DIAG_LEFT")
+                        .ok()
+                        .and_then(|value| value.parse::<u16>().ok())
+                    {
+                        let tick = u16::from(self.sunset_attack_tick);
+                        self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                        if tick < down_frames {
+                            return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                        }
+                        let lane = if std::env::var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
+                            0
+                        } else {
+                            PAD_UP
+                        };
+                        return PAD_LEFT | lane | PAD_CROSS;
+                    }
+                    if let Some((wait_frames, run_frames)) =
+                        std::env::var("C1_SUNSET_STAGE67_LEFT_JUMP")
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .split_once(',')
+                                    .map(|(wait, run)| (wait.to_owned(), run.to_owned()))
+                            })
+                            .and_then(|(wait, run)| {
+                                Some((wait.parse::<u16>().ok()?, run.parse::<u16>().ok()?))
+                            })
+                    {
+                        let tick = u16::from(self.sunset_attack_tick);
+                        self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                        if tick < wait_frames {
+                            return 0;
+                        }
+                        if tick < wait_frames + run_frames {
+                            return PAD_LEFT;
+                        }
+                        return PAD_LEFT | PAD_CROSS;
+                    }
+                    if let Some((left_frames, up_frames)) =
+                        std::env::var("C1_SUNSET_STAGE67_AROUND")
+                            .ok()
+                            .and_then(|value| {
+                                value
+                                    .split_once(',')
+                                    .map(|(left, up)| (left.to_owned(), up.to_owned()))
+                            })
+                            .and_then(|(left, up)| {
+                                Some((left.parse::<u16>().ok()?, up.parse::<u16>().ok()?))
+                            })
+                    {
+                        let tick = u16::from(self.sunset_attack_tick);
+                        self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                        let depth = if std::env::var_os("C1_SUNSET_STAGE67_DOWN").is_some() {
+                            PAD_DOWN
+                        } else {
+                            PAD_UP
+                        };
+                        if tick < left_frames {
+                            return PAD_LEFT;
+                        }
+                        if tick < left_frames + up_frames {
+                            return depth;
+                        }
+                        return PAD_RIGHT | depth | PAD_CROSS;
+                    }
+                    if let Some(tick) = std::env::var("C1_SUNSET_STAGE67_TAS_TICK")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        if self.sunset_attack_tick == 0 {
+                            self.sunset_tick = tick;
+                            self.sunset_attack_tick = 1;
+                        }
+                        let held = sunset_tas_input(self.sunset_tick);
+                        self.sunset_tick = self.sunset_tick.saturating_add(1);
+                        return held;
+                    }
+                    if let Some(held) = std::env::var("C1_SUNSET_STAGE67_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        return held;
+                    }
+                    return PAD_UP;
+                }
+                if self.sunset_stage == 66 && camera.path.zone == g1 {
+                    if player.translation[0] >= 29_890_000
+                        && player.translation[1] > -18_500_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 67;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                }
+                if self.sunset_stage == 65 && camera.path.zone == g1 {
+                    if let Some(held) = std::env::var("C1_SUNSET_STAGE65_LANE_TEST")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                    {
+                        return held;
+                    }
+                    if (29_330_000..29_660_000).contains(&player.translation[0])
+                        && player.translation[1] > -18_720_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 66;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    if self.sunset_attack_tick == 0 {
+                        if player.translation[0] < 29_100_000 || player.velocity[0] < 300_000 {
+                            return PAD_RIGHT;
+                        }
+                        self.sunset_attack_tick = 1;
+                        self.jump_hold = 20;
+                    }
+                    let horizontal = if player.translation[0] < 29_500_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 29_570_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return horizontal | PAD_CROSS;
+                    }
+                    return horizontal;
+                }
+                if self.sunset_stage == 64 && (camera.path.zone == f4 || camera.path.zone == g1) {
+                    if (28_950_000..29_220_000).contains(&player.translation[0])
+                        && player.translation[1] > -18_930_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 65;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        self.sunset_wait = 18;
+                        if std::env::var_os("C1_SUNSET_STAGE65_LANE_TEST").is_some() {
+                            return 0;
+                        }
+                        return PAD_RIGHT;
+                    }
+                    if self.jump_hold == 0 && self.sunset_attack_tick == 0 {
+                        self.sunset_attack_tick = 1;
+                        self.jump_hold = 20;
+                    }
+                    let horizontal = if player.translation[0] < 29_020_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 29_140_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return horizontal | PAD_CROSS;
+                    }
+                    return horizontal;
+                }
+                if self.sunset_stage == 63 && (camera.path.zone == f4 || camera.path.zone == g1) {
+                    if (28_520_000..28_850_000).contains(&player.translation[0])
+                        && player.translation[1] > -19_120_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 64;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    if self.jump_hold == 0 && self.sunset_attack_tick == 0 {
+                        self.sunset_attack_tick = 1;
+                        self.jump_hold = 20;
+                    }
+                    let horizontal = if player.translation[0] < 28_620_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 28_720_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return horizontal | PAD_CROSS;
+                    }
+                    return horizontal;
+                }
+                if self.sunset_stage == 62 && camera.path.zone == f4 {
+                    if (28_750_000..29_100_000).contains(&player.translation[0])
+                        && player.translation[1] > -19_330_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 63;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    let lane = if self.sunset_attack_tick >= 8 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return PAD_LEFT | lane | PAD_CROSS;
+                    }
+                    return PAD_LEFT | lane;
+                }
+                let d1_lane_target = std::env::var("C1_SUNSET_D1_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(237_056);
+                let d1_lane = if camera.path.zone == d1
+                    && player.translation[2] > d1_lane_target + 8_000
+                {
+                    PAD_UP
+                } else if camera.path.zone == d1 && player.translation[2] < d1_lane_target - 8_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let f2_lane_target = std::env::var("C1_SUNSET_F2_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(player.translation[2]);
+                let f2_lane_start = std::env::var("C1_SUNSET_F2_LANE_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(28_000_000);
+                let f2_lane = if (camera.path.zone == f1 || camera.path.zone == f2)
+                    && player.translation[0] >= f2_lane_start
+                    && player.translation[2] > f2_lane_target + 8_000
+                {
+                    PAD_UP
+                } else if (camera.path.zone == f1 || camera.path.zone == f2)
+                    && player.translation[0] >= f2_lane_start
+                    && player.translation[2] < f2_lane_target - 8_000
+                {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let e3_lane_target = std::env::var("C1_SUNSET_E3_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(player.translation[2]);
+                let e3_lane = if (camera.path.zone == e2 || camera.path.zone == e3)
+                    && player.translation[0] >= 23_000_000
+                    && player.translation[2] > e3_lane_target + 8_000
+                {
+                    PAD_UP
+                } else if (camera.path.zone == e2 || camera.path.zone == e3)
+                    && player.translation[0] >= 23_000_000
+                    && player.translation[2] < e3_lane_target - 8_000
+                {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let f3_lane_target = std::env::var("C1_SUNSET_F3_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(player.translation[2]);
+                let f3_lane_start = std::env::var("C1_SUNSET_F3_LANE_X")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(28_160_000);
+                let f3_lane = if camera.path.zone == f3
+                    && self.sunset_stage >= 51
+                    && player.translation[0] >= f3_lane_start
+                    && player.translation[2] > f3_lane_target + 8_000
+                {
+                    PAD_UP
+                } else if camera.path.zone == f3
+                    && self.sunset_stage >= 51
+                    && player.translation[0] >= f3_lane_start
+                    && player.translation[2] < f3_lane_target - 8_000
+                {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let f3_negative_lane_target = std::env::var("C1_SUNSET_F3_NEGATIVE_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(-100_000);
+                let f3_negative_lane = if player.translation[2] > f3_negative_lane_target + 8_000 {
+                    PAD_UP
+                } else if player.translation[2] < f3_negative_lane_target - 8_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if self.sunset_stage == 61 && camera.path.zone == f4 {
+                    if ((28_650_000..28_900_000).contains(&player.translation[0])
+                        && player.translation[1] > -19_780_000
+                        || (29_200_000..29_600_000).contains(&player.translation[0])
+                            && player.translation[1] > -19_550_000)
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 62;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 20;
+                        if std::env::var_os("C1_SUNSET_F4_CONTINUOUS").is_some() {
+                            let held = sunset_tas_input(self.sunset_tick);
+                            self.sunset_tick = self.sunset_tick.saturating_add(1);
+                            return held;
+                        }
+                        return PAD_LEFT;
+                    }
+                    if std::env::var("C1_SUNSET_F4_TAS_START")
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .is_some()
+                    {
+                        let held = sunset_tas_input(self.sunset_tick);
+                        self.sunset_tick = self.sunset_tick.saturating_add(1);
+                        return held;
+                    }
+                    if self.sunset_attack_tick == 0 {
+                        if std::env::var_os("C1_SUNSET_F4_DIRECT").is_some()
+                            && player.status_a & 1 != 0
+                        {
+                            if player.velocity[0] > 0 {
+                                return PAD_LEFT;
+                            }
+                            self.sunset_attack_tick = 1;
+                            self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                                .ok()
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(20);
+                            return PAD_LEFT | PAD_UP | PAD_CROSS;
+                        }
+                        if player.status_a & 1 != 0 {
+                            if player.translation[0] <= 29_390_000 {
+                                self.sunset_attack_tick = 1;
+                                self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                                    .ok()
+                                    .and_then(|value| value.parse().ok())
+                                    .unwrap_or(20);
+                                return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                            }
+                            return PAD_LEFT;
+                        }
+                        let coyote_delay = std::env::var("C1_SUNSET_F4_FOURTH_DELAY")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0);
+                        if self.jump_hold < coyote_delay {
+                            self.jump_hold += 1;
+                            return PAD_LEFT | PAD_DOWN;
+                        }
+                        self.sunset_attack_tick = 1;
+                        self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(20);
+                        return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                    }
+                    let direct = std::env::var_os("C1_SUNSET_F4_DIRECT").is_some();
+                    let normal_lane = std::env::var("C1_SUNSET_F4_FOURTH_LANE")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(250_000);
+                    let depth = if player.translation[2]
+                        > if direct {
+                            -50_000
+                        } else {
+                            normal_lane + 20_000
+                        } {
+                        PAD_UP
+                    } else if player.translation[2]
+                        < if direct {
+                            -100_000
+                        } else {
+                            normal_lane - 20_000
+                        }
+                    {
+                        PAD_DOWN
+                    } else if self.sunset_attack_tick & 1 == 0 {
+                        PAD_DOWN
+                    } else {
+                        PAD_UP
+                    };
+                    let jump_tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
+                    let spin = std::env::var("C1_SUNSET_F4_FOURTH_SPIN")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .is_some_and(|spin_tick| jump_tick == spin_tick);
+                    let horizontal = if direct && player.translation[0] < 29_300_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+                    if direct
+                        && jump_tick < 100
+                        && player.state == 10
+                        && player.status_a & 0x10_0000 != 0
+                    {
+                        self.sunset_attack_tick = 100;
+                        self.jump_hold = 20;
+                        return horizontal
+                            | depth
+                            | PAD_CROSS
+                            | if std::env::var_os("C1_SUNSET_F4_DIRECT_REJUMP_SPIN").is_some() {
+                                PAD_SQUARE
+                            } else {
+                                0
+                            };
+                    }
+                    if direct && player.state == 18 {
+                        self.jump_hold = self.jump_hold.saturating_sub(1);
+                        return horizontal | depth | if spin { PAD_SQUARE } else { 0 };
+                    }
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return horizontal | depth | PAD_CROSS | if spin { PAD_SQUARE } else { 0 };
+                    }
+                    return horizontal | depth | if spin { PAD_SQUARE } else { 0 };
+                }
+                if self.sunset_stage == 60 && camera.path.zone == f4 {
+                    if (29_520_000..29_650_000).contains(&player.translation[0])
+                        && player.translation[1] > -19_950_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 61;
+                        self.sunset_attack_tick = 0;
+                        self.sunset_tick = std::env::var("C1_SUNSET_F4_TAS_START")
+                            .ok()
+                            .and_then(|value| value.parse::<u32>().ok())
+                            .unwrap_or(2_240);
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    let runup = std::env::var("C1_SUNSET_F4_THIRD_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(4);
+                    if self.sunset_attack_tick < runup {
+                        self.sunset_attack_tick += 1;
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    if self.sunset_attack_tick == runup {
+                        self.sunset_attack_tick += 1;
+                        self.jump_hold = std::env::var("C1_SUNSET_F4_THIRD_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(16);
+                        return PAD_RIGHT | PAD_SQUARE | PAD_CROSS;
+                    }
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return PAD_RIGHT | PAD_SQUARE | PAD_CROSS;
+                    }
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.sunset_stage == 59 && camera.path.zone == f4 {
+                    if (28_950_000..29_220_000).contains(&player.translation[0])
+                        && player.translation[1] > -20_150_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 60;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    let runup = std::env::var("C1_SUNSET_F4_SECOND_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(12);
+                    if self.sunset_attack_tick < runup {
+                        self.sunset_attack_tick += 1;
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    if self.sunset_attack_tick == runup {
+                        self.sunset_attack_tick += 1;
+                        self.jump_hold = std::env::var("C1_SUNSET_F4_SECOND_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(20);
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
+                    return PAD_RIGHT;
+                }
+                if self.sunset_stage == 58 && (camera.path.zone == f3 || camera.path.zone == f4) {
+                    if (28_450_000..28_600_000).contains(&player.translation[0])
+                        && player.translation[1] > -20_350_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 59;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return 0;
+                    }
+                    if self.jump_hold == 0 && self.sunset_attack_tick == 0 {
+                        if player.translation[0] > 28_920_000 {
+                            return PAD_LEFT;
+                        }
+                        self.sunset_attack_tick = 1;
+                        self.jump_hold = std::env::var("C1_SUNSET_F4_FIRST_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(20);
+                        return PAD_LEFT | PAD_CROSS;
+                    }
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return PAD_LEFT | PAD_CROSS;
+                    }
+                    return PAD_LEFT;
+                }
+                if self.sunset_stage == 57 && (camera.path.zone == f3 || camera.path.zone == f4) {
+                    if player.translation[0] < 29_100_000
+                        && player.translation[1] > -20_550_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 58;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return PAD_LEFT;
+                    }
+                    let held = PAD_LEFT | f3_negative_lane;
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return held | PAD_CROSS;
+                    }
+                    return held;
+                }
+                if self.sunset_stage == 56 && camera.path.zone == f3 {
+                    self.sunset_stage = 57;
+                    self.jump_hold = std::env::var("C1_SUNSET_F3_FOURTH_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_LEFT | f3_negative_lane | PAD_CROSS;
+                }
+                if self.sunset_stage == 55 && camera.path.zone == f3 {
+                    if player.translation[0] < 29_500_000
+                        && player.translation[1] > -20_750_000
+                        && player.status_a & 1 != 0
+                    {
+                        self.sunset_stage = 56;
+                        self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
+                        return PAD_LEFT;
+                    }
+                    let held = PAD_LEFT | f3_lane;
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return held | PAD_CROSS;
+                    }
+                    return held;
+                }
+                if self.sunset_stage == 54 && camera.path.zone == f3 {
+                    let launch_x = std::env::var("C1_SUNSET_F3_THIRD_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(29_730_000);
+                    let launch_speed = std::env::var("C1_SUNSET_F3_THIRD_SPEED")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(-300_000);
+                    if player.translation[0] > launch_x || player.velocity[0] > launch_speed {
+                        return PAD_LEFT | f3_lane;
+                    }
+                    self.sunset_stage = 55;
+                    self.jump_hold = std::env::var("C1_SUNSET_F3_THIRD_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_LEFT | f3_lane | PAD_CROSS;
+                }
+                if self.sunset_stage == 53
+                    && camera.path.zone == f3
+                    && camera.path.index == 1
+                    && player.translation[0] > 29_700_000
+                    && player.translation[1] > -20_950_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 54;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 52 && camera.path.zone == f3 {
+                    self.sunset_stage = 53;
+                    self.jump_hold = std::env::var("C1_SUNSET_F3_SECOND_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | f3_lane | PAD_CROSS;
+                }
+                if self.sunset_stage == 51
+                    && camera.path.zone == f3
+                    && (29_450_000..29_650_000).contains(&player.translation[0])
+                    && player.translation[1] > -21_150_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 52;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 50 && (camera.path.zone == f2 || camera.path.zone == f3) {
+                    self.sunset_stage = 51;
+                    self.jump_hold = std::env::var("C1_SUNSET_F3_FIRST_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | f3_lane | PAD_CROSS;
+                }
+                if self.sunset_stage == 49
+                    && (camera.path.zone == f2 || camera.path.zone == f3)
+                    && player.translation[0] >= 28_160_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 50;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 48 && (camera.path.zone == f2 || camera.path.zone == f3) {
+                    self.sunset_stage = 49;
+                    self.jump_hold = std::env::var("C1_SUNSET_F2_TRANSFER_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if self.sunset_stage == 47
+                    && camera.path.zone == f2
+                    && (27_900_000..28_160_000).contains(&player.translation[0])
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 48;
+                    self.sunset_wait = std::env::var("C1_SUNSET_F2_TRANSFER_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 45 && (camera.path.zone == e3 || camera.path.zone == f1) {
+                    self.sunset_stage = 46;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.sunset_stage == 46 && (camera.path.zone == e3 || camera.path.zone == f1) {
+                    let launch_x = std::env::var("C1_SUNSET_F1_FIRST_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(25_250_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 47;
+                    self.jump_hold = std::env::var("C1_SUNSET_F1_FIRST_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 44
+                    && (camera.path.zone == e3 || camera.path.zone == f1)
+                    && player.translation[0] >= 25_150_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 45;
+                    self.sunset_wait = std::env::var("C1_SUNSET_F1_FIRST_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 43 && camera.path.zone == e3 {
+                    self.sunset_stage = 44;
+                    self.jump_hold = std::env::var("C1_SUNSET_E3_THIRD_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 42
+                    && camera.path.zone == e3
+                    && player.translation[0] >= 24_700_000
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 43;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 41 && camera.path.zone == e3 {
+                    let launch_x = std::env::var("C1_SUNSET_E3_SECOND_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(24_200_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | e3_lane | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 42;
+                    self.jump_hold = std::env::var("C1_SUNSET_E3_SECOND_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 40
+                    && camera.path.zone == e3
+                    && player.translation[0] >= 24_050_000
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 41;
+                    self.sunset_wait = std::env::var("C1_SUNSET_E3_SECOND_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return PAD_RIGHT | e3_lane | PAD_SQUARE;
+                }
+                if self.sunset_stage == 38 && (camera.path.zone == e2 || camera.path.zone == e3) {
+                    self.sunset_stage = 39;
+                    return PAD_RIGHT | e3_lane | PAD_SQUARE;
+                }
+                if self.sunset_stage == 39 && (camera.path.zone == e2 || camera.path.zone == e3) {
+                    let launch_x = std::env::var("C1_SUNSET_E3_FIRST_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(23_800_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | e3_lane | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 40;
+                    self.jump_hold = std::env::var("C1_SUNSET_E3_FIRST_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 37
+                    && (camera.path.zone == e2 || camera.path.zone == e3)
+                    && player.translation[0] >= 23_700_000
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 38;
+                    self.sunset_wait = std::env::var("C1_SUNSET_E3_FIRST_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if self.sunset_stage == 36 && (camera.path.zone == d3 || camera.path.zone == e1) {
+                    let launch_x = std::env::var("C1_SUNSET_E1_FIRST_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20_340_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 37;
+                    self.jump_hold = std::env::var("C1_SUNSET_E1_FIRST_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 35
+                    && (camera.path.zone == d3 || camera.path.zone == e1)
+                    && player.translation[0] >= 20_100_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 36;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.sunset_stage == 34 && (camera.path.zone == d1 || camera.path.zone == d2) {
+                    self.sunset_stage = 35;
+                    self.jump_hold = std::env::var("C1_SUNSET_D2_FIRST_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if self.sunset_stage == 33
+                    && (camera.path.zone == d1 || camera.path.zone == d2)
+                    && player.translation[0] >= 17_200_000
+                    && player.translation[1] < -21_300_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 34;
+                    self.sunset_wait = std::env::var("C1_SUNSET_D2_FIRST_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 31 {
+                    self.sunset_stage = 32;
+                    return PAD_RIGHT | d1_lane;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 32 {
+                    let launch_x = std::env::var("C1_SUNSET_D1_THIRD_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16_500_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | d1_lane;
+                    }
+                    self.sunset_stage = 33;
+                    self.jump_hold = std::env::var("C1_SUNSET_D1_THIRD_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(20);
+                    return PAD_RIGHT | d1_lane | PAD_CROSS;
+                }
+                if camera.path.zone == d1
+                    && self.sunset_stage == 28
+                    && player.translation[0] >= 16_350_000
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 31;
+                    self.sunset_wait = std::env::var("C1_SUNSET_D1_THIRD_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 29 {
+                    if self.sunset_attack_tick > 0 {
+                        self.sunset_attack_tick -= 1;
+                        return PAD_RIGHT | d1_lane | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 30;
+                    return PAD_RIGHT | d1_lane;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 28 {
+                    let attack_x = std::env::var("C1_SUNSET_D1_BOX_ATTACK_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16_100_000);
+                    if player.translation[0] >= attack_x {
+                        self.sunset_stage = 29;
+                        self.sunset_attack_tick = std::env::var("C1_SUNSET_D1_BOX_ATTACK_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(5);
+                        self.jump_hold = 0;
+                        return PAD_RIGHT | d1_lane | PAD_SQUARE;
+                    }
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 26 {
+                    self.sunset_stage = 27;
+                    return PAD_RIGHT | d1_lane;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 27 {
+                    let launch_x = std::env::var("C1_SUNSET_D1_SECOND_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(15_800_000);
+                    let launch_speed = std::env::var("C1_SUNSET_D1_SECOND_SPEED")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(400_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < launch_speed {
+                        return PAD_RIGHT | d1_lane;
+                    }
+                    self.sunset_stage = 28;
+                    self.jump_hold = std::env::var("C1_SUNSET_D1_SECOND_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16);
+                    return PAD_RIGHT | d1_lane | PAD_CROSS;
+                }
+                if camera.path.zone == d1
+                    && self.sunset_stage == 25
+                    && player.translation[0] >= 15_650_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 26;
+                    self.sunset_wait = std::env::var("C1_SUNSET_D1_SECOND_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(0);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 22 {
+                    self.sunset_stage = 23;
+                    self.sunset_attack_tick = std::env::var("C1_SUNSET_D1_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(12);
+                    return PAD_LEFT
+                        | if camera.path.zone == d1 {
+                            0
+                        } else {
+                            PAD_SQUARE
+                        };
+                }
+                if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 23 {
+                    if self.sunset_attack_tick > 0 {
+                        self.sunset_attack_tick -= 1;
+                        return PAD_LEFT
+                            | if camera.path.zone == d1 {
+                                0
+                            } else {
+                                PAD_SQUARE
+                            };
+                    }
+                    self.sunset_stage = 24;
+                    return PAD_RIGHT
+                        | if camera.path.zone == d1 {
+                            0
+                        } else {
+                            PAD_SQUARE
+                        };
+                }
+                if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 24 {
+                    let launch_x = std::env::var("C1_SUNSET_D1_X")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(15_450_000);
+                    if player.translation[0] < launch_x || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT
+                            | if camera.path.zone == d1 {
+                                0
+                            } else {
+                                PAD_SQUARE
+                            };
+                    }
+                    self.sunset_stage = 25;
+                    self.jump_hold = std::env::var("C1_SUNSET_D1_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16);
+                    return PAD_RIGHT
+                        | PAD_CROSS
+                        | if camera.path.zone == d1 {
+                            0
+                        } else {
+                            PAD_SQUARE
+                        };
+                }
+                if (camera.path.zone == c4 || camera.path.zone == d1)
+                    && self.sunset_stage == 21
+                    && player.translation[0] >= 15_400_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 22;
+                    self.sunset_wait = std::env::var("C1_SUNSET_D1_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(40);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if (camera.path.zone == c2 || camera.path.zone == c3) && self.sunset_stage == 18 {
+                    self.sunset_stage = 19;
+                    self.sunset_attack_tick = std::env::var("C1_SUNSET_C3_RUNUP")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(12);
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                if (camera.path.zone == c2 || camera.path.zone == c3) && self.sunset_stage == 19 {
+                    if self.sunset_attack_tick > 0 {
+                        self.sunset_attack_tick -= 1;
+                        return PAD_LEFT | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 20;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if (camera.path.zone == c2 || camera.path.zone == c3) && self.sunset_stage == 20 {
+                    if player.translation[0] < 12_450_000 || player.velocity[0] < 400_000 {
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    self.sunset_stage = 21;
+                    self.jump_hold = std::env::var("C1_SUNSET_C3_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16);
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                if camera.path.zone == c2
+                    && self.sunset_stage < 16
+                    && player.translation[0] >= 10_900_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 16;
+                    self.sunset_wait = 80;
+                    self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if camera.path.zone == c3
+                    && self.sunset_stage == 17
+                    && player.translation[0] >= 12_500_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 18;
+                    self.sunset_wait = std::env::var("C1_SUNSET_C3_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(40);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if camera.path.zone == c2
+                    && self.sunset_stage == 16
+                    && player.translation[0] >= 11_600_000
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 17;
+                    self.sunset_wait = std::env::var("C1_SUNSET_C2_SECOND_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(40);
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                let c3_lane = std::env::var("C1_SUNSET_C3_LANE")
+                    .ok()
+                    .and_then(|value| value.parse::<i32>().ok())
+                    .unwrap_or(237_056);
+                let lane = if camera.path.zone == c3 && player.translation[2] > c3_lane + 8_000 {
+                    PAD_UP
+                } else if camera.path.zone == c3 && player.translation[2] < c3_lane - 8_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let held = PAD_RIGHT
+                    | lane
+                    | d1_lane
+                    | e3_lane
+                    | f3_lane
+                    | f2_lane
+                    | if camera.path.zone == d1 {
+                        0
+                    } else {
+                        PAD_SQUARE
+                    };
+                if camera.path.zone == c3
+                    && !matches!(self.sunset_stage, 18..=20)
+                    && player.translation[1] < -21_450_000
+                    && player.status_a & 1 != 0
+                    && self.jump_hold == 0
+                {
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = std::env::var("C1_SUNSET_C3_HOLD")
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16);
+                    return held | PAD_CROSS;
+                }
+                if player.status_a & 1 != 0 && self.jump_hold == 0 {
+                    if self.sunset_attack_tick == 0 {
+                        self.sunset_attack_tick = if camera.path.zone == c4
+                            || camera.path.zone == d1
+                        {
+                            std::env::var(if camera.path.zone == c4 {
+                                "C1_SUNSET_C4_DELAY"
+                            } else {
+                                "C1_SUNSET_D1_DELAY"
+                            })
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(5)
+                        } else if camera.path.zone == f2 && player.translation[0] >= 27_800_000 {
+                            std::env::var("C1_SUNSET_F2_DELAY")
+                                .ok()
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(5)
+                        } else if camera.path.zone == c2 && matches!(self.sunset_stage, 16 | 17) {
+                            12
+                        } else {
+                            5
+                        };
+                    }
+                    self.sunset_attack_tick -= 1;
+                    if self.sunset_attack_tick != 0 {
+                        return held;
+                    }
+                    self.jump_hold = if camera.path.zone == c4 || camera.path.zone == d1 {
+                        std::env::var(if camera.path.zone == c4 {
+                            "C1_SUNSET_C4_HOLD"
+                        } else {
+                            "C1_SUNSET_D1_LATE_HOLD"
+                        })
+                        .ok()
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(16)
+                    } else if camera.path.zone == f2 && player.translation[0] >= 27_800_000 {
+                        std::env::var("C1_SUNSET_F2_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(16)
+                    } else if player.translation[0] >= 10_400_000 {
+                        16
+                    } else {
+                        8
+                    };
+                    return held | PAD_CROSS;
+                }
+                if self.jump_hold > 0 {
+                    self.jump_hold -= 1;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
+            if self.sunset_stage == 3
+                && camera.path.zone == b2
+                && (5_880_000..6_500_000).contains(&player.translation[0])
+            {
+                let lane = if player.translation[0] >= 6_180_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return PAD_RIGHT | lane | PAD_CROSS | PAD_SQUARE;
+            }
+            let mut held = sunset_tas_input(self.sunset_tick);
+            self.sunset_tick = self.sunset_tick.saturating_add(1);
+            if self.sunset_stage == 3 {
+                held &= !(PAD_UP | PAD_DOWN);
+                if player.translation[2] < 180_000 {
+                    held |= PAD_DOWN;
+                } else if player.translation[2] > 240_000 {
+                    held |= PAD_UP;
+                }
+            }
+            return held;
+        }
         if player.translation[2] > -7_000_000 && player.translation[0] < 170_000 {
             return PAD_RIGHT;
         }
@@ -19007,7 +24703,13 @@ impl SurveyInputController {
                 final_stage: 0,
                 final_tick: 0,
             },
-            high_road: HighRoadCompletionRouteController { jump_hold: 0 },
+            high_road: HighRoadCompletionRouteController {
+                jump_hold: 0,
+                sunset_tick: 0,
+                sunset_wait: 0,
+                sunset_stage: 0,
+                sunset_attack_tick: 0,
+            },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
                 action_tick: 0,
@@ -20665,22 +26367,30 @@ fn program_object_traces(
             vm.register(index)
                 .map_err(|error| format!("program trace register {index}: {error:?}"))
         };
+        let translation = [
+            register(process_register::TRANSLATION_X)?.cast_signed(),
+            register(process_register::TRANSLATION_Y)?.cast_signed(),
+            register(process_register::TRANSLATION_Z)?.cast_signed(),
+        ];
         traces.push(ProgramObjectTrace {
             object: object.vm(),
             origin: spawned.origin(),
             program: identity.global_eid(),
             state: vm.state(),
-            translation: [
-                register(process_register::TRANSLATION_X)?.cast_signed(),
-                register(process_register::TRANSLATION_Y)?.cast_signed(),
-                register(process_register::TRANSLATION_Z)?.cast_signed(),
-            ],
+            translation,
             bound: runtime
                 .machine()
                 .frame_bounds()
                 .iter()
                 .find(|bound| bound.object == object.vm())
-                .map(|bound| bound.bound),
+                .map(|bound| bound.bound)
+                .or_else(|| {
+                    Some(vm.retail_local_bound().translated(crust_sim::Vec3 {
+                        x: translation[0],
+                        y: translation[1],
+                        z: translation[2],
+                    }))
+                }),
             animation_counter: register(process_register::ANIMATION_COUNTER)?,
             register_72: register(72)?,
         });
@@ -20993,7 +26703,7 @@ fn update_camera(
                         || flags & 2 != 0;
                     let plan = lifecycle
                         .plan_transition_with_marker(after.path.zone, activation_marker)
-                        .map_err(|error| error.to_string())?;
+                        .map_err(|error| format!("{error:?}"))?;
                     let destination_load_entries = lifecycle
                         .zone(after.path.zone)
                         .ok_or_else(|| {
@@ -22043,6 +27753,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
+                    | SurveyInputProfile::HighRoadCompletionRoute
             )
             && (matches!(
                 input_profile,
@@ -22052,13 +27763,15 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
+                    | SurveyInputProfile::HighRoadCompletionRoute
             ) || frame >= 300
                 || frame <= 120)
             && (input_profile != SurveyInputProfile::GeneratorRoomCompletionRoute || frame <= 1_500)
         {
             eprintln!(
-                "route[{}] f{frame} held={held:#06x} camera={:?} player={player:?}",
+                "route[{}] f{frame} held={held:#06x} high-road={:?} camera={:?} player={player:?}",
                 input_profile.label(),
+                input_controller.high_road,
                 camera.location()
             );
         }
@@ -29504,7 +35217,9 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
         let result = read_pair(&root, known.id).and_then(|(nsd_bytes, nsf_bytes)| {
             let nsd = parse_nsd(&nsd_bytes, known.id).map_err(|error| error.to_string())?;
             let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
-            let input_profile = if known.id == LevelId::new_const(0x03)
+            let input_profile = if known.id == LevelId::new_const(0x23) {
+                SurveyInputProfile::HighRoadCompletionRoute
+            } else if known.id == LevelId::new_const(0x03)
                 && std::env::var_os("C1_SURVEY_CORTEX_POWER_ROUTE").is_some()
             {
                 SurveyInputProfile::CortexPowerCompletionRoute

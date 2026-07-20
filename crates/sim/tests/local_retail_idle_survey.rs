@@ -16,6 +16,8 @@
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
 //! one level's trace. `C1_SURVEY_FRAMES` selects a bounded 1..=108,000 frame
 //! window; the default remains 360 frames.
+//! The temporary Sunset Vista route is opt-in with `C1_SURVEY_SUNSET_ROUTE=1`
+//! and still requires the legally local `C1_SUNSET_TAS_INPUT` oracle.
 
 #![allow(clippy::too_many_arguments, clippy::too_many_lines)]
 
@@ -16683,7 +16685,9 @@ impl HighRoadCompletionRouteController {
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     return PAD_LEFT
-                        | if (tick.wrapping_sub(wait_frames).wrapping_add(phase) / 2) % 2 == 0 {
+                        | if (tick.wrapping_sub(wait_frames).wrapping_add(phase) / 2)
+                            .is_multiple_of(2)
+                        {
                             PAD_UP
                         } else {
                             PAD_DOWN
@@ -16801,7 +16805,7 @@ impl HighRoadCompletionRouteController {
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     PAD_LEFT
-                        | if (tick.wrapping_add(phase) / 2) % 2 == 0 {
+                        | if (tick.wrapping_add(phase) / 2).is_multiple_of(2) {
                             PAD_UP
                         } else {
                             PAD_DOWN
@@ -16824,7 +16828,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16841,7 +16845,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16861,7 +16865,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16878,7 +16882,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16905,7 +16909,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16926,7 +16930,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16947,7 +16951,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16964,7 +16968,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -16981,7 +16985,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17002,7 +17006,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17021,7 +17025,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17053,7 +17057,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17074,7 +17078,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17095,7 +17099,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17116,7 +17120,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17133,7 +17137,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17154,7 +17158,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17171,7 +17175,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17197,7 +17201,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17219,7 +17223,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -17240,7 +17244,7 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2) % 2 == 0 {
+                let lane = if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -19295,7 +19299,7 @@ impl HighRoadCompletionRouteController {
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     return PAD_LEFT
-                        | if stage_tick.wrapping_add(phase) % 2 == 0 {
+                        | if stage_tick.wrapping_add(phase).is_multiple_of(2) {
                             PAD_UP
                         } else {
                             PAD_DOWN
@@ -19564,10 +19568,8 @@ impl HighRoadCompletionRouteController {
                         26 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
                             PAD_LEFT | PAD_DOWN
                         }
-                        19..=22 => PAD_LEFT | PAD_UP | PAD_CROSS,
-                        23 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
-                        24 => PAD_LEFT | PAD_UP | PAD_CROSS,
-                        25 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
+                        19..=22 | 24 => PAD_LEFT | PAD_UP | PAD_CROSS,
+                        23 | 25 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
                         26 => PAD_LEFT | PAD_UP,
                         _ => PAD_LEFT | PAD_CROSS,
                     };
@@ -19865,8 +19867,8 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 210 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                if !std::env::var_os("C1_SUNSET_STAGE210_DIRECT_H12")
-                    .is_some_and(|value| value == "0")
+                if std::env::var_os("C1_SUNSET_STAGE210_DIRECT_H12")
+                    .is_none_or(|value| value != "0")
                     && player.status_a & 1 != 0
                     && (40_200_000..=41_000_000).contains(&player.translation[0])
                     && (-7_250_000..=-6_950_000).contains(&player.translation[1])
@@ -20590,7 +20592,15 @@ impl HighRoadCompletionRouteController {
                         17..=20 | 22 => PAD_LEFT | PAD_UP | PAD_CROSS,
                         21 | 23 | 25..=27 => PAD_LEFT | PAD_DOWN | PAD_CROSS,
                         24 => PAD_LEFT | PAD_UP,
-                        _ => PAD_LEFT | if tick % 2 == 0 { PAD_UP } else { PAD_DOWN } | PAD_CROSS,
+                        _ => {
+                            PAD_LEFT
+                                | if tick.is_multiple_of(2) {
+                                    PAD_UP
+                                } else {
+                                    PAD_DOWN
+                                }
+                                | PAD_CROSS
+                        }
                     };
                 }
                 if let Ok(start) = std::env::var("C1_SUNSET_STAGE78_TAS_TICK") {
@@ -21037,16 +21047,16 @@ impl HighRoadCompletionRouteController {
                     }
                     return PAD_UP;
                 }
-                if self.sunset_stage == 66 && camera.path.zone == g1 {
-                    if player.translation[0] >= 29_890_000
-                        && player.translation[1] > -18_500_000
-                        && player.status_a & 1 != 0
-                    {
-                        self.sunset_stage = 67;
-                        self.sunset_attack_tick = 0;
-                        self.jump_hold = 0;
-                        return 0;
-                    }
+                if self.sunset_stage == 66
+                    && camera.path.zone == g1
+                    && player.translation[0] >= 29_890_000
+                    && player.translation[1] > -18_500_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 67;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    return 0;
                 }
                 if self.sunset_stage == 65 && camera.path.zone == g1 {
                     if let Some(held) = std::env::var("C1_SUNSET_STAGE65_LANE_TEST")
@@ -21328,14 +21338,13 @@ impl HighRoadCompletionRouteController {
                         } {
                         PAD_UP
                     } else if player.translation[2]
-                        < if direct {
+                        < (if direct {
                             -100_000
                         } else {
                             normal_lane - 20_000
-                        }
+                        })
+                        || self.sunset_attack_tick & 1 == 0
                     {
-                        PAD_DOWN
-                    } else if self.sunset_attack_tick & 1 == 0 {
                         PAD_DOWN
                     } else {
                         PAD_UP
@@ -35490,7 +35499,9 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
         let result = read_pair(&root, known.id).and_then(|(nsd_bytes, nsf_bytes)| {
             let nsd = parse_nsd(&nsd_bytes, known.id).map_err(|error| error.to_string())?;
             let nsf = parse_nsf(&nsf_bytes, &nsd).map_err(|error| error.to_string())?;
-            let input_profile = if known.id == LevelId::new_const(0x23) {
+            let input_profile = if known.id == LevelId::new_const(0x23)
+                && std::env::var_os("C1_SURVEY_SUNSET_ROUTE").is_some()
+            {
                 SurveyInputProfile::HighRoadCompletionRoute
             } else if known.id == LevelId::new_const(0x03)
                 && std::env::var_os("C1_SURVEY_CORTEX_POWER_ROUTE").is_some()

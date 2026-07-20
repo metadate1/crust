@@ -142,7 +142,10 @@ pub fn apply_retail_object_zone_shader(
 /// # Errors
 ///
 /// Returns an error rather than reproducing undefined signed overflow for
-/// malformed coordinates outside the retail corpus.
+/// malformed coordinates outside the retail corpus. The one deliberate
+/// exception is the light-direction multiply: the retail MIPS executable
+/// consumes the low 32-bit product before shifting it, so that operation uses
+/// explicit wrapping arithmetic here as well.
 pub fn apply_mode_four_object_colors(
     mut colors: [u16; 24],
     input: ObjectDarkShaderInput,
@@ -196,9 +199,7 @@ pub fn apply_mode_four_object_colors(
     let dark_distance = input.dark_distance.max(1);
     let mut light_direction = [0_i32; 3];
     for (source, output) in direction.into_iter().zip(&mut light_direction) {
-        let product = source.checked_mul(complementary_distance).ok_or(
-            RetailDarkShaderError::ArithmeticOutOfRange("light direction product"),
-        )?;
+        let product = source.wrapping_mul(complementary_distance);
         *output = ((product >> 8) / dark_distance).clamp(-6_000, 6_000);
     }
 
@@ -284,6 +285,25 @@ mod tests {
         assert_eq!(&shaded[..9], &[0, 0, 65_152, 0, 0, 65_152, 0, 0, 65_152]);
         assert_eq!(&shaded[9..12], &[12; 3]);
         assert_eq!(&shaded[12..], &original[12..]);
+    }
+
+    #[test]
+    fn light_direction_product_uses_defined_mips_low_word_wrap() {
+        let shaded = apply_mode_four_object_colors(
+            [0; 24],
+            ObjectDarkShaderInput {
+                reference_translation: [2_482_176, 708_648, -16_567_312],
+                object_translation: [2_457_344, 931_840, -16_588_800],
+                dark_distance: 2_000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            &shaded[..9],
+            &[497, 3_914, 430, 497, 3_914, 430, 497, 3_914, 430]
+        );
+        assert_eq!(&shaded[9..12], &[123; 3]);
     }
 
     #[test]

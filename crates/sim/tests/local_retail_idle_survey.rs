@@ -392,6 +392,99 @@ fn lights_out_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn fumbling_in_the_dark_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x2a);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Fumbling in the Dark");
+    let (nsd, nsf, nsf_bytes) = parse_local_pair(&root, level)
+        .expect("the legally local Fumbling in the Dark pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::FumblingInTheDarkCompletionRoute,
+        3_600,
+    )
+    .expect("Fumbling in the Dark's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 3_434, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((3_434, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 3434 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(
+        survey
+            .checkpoint_samples
+            .iter()
+            .any(|(frame, checkpoint, _)| (*frame, *checkpoint) == (1_481, 0x2e00)),
+        "the ordinary route must activate the authored checkpoint: {}",
+        survey.summary()
+    );
+    for defeated in [
+        (2_945, 86, 3),
+        (2_976, 60, 3),
+        (3_193, 62, 3),
+        (3_227, 90, 3),
+        (3_259, 89, 3),
+    ] {
+        assert!(
+            survey.spawn_flag_samples.contains(&defeated),
+            "missing authored spider defeat {defeated:?}: {}",
+            survey.summary()
+        );
+    }
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+    let player = player_trace(&runtime)
+        .expect("Fumbling in the Dark completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(runtime.draw_count(), 3_434);
+    assert!(
+        survey.is_clean(),
+        "Fumbling in the Dark end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn high_road_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -489,6 +582,7 @@ enum SurveyInputProfile {
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
+    FumblingInTheDarkCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
     HogWildCompletionRoute,
@@ -554,6 +648,7 @@ impl SurveyInputProfile {
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
+            Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -606,6 +701,7 @@ impl SurveyInputProfile {
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
+                | Self::FumblingInTheDarkCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
                 | Self::HogWildCompletionRoute
@@ -639,6 +735,180 @@ impl SurveyInputProfile {
                 | Self::CortexCompletionRoute
                 | Self::GreatHallCortexRoute
         )
+    }
+}
+
+/// Deterministic ordinary-pad route from Fumbling in the Dark's fresh spawn
+/// through the authored `WarpC` exit. This captures the narrow platform and
+/// final spider-bounce sequence without injecting position or runtime state.
+struct FumblingInTheDarkCompletionRouteController;
+
+impl FumblingInTheDarkCompletionRouteController {
+    fn held(frame: u32) -> u32 {
+        let mut held = match frame {
+            1..=59 | 104..=132 => PAD_RIGHT,
+            133..=148 | 2_532..=2_548 | 3_084..=3_091 => PAD_LEFT,
+            164..=188
+            | 220..=244
+            | 329..=344
+            | 396..=420
+            | 473..=504
+            | 524..=548
+            | 596..=620
+            | 672..=696
+            | 769..=784
+            | 880..=883
+            | 1_002..=1_017
+            | 1_640..=1_720
+            | 2_276..=2_283
+            | 2_502..=2_524
+            | 2_715..=2_744
+            | 3_126..=3_139 => PAD_UP | PAD_RIGHT,
+            189..=204
+            | 245..=260
+            | 304..=328
+            | 421..=436
+            | 448..=472
+            | 505..=520
+            | 549..=564
+            | 621..=636
+            | 697..=712
+            | 744..=768
+            | 848..=871
+            | 884..=900
+            | 1_840..=1_845
+            | 1_938..=1_944
+            | 3_065..=3_076 => PAD_UP | PAD_LEFT,
+            872..=879 => PAD_UP | PAD_RIGHT | PAD_SQUARE,
+            1_018..=1_022 | 3_077..=3_083 => PAD_UP | PAD_LEFT | PAD_SQUARE,
+            1_023 | 2_963..=2_968 | 3_024..=3_038 => PAD_DOWN,
+            1_024..=1_058 | 2_203..=2_260 | 2_434..=2_470 | 3_154..=3_163 => 0,
+            1_059..=1_068
+            | 1_419..=1_428
+            | 1_594..=1_603
+            | 1_828..=1_837
+            | 2_487..=2_500
+            | 2_847..=2_864
+            | 2_895..=2_914
+            | 2_922..=2_928
+            | 2_946..=2_952
+            | 2_977..=2_983
+            | 3_012..=3_018
+            | 3_048..=3_054
+            | 3_057..=3_063 => PAD_UP | PAD_SQUARE,
+            _ => PAD_UP,
+        };
+
+        if matches!(
+            frame,
+            40..=51
+                | 64..=75
+                | 88..=99
+                | 112..=123
+                | 136..=147
+                | 160..=171
+                | 184..=195
+                | 208..=219
+                | 232..=243
+                | 256..=267
+                | 280..=291
+                | 304..=315
+                | 328..=339
+                | 352..=363
+                | 376..=387
+                | 400..=411
+                | 424..=435
+                | 456..=467
+                | 484..=507
+                | 520..=531
+                | 544..=555
+                | 568..=579
+                | 592..=603
+                | 616..=627
+                | 640..=651
+                | 664..=675
+                | 688..=699
+                | 712..=723
+                | 736..=747
+                | 760..=771
+                | 784..=795
+                | 808..=819
+                | 832..=843
+                | 868..=891
+                | 904..=915
+                | 934..=945
+                | 952..=963
+                | 976..=987
+                | 1_000..=1_011
+                | 1_059..=1_070
+                | 1_083..=1_094
+                | 1_107..=1_118
+                | 1_131..=1_142
+                | 1_155..=1_166
+                | 1_179..=1_190
+                | 1_203..=1_214
+                | 1_227..=1_238
+                | 1_264..=1_275
+                | 1_288..=1_299
+                | 1_312..=1_323
+                | 1_346..=1_357
+                | 1_372..=1_383
+                | 1_405..=1_416
+                | 1_436..=1_447
+                | 1_460..=1_471
+                | 1_484..=1_495
+                | 1_508
+                | 1_532..=1_543
+                | 1_556..=1_567
+                | 1_580..=1_591
+                | 1_612..=1_623
+                | 1_636..=1_647
+                | 1_660..=1_671
+                | 1_684..=1_695
+                | 1_708..=1_719
+                | 1_732..=1_743
+                | 1_756..=1_767
+                | 1_780..=1_791
+                | 1_808..=1_819
+                | 1_832..=1_843
+                | 1_856..=1_867
+                | 1_880..=1_891
+                | 1_938..=1_949
+                | 1_962..=1_973
+                | 1_986..=1_997
+                | 2_010..=2_021
+                | 2_034..=2_045
+                | 2_060..=2_071
+                | 2_099..=2_110
+                | 2_123..=2_134
+                | 2_147..=2_158
+                | 2_171..=2_182
+                | 2_288..=2_338
+                | 2_342..=2_375
+                | 2_404..=2_427
+                | 2_431..=2_465
+                | 2_474..=2_498
+                | 2_502..=2_538
+                | 2_554..=2_590
+                | 2_610..=2_646
+                | 2_654..=2_682
+                | 2_690..=2_728
+                | 2_745..=2_769
+                | 2_772..=2_810
+                | 2_888..=2_914
+                | 2_920..=2_960
+                | 3_010..=3_037
+                | 3_046..=3_070
+                | 3_075..=3_090
+                | 3_096..=3_125
+                | 3_132..=3_165
+                | 3_168..=3_246
+                | 3_285..=3_315
+                | 3_322..=3_352
+        ) {
+            held |= PAD_CROSS;
+        }
+        held
     }
 }
 
@@ -24870,6 +25140,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::LightsOutCompletionRoute => {
                 LightsOutCompletionRouteController::held(frame)
+            }
+            SurveyInputProfile::FumblingInTheDarkCompletionRoute => {
+                FumblingInTheDarkCompletionRouteController::held(frame)
             }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {

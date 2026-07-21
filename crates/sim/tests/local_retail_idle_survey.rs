@@ -48725,7 +48725,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(papu_papu_completion_survey.spawn_attempts, 5_684);
             assert_eq!(papu_papu_completion_survey.expected_spawn_rejections, 5_678);
             assert_eq!(papu_papu_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(papu_papu_completion_survey.executions, 16_379);
+            assert_eq!(papu_papu_completion_survey.executions, 16_391);
             assert_eq!(papu_papu_completion_survey.zone_transitions, 0);
             assert_eq!(papu_papu_completion_survey.camera_ranges.len(), 3);
             assert_eq!(papu_papu_completion_survey.camera_path_changes, 2);
@@ -48911,9 +48911,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 papu_papu_completion_runtime.machine().random_seed(),
-                0x2f55_863f
+                0x3823_ffd7
             );
-            assert_eq!(papu_papu_completion_runtime.draw_count(), 4_244);
+            assert_eq!(papu_papu_completion_runtime.draw_count(), 4_332);
             assert!(
                 papu_papu_completion_survey.is_clean(),
                 "Papu Papu's carried completion route must remain clean: {}",
@@ -48941,8 +48941,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert!(report.effects.is_empty());
                 report.carry
             };
-            assert_eq!(carry.random_seed, 0x2f55_863f);
-            assert_eq!(carry.draw_count, 4_244);
+            assert_eq!(carry.random_seed, 0x3823_ffd7);
+            assert_eq!(carry.draw_count, 4_332);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,

@@ -1772,7 +1772,7 @@ impl Runtime {
                 self.retail_pbak = None;
                 dom.log(
                     &format!(
-                        "Retail PBAK input ended ({reason:?}); the zero island-camera target released physical input."
+                        "Retail PBAK input ended ({reason:?}); no caption controller retained the authored return lock."
                     ),
                     false,
                 );

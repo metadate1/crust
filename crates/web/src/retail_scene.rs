@@ -4984,15 +4984,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    #[ignore = "set C1_STREAM_DIR or C1_DISC_IMAGE to legally local retail data"]
     fn local_pbak_restored_scene_is_renderable() {
         const RETAIL_GLOBAL_WORDS: usize = 256;
         const PBAK_STATE_GLOBAL: usize = 105;
 
-        let root = PathBuf::from(
-            std::env::var_os("C1_STREAM_DIR")
-                .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
-        );
         let level = std::env::var("C1_PBAK_LEVEL").ok().map_or_else(
             || LevelId::new_const(0x0c),
             |value| {
@@ -5005,12 +5001,36 @@ mod tests {
                 LevelId::new(raw).expect("C1_PBAK_LEVEL fits the retail filename field")
             },
         );
-        let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
-        let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
-        let nsd_bytes = std::fs::read(&nsd_path)
-            .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
-        let nsf_bytes = std::fs::read(&nsf_path)
-            .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+        let (nsd_bytes, nsf_bytes) = if let Some(root) = std::env::var_os("C1_STREAM_DIR") {
+            let root = PathBuf::from(root);
+            let nsd_path = root.join(StreamName::new(level, StreamKind::Nsd).filename());
+            let nsf_path = root.join(StreamName::new(level, StreamKind::Nsf).filename());
+            (
+                std::fs::read(&nsd_path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display())),
+                std::fs::read(&nsf_path)
+                    .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display())),
+            )
+        } else {
+            let disc_path = PathBuf::from(
+                std::env::var_os("C1_DISC_IMAGE")
+                    .expect("set C1_STREAM_DIR or C1_DISC_IMAGE to legally local retail data"),
+            );
+            let disc_bytes = std::fs::read(&disc_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", disc_path.display()));
+            let disc = DiscImage::open(&disc_bytes).unwrap();
+            let streams = disc.discover_streams().unwrap();
+            let nsd_stream = streams
+                .get(StreamName::new(level, StreamKind::Nsd))
+                .expect("disc is missing the selected PBAK NSD");
+            let nsf_stream = streams
+                .get(StreamName::new(level, StreamKind::Nsf))
+                .expect("disc is missing the selected PBAK NSF");
+            (
+                disc.read_stream(nsd_stream).unwrap(),
+                disc.read_stream(nsf_stream).unwrap(),
+            )
+        };
         let nsd = parse_nsd(&nsd_bytes, level).unwrap();
         let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
         let graph = RetailZoneGraph::from_pair(&nsd, &nsf, &nsf_bytes).unwrap();
@@ -5482,28 +5502,22 @@ mod tests {
                 .as_ref()
                 .expect("the final recorded pad boundary must complete the retail demo handshake");
             let finish_island_rotation = finish_island_rotation
-                .expect("the final recorded pad boundary must sample its island-camera target");
-            match (finish_island_rotation, finish_outcome) {
-                (0, RetailDemoFinishOutcome::Released) => {
-                    assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
-                }
-                (0, outcome) => {
-                    panic!("a zero island-camera target must release playback, got {outcome:?}")
-                }
-                (_, RetailDemoFinishOutcome::CaptionEvent { .. }) => {
+                .expect("the final recorded pad boundary must sample global 64");
+            match finish_outcome {
+                RetailDemoFinishOutcome::CaptionEvent { .. } => {
                     assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(3));
                 }
-                (_, RetailDemoFinishOutcome::CaptionEventFault { .. }) => {
+                RetailDemoFinishOutcome::CaptionEventFault { .. } => {
                     panic!("the legal recording reached a malformed caption-event handler")
                 }
-                (_, RetailDemoFinishOutcome::Released) => {
-                    panic!("a nonzero island-camera target must hand off to the caption object")
+                RetailDemoFinishOutcome::Released => {
+                    panic!("the live PBAK caption must retain the authored return lock")
                 }
             }
             if level == LevelId::new_const(0x0c) {
                 assert_eq!(
                     finish_island_rotation, 0,
-                    "the direct-mount pb0cB fixture must retain its zero island-camera target"
+                    "pb0cB proves the caption handoff is independent of island-camera global 64"
                 );
             }
         }

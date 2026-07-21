@@ -206,10 +206,10 @@ not copy any disc or stream bytes into the repository:
   low-five-bit effective values.
   Separate runtime coverage verifies that the caption's executable-four/subtype-nine child keeps a
   null lifecycle zone while using the current ZDAT for environment/colors. The direct-mount
-  fixture samples a zero island-camera target at the final boundary, returns `Released`, and leaves
-  PBAK state zero. Separate finish-contract coverage verifies that a nonzero carried target
-  completes the caption handoff and retains state three; the full local-scene trace rejects a
-  checked caption-handler fault whenever that branch is used.
+  fixture reaches the final boundary with a live caption reference, dispatches event `0xE00`, and
+  retains PBAK state three even though island-camera global 64 remains zero. Separate
+  finish-contract coverage verifies that a null caption releases input, a malformed non-null
+  reference is rejected, and the full local-scene trace rejects a checked caption-handler fault.
 
 These are native, ignored-by-default local-data tests. They characterize the mounted retail data
 and runtime boundary; they are not evidence of a browser playthrough or full GOOL parity.

@@ -1742,11 +1742,11 @@ pub enum RetailDemoStartError {
 /// Source result after `PadUpdatePbak` exposes its final recorded pad word.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RetailDemoFinishOutcome {
-    /// A non-island recording simply releases physical input ownership.
+    /// Playback without a live caption controller releases physical input.
     Released,
-    /// Island-camera recordings synchronously notify the live caption object
-    /// and retain the native `pbak_state == 3` input lock until its authored
-    /// GOOL flow requests the next level.
+    /// A live caption object is synchronously notified and retains the native
+    /// `pbak_state == 3` input lock until its authored GOOL flow requests the
+    /// next level.
     CaptionEvent {
         recipient: RuntimeObjectHandle,
         dispatch: EventDispatchOutcome,
@@ -1765,8 +1765,8 @@ impl RetailDemoFinishOutcome {
     ///
     /// A failed outer frame has no [`RuntimeFrame`] from which the browser can
     /// recover these already-authored effects, so the PBAK owner may replay
-    /// this exact slice once on that error path. Zero-island releases emit no
-    /// caption event and therefore expose an empty slice.
+    /// this exact slice once on that error path. Null-caption releases emit
+    /// no event and therefore expose an empty slice.
     #[must_use]
     pub fn effects(&self) -> &[VmEffect] {
         match self {
@@ -1948,7 +1948,6 @@ pub enum RuntimeError<E> {
         global: usize,
         value: u32,
     },
-    MissingDemoCaptionObject,
     MissingTransitionZoneTarget,
     MissingLevelStateContext,
     MissingSavedLevelState,
@@ -3987,32 +3986,30 @@ impl RetailRuntime {
     /// Completes native `PadUpdatePbak` after the final recorded word or a
     /// physical interruption has already been made observable to GOOL.
     ///
-    /// A zero island-camera target releases playback immediately. Otherwise
-    /// global `caption_obj` must decode to a live generational Rust handle;
-    /// event `0xE00` with one zero argument is delivered synchronously before
-    /// `pbak_state` is latched to three. Partial/native pointer corruption is
-    /// rejected rather than dereferenced.
+    /// A null `caption_obj` clears `pbak_state` and releases playback.
+    /// Otherwise the global must decode to a live generational Rust handle;
+    /// event `0xE00` with one zero argument is delivered synchronously while
+    /// the handler can still observe state two, then `pbak_state` is latched
+    /// to three. Partial/native pointer corruption is rejected without
+    /// changing the playback state rather than dereferenced.
+    ///
+    /// This follows the retail executable's `lw a1,-0x74(s3)` at `0x800168e4`
+    /// (global 76), its `GoolSendEvent` call at `0x80016904`, and the separate
+    /// null/state-three stores after that branch. The historical C
+    /// reconstruction instead labels the condition as `island_cam_rot_x`.
     pub fn finish_retail_demo<H: ProgramHost>(
         &mut self,
         host: &mut H,
     ) -> Result<RetailDemoFinishOutcome, RuntimeError<H::Error>> {
-        let island_rotation = self
-            .machine
-            .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
-            .map_err(RuntimeError::Vm)?;
-        self.machine
-            .set_global_word(PBAK_STATE_GLOBAL, 0)
-            .map_err(RuntimeError::Vm)?;
-        if island_rotation == 0 {
-            return Ok(RetailDemoFinishOutcome::Released);
-        }
-
         let caption_word = self
             .machine
             .global_word(CAPTION_OBJECT_GLOBAL)
             .map_err(RuntimeError::Vm)?;
         if caption_word == 0 {
-            return Err(RuntimeError::MissingDemoCaptionObject);
+            self.machine
+                .set_global_word(PBAK_STATE_GLOBAL, 0)
+                .map_err(RuntimeError::Vm)?;
+            return Ok(RetailDemoFinishOutcome::Released);
         }
         let reference = CollisionObjectReference::from_word(caption_word).ok_or(
             RuntimeError::InvalidGlobalObjectReference {
@@ -4030,7 +4027,7 @@ impl RetailRuntime {
         let dispatch =
             self.dispatch_event(host, None, Some(recipient), PBAK_CAPTION_EVENT, Some(&[0]));
         // The source ignores GoolSendEvent's status and always enters state
-        // three after a nonzero island target. Preserve that latch even when
+        // three after a non-null caption pointer. Preserve that latch even when
         // checked Rust event execution reports a malformed program.
         self.machine
             .set_global_word(PBAK_STATE_GLOBAL, 3)
@@ -18119,11 +18116,11 @@ mod tests {
     }
 
     #[test]
-    fn retail_demo_finish_releases_non_island_input_without_reading_caption() {
+    fn retail_demo_finish_releases_input_when_caption_is_null() {
         let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
         runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
         runtime
-            .set_global_word(CAPTION_OBJECT_GLOBAL, 0xdead_beef)
+            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
             .unwrap();
 
         assert_eq!(
@@ -18141,10 +18138,14 @@ mod tests {
             .machine
             .object_mut(caption.vm)
             .unwrap()
-            .configure_test_event_interrupt(PBAK_CAPTION_EVENT, vec![RETURN])
-            .unwrap();
-        runtime
-            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
+            .configure_test_event_interrupt(
+                PBAK_CAPTION_EVENT,
+                vec![
+                    Instruction::encode(0x1f, 0, 0x0869),
+                    Instruction::encode(0x11, 0x0e1f, 0x0e00),
+                    RETURN,
+                ],
+            )
             .unwrap();
         runtime
             .set_global_word(
@@ -18166,6 +18167,11 @@ mod tests {
             })
         );
         assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(3));
+        assert_eq!(
+            runtime.machine.object(caption.vm).unwrap().register(0),
+            Ok(2),
+            "the synchronous caption handler must observe PBAK state two"
+        );
         assert_eq!(
             runtime
                 .machine
@@ -18208,9 +18214,6 @@ mod tests {
         .unwrap();
         observer_vm.set_link(0, Some(caption.vm)).unwrap();
         runtime.machine.upsert_object(observer_vm).unwrap();
-        runtime
-            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
-            .unwrap();
         runtime
             .set_global_word(
                 CAPTION_OBJECT_GLOBAL,
@@ -18291,9 +18294,6 @@ mod tests {
             .unwrap();
         caption_vm.set_register(0, 0x17 << 8).unwrap();
         runtime
-            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
-            .unwrap();
-        runtime
             .set_global_word(
                 CAPTION_OBJECT_GLOBAL,
                 CollisionObjectReference::new(caption.vm).to_word(),
@@ -18343,9 +18343,6 @@ mod tests {
             .configure_test_event_interrupt(PBAK_CAPTION_EVENT, vec![0xff00_0000])
             .unwrap();
         runtime
-            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0f00)
-            .unwrap();
-        runtime
             .set_global_word(
                 CAPTION_OBJECT_GLOBAL,
                 CollisionObjectReference::new(caption.vm).to_word(),
@@ -18374,9 +18371,7 @@ mod tests {
     #[test]
     fn retail_demo_finish_rejects_an_untyped_caption_global() {
         let mut runtime = RetailRuntime::new(PBAK_STATE_GLOBAL + 1);
-        runtime
-            .set_global_word(ISLAND_CAMERA_ROTATION_GLOBAL, 0x0100)
-            .unwrap();
+        runtime.set_global_word(PBAK_STATE_GLOBAL, 2).unwrap();
         runtime
             .set_global_word(CAPTION_OBJECT_GLOBAL, 0x1234_5678)
             .unwrap();
@@ -18388,7 +18383,11 @@ mod tests {
                 value: 0x1234_5678,
             })
         );
-        assert_eq!(runtime.global_word(PBAK_STATE_GLOBAL), Ok(0));
+        assert_eq!(
+            runtime.global_word(PBAK_STATE_GLOBAL),
+            Ok(2),
+            "checked pointer rejection occurs before either native state store"
+        );
     }
 
     #[test]

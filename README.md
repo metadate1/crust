@@ -493,8 +493,10 @@ recording, generates the retail `pb0?B` EID, and suppresses drawing while armed;
 choices end at the characterized seed `0xaf5aad71`. Recorded absolute ticks are published from the
 new current frame after Crash's pad boundary, while the start and terminal frames retain their
 source wall-clock/state gates. The checked caption controller now survives
-the demo restart beneath logical root one; a nonzero island-camera target dispatches its checked
-event `0xE00`, while a zero target releases physical input without inventing a title transition.
+the demo restart beneath logical root one; a live caption reference dispatches its checked event
+`0xE00`, while a null caption releases physical input without inventing a title transition. This
+matches the shipped `PadUpdatePbak` load from global 76; the historical C reconstruction's
+island-camera label for that condition is contradicted by the retail instruction stream.
 Playback advances at Crash's actual root-six traversal boundary: root-one caption work runs first,
 the completion event and input-lock rebind are synchronous, and Crash plus later roots observe the
 new pad/controller state in that same frame. Caption objects retain their intentional null lifecycle

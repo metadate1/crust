@@ -1382,21 +1382,25 @@ is 1,322,866 bytes with SHA-256
   recorded pad boundaries in aggregate. Each legal direct-mount fixture completed its final input
   handshake without a caption-handler fault. The `pb0cB` run included its authored same-level
   restart, built each non-restart scene, and retained exact transient `FruiC` incarnation checks.
-- The locked all-target workspace currently enumerates 1,095 tests: 958 default-active and 137
+- The locked all-target workspace currently enumerates 1,096 tests: 958 default-active and 138
   legally-local ignored tests. The complete 958-test default gate and previously published
   136-test owned-data sweep pass with zero failures, including the complete Native Fortress and Up
-  the Creek route goldens; the added N. Sanity completion golden passes independently. Rustfmt,
+  the Creek route goldens; the added N. Sanity completion, owned-disc caption-return, and complete
+  `pb0cB` scene goldens pass independently. Rustfmt,
   warnings-denied native all-target Clippy, warnings-denied Wasm Clippy, optimized native/Wasm
   release builds, all eleven Node distribution tests, `npm run build`, and the distribution verifier
   pass on the delivery tree.
-- A fresh Chrome-compatible in-app browser reload selected the user's legally local
+- The `5ef328e` Chrome-compatible in-app browser build
+  `5ef328ef9bcb-1a72bf618243-87f5283f6472-clean` selected the user's legally local
   632,083,536-byte raw BIN through the real file input without a helper or copied asset. The app
-  recognized all 44 pairs/43 playable levels, launched the full game from the beginning, rendered
-  the publisher and title/menu presentations, and entered Jungle Rollers' authored attract run.
-  Its complete 1,348-input PBAK performed three hard death/restart cycles and released physical
-  input at completion. The live controls changed `RUNNING` to `PAUSED`, changed synthesized audio
-  to `MUTED`, then restored `RUNNING`/`SYNTH ACTIVE`; telemetry remained at 30.00 Hz. Browser
-  warning/error logs were empty, and the data remained local to the tab.
+  recognized all 44 pairs/43 playable levels, launched from the beginning, idled Title into Intro
+  `0x38`, returned to Title `0x19`, and naturally entered Jungle Rollers' 1,348-input `pb0cB`
+  attract run. At its exact final boundary the live browser logged an acknowledged caption event
+  `0xE00` and retained `pbak_state == 3`; the authored caption path then requested and mounted Title
+  `0x19`. A later untouched idle cycle proceeded into the next attract recording at `0x12`, proving
+  the first demo did not strand the runtime in gameplay. Telemetry remained `RUNNING` at 30.00 Hz
+  with `SYNTH ACTIVE`; captured browser warning/error logs were empty, and all game data remained
+  local to the tab.
 - A new exact fresh-boot N. Sanity Beach completion golden follows only ordinary directional,
   Cross, and Square pad words. It activates checkpoint 19 on frame 861 with source-ordered saved
   box count `0x900`, advances the live count to `0xa00`, observes `WarpC` states zero through four,

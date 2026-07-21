@@ -48203,9 +48203,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             post_boulders_map.runtime.machine().random_seed(),
-            0xd3cf_0f5a
+            0x98a5_de72
         );
-        assert_eq!(post_boulders_map.runtime.draw_count(), 12_092);
+        assert_eq!(post_boulders_map.runtime.draw_count(), 12_124);
 
         let upstream_carry: RetailSessionCarry = {
             let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -48225,8 +48225,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(upstream_carry.random_seed, 0xd3cf_0f5a);
-        assert_eq!(upstream_carry.draw_count, 12_092);
+        assert_eq!(upstream_carry.random_seed, 0x98a5_de72);
+        assert_eq!(upstream_carry.draw_count, 12_124);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,

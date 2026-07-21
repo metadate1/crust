@@ -16,8 +16,9 @@
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
 //! one level's trace. `C1_SURVEY_FRAMES` selects a bounded 1..=108,000 frame
 //! window; the default remains 360 frames.
-//! The temporary Sunset Vista route is opt-in with `C1_SURVEY_SUNSET_ROUTE=1`
-//! and still requires the legally local `C1_SUNSET_TAS_INPUT` oracle.
+//! The Sunset Vista route is opt-in with `C1_SURVEY_SUNSET_ROUTE=1`; its five
+//! short digital-pad bootstrap windows and adaptive controller are entirely
+//! self-contained in this test target.
 
 #![allow(clippy::too_many_arguments, clippy::too_many_lines)]
 
@@ -26,7 +27,6 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     num::NonZeroU16,
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 use crust_formats::{
@@ -722,6 +722,146 @@ fn high_road_direct_boot_reaches_authored_end_warp() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn sunset_vista_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x23);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Sunset Vista");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Sunset Vista pair must parse");
+    let (survey, mut runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::SunsetVistaCompletionRoute,
+        8_000,
+    )
+    .expect("Sunset Vista's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 7_759, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((7_759, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 7759 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
+
+    assert_eq!(survey.zone_transitions, 66);
+    assert_eq!(survey.successful_spawns, 274);
+    assert_eq!(survey.spawn_attempts, 103_015);
+    assert_eq!(survey.expected_spawn_rejections, 102_741);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 220_788);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.final_live_objects, 23);
+    assert_eq!(survey.max_live_objects, 47);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (483, 0x100),
+            (1_969, 0x200),
+            (2_641, 0x300),
+            (3_841, 0x400),
+            (4_188, 0x500),
+            (4_609, 0x600),
+            (4_774, 0x700),
+            (5_271, 0x800),
+            (5_289, 0x900),
+            (5_451, 0xa00),
+            (5_701, 0xb00),
+            (5_702, 0xc00),
+            (5_730, 0xd00),
+            (6_117, 0xe00),
+        ]
+    );
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_969, 16_384, [21_401_600, -21_299_968, 204_544]),
+            (2_641, 23_296, [29_491_200, -21_094_400, 50_944]),
+            (4_609, 39_936, [22_220_800, -10_752_000, 204_544]),
+            (5_305, 39_936, [29_798_400, -10_235_973, 204_544]),
+            (6_180, 39_936, [36_915_200, -10_680_631, -358_656]),
+        ]
+    );
+    assert_eq!(
+        survey.saved_box_count_samples,
+        [(1_969, 0x100), (2_641, 0x200), (4_609, 0x500)]
+    );
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&3));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([2_048_000, -21_299_968, 204_544])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([45_432_192, 855_375, 182_352])
+    );
+    let player = player_trace(&runtime)
+        .expect("Sunset Vista completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [45_432_192, 855_375, 182_352]);
+    assert_eq!(runtime.draw_count(), 7_759);
+    assert!(
+        survey.is_clean(),
+        "Sunset Vista end-warp route must remain clean: {}",
+        survey.summary()
+    );
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let report = runtime
+        .finish_level_transition(&mut host, 0x2d)
+        .expect("Sunset Vista LEVEL_END must resolve Level Complete");
+    assert!(report.event_failures.is_empty());
+    assert_eq!(report.requested_lid, 0x2d);
+    assert_eq!(report.next_lid_after_event, 0x2d);
+    assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+    assert!(!report.resolved.bonus_return);
+}
+
 fn progression_frame_count() -> u32 {
     std::env::var("C1_PROGRESSION_FRAMES")
         .ok()
@@ -782,6 +922,7 @@ enum SurveyInputProfile {
     LostCityCompletionRoute,
     RoadToNowhereCompletionRoute,
     HighRoadCompletionRoute,
+    SunsetVistaCompletionRoute,
     PapuPapuCompletionRoute,
     KoalaKongCompletionRoute,
     PinstripeCompletionRoute,
@@ -854,6 +995,7 @@ impl SurveyInputProfile {
             Self::LostCityCompletionRoute => "lost-city-completion-route",
             Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
             Self::HighRoadCompletionRoute => "high-road-completion-route",
+            Self::SunsetVistaCompletionRoute => "sunset-vista-completion-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
             Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
             Self::PinstripeCompletionRoute => "pinstripe-completion-route",
@@ -913,6 +1055,7 @@ impl SurveyInputProfile {
                 | Self::LostCityCompletionRoute
                 | Self::RoadToNowhereCompletionRoute
                 | Self::HighRoadCompletionRoute
+                | Self::SunsetVistaCompletionRoute
                 | Self::PapuPapuCompletionRoute
                 | Self::KoalaKongCompletionRoute
                 | Self::PinstripeCompletionRoute
@@ -20878,50 +21021,206 @@ struct HighRoadCompletionRouteController {
     sunset_attack_tick: u8,
 }
 
-fn sunset_tas_input(tick: u32) -> u32 {
-    static INPUTS: OnceLock<Vec<u32>> = OnceLock::new();
-    let inputs = INPUTS.get_or_init(|| {
-        let path = std::env::var("C1_SUNSET_TAS_INPUT")
-            .expect("C1_SUNSET_TAS_INPUT points to the temporary local TAS oracle");
-        std::fs::read_to_string(path)
-            .expect("temporary local TAS oracle is readable")
-            .lines()
-            .skip(2)
-            .filter(|line| line.starts_with('|'))
-            .map(|line| {
-                let buttons = line
-                    .rsplit_once(',')
-                    .and_then(|(_, tail)| tail.split_once('|'))
-                    .map(|(buttons, _)| buttons)
-                    .expect("TAS pad row has a button field");
-                buttons
-                    .bytes()
-                    .take(10)
-                    .enumerate()
-                    .fold(0, |held, (index, button)| {
-                        if button == b'.' {
-                            held
-                        } else {
-                            held | match index {
-                                0 => PAD_UP,
-                                1 => PAD_DOWN,
-                                2 => PAD_LEFT,
-                                3 => PAD_RIGHT,
-                                6 | 8 => PAD_SQUARE,
-                                9 => PAD_CROSS,
-                                _ => 0,
-                            }
-                        }
-                    })
-            })
-            .collect()
-    });
-    let start_line = std::env::var("C1_SUNSET_TAS_START")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(53_127);
-    let source_line = start_line + tick as usize * 2;
-    inputs.get(source_line - 3).copied().unwrap_or_default()
+#[allow(clippy::match_same_arms)] // This is a named route-parameter lookup table.
+fn sunset_route_default(name: &str) -> Option<&'static str> {
+    match name {
+        "C1_SUNSET_C2_SECOND_WAIT" => Some("38"),
+        "C1_SUNSET_C3_HOLD" => Some("0"),
+        "C1_SUNSET_C3_RUNUP" => Some("12"),
+        "C1_SUNSET_C3_WAIT" => Some("90"),
+        "C1_SUNSET_C4_DELAY" => Some("12"),
+        "C1_SUNSET_C4_HOLD" => Some("32"),
+        "C1_SUNSET_D1_BOX_ATTACK_X" => Some("18000000"),
+        "C1_SUNSET_D1_HOLD" => Some("16"),
+        "C1_SUNSET_D1_LANE" => Some("120000"),
+        "C1_SUNSET_D1_RUNUP" => Some("0"),
+        "C1_SUNSET_D1_SECOND_HOLD" => Some("20"),
+        "C1_SUNSET_D1_SECOND_SPEED" => Some("400000"),
+        "C1_SUNSET_D1_SECOND_WAIT" => Some("0"),
+        "C1_SUNSET_D1_SECOND_X" => Some("15950000"),
+        "C1_SUNSET_D1_THIRD_HOLD" => Some("20"),
+        "C1_SUNSET_D1_THIRD_WAIT" => Some("75"),
+        "C1_SUNSET_D1_THIRD_X" => Some("16700000"),
+        "C1_SUNSET_D1_WAIT" => Some("0"),
+        "C1_SUNSET_D1_X" => Some("15540000"),
+        "C1_SUNSET_D2_FIRST_HOLD" => Some("20"),
+        "C1_SUNSET_D2_FIRST_WAIT" => Some("30"),
+        "C1_SUNSET_E1_FIRST_HOLD" => Some("20"),
+        "C1_SUNSET_E1_FIRST_WAIT" => Some("85"),
+        "C1_SUNSET_E1_FIRST_X" => Some("20460000"),
+        "C1_SUNSET_E3_FIRST_HOLD" => Some("20"),
+        "C1_SUNSET_E3_FIRST_WAIT" => Some("0"),
+        "C1_SUNSET_E3_FIRST_X" => Some("24000000"),
+        "C1_SUNSET_E3_LANE" => Some("220000"),
+        "C1_SUNSET_E3_SECOND_HOLD" => Some("32"),
+        "C1_SUNSET_E3_SECOND_WAIT" => Some("0"),
+        "C1_SUNSET_E3_SECOND_X" => Some("24050000"),
+        "C1_SUNSET_E3_THIRD_HOLD" => Some("20"),
+        "C1_SUNSET_F1_FIRST_HOLD" => Some("20"),
+        "C1_SUNSET_F1_FIRST_WAIT" => Some("85"),
+        "C1_SUNSET_F1_FIRST_X" => Some("25250000"),
+        "C1_SUNSET_F2_TRANSFER_HOLD" => Some("20"),
+        "C1_SUNSET_F2_TRANSFER_WAIT" => Some("18"),
+        "C1_SUNSET_F3_FIRST_HOLD" => Some("32"),
+        "C1_SUNSET_F3_LANE" => Some("150000"),
+        "C1_SUNSET_F3_LANE_X" => Some("28160000"),
+        "C1_SUNSET_F3_SECOND_HOLD" => Some("20"),
+        "C1_SUNSET_F3_THIRD_HOLD" => Some("20"),
+        "C1_SUNSET_F3_THIRD_SPEED" => Some("-300000"),
+        "C1_SUNSET_F3_THIRD_X" => Some("29730000"),
+        "C1_SUNSET_F4_TAS_START" => Some("2240"),
+        "C1_SUNSET_STAGE67_DIAG_PURE" => Some("1"),
+        "C1_SUNSET_STAGE67_RUN_DIAG" => Some("6,2"),
+        "C1_SUNSET_STAGE68_WAIT" => Some("10"),
+        "C1_SUNSET_STAGE69_RIDE_EXIT" => Some("1"),
+        "C1_SUNSET_STAGE70_RUN" => Some("3"),
+        "C1_SUNSET_STAGE71_WAIT_RUN" => Some("0,2"),
+        "C1_SUNSET_STAGE72_HOP_LEFT" => Some("6"),
+        "C1_SUNSET_STAGE72_PHASED" => Some("1"),
+        "C1_SUNSET_STAGE76_RUN" => Some("10"),
+        "C1_SUNSET_STAGE77_RUN" => Some("2"),
+        "C1_SUNSET_STAGE77_WAIT" => Some("24"),
+        "C1_SUNSET_STAGE78_CLEAN" => Some("1"),
+        "C1_SUNSET_STAGE78_SOURCE_CONTROLLER" => Some("1"),
+        "C1_SUNSET_STAGE88_RUN" => Some("10"),
+        "C1_SUNSET_STAGE92_JUMP_X" => Some("26600000"),
+        "C1_SUNSET_STAGE94_CYCLE" => Some("34"),
+        "C1_SUNSET_STAGE94_HOLD" => Some("22"),
+        "C1_SUNSET_STAGE95_JUMP_X" => Some("24600000"),
+        "C1_SUNSET_STAGE97_JUMP_X" => Some("23750000"),
+        "C1_SUNSET_STAGE99_JUMP_X" => Some("23260000"),
+        "C1_SUNSET_STAGE101_JUMP_X" => Some("22600000"),
+        "C1_SUNSET_STAGE103_JUMP_X" => Some("22000000"),
+        "C1_SUNSET_STAGE105_WAIT" => Some("28"),
+        "C1_SUNSET_STAGE106_DIR" => Some("8192"),
+        "C1_SUNSET_STAGE106_RUN" => Some("8"),
+        "C1_SUNSET_STAGE118_WAIT" => Some("90"),
+        "C1_SUNSET_STAGE121_BRAKE" => Some("12"),
+        "C1_SUNSET_STAGE121_RUNUP" => Some("4"),
+        "C1_SUNSET_STAGE121_SQUARE" => Some("0"),
+        "C1_SUNSET_STAGE122_CENTER" => Some("1"),
+        "C1_SUNSET_STAGE122_RELEASE" => Some("24"),
+        "C1_SUNSET_STAGE125_WAIT" => Some("30"),
+        "C1_SUNSET_STAGE129_RUNUP" => Some("2"),
+        "C1_SUNSET_STAGE131_RUNUP" => Some("6"),
+        "C1_SUNSET_STAGE138_RUNUP" => Some("10"),
+        "C1_SUNSET_STAGE146_PHASED" => Some("1"),
+        "C1_SUNSET_STAGE146_WAIT" => Some("125"),
+        "C1_SUNSET_STAGE148_RUN" => Some("8"),
+        "C1_SUNSET_STAGE152_WAIT" => Some("32"),
+        "C1_SUNSET_STAGE190_Z_MAX" => Some("140000"),
+        "C1_SUNSET_STAGE190_Z_MIN" => Some("80000"),
+        "C1_SUNSET_STAGE191_RUNUP" => Some("6"),
+        "C1_SUNSET_STAGE191_Z_MAX" => Some("300000"),
+        "C1_SUNSET_STAGE191_Z_MIN" => Some("-100000"),
+        "C1_SUNSET_STAGE192_ALTERNATE" => Some("1"),
+        "C1_SUNSET_STAGE192_ALT_PHASE" => Some("0"),
+        "C1_SUNSET_STAGE192_RUNUP" => Some("4"),
+        "C1_SUNSET_STAGE192_RUNUP_TEST" => Some("32768"),
+        "C1_SUNSET_STAGE193_EDGE_JUMP" => Some("1"),
+        "C1_SUNSET_STAGE193_JUMP_TEST" => Some("32832"),
+        "C1_SUNSET_STAGE193_JUMP_X" => Some("40600000"),
+        "C1_SUNSET_STAGE197_RUNUP" => Some("2"),
+        "C1_SUNSET_STAGE198_RUNUP" => Some("10"),
+        "C1_SUNSET_STAGE199_RUNUP" => Some("2"),
+        "C1_SUNSET_STAGE201_ALIGN_UP" => Some("1"),
+        "C1_SUNSET_STAGE201_SOURCE_WALL" => Some("1"),
+        "C1_SUNSET_STAGE205_TAS_BASE" => Some("1982"),
+        "C1_SUNSET_STAGE205_TAS_WAIT" => Some("12"),
+        "C1_SUNSET_STAGE207_TAS_BASE" => Some("2001"),
+        "C1_SUNSET_STAGE207_TAS_LEFT_HOLD" => Some("4"),
+        "C1_SUNSET_STAGE207_TAS_RIGHT_HOLD" => Some("20"),
+        "C1_SUNSET_STAGE208_LEFT_BRAKE" => Some("20"),
+        "C1_SUNSET_STAGE208_RIGHT_HOLD" => Some("14"),
+        "C1_SUNSET_STAGE210_DIRECT_H12" => Some("1"),
+        "C1_SUNSET_STAGE210_LEFT_HOLD" => Some("1"),
+        "C1_SUNSET_STAGE210_RIGHT_BRAKE" => Some("4"),
+        "C1_SUNSET_STAGE210_SWAP" => Some("0"),
+        _ => None,
+    }
+}
+
+fn sunset_var(name: &str) -> Result<String, std::env::VarError> {
+    sunset_route_default(name)
+        .map(str::to_owned)
+        .ok_or(std::env::VarError::NotPresent)
+}
+
+fn sunset_var_os(name: &str) -> Option<std::ffi::OsString> {
+    sunset_route_default(name).map(std::ffi::OsString::from)
+}
+
+// These ordinary digital-pad masks are the five short bootstrap windows still
+// consulted by the adaptive Sunset Vista controller. They were mechanically
+// reduced from the temporary local route-characterization input: these are
+// controller commands only, with no game/disc bytes. Keeping only the windows
+// the route consumes removes its dependency on that local replay file.
+const SUNSET_INPUT_0_121: [u16; 122] = [
+    0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000,
+    0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000, 0x8000,
+    0x8000, 0x8000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000,
+    0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000, 0xc000,
+    0xc000, 0xc040, 0xc040, 0xc040, 0xc040, 0xc040, 0x9040, 0xc040, 0x9000, 0x9000, 0x9000, 0x9000,
+    0x9000, 0x9000, 0x9080, 0x9000, 0x9000, 0x6000, 0x6000, 0x6000, 0x6000, 0x6000, 0x6000, 0x6000,
+    0x6000, 0x6000, 0x6000, 0x6000, 0x6000, 0x6000, 0x6000, 0x3040, 0x3040, 0x3040, 0x3040, 0x3040,
+    0x6040, 0x3040, 0x3040, 0x6040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040,
+    0x6040, 0x3040, 0x6040, 0x3000, 0x6000, 0x3000, 0x6000, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040,
+    0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3000,
+    0x6000, 0x3000,
+];
+
+const SUNSET_INPUT_140_387: [u16; 248] = [
+    0x6000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6040, 0x3040, 0x6040,
+    0x3040, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000,
+    0x6000, 0x3000, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040,
+    0x3040, 0x6040, 0x3040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x3040, 0x3040, 0x3040, 0x3040,
+    0x3040, 0x3040, 0x3040, 0x3040, 0x9040, 0x9040, 0x3000, 0x9040, 0x3000, 0x9000, 0x3000, 0x9000,
+    0x3000, 0x9000, 0x9000, 0x3000, 0x9000, 0x3000, 0x9000, 0x3000, 0x9000, 0x3000, 0x9000, 0x3000,
+    0x9000, 0x3040, 0x9000, 0x3000, 0x9080, 0x3080, 0x9080, 0x3080, 0x9080, 0x3080, 0x3080, 0x3080,
+    0x6080, 0x60c0, 0xc0c0, 0xc0c0, 0x60c0, 0xc040, 0x6040, 0xc000, 0x6000, 0xc000, 0x6000, 0x8000,
+    0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x2000, 0x6000, 0x6000, 0x2000, 0x2000, 0x2000,
+    0x0080, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x00c0, 0x0040, 0x0040, 0x0000, 0x0000,
+    0x0000, 0x0080, 0x0000, 0x0000, 0x0040, 0x0040, 0x0040, 0x0040, 0x0080, 0x0000, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0040, 0x0040,
+    0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0040, 0x0000, 0x0000,
+    0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x6000, 0x6000, 0x3000, 0x6040, 0x3040,
+    0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6040, 0x3040, 0x6000,
+    0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6040, 0x3040, 0x3040,
+    0x6040, 0x3040, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000, 0x6000, 0x3000,
+    0x6000, 0x3000, 0x6000, 0x3000, 0x6040, 0x3000, 0x2000, 0x3000, 0x3000, 0x3000, 0x3000, 0x3000,
+    0x3000, 0x3000, 0x3000, 0x3000, 0x3080, 0x3000, 0x3000, 0x3000, 0x3000, 0x3000, 0x3000, 0x3000,
+    0x3000, 0x2000, 0x6000, 0xc040, 0xc000, 0xc000, 0x6000, 0xc000, 0x6000, 0x6000, 0x6000, 0x60c0,
+    0x6000, 0x6000, 0x6000, 0x3000, 0x3000, 0x3000, 0x2000, 0x2000,
+];
+
+const SUNSET_INPUT_1982_1999: [u16; 18] = [
+    0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040,
+    0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000,
+];
+
+const SUNSET_INPUT_2001_2058: [u16; 58] = [
+    0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040,
+    0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000,
+    0x9000, 0xc040, 0x9040, 0xc040, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000,
+    0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc040, 0x90c0, 0xc040, 0x9040, 0x9040,
+    0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040,
+];
+
+const SUNSET_INPUT_2240_2271: [u16; 32] = [
+    0xc040, 0x9040, 0xc040, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000, 0xc000, 0x9000,
+    0xc000, 0x9000, 0xc040, 0xc040, 0x9040, 0xc040, 0x9040, 0xc040, 0x9040, 0x9040, 0xc040, 0x9040,
+    0xc040, 0x9040, 0x9040, 0xc040, 0x9040, 0x9040, 0xc040, 0x9040,
+];
+
+fn sunset_bootstrap_input(tick: u32) -> u32 {
+    match tick {
+        0..=121 => u32::from(SUNSET_INPUT_0_121[tick as usize]),
+        140..=387 => u32::from(SUNSET_INPUT_140_387[(tick - 140) as usize]),
+        1_982..=1_999 => u32::from(SUNSET_INPUT_1982_1999[(tick - 1_982) as usize]),
+        2_001..=2_058 => u32::from(SUNSET_INPUT_2001_2058[(tick - 2_001) as usize]),
+        2_240..=2_271 => u32::from(SUNSET_INPUT_2240_2271[(tick - 2_240) as usize]),
+        _ => 0,
+    }
 }
 
 impl HighRoadCompletionRouteController {
@@ -21116,7 +21415,7 @@ impl HighRoadCompletionRouteController {
             });
             if self.sunset_stage == 79
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
                 if player.translation[1] < -16_550_000
                     && player.status_a & 1 != 0
@@ -21126,17 +21425,17 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                if std::env::var_os("C1_SUNSET_STAGE79_ALT").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE79_ALT").is_some() {
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let wait_frames = std::env::var("C1_SUNSET_STAGE79_ALT_WAIT")
+                    let wait_frames = sunset_var("C1_SUNSET_STAGE79_ALT_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait_frames {
                         return 0;
                     }
-                    let phase = std::env::var("C1_SUNSET_STAGE79_ALT_PHASE")
+                    let phase = sunset_var("C1_SUNSET_STAGE79_ALT_PHASE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -21150,7 +21449,7 @@ impl HighRoadCompletionRouteController {
                         }
                         | PAD_CROSS;
                 }
-                if let Ok(script) = std::env::var("C1_SUNSET_STAGE79_SCRIPT") {
+                if let Ok(script) = sunset_var("C1_SUNSET_STAGE79_SCRIPT") {
                     let mut fields = script.split(',');
                     let press = fields
                         .next()
@@ -21173,7 +21472,7 @@ impl HighRoadCompletionRouteController {
                             0
                         };
                 }
-                return std::env::var("C1_SUNSET_STAGE79_TEST")
+                return sunset_var("C1_SUNSET_STAGE79_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
@@ -21183,7 +21482,7 @@ impl HighRoadCompletionRouteController {
                     || camera.path.zone == g3
                     || camera.path.zone
                         == Eid::from_name("g4_zZ").expect("fixed Sunset Vista zone EID is valid"))
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 if tick > 20
@@ -21196,16 +21495,16 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if let Ok(run_frames) = std::env::var("C1_SUNSET_STAGE80_RUN") {
+                if let Ok(run_frames) = sunset_var("C1_SUNSET_STAGE80_RUN") {
                     let run_frames = run_frames.parse::<u8>().unwrap_or(10);
                     return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
                 }
-                return std::env::var("C1_SUNSET_STAGE80_TEST")
+                return sunset_var("C1_SUNSET_STAGE80_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
             }
-            if self.sunset_stage == 81 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+            if self.sunset_stage == 81 && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
                 let tick = self.sunset_attack_tick;
                 if tick > 10
                     && (28_700_000..29_000_000).contains(&player.translation[0])
@@ -21217,13 +21516,13 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let run_frames = std::env::var("C1_SUNSET_STAGE81_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE81_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
             }
-            if self.sunset_stage == 82 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+            if self.sunset_stage == 82 && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
                 let tick = self.sunset_attack_tick;
                 if tick > 15
                     && (28_450_000..28_560_000).contains(&player.translation[0])
@@ -21235,28 +21534,28 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let run_frames = std::env::var("C1_SUNSET_STAGE82_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE82_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 return PAD_LEFT | if tick < run_frames { 0 } else { PAD_CROSS };
             }
-            if self.sunset_stage == 83 && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+            if self.sunset_stage == 83 && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait_frames = std::env::var("C1_SUNSET_STAGE83_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE83_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < wait_frames {
                     return 0;
                 }
-                let run_frames = std::env::var("C1_SUNSET_STAGE83_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE83_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
-                let direction = if std::env::var_os("C1_SUNSET_STAGE83_ALT").is_some() {
-                    let phase = std::env::var("C1_SUNSET_STAGE83_ALT_PHASE")
+                let direction = if sunset_var_os("C1_SUNSET_STAGE83_ALT").is_some() {
+                    let phase = sunset_var("C1_SUNSET_STAGE83_ALT_PHASE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -21267,7 +21566,7 @@ impl HighRoadCompletionRouteController {
                             PAD_DOWN
                         }
                 } else {
-                    std::env::var("C1_SUNSET_STAGE83_DIR")
+                    sunset_var("C1_SUNSET_STAGE83_DIR")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_LEFT)
@@ -21280,7 +21579,7 @@ impl HighRoadCompletionRouteController {
                     };
             }
             if self.sunset_stage == 84
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21297,7 +21596,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane;
             }
             if self.sunset_stage == 85
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21317,7 +21616,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 86
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21334,7 +21633,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane;
             }
             if self.sunset_stage == 87
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21361,7 +21660,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_CROSS;
             }
             if self.sunset_stage == 88
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21370,7 +21669,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let run_frames = std::env::var("C1_SUNSET_STAGE88_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE88_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(8);
@@ -21382,7 +21681,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane;
             }
             if self.sunset_stage == 89
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21403,7 +21702,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 90
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21420,7 +21719,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane;
             }
             if self.sunset_stage == 91
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21437,7 +21736,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 92
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21446,7 +21745,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let jump_x = std::env::var("C1_SUNSET_STAGE92_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE92_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(26_550_000);
@@ -21458,7 +21757,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 93
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21477,7 +21776,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 94
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
@@ -21494,12 +21793,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return PAD_LEFT | lane | PAD_SQUARE;
                 }
-                let cycle = std::env::var("C1_SUNSET_STAGE94_CYCLE")
+                let cycle = sunset_var("C1_SUNSET_STAGE94_CYCLE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(30)
                     .max(1);
-                let hold = std::env::var("C1_SUNSET_STAGE94_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE94_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(20);
@@ -21509,7 +21808,7 @@ impl HighRoadCompletionRouteController {
                     | if tick % cycle < hold { PAD_CROSS } else { 0 };
             }
             if self.sunset_stage == 95
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21518,7 +21817,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let jump_x = std::env::var("C1_SUNSET_STAGE95_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE95_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(24_200_000);
@@ -21530,7 +21829,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 96
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21551,7 +21850,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 97
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21560,7 +21859,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let jump_x = std::env::var("C1_SUNSET_STAGE97_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE97_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(23_700_000);
@@ -21572,7 +21871,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 98
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21589,7 +21888,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 99
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21598,7 +21897,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let jump_x = std::env::var("C1_SUNSET_STAGE99_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE99_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(22_900_000);
@@ -21610,7 +21909,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 100
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21627,7 +21926,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 101
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21641,7 +21940,7 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let jump_x = std::env::var("C1_SUNSET_STAGE101_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE101_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(22_500_000);
@@ -21653,7 +21952,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 102
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21675,7 +21974,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 103
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21684,7 +21983,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     PAD_DOWN
                 };
-                let jump_x = std::env::var("C1_SUNSET_STAGE103_JUMP_X")
+                let jump_x = sunset_var("C1_SUNSET_STAGE103_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(21_950_000);
@@ -21696,7 +21995,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_SQUARE;
             }
             if self.sunset_stage == 104
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21718,7 +22017,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 105
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if camera.path.zone == h4 && camera.path.index == 1 {
@@ -21732,7 +22031,7 @@ impl HighRoadCompletionRouteController {
                 if player.translation[2] > 165_000 || player.velocity[2] > 100_000 {
                     return PAD_UP;
                 }
-                let wait_frames = std::env::var("C1_SUNSET_STAGE105_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE105_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -21741,14 +22040,14 @@ impl HighRoadCompletionRouteController {
                 }
                 self.sunset_stage = 106;
                 self.sunset_attack_tick = 0;
-                let direction = std::env::var("C1_SUNSET_STAGE106_DIR")
+                let direction = sunset_var("C1_SUNSET_STAGE106_DIR")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT);
                 return direction | PAD_CROSS;
             }
             if self.sunset_stage == 106
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21762,18 +22061,18 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let direction = std::env::var("C1_SUNSET_STAGE106_DIR")
+                let direction = sunset_var("C1_SUNSET_STAGE106_DIR")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT);
-                let run_frames = std::env::var("C1_SUNSET_STAGE106_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE106_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 return if tick < run_frames { direction } else { 0 } | PAD_CROSS;
             }
             if self.sunset_stage == 107
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21789,17 +22088,17 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                if let Some(start) = std::env::var("C1_SUNSET_STAGE107_TAS_TICK")
+                if let Some(start) = sunset_var("C1_SUNSET_STAGE107_TAS_TICK")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                 {
-                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                    return sunset_bootstrap_input(start.saturating_add(u32::from(tick)));
                 }
-                let target_x = std::env::var("C1_SUNSET_STAGE107_X")
+                let target_x = sunset_var("C1_SUNSET_STAGE107_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(21_400_000);
-                let target_z = std::env::var("C1_SUNSET_STAGE107_Z")
+                let target_z = sunset_var("C1_SUNSET_STAGE107_Z")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(153_000);
@@ -21826,7 +22125,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 108
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0
@@ -21840,7 +22139,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 109
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21862,7 +22161,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 110
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0
@@ -21876,7 +22175,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 111
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21898,7 +22197,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 112
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21927,7 +22226,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 113
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21956,7 +22255,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 114
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0 && player.translation[0] <= 22_100_000 {
@@ -21967,7 +22266,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_LEFT;
             }
             if self.sunset_stage == 115
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -21999,7 +22298,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 116
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22031,7 +22330,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 117
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0
@@ -22059,11 +22358,11 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 118
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait_frames = std::env::var("C1_SUNSET_STAGE118_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE118_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -22085,7 +22384,7 @@ impl HighRoadCompletionRouteController {
                 };
             }
             if self.sunset_stage == 119
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22117,7 +22416,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 120
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0
@@ -22145,11 +22444,11 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 121
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if std::env::var_os("C1_SUNSET_STAGE121_BYPASS").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE121_BYPASS").is_some() {
                     if player.translation[2] < 180_000 {
                         return PAD_DOWN;
                     }
@@ -22160,9 +22459,9 @@ impl HighRoadCompletionRouteController {
                     }
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                if let Ok(square_start) = std::env::var("C1_SUNSET_STAGE121_SQUARE") {
+                if let Ok(square_start) = sunset_var("C1_SUNSET_STAGE121_SQUARE") {
                     let square_start = square_start.parse::<u8>().unwrap_or(0);
-                    let runup = std::env::var("C1_SUNSET_STAGE121_RUNUP")
+                    let runup = sunset_var("C1_SUNSET_STAGE121_RUNUP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -22178,7 +22477,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    let brake = std::env::var("C1_SUNSET_STAGE121_BRAKE")
+                    let brake = sunset_var("C1_SUNSET_STAGE121_BRAKE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(u8::MAX);
@@ -22193,7 +22492,7 @@ impl HighRoadCompletionRouteController {
                             0
                         };
                 }
-                let wait_frames = std::env::var("C1_SUNSET_STAGE121_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE121_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -22225,9 +22524,9 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 122
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE122_CENTER").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE122_CENTER").is_some() {
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                     if player.status_a & 1 != 0
@@ -22238,10 +22537,10 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    if let Ok(release) = std::env::var("C1_SUNSET_STAGE122_RELEASE") {
+                    if let Ok(release) = sunset_var("C1_SUNSET_STAGE122_RELEASE") {
                         let release = release.parse::<u8>().unwrap_or(u8::MAX);
                         if tick >= release {
-                            let target = std::env::var("C1_SUNSET_STAGE122_TARGET")
+                            let target = sunset_var("C1_SUNSET_STAGE122_TARGET")
                                 .ok()
                                 .and_then(|value| value.parse::<i32>().ok())
                                 .unwrap_or(22_200_000);
@@ -22264,10 +22563,10 @@ impl HighRoadCompletionRouteController {
                     };
                     return horizontal | PAD_CROSS;
                 }
-                if std::env::var_os("C1_SUNSET_STAGE122_LEFT").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE122_LEFT").is_some() {
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let delay = std::env::var("C1_SUNSET_STAGE122_DELAY")
+                    let delay = sunset_var("C1_SUNSET_STAGE122_DELAY")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -22279,7 +22578,7 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 123
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -12_600_000
@@ -22292,7 +22591,7 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 124
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -12_500_000
@@ -22312,9 +22611,9 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 125
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if let Ok(wait) = std::env::var("C1_SUNSET_STAGE125_WAIT") {
+                if let Ok(wait) = sunset_var("C1_SUNSET_STAGE125_WAIT") {
                     let wait = wait.parse::<u8>().unwrap_or(40);
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22328,16 +22627,16 @@ impl HighRoadCompletionRouteController {
                     }
                     return if tick < wait { 0 } else { PAD_CROSS };
                 }
-                if let Ok(start) = std::env::var("C1_SUNSET_STAGE125_TAS_TICK") {
+                if let Ok(start) = sunset_var("C1_SUNSET_STAGE125_TAS_TICK") {
                     let start = start.parse::<u32>().unwrap_or(4_217);
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                    return sunset_bootstrap_input(start.saturating_add(u32::from(tick)));
                 }
                 return 0;
             }
             if self.sunset_stage == 126
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_590_000
@@ -22350,7 +22649,7 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 127
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_420_000
@@ -22370,7 +22669,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 128
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_420_000
@@ -22390,7 +22689,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 129
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22402,7 +22701,7 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let runup = std::env::var("C1_SUNSET_STAGE129_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE129_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -22419,7 +22718,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 130
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_010_000
@@ -22439,7 +22738,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | PAD_CROSS;
             }
             if self.sunset_stage == 131
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22452,7 +22751,7 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let runup = std::env::var("C1_SUNSET_STAGE131_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE131_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(5);
@@ -22476,7 +22775,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | lane | PAD_CROSS;
             }
             if self.sunset_stage == 132
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22495,7 +22794,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | if tick == 0 { PAD_SQUARE } else { 0 };
             }
             if self.sunset_stage == 133
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if camera.path.zone
                     == Eid::from_name("i4_zZ").expect("fixed Sunset Vista zone EID is valid")
@@ -22514,7 +22813,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane;
             }
             if self.sunset_stage == 134
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 23_150_000 {
                     self.sunset_stage = 135;
@@ -22531,7 +22830,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane;
             }
             if self.sunset_stage == 135
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -22550,7 +22849,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS | if tick == 6 { PAD_SQUARE } else { 0 };
             }
             if self.sunset_stage == 136
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 23_750_000 {
                     self.sunset_stage = 137;
@@ -22560,7 +22859,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 137
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 24_050_000 {
                     self.sunset_stage = 138;
@@ -22577,11 +22876,11 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 138
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE138_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE138_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(10);
@@ -22600,7 +22899,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane;
             }
             if self.sunset_stage == 139
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 24_400_000 {
                     self.sunset_stage = 140;
@@ -22617,11 +22916,11 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 140
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE140_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE140_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(29);
@@ -22637,7 +22936,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | PAD_CROSS;
             }
             if self.sunset_stage == 141
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 24_620_000 {
                     self.sunset_stage = 142;
@@ -22654,14 +22953,14 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 142
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 self.sunset_stage = 143;
                 self.sunset_attack_tick = 0;
                 return PAD_RIGHT | PAD_CROSS;
             }
             if self.sunset_stage == 143
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 24_850_000 {
                     self.sunset_stage = 144;
@@ -22671,7 +22970,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | PAD_CROSS;
             }
             if self.sunset_stage == 144
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 25_200_000 {
                     self.sunset_stage = 145;
@@ -22681,7 +22980,7 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 145
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if player.status_a & 1 != 0 && player.translation[0] > 25_650_000 {
                     self.sunset_stage = 146;
@@ -22698,22 +22997,22 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 146
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if let Ok(test) = std::env::var("C1_SUNSET_STAGE146_TEST") {
+                if let Ok(test) = sunset_var("C1_SUNSET_STAGE146_TEST") {
                     return test.parse::<u32>().unwrap_or(0);
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if let Ok(start) = std::env::var("C1_SUNSET_STAGE146_TAS_TICK") {
+                if let Ok(start) = sunset_var("C1_SUNSET_STAGE146_TAS_TICK") {
                     let start = start.parse::<u32>().unwrap_or(4_330);
-                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                    return sunset_bootstrap_input(start.saturating_add(u32::from(tick)));
                 }
-                let wait = std::env::var("C1_SUNSET_STAGE146_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE146_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(65);
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if tick < wait {
                         return 0;
                     }
@@ -22736,7 +23035,7 @@ impl HighRoadCompletionRouteController {
                         0
                     };
                 }
-                if let Ok(test) = std::env::var("C1_SUNSET_STAGE146_AFTER_WAIT_TEST") {
+                if let Ok(test) = sunset_var("C1_SUNSET_STAGE146_AFTER_WAIT_TEST") {
                     return test.parse::<u32>().unwrap_or(0);
                 }
                 if player.status_a & 1 != 0 && player.translation[0] > 25_880_000 {
@@ -22747,9 +23046,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 147
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 26_600_000
                         && player.translation[1] > -10_800_000
@@ -22760,14 +23059,14 @@ impl HighRoadCompletionRouteController {
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let wait = std::env::var("C1_SUNSET_STAGE147_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE147_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait {
                         return 0;
                     }
-                    return std::env::var("C1_SUNSET_STAGE147_TEST")
+                    return sunset_var("C1_SUNSET_STAGE147_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT | PAD_CROSS);
@@ -22787,9 +23086,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 148
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 27_080_000
                         && player.translation[1] > -11_000_000
@@ -22800,11 +23099,11 @@ impl HighRoadCompletionRouteController {
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let run = std::env::var("C1_SUNSET_STAGE148_RUN")
+                    let run = sunset_var("C1_SUNSET_STAGE148_RUN")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(8);
-                    return std::env::var("C1_SUNSET_STAGE148_TEST")
+                    return sunset_var("C1_SUNSET_STAGE148_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT | if tick < run { 0 } else { PAD_CROSS });
@@ -22814,9 +23113,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
             }
             if self.sunset_stage == 149
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 27_500_000
                         && player.translation[1] > -10_800_000
@@ -22825,7 +23124,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    return std::env::var("C1_SUNSET_STAGE149_TEST")
+                    return sunset_var("C1_SUNSET_STAGE149_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT | PAD_CROSS);
@@ -22845,9 +23144,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 150
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 27_850_000
                         && player.translation[1] > -10_900_000
@@ -22856,7 +23155,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    return std::env::var("C1_SUNSET_STAGE150_TEST")
+                    return sunset_var("C1_SUNSET_STAGE150_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT);
@@ -22869,9 +23168,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT;
             }
             if self.sunset_stage == 151
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 28_150_000
                         && player.translation[1] > -10_900_000
@@ -22882,9 +23181,9 @@ impl HighRoadCompletionRouteController {
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    if let Ok(lane_ticks) = std::env::var("C1_SUNSET_STAGE151_LANE_TICKS") {
+                    if let Ok(lane_ticks) = sunset_var("C1_SUNSET_STAGE151_LANE_TICKS") {
                         let lane_ticks = lane_ticks.parse::<u8>().unwrap_or(8);
-                        let lane = std::env::var("C1_SUNSET_STAGE151_LANE_DIR")
+                        let lane = sunset_var("C1_SUNSET_STAGE151_LANE_DIR")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(PAD_DOWN);
@@ -22894,14 +23193,14 @@ impl HighRoadCompletionRouteController {
                         let brake = if lane == PAD_UP { PAD_DOWN } else { PAD_UP };
                         return PAD_RIGHT | brake | PAD_CROSS;
                     }
-                    let wait = std::env::var("C1_SUNSET_STAGE151_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE151_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait {
                         return 0;
                     }
-                    return std::env::var("C1_SUNSET_STAGE151_TEST")
+                    return sunset_var("C1_SUNSET_STAGE151_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT | PAD_CROSS);
@@ -22921,9 +23220,9 @@ impl HighRoadCompletionRouteController {
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 152
-                && std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 28_680_000
                         && player.translation[1] > -11_000_000
@@ -22934,7 +23233,7 @@ impl HighRoadCompletionRouteController {
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let wait = std::env::var("C1_SUNSET_STAGE152_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE152_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(32);
@@ -22945,7 +23244,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 153 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 153 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 29_500_000
                     && player.translation[1] > -10_500_000
@@ -22956,7 +23255,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return PAD_RIGHT | PAD_CROSS;
             }
-            if self.sunset_stage == 154 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 154 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 30_040_000
                     && player.translation[1] > -10_800_000
@@ -22965,12 +23264,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE154_TEST")
+                return sunset_var("C1_SUNSET_STAGE154_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 155 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 155 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 30_500_000
                     && player.translation[1] > -10_500_000
@@ -22979,12 +23278,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE155_TEST")
+                return sunset_var("C1_SUNSET_STAGE155_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 156 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 156 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 31_000_000
                     && player.translation[1] > -10_900_000
@@ -22993,12 +23292,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return PAD_RIGHT;
                 }
-                return std::env::var("C1_SUNSET_STAGE156_TEST")
+                return sunset_var("C1_SUNSET_STAGE156_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 157 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 157 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 31_350_000
                     && player.translation[1] > -10_900_000
@@ -23007,12 +23306,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE157_TEST")
+                return sunset_var("C1_SUNSET_STAGE157_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT);
             }
-            if self.sunset_stage == 158 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 158 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 32_300_000
                     && player.translation[1] > -10_900_000
@@ -23021,12 +23320,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE158_TEST")
+                return sunset_var("C1_SUNSET_STAGE158_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 159 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 159 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 33_400_000
                     && player.translation[1] > -11_100_000
@@ -23037,14 +23336,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE159_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE159_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(5);
                 if tick < runup {
                     return PAD_RIGHT;
                 }
-                let lane_ticks = std::env::var("C1_SUNSET_STAGE159_LANE_TICKS")
+                let lane_ticks = sunset_var("C1_SUNSET_STAGE159_LANE_TICKS")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -23053,12 +23352,12 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                return std::env::var("C1_SUNSET_STAGE159_TEST")
+                return sunset_var("C1_SUNSET_STAGE159_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | lane | PAD_CROSS);
             }
-            if self.sunset_stage == 160 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 160 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 33_800_000
                     && player.translation[1] > -10_900_000
@@ -23067,12 +23366,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE160_TEST")
+                return sunset_var("C1_SUNSET_STAGE160_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 161 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 161 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 35_350_000
                     && player.translation[1] > -11_100_000
@@ -23081,12 +23380,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE161_TEST")
+                return sunset_var("C1_SUNSET_STAGE161_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 162 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 162 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 35_700_000
                     && player.translation[1] > -10_900_000
@@ -23095,12 +23394,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE162_TEST")
+                return sunset_var("C1_SUNSET_STAGE162_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 163 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 163 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] < -120_000
                     && player.translation[1] > -10_900_000
@@ -23109,12 +23408,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE163_TEST")
+                return sunset_var("C1_SUNSET_STAGE163_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP | PAD_CROSS);
             }
-            if self.sunset_stage == 164 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 164 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] < -350_000
                     && player.translation[1] > -10_900_000
@@ -23123,12 +23422,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE164_TEST")
+                return sunset_var("C1_SUNSET_STAGE164_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP | PAD_SQUARE);
             }
-            if self.sunset_stage == 165 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 165 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] > -300_000
                     && player.translation[1] > -10_900_000
@@ -23137,12 +23436,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE165_TEST")
+                return sunset_var("C1_SUNSET_STAGE165_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_SQUARE);
             }
-            if self.sunset_stage == 166 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 166 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.state == 2
                     && player.status_a & 1 != 0
                     && player.translation[2] > -300_000
@@ -23152,12 +23451,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE166_TEST")
+                return sunset_var("C1_SUNSET_STAGE166_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_SQUARE);
             }
-            if self.sunset_stage == 167 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 167 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] > 160_000
                     && player.translation[1] > -10_900_000
@@ -23166,12 +23465,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE167_TEST")
+                return sunset_var("C1_SUNSET_STAGE167_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_CROSS);
             }
-            if self.sunset_stage == 168 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 168 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 36_230_000
                     && player.translation[1] > -11_100_000
@@ -23180,12 +23479,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE168_TEST")
+                return sunset_var("C1_SUNSET_STAGE168_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 169 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 169 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 36_750_000
                     && player.translation[1] > -11_200_000
@@ -23194,12 +23493,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE169_TEST")
+                return sunset_var("C1_SUNSET_STAGE169_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 170 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 170 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 37_080_000
                     && player.translation[1] > -11_250_000
@@ -23208,12 +23507,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE170_TEST")
+                return sunset_var("C1_SUNSET_STAGE170_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 171 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 171 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 37_300_000
                     && player.translation[1] > -11_100_000
@@ -23224,19 +23523,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE171_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE171_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(5);
                 if tick < wait {
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE171_TEST")
+                return sunset_var("C1_SUNSET_STAGE171_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 172 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 172 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 37_650_000
                     && player.translation[1] > -11_100_000
@@ -23245,12 +23544,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE172_TEST")
+                return sunset_var("C1_SUNSET_STAGE172_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 173 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 173 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_000_000
                     && player.translation[1] > -11_300_000
@@ -23261,19 +23560,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE173_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE173_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(20);
                 if tick < wait {
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE173_TEST")
+                return sunset_var("C1_SUNSET_STAGE173_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 174 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 174 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_000_000
                     && player.translation[2] < 150_000
@@ -23283,12 +23582,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE174_TEST")
+                return sunset_var("C1_SUNSET_STAGE174_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP | PAD_CROSS);
             }
-            if self.sunset_stage == 175 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 175 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_300_000
                     && player.translation[2] < -350_000
@@ -23300,19 +23599,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE175_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE175_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(10);
                 if tick < wait {
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE175_TEST")
+                return sunset_var("C1_SUNSET_STAGE175_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP | PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 176 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 176 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] < 37_050_000
                     && player.translation[2] < -300_000
@@ -23322,12 +23621,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE176_TEST")
+                return sunset_var("C1_SUNSET_STAGE176_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT | PAD_CROSS);
             }
-            if self.sunset_stage == 177 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 177 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] < 36_750_000
                     && player.translation[2] < -300_000
@@ -23337,12 +23636,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE177_TEST")
+                return sunset_var("C1_SUNSET_STAGE177_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT | PAD_SQUARE);
             }
-            if self.sunset_stage == 178 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 178 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] < 36_800_000
                     && player.translation[2] > -300_000
@@ -23352,12 +23651,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE178_TEST")
+                return sunset_var("C1_SUNSET_STAGE178_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_CROSS);
             }
-            if self.sunset_stage == 179 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 179 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_420_000
                     && player.translation[2] > -350_000
@@ -23367,12 +23666,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE179_TEST")
+                return sunset_var("C1_SUNSET_STAGE179_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 180 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 180 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_400_000
                     && player.translation[2] > -50_000
@@ -23384,26 +23683,26 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE180_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE180_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < runup {
                     return PAD_RIGHT;
                 }
-                let right_tick = std::env::var("C1_SUNSET_STAGE180_RIGHT_TICK")
+                let right_tick = sunset_var("C1_SUNSET_STAGE180_RIGHT_TICK")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(16);
                 if tick.saturating_sub(runup) >= right_tick {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                return std::env::var("C1_SUNSET_STAGE180_TEST")
+                return sunset_var("C1_SUNSET_STAGE180_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 181 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 181 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 38_680_000
                     && player.translation[2] > 200_000
@@ -23413,12 +23712,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE181_TEST")
+                return sunset_var("C1_SUNSET_STAGE181_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN | PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 182 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 182 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 39_050_000
                     && player.translation[2] > 100_000
@@ -23428,12 +23727,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE182_TEST")
+                return sunset_var("C1_SUNSET_STAGE182_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 183 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 183 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 39_520_000
                     && player.translation[2] > 100_000
@@ -23445,19 +23744,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE183_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE183_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 if tick < runup {
                     return PAD_RIGHT;
                 }
-                return std::env::var("C1_SUNSET_STAGE183_TEST")
+                return sunset_var("C1_SUNSET_STAGE183_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 184 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 184 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 40_800_000
                     && player.translation[1] > -10_900_000
@@ -23466,12 +23765,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE184_TEST")
+                return sunset_var("C1_SUNSET_STAGE184_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT);
             }
-            if self.sunset_stage == 185 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 185 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] < 50_000
                     && player.translation[1] > -10_900_000
@@ -23480,12 +23779,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE185_TEST")
+                return sunset_var("C1_SUNSET_STAGE185_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP);
             }
-            if self.sunset_stage == 186 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 186 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 41_150_000
                     && player.translation[1] > -10_700_000
@@ -23494,12 +23793,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE186_TEST")
+                return sunset_var("C1_SUNSET_STAGE186_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 187 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 187 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 41_500_000
                     && player.translation[1] > -10_450_000
@@ -23508,12 +23807,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE187_TEST")
+                return sunset_var("C1_SUNSET_STAGE187_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 188 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 188 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] > 250_000
                     && player.translation[1] > -10_450_000
@@ -23522,12 +23821,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE188_TEST")
+                return sunset_var("C1_SUNSET_STAGE188_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_DOWN);
             }
-            if self.sunset_stage == 189 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 189 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[2] > 300_000
                     && player.translation[1] > -10_350_000
@@ -23536,17 +23835,17 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE189_TEST")
+                return sunset_var("C1_SUNSET_STAGE189_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 190 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let z_min = std::env::var("C1_SUNSET_STAGE190_Z_MIN")
+            if self.sunset_stage == 190 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let z_min = sunset_var("C1_SUNSET_STAGE190_Z_MIN")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(180_000);
-                let z_max = std::env::var("C1_SUNSET_STAGE190_Z_MAX")
+                let z_max = sunset_var("C1_SUNSET_STAGE190_Z_MAX")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(230_000);
@@ -23561,24 +23860,24 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE190_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE190_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < wait {
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE190_TEST")
+                return sunset_var("C1_SUNSET_STAGE190_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP);
             }
-            if self.sunset_stage == 191 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let z_min = std::env::var("C1_SUNSET_STAGE191_Z_MIN")
+            if self.sunset_stage == 191 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let z_min = sunset_var("C1_SUNSET_STAGE191_Z_MIN")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(100_000);
-                let z_max = std::env::var("C1_SUNSET_STAGE191_Z_MAX")
+                let z_max = sunset_var("C1_SUNSET_STAGE191_Z_MAX")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(250_000);
@@ -23593,26 +23892,26 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE191_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE191_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < wait {
                     return 0;
                 }
-                let runup = std::env::var("C1_SUNSET_STAGE191_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE191_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 if tick.saturating_sub(wait) < runup {
                     return PAD_LEFT;
                 }
-                return std::env::var("C1_SUNSET_STAGE191_TEST")
+                return sunset_var("C1_SUNSET_STAGE191_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT | PAD_CROSS);
             }
-            if self.sunset_stage == 192 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 192 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_400_000..40_750_000).contains(&player.translation[0])
                     && (-10_000_000..-9_850_000).contains(&player.translation[1])
@@ -23632,36 +23931,36 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE192_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE192_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 if tick < runup {
-                    return std::env::var("C1_SUNSET_STAGE192_RUNUP_TEST")
+                    return sunset_var("C1_SUNSET_STAGE192_RUNUP_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_DOWN);
                 }
-                if let Ok(turn_after) = std::env::var("C1_SUNSET_STAGE192_TURN_AFTER") {
+                if let Ok(turn_after) = sunset_var("C1_SUNSET_STAGE192_TURN_AFTER") {
                     let turn_after = turn_after.parse::<u8>().unwrap_or(u8::MAX);
                     if tick.saturating_sub(runup) >= turn_after {
-                        return std::env::var("C1_SUNSET_STAGE192_TURN_TEST")
+                        return sunset_var("C1_SUNSET_STAGE192_TURN_TEST")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(PAD_LEFT | PAD_UP | PAD_CROSS);
                     }
                 }
-                if std::env::var_os("C1_SUNSET_STAGE192_ALTERNATE").is_some() {
-                    let phase = std::env::var("C1_SUNSET_STAGE192_ALT_PHASE")
+                if sunset_var_os("C1_SUNSET_STAGE192_ALTERNATE").is_some() {
+                    let phase = sunset_var("C1_SUNSET_STAGE192_ALT_PHASE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
-                    let period = std::env::var("C1_SUNSET_STAGE192_ALT_PERIOD")
+                    let period = sunset_var("C1_SUNSET_STAGE192_ALT_PERIOD")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(2)
                         .max(1);
-                    let up_count = std::env::var("C1_SUNSET_STAGE192_ALT_UP_COUNT")
+                    let up_count = sunset_var("C1_SUNSET_STAGE192_ALT_UP_COUNT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(1)
@@ -23674,12 +23973,12 @@ impl HighRoadCompletionRouteController {
                         }
                         | PAD_CROSS;
                 }
-                return std::env::var("C1_SUNSET_STAGE192_TEST")
+                return sunset_var("C1_SUNSET_STAGE192_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT | PAD_CROSS);
             }
-            if self.sunset_stage == 193 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 193 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_000_000..40_400_000).contains(&player.translation[0])
                     && (-9_800_000..-9_650_000).contains(&player.translation[1])
@@ -23723,34 +24022,34 @@ impl HighRoadCompletionRouteController {
                 }
                 let stage_tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if std::env::var_os("C1_SUNSET_STAGE193_EDGE_JUMP").is_some() {
-                    let jump_x = std::env::var("C1_SUNSET_STAGE193_JUMP_X")
+                if sunset_var_os("C1_SUNSET_STAGE193_EDGE_JUMP").is_some() {
+                    let jump_x = sunset_var("C1_SUNSET_STAGE193_JUMP_X")
                         .ok()
                         .and_then(|value| value.parse::<i32>().ok())
                         .unwrap_or(39_650_000);
                     if player.translation[0] <= jump_x {
-                        return std::env::var("C1_SUNSET_STAGE193_JUMP_TEST")
+                        return sunset_var("C1_SUNSET_STAGE193_JUMP_TEST")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(PAD_LEFT | PAD_CROSS);
                     }
                     return PAD_LEFT;
                 }
-                if let Ok(flatten_z) = std::env::var("C1_SUNSET_STAGE193_FLATTEN_Z") {
+                if let Ok(flatten_z) = sunset_var("C1_SUNSET_STAGE193_FLATTEN_Z") {
                     let flatten_z = flatten_z.parse::<i32>().unwrap_or(i32::MAX);
                     if player.translation[2] >= flatten_z {
-                        return std::env::var("C1_SUNSET_STAGE193_FLATTEN_TEST")
+                        return sunset_var("C1_SUNSET_STAGE193_FLATTEN_TEST")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(PAD_LEFT | PAD_CROSS);
                     }
                 }
-                if let Ok(start) = std::env::var("C1_SUNSET_STAGE193_TAS_TICK") {
+                if let Ok(start) = sunset_var("C1_SUNSET_STAGE193_TAS_TICK") {
                     let start = start.parse::<u32>().unwrap_or(2_140);
-                    return sunset_tas_input(start.saturating_add(u32::from(stage_tick)));
+                    return sunset_bootstrap_input(start.saturating_add(u32::from(stage_tick)));
                 }
-                if std::env::var_os("C1_SUNSET_STAGE193_ALTERNATE").is_some() {
-                    let phase = std::env::var("C1_SUNSET_STAGE193_ALT_PHASE")
+                if sunset_var_os("C1_SUNSET_STAGE193_ALTERNATE").is_some() {
+                    let phase = sunset_var("C1_SUNSET_STAGE193_ALT_PHASE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -23762,12 +24061,12 @@ impl HighRoadCompletionRouteController {
                         }
                         | PAD_CROSS;
                 }
-                return std::env::var("C1_SUNSET_STAGE193_TEST")
+                return sunset_var("C1_SUNSET_STAGE193_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP);
             }
-            if self.sunset_stage == 194 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 194 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (41_450_000..41_650_000).contains(&player.translation[0])
                     && (-10_450_000..-10_200_000).contains(&player.translation[1])
@@ -23778,19 +24077,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let phase1 = std::env::var("C1_SUNSET_STAGE194_PHASE1")
+                let phase1 = sunset_var("C1_SUNSET_STAGE194_PHASE1")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
-                let phase2 = std::env::var("C1_SUNSET_STAGE194_PHASE2")
+                let phase2 = sunset_var("C1_SUNSET_STAGE194_PHASE2")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
-                let phase3 = std::env::var("C1_SUNSET_STAGE194_PHASE3")
+                let phase3 = sunset_var("C1_SUNSET_STAGE194_PHASE3")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
-                let phase4 = std::env::var("C1_SUNSET_STAGE194_PHASE4")
+                let phase4 = sunset_var("C1_SUNSET_STAGE194_PHASE4")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
@@ -23805,15 +24104,15 @@ impl HighRoadCompletionRouteController {
                 } else {
                     "C1_SUNSET_STAGE194_TEST5"
                 };
-                return std::env::var(variable)
+                return sunset_var(variable)
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
             }
-            if self.sunset_stage == 195 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 195 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE195_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE195_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -23821,11 +24120,11 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 let tick = tick.saturating_sub(wait);
-                let phase1 = std::env::var("C1_SUNSET_STAGE195_PHASE1")
+                let phase1 = sunset_var("C1_SUNSET_STAGE195_PHASE1")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
-                let flatten_z = std::env::var("C1_SUNSET_STAGE195_FLATTEN_Z")
+                let flatten_z = sunset_var("C1_SUNSET_STAGE195_FLATTEN_Z")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok());
                 let variable = if tick < phase1 {
@@ -23835,20 +24134,20 @@ impl HighRoadCompletionRouteController {
                 } else {
                     "C1_SUNSET_STAGE195_TEST2"
                 };
-                return std::env::var(variable)
+                return sunset_var(variable)
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
             }
-            if self.sunset_stage == 196 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let jump_x = std::env::var("C1_SUNSET_STAGE196_JUMP_X")
+            if self.sunset_stage == 196 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let jump_x = sunset_var("C1_SUNSET_STAGE196_JUMP_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(39_600_000);
-                let attack_x = std::env::var("C1_SUNSET_STAGE196_ATTACK_X")
+                let attack_x = sunset_var("C1_SUNSET_STAGE196_ATTACK_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok());
-                let flatten_z = std::env::var("C1_SUNSET_STAGE196_FLATTEN_Z")
+                let flatten_z = sunset_var("C1_SUNSET_STAGE196_FLATTEN_Z")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok());
                 let variable = if flatten_z
@@ -23861,12 +24160,12 @@ impl HighRoadCompletionRouteController {
                 } else {
                     "C1_SUNSET_STAGE196_TEST"
                 };
-                return std::env::var(variable)
+                return sunset_var(variable)
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT);
             }
-            if self.sunset_stage == 197 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 197 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_500_000..40_800_000).contains(&player.translation[0])
                     && (-9_620_000..-9_430_000).contains(&player.translation[1])
@@ -23877,22 +24176,22 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE197_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE197_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < runup {
-                    return std::env::var("C1_SUNSET_STAGE197_RUNUP_TEST")
+                    return sunset_var("C1_SUNSET_STAGE197_RUNUP_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT);
                 }
-                return std::env::var("C1_SUNSET_STAGE197_TEST")
+                return sunset_var("C1_SUNSET_STAGE197_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 198 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 198 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_900_000..41_250_000).contains(&player.translation[0])
                     && (-9_420_000..-9_220_000).contains(&player.translation[1])
@@ -23903,58 +24202,58 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE198_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE198_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < runup {
-                    return std::env::var("C1_SUNSET_STAGE198_RUNUP_TEST")
+                    return sunset_var("C1_SUNSET_STAGE198_RUNUP_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT);
                 }
-                return std::env::var("C1_SUNSET_STAGE198_TEST")
+                return sunset_var("C1_SUNSET_STAGE198_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 199 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 199 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (41_200_000..41_650_000).contains(&player.translation[0])
                     && (-9_180_000..-9_000_000).contains(&player.translation[1])
                 {
                     self.sunset_stage = 200;
                     self.sunset_attack_tick = 0;
-                    if std::env::var_os("C1_SUNSET_STAGE199_CONTINUE_HELD").is_some() {
+                    if sunset_var_os("C1_SUNSET_STAGE199_CONTINUE_HELD").is_some() {
                         return PAD_RIGHT | PAD_CROSS;
                     }
                     return 0;
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE199_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE199_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < runup {
-                    return std::env::var("C1_SUNSET_STAGE199_RUNUP_TEST")
+                    return sunset_var("C1_SUNSET_STAGE199_RUNUP_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_RIGHT);
                 }
-                if std::env::var("C1_SUNSET_STAGE199_LANE_Z")
+                if sunset_var("C1_SUNSET_STAGE199_LANE_Z")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .is_some_and(|target| player.translation[2] > target)
                 {
                     return PAD_RIGHT | PAD_UP | PAD_CROSS;
                 }
-                return std::env::var("C1_SUNSET_STAGE199_TEST")
+                return sunset_var("C1_SUNSET_STAGE199_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 200 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 200 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && player.translation[0] > 41_500_000
                     && (-9_180_000..-9_000_000).contains(&player.translation[1])
@@ -23963,12 +24262,12 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                return std::env::var("C1_SUNSET_STAGE200_TEST")
+                return sunset_var("C1_SUNSET_STAGE200_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 201 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 201 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_825_000..=41_075_000).contains(&player.translation[0])
                     && (-8_930_000..=-8_870_000).contains(&player.translation[1])
@@ -23988,20 +24287,20 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if std::env::var_os("C1_SUNSET_STAGE201_UPPER").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE201_UPPER").is_some() {
                     if tick < 5 {
                         return PAD_UP;
                     }
                     return PAD_LEFT | PAD_CROSS;
                 }
-                if std::env::var_os("C1_SUNSET_STAGE201_SOURCE_WALL").is_some() {
-                    if std::env::var_os("C1_SUNSET_STAGE201_TAS_CONTINUATION").is_some() {
-                        let base = std::env::var("C1_SUNSET_STAGE201_TAS_BASE")
+                if sunset_var_os("C1_SUNSET_STAGE201_SOURCE_WALL").is_some() {
+                    if sunset_var_os("C1_SUNSET_STAGE201_TAS_CONTINUATION").is_some() {
+                        let base = sunset_var("C1_SUNSET_STAGE201_TAS_BASE")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(2_283);
-                        let mut held = sunset_tas_input(base + u32::from(tick));
-                        let spin_tick = std::env::var("C1_SUNSET_STAGE201_TAS_SPIN_TICK")
+                        let mut held = sunset_bootstrap_input(base + u32::from(tick));
+                        let spin_tick = sunset_var("C1_SUNSET_STAGE201_TAS_SPIN_TICK")
                             .ok()
                             .and_then(|value| value.parse::<u8>().ok());
                         if spin_tick == Some(tick) {
@@ -24011,17 +24310,17 @@ impl HighRoadCompletionRouteController {
                     }
                     return match tick {
                         0..=1 => 0,
-                        2..=18 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_UP").is_some() => {
+                        2..=18 if sunset_var_os("C1_SUNSET_STAGE201_ALIGN_UP").is_some() => {
                             PAD_UP | PAD_CROSS
                         }
-                        2..=18 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                        2..=18 if sunset_var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
                             PAD_DOWN | PAD_CROSS
                         }
                         2..=18 => PAD_CROSS,
-                        19..=25 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                        19..=25 if sunset_var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
                             PAD_LEFT | PAD_DOWN | PAD_CROSS
                         }
-                        26 if std::env::var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
+                        26 if sunset_var_os("C1_SUNSET_STAGE201_ALIGN_DOWN").is_some() => {
                             PAD_LEFT | PAD_DOWN
                         }
                         19..=22 | 24 => PAD_LEFT | PAD_UP | PAD_CROSS,
@@ -24030,22 +24329,22 @@ impl HighRoadCompletionRouteController {
                         _ => PAD_LEFT | PAD_CROSS,
                     };
                 }
-                let wait = std::env::var("C1_SUNSET_STAGE201_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE201_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(1);
                 if tick < wait {
-                    return std::env::var("C1_SUNSET_STAGE201_WAIT_TEST")
+                    return sunset_var("C1_SUNSET_STAGE201_WAIT_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(0);
                 }
-                return std::env::var("C1_SUNSET_STAGE201_TEST")
+                return sunset_var("C1_SUNSET_STAGE201_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
-            if self.sunset_stage == 202 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 202 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (39_800_000..=40_100_000).contains(&player.translation[0])
                     && (-10_850_000..=-10_650_000).contains(&player.translation[1])
@@ -24056,7 +24355,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return PAD_LEFT | PAD_CROSS;
             }
-            if self.sunset_stage == 203 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 203 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (39_500_000..=39_850_000).contains(&player.translation[0])
                     && (-10_850_000..=-10_650_000).contains(&player.translation[1])
@@ -24068,35 +24367,35 @@ impl HighRoadCompletionRouteController {
                 }
                 return PAD_LEFT | PAD_CROSS;
             }
-            if self.sunset_stage == 204 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 204 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if std::env::var_os("C1_SUNSET_STAGE204_TAS").is_some() {
-                    let wait = std::env::var("C1_SUNSET_STAGE204_TAS_WAIT")
+                if sunset_var_os("C1_SUNSET_STAGE204_TAS").is_some() {
+                    let wait = sunset_var("C1_SUNSET_STAGE204_TAS_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait {
                         return 0;
                     }
-                    let runup = std::env::var("C1_SUNSET_STAGE204_TAS_RUNUP")
+                    let runup = sunset_var("C1_SUNSET_STAGE204_TAS_RUNUP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait.saturating_add(runup) {
                         return PAD_LEFT;
                     }
-                    let base = std::env::var("C1_SUNSET_STAGE204_TAS_BASE")
+                    let base = sunset_var("C1_SUNSET_STAGE204_TAS_BASE")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(2_360);
                     let source_tick = tick - wait.saturating_add(runup);
-                    let mut held = sunset_tas_input(base + u32::from(source_tick));
-                    let force_down = std::env::var("C1_SUNSET_STAGE204_TAS_FORCE_DOWN")
+                    let mut held = sunset_bootstrap_input(base + u32::from(source_tick));
+                    let force_down = sunset_var("C1_SUNSET_STAGE204_TAS_FORCE_DOWN")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
-                    let force_up = std::env::var("C1_SUNSET_STAGE204_TAS_FORCE_UP")
+                    let force_up = sunset_var("C1_SUNSET_STAGE204_TAS_FORCE_UP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -24105,7 +24404,7 @@ impl HighRoadCompletionRouteController {
                     } else if source_tick < force_down.saturating_add(force_up) {
                         held = (held & !(PAD_UP | PAD_DOWN)) | PAD_UP;
                     }
-                    let spin_tick = std::env::var("C1_SUNSET_STAGE204_TAS_SPIN_TICK")
+                    let spin_tick = sunset_var("C1_SUNSET_STAGE204_TAS_SPIN_TICK")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok());
                     if spin_tick == Some(source_tick) {
@@ -24113,11 +24412,11 @@ impl HighRoadCompletionRouteController {
                     }
                     return held;
                 }
-                let depth_hold = std::env::var("C1_SUNSET_STAGE204_DOWN_HOLD")
+                let depth_hold = sunset_var("C1_SUNSET_STAGE204_DOWN_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
-                let depth_brake = std::env::var("C1_SUNSET_STAGE204_UP_BRAKE")
+                let depth_brake = sunset_var("C1_SUNSET_STAGE204_UP_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24127,12 +24426,12 @@ impl HighRoadCompletionRouteController {
                 if tick < depth_hold.saturating_add(depth_brake) {
                     return PAD_LEFT | PAD_UP | PAD_CROSS;
                 }
-                return std::env::var("C1_SUNSET_STAGE204_TEST")
+                return sunset_var("C1_SUNSET_STAGE204_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
             }
-            if self.sunset_stage == 205 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 205 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (41_200_000..=41_500_000).contains(&player.translation[0])
                     && (-8_340_000..=-8_280_000).contains(&player.translation[1])
@@ -24152,9 +24451,9 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if let Ok(base) = std::env::var("C1_SUNSET_STAGE205_TAS_BASE") {
+                if let Ok(base) = sunset_var("C1_SUNSET_STAGE205_TAS_BASE") {
                     let base = base.parse::<u32>().unwrap_or(1_982);
-                    let wait = std::env::var("C1_SUNSET_STAGE205_TAS_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE205_TAS_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -24162,15 +24461,15 @@ impl HighRoadCompletionRouteController {
                         return 0;
                     }
                     let source_tick = tick.saturating_sub(wait);
-                    let held = sunset_tas_input(base.saturating_add(u32::from(source_tick)));
+                    let held = sunset_bootstrap_input(base.saturating_add(u32::from(source_tick)));
                     return held;
                 }
-                return std::env::var("C1_SUNSET_STAGE205_TEST")
+                return sunset_var("C1_SUNSET_STAGE205_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_LEFT | PAD_CROSS);
             }
-            if self.sunset_stage == 207 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 207 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (41_200_000..=41_500_000).contains(&player.translation[0])
                     && (-8_340_000..=-8_280_000).contains(&player.translation[1])
@@ -24190,9 +24489,9 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if let Ok(base) = std::env::var("C1_SUNSET_STAGE207_TAS_BASE") {
+                if let Ok(base) = sunset_var("C1_SUNSET_STAGE207_TAS_BASE") {
                     let base = base.parse::<u32>().unwrap_or(1_994);
-                    let wait = std::env::var("C1_SUNSET_STAGE207_TAS_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE207_TAS_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -24200,13 +24499,13 @@ impl HighRoadCompletionRouteController {
                         return 0;
                     }
                     let source_tick = tick.saturating_sub(wait);
-                    let held = sunset_tas_input(base.saturating_add(u32::from(source_tick)));
-                    if let Ok(left_hold) = std::env::var("C1_SUNSET_STAGE207_TAS_LEFT_HOLD") {
+                    let held = sunset_bootstrap_input(base.saturating_add(u32::from(source_tick)));
+                    if let Ok(left_hold) = sunset_var("C1_SUNSET_STAGE207_TAS_LEFT_HOLD") {
                         let left_hold = left_hold.parse::<u8>().unwrap_or(6);
                         if source_tick < left_hold {
                             return held;
                         }
-                        let right_hold = std::env::var("C1_SUNSET_STAGE207_TAS_RIGHT_HOLD")
+                        let right_hold = sunset_var("C1_SUNSET_STAGE207_TAS_RIGHT_HOLD")
                             .ok()
                             .and_then(|value| value.parse::<u8>().ok())
                             .unwrap_or(20);
@@ -24217,15 +24516,15 @@ impl HighRoadCompletionRouteController {
                     }
                     return held;
                 }
-                let wait = std::env::var("C1_SUNSET_STAGE207_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE207_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(34);
-                let down = std::env::var("C1_SUNSET_STAGE207_DOWN")
+                let down = sunset_var("C1_SUNSET_STAGE207_DOWN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(5);
-                let up = std::env::var("C1_SUNSET_STAGE207_UP")
+                let up = sunset_var("C1_SUNSET_STAGE207_UP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(5);
@@ -24238,21 +24537,21 @@ impl HighRoadCompletionRouteController {
                     }
                     return 0;
                 }
-                let runup = std::env::var("C1_SUNSET_STAGE207_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE207_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(3);
                 if tick < wait.saturating_add(runup) {
                     return PAD_RIGHT;
                 }
-                let jump_hold = std::env::var("C1_SUNSET_STAGE207_JUMP_HOLD")
+                let jump_hold = sunset_var("C1_SUNSET_STAGE207_JUMP_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
                 if tick < wait.saturating_add(runup).saturating_add(jump_hold) {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE207_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE207_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24266,10 +24565,10 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 206 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 206 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 return 0;
             }
-            if self.sunset_stage == 208 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 208 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_700_000..=41_200_000).contains(&player.translation[0])
                     && (-7_950_000..=-7_450_000).contains(&player.translation[1])
@@ -24280,21 +24579,21 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = std::env::var("C1_SUNSET_STAGE208_WAIT")
+                let wait = sunset_var("C1_SUNSET_STAGE208_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < wait {
                     return 0;
                 }
-                let right_hold = std::env::var("C1_SUNSET_STAGE208_RIGHT_HOLD")
+                let right_hold = sunset_var("C1_SUNSET_STAGE208_RIGHT_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(14);
                 if tick < wait.saturating_add(right_hold) {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                let left_brake = std::env::var("C1_SUNSET_STAGE208_LEFT_BRAKE")
+                let left_brake = sunset_var("C1_SUNSET_STAGE208_LEFT_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(20);
@@ -24303,12 +24602,12 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 209 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let trigger_y = std::env::var("C1_SUNSET_STAGE209_TRIGGER_Y")
+            if self.sunset_stage == 209 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = sunset_var("C1_SUNSET_STAGE209_TRIGGER_Y")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(-7_380_000);
-                let trigger_x_max = std::env::var("C1_SUNSET_STAGE209_TRIGGER_X_MAX")
+                let trigger_x_max = sunset_var("C1_SUNSET_STAGE209_TRIGGER_X_MAX")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(41_150_000);
@@ -24322,9 +24621,8 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 210 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                if std::env::var_os("C1_SUNSET_STAGE210_DIRECT_H12")
-                    .is_none_or(|value| value != "0")
+            if self.sunset_stage == 210 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE210_DIRECT_H12").is_none_or(|value| value != "0")
                     && player.status_a & 1 != 0
                     && (40_200_000..=41_000_000).contains(&player.translation[0])
                     && (-7_250_000..=-6_950_000).contains(&player.translation[1])
@@ -24344,7 +24642,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE210_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE210_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24352,34 +24650,32 @@ impl HighRoadCompletionRouteController {
                     return PAD_LEFT;
                 }
                 let tick = tick.saturating_sub(runup);
-                let left_hold = std::env::var("C1_SUNSET_STAGE210_LEFT_HOLD")
+                let left_hold = sunset_var("C1_SUNSET_STAGE210_LEFT_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(1);
-                let depth = std::env::var("C1_SUNSET_STAGE210_DEPTH")
+                let depth = sunset_var("C1_SUNSET_STAGE210_DEPTH")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
-                let depth_hold = std::env::var("C1_SUNSET_STAGE210_DEPTH_HOLD")
+                let depth_hold = sunset_var("C1_SUNSET_STAGE210_DEPTH_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(left_hold);
                 let depth_input = if tick < depth_hold { depth } else { 0 };
                 if tick < left_hold {
-                    return if std::env::var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0")
-                    {
+                    return if sunset_var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0") {
                         PAD_RIGHT | PAD_CROSS | depth_input
                     } else {
                         PAD_LEFT | PAD_CROSS | depth_input
                     };
                 }
-                let right_brake = std::env::var("C1_SUNSET_STAGE210_RIGHT_BRAKE")
+                let right_brake = sunset_var("C1_SUNSET_STAGE210_RIGHT_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 if tick < left_hold.saturating_add(right_brake) {
-                    return if std::env::var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0")
-                    {
+                    return if sunset_var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0") {
                         PAD_LEFT | PAD_CROSS | depth_input
                     } else {
                         PAD_RIGHT | PAD_CROSS | depth_input
@@ -24387,7 +24683,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 211 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 211 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_250_000..=40_850_000).contains(&player.translation[0])
                     && (-7_250_000..=-6_850_000).contains(&player.translation[1])
@@ -24397,10 +24693,10 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                if std::env::var_os("C1_SUNSET_STAGE211_CUSTOM").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE211_CUSTOM").is_some() {
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let wait = std::env::var("C1_SUNSET_STAGE211_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE211_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(100);
@@ -24408,20 +24704,20 @@ impl HighRoadCompletionRouteController {
                         return 0;
                     }
                     let action_tick = tick.saturating_sub(wait);
-                    let hold = std::env::var("C1_SUNSET_STAGE211_HOLD")
+                    let hold = sunset_var("C1_SUNSET_STAGE211_HOLD")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(20);
-                    let depth = std::env::var("C1_SUNSET_STAGE211_DEPTH")
+                    let depth = sunset_var("C1_SUNSET_STAGE211_DEPTH")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(PAD_UP);
-                    let action = if std::env::var_os("C1_SUNSET_STAGE211_CIRCLE").is_some() {
+                    let action = if sunset_var_os("C1_SUNSET_STAGE211_CIRCLE").is_some() {
                         0x20
                     } else {
                         0
                     };
-                    let runup = std::env::var("C1_SUNSET_STAGE211_RUNUP")
+                    let runup = sunset_var("C1_SUNSET_STAGE211_RUNUP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -24432,7 +24728,7 @@ impl HighRoadCompletionRouteController {
                     if jump_tick < hold {
                         return PAD_RIGHT | PAD_CROSS | depth | action;
                     }
-                    let brake = std::env::var("C1_SUNSET_STAGE211_BRAKE")
+                    let brake = sunset_var("C1_SUNSET_STAGE211_BRAKE")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(12);
@@ -24441,25 +24737,25 @@ impl HighRoadCompletionRouteController {
                     }
                     return 0;
                 }
-                if let Ok(base) = std::env::var("C1_SUNSET_STAGE211_TAS_BASE") {
+                if let Ok(base) = sunset_var("C1_SUNSET_STAGE211_TAS_BASE") {
                     let base = base.parse::<u32>().unwrap_or(2_026);
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let wait = std::env::var("C1_SUNSET_STAGE211_TAS_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE211_TAS_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
                     if tick < wait {
                         return 0;
                     }
-                    return sunset_tas_input(
+                    return sunset_bootstrap_input(
                         base.saturating_add(u32::from(tick.saturating_sub(wait))),
                     );
                 }
                 return 0;
             }
-            if self.sunset_stage == 212 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let trigger_y = std::env::var("C1_SUNSET_STAGE212_TRIGGER_Y")
+            if self.sunset_stage == 212 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = sunset_var("C1_SUNSET_STAGE212_TRIGGER_Y")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(-6_410_000);
@@ -24473,7 +24769,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 213 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 213 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_700_000..=41_100_000).contains(&player.translation[0])
                     && (-6_260_000..=-6_100_000).contains(&player.translation[1])
@@ -24494,14 +24790,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let hold = std::env::var("C1_SUNSET_STAGE213_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE213_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(8);
                 if tick < hold {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE213_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE213_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24510,8 +24806,8 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 214 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                let trigger_y = std::env::var("C1_SUNSET_STAGE214_TRIGGER_Y")
+            if self.sunset_stage == 214 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let trigger_y = sunset_var("C1_SUNSET_STAGE214_TRIGGER_Y")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(-5_700_000);
@@ -24525,7 +24821,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 215 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 215 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_350_000..=41_100_000).contains(&player.translation[0])
                     && (-5_600_000..=-5_250_000).contains(&player.translation[1])
@@ -24538,14 +24834,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let hold = std::env::var("C1_SUNSET_STAGE215_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE215_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(8);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE215_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE215_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24554,7 +24850,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 216 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 216 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_550_000..=40_950_000).contains(&player.translation[0])
                     && player.translation[1] >= -4_780_000
@@ -24566,7 +24862,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 217 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 217 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_300_000..=40_620_000).contains(&player.translation[0])
                     && (-4_650_000..=-4_550_000).contains(&player.translation[1])
@@ -24579,14 +24875,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let hold = std::env::var("C1_SUNSET_STAGE217_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE217_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(18);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE217_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE217_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24595,7 +24891,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 218 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 218 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_080_000..=40_400_000).contains(&player.translation[0])
                     && (-4_440_000..=-4_340_000).contains(&player.translation[1])
@@ -24608,14 +24904,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let hold = std::env::var("C1_SUNSET_STAGE218_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE218_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE218_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE218_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24624,7 +24920,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 219 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 219 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_630_000..=40_880_000).contains(&player.translation[0])
                     && (-4_330_000..=-4_220_000).contains(&player.translation[1])
@@ -24637,7 +24933,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE219_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE219_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(2);
@@ -24645,14 +24941,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE219_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE219_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(20);
                 if tick < hold {
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE219_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE219_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24661,7 +24957,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 220 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 220 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_940_000..=41_190_000).contains(&player.translation[0])
                     && (-4_130_000..=-4_020_000).contains(&player.translation[1])
@@ -24674,15 +24970,15 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE220_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE220_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(2);
-                let depth = std::env::var("C1_SUNSET_STAGE220_DEPTH")
+                let depth = sunset_var("C1_SUNSET_STAGE220_DEPTH")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP);
-                let depth_hold = std::env::var("C1_SUNSET_STAGE220_DEPTH_HOLD")
+                let depth_hold = sunset_var("C1_SUNSET_STAGE220_DEPTH_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(6);
@@ -24691,14 +24987,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | depth_input;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE220_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE220_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
                 if tick < hold {
                     return PAD_RIGHT | PAD_CROSS | depth_input;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE220_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE220_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24707,7 +25003,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 221 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 221 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (41_245_000..=41_500_000).contains(&player.translation[0])
                     && (-3_930_000..=-3_820_000).contains(&player.translation[1])
@@ -24720,15 +25016,15 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE221_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE221_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
-                let depth = std::env::var("C1_SUNSET_STAGE221_DEPTH")
+                let depth = sunset_var("C1_SUNSET_STAGE221_DEPTH")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(PAD_UP);
-                let depth_hold = std::env::var("C1_SUNSET_STAGE221_DEPTH_HOLD")
+                let depth_hold = sunset_var("C1_SUNSET_STAGE221_DEPTH_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
@@ -24737,14 +25033,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | depth_input;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE221_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE221_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
                 if tick < hold {
                     return PAD_RIGHT | PAD_CROSS | depth_input;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE221_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE221_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24753,7 +25049,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 222 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 222 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_835_000..=41_085_000).contains(&player.translation[0])
                     && (-3_720_000..=-3_610_000).contains(&player.translation[1])
@@ -24766,7 +25062,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE222_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE222_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -24779,14 +25075,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_LEFT | depth_input;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE222_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE222_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(14);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS | depth_input;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE222_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE222_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24795,7 +25091,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 223 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 223 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_530_000..=40_780_000).contains(&player.translation[0])
                     && (-3_520_000..=-3_400_000).contains(&player.translation[1])
@@ -24808,7 +25104,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE223_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE223_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -24823,14 +25119,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_LEFT | depth_input;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE223_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE223_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS | depth_input;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE223_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE223_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24839,7 +25135,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 224 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 224 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (39_970_000..=40_490_000).contains(&player.translation[0])
                     && (-3_340_000..=-3_210_000).contains(&player.translation[1])
@@ -24852,7 +25148,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE224_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE224_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -24867,14 +25163,14 @@ impl HighRoadCompletionRouteController {
                     return PAD_LEFT | depth_input;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE224_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE224_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(14);
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS | depth_input;
                 }
-                let brake = std::env::var("C1_SUNSET_STAGE224_BRAKE")
+                let brake = sunset_var("C1_SUNSET_STAGE224_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
@@ -24883,7 +25179,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 225 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 225 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_600_000..=40_900_000).contains(&player.translation[0])
                     && (-3_130_000..=-3_000_000).contains(&player.translation[1])
@@ -24896,7 +25192,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE225_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE225_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(2);
@@ -24904,7 +25200,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE225_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE225_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(14);
@@ -24913,7 +25209,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 226 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 226 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_770_000..=41_130_000).contains(&player.translation[0])
                     && (-3_030_000..=-2_900_000).contains(&player.translation[1])
@@ -24926,7 +25222,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = std::env::var("C1_SUNSET_STAGE226_RUNUP")
+                let runup = sunset_var("C1_SUNSET_STAGE226_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(2);
@@ -24934,7 +25230,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT;
                 }
                 let tick = tick.saturating_sub(runup);
-                let hold = std::env::var("C1_SUNSET_STAGE226_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE226_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
@@ -24943,7 +25239,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 227 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 227 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (40_750_000..=41_300_000).contains(&player.translation[0])
                     && (-2_930_000..=-2_800_000).contains(&player.translation[1])
@@ -24956,7 +25252,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let hold = std::env::var("C1_SUNSET_STAGE227_HOLD")
+                let hold = sunset_var("C1_SUNSET_STAGE227_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(6);
@@ -24965,7 +25261,7 @@ impl HighRoadCompletionRouteController {
                 }
                 return 0;
             }
-            if self.sunset_stage == 228 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 228 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
                     && (43_450_000..=44_950_000).contains(&player.translation[0])
                     && (-2_930_000..=-2_800_000).contains(&player.translation[1])
@@ -24991,7 +25287,7 @@ impl HighRoadCompletionRouteController {
                 );
                 return PAD_RIGHT | if jump { PAD_CROSS } else { 0 };
             }
-            if self.sunset_stage == 229 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 229 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.state == 32 || player.event == 5_632 {
                     self.sunset_stage = 230;
                     self.sunset_attack_tick = 0;
@@ -25011,12 +25307,12 @@ impl HighRoadCompletionRouteController {
                 );
                 return PAD_RIGHT | depth_input | if jump { PAD_CROSS } else { 0 };
             }
-            if self.sunset_stage == 230 && std::env::var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+            if self.sunset_stage == 230 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 return 0;
             }
             if self.sunset_stage == 78
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
                 && player.translation[0] > 29_850_000
                 && (-16_500_000..-16_100_000).contains(&player.translation[1])
                 && player.status_a & 1 != 0
@@ -25027,11 +25323,11 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 78
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE78_CLEAN").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE78_CLEAN").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                if std::env::var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some() {
                     if tick > 20
                         && (29_150_000..29_400_000).contains(&player.translation[0])
                         && player.translation[1] > -15_700_000
@@ -25059,27 +25355,27 @@ impl HighRoadCompletionRouteController {
                         }
                     };
                 }
-                if let Ok(start) = std::env::var("C1_SUNSET_STAGE78_TAS_TICK") {
+                if let Ok(start) = sunset_var("C1_SUNSET_STAGE78_TAS_TICK") {
                     let start = start.parse::<u32>().unwrap_or(2_297);
-                    return sunset_tas_input(start.saturating_add(u32::from(tick)));
+                    return sunset_bootstrap_input(start.saturating_add(u32::from(tick)));
                 }
-                let run_frames = std::env::var("C1_SUNSET_STAGE78_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE78_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
-                let direction = std::env::var("C1_SUNSET_STAGE78_BRAKE")
+                let direction = sunset_var("C1_SUNSET_STAGE78_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .map_or(
                         PAD_RIGHT,
                         |brake| if tick < brake { PAD_RIGHT } else { PAD_LEFT },
                     );
-                let lane_start = std::env::var("C1_SUNSET_STAGE78_LANE_START")
+                let lane_start = sunset_var("C1_SUNSET_STAGE78_LANE_START")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(u8::MAX);
                 let lane = if tick >= lane_start {
-                    std::env::var("C1_SUNSET_STAGE78_LANE")
+                    sunset_var("C1_SUNSET_STAGE78_LANE")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .unwrap_or(0)
@@ -25090,9 +25386,9 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 77
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
-                if std::env::var_os("C1_SUNSET_STAGE77_WAIT_ONLY").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE77_WAIT_ONLY").is_some() {
                     return 0;
                 }
                 if self.sunset_attack_tick > 6
@@ -25106,14 +25402,14 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait_frames = std::env::var("C1_SUNSET_STAGE77_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE77_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
                 if tick < wait_frames {
                     return 0;
                 }
-                let run_frames = std::env::var("C1_SUNSET_STAGE77_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE77_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -25127,7 +25423,7 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 76
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
                 if self.sunset_attack_tick > 8
                     && (29_250_000..29_520_000).contains(&player.translation[0])
@@ -25140,7 +25436,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let run_frames = std::env::var("C1_SUNSET_STAGE76_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE76_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -25148,7 +25444,7 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 75
                 && (camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
                 && (28_750_000..29_100_000).contains(&player.translation[0])
                 && player.translation[1] > -16_300_000
                 && player.status_a & 1 != 0
@@ -25159,7 +25455,7 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 74
                 && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
                 if self.sunset_attack_tick > 8
                     && (28_450_000..28_720_000).contains(&player.translation[0])
@@ -25172,7 +25468,7 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let run_frames = std::env::var("C1_SUNSET_STAGE72_SECOND_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE72_SECOND_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(8);
@@ -25180,11 +25476,11 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 73
                 && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
-                && std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some()
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait_frames = std::env::var("C1_SUNSET_STAGE72_SECOND_WAIT")
+                let wait_frames = sunset_var("C1_SUNSET_STAGE72_SECOND_WAIT")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(12);
@@ -25203,12 +25499,12 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 72
                 && (camera.path.zone == g1 || camera.path.zone == g2 || camera.path.zone == g3)
             {
-                if std::env::var_os("C1_SUNSET_STAGE72_TAS").is_some() {
-                    let held = sunset_tas_input(self.sunset_tick);
+                if sunset_var_os("C1_SUNSET_STAGE72_TAS").is_some() {
+                    let held = sunset_bootstrap_input(self.sunset_tick);
                     self.sunset_tick = self.sunset_tick.saturating_add(1);
                     return held;
                 }
-                if std::env::var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
+                if sunset_var_os("C1_SUNSET_STAGE72_PHASED").is_some() {
                     if self.sunset_attack_tick > 10
                         && (28_740_000..29_000_000).contains(&player.translation[0])
                         && player.translation[1] > -16_700_000
@@ -25220,7 +25516,7 @@ impl HighRoadCompletionRouteController {
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                    let left_frames = std::env::var("C1_SUNSET_STAGE72_HOP_LEFT")
+                    let left_frames = sunset_var("C1_SUNSET_STAGE72_HOP_LEFT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(6);
@@ -25239,11 +25535,11 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let run_frames = std::env::var("C1_SUNSET_STAGE72_RUN")
+                let run_frames = sunset_var("C1_SUNSET_STAGE72_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
-                let brake_x = std::env::var("C1_SUNSET_STAGE72_BRAKE_X")
+                let brake_x = sunset_var("C1_SUNSET_STAGE72_BRAKE_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok());
                 let tick = self.sunset_attack_tick;
@@ -25256,7 +25552,7 @@ impl HighRoadCompletionRouteController {
                 return horizontal | if tick < run_frames { 0 } else { PAD_CROSS };
             }
             if self.sunset_stage == 71 && (camera.path.zone == g1 || camera.path.zone == g2) {
-                if let Some((wait_frames, run_frames)) = std::env::var("C1_SUNSET_STAGE71_WAIT_RUN")
+                if let Some((wait_frames, run_frames)) = sunset_var("C1_SUNSET_STAGE71_WAIT_RUN")
                     .ok()
                     .and_then(|value| {
                         value
@@ -25288,14 +25584,14 @@ impl HighRoadCompletionRouteController {
                             PAD_CROSS
                         };
                 }
-                return std::env::var("C1_SUNSET_STAGE71_TEST")
+                return sunset_var("C1_SUNSET_STAGE71_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
                     .unwrap_or(0);
             }
             if self.sunset_stage == 70
                 && (camera.path.zone == g1 || camera.path.zone == g2)
-                && let Some(run_frames) = std::env::var("C1_SUNSET_STAGE70_RUN")
+                && let Some(run_frames) = sunset_var("C1_SUNSET_STAGE70_RUN")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
             {
@@ -25309,17 +25605,17 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane =
-                    if tick >= run_frames && std::env::var_os("C1_SUNSET_STAGE70_UP").is_some() {
-                        PAD_UP
-                    } else {
-                        0
-                    };
+                let lane = if tick >= run_frames && sunset_var_os("C1_SUNSET_STAGE70_UP").is_some()
+                {
+                    PAD_UP
+                } else {
+                    0
+                };
                 return PAD_LEFT | lane | if tick < run_frames { 0 } else { PAD_CROSS };
             }
             if self.sunset_stage == 70
                 && (camera.path.zone == g1 || camera.path.zone == g2)
-                && let Some(down_frames) = std::env::var("C1_SUNSET_STAGE70_DOWN_FRAMES")
+                && let Some(down_frames) = sunset_var("C1_SUNSET_STAGE70_DOWN_FRAMES")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
             {
@@ -25330,7 +25626,7 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 70
                 && (camera.path.zone == g1 || camera.path.zone == g2)
-                && let Some(held) = std::env::var("C1_SUNSET_STAGE70_TEST")
+                && let Some(held) = sunset_var("C1_SUNSET_STAGE70_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
             {
@@ -25338,7 +25634,7 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 69
                 && (camera.path.zone == g1 || camera.path.zone == g2)
-                && std::env::var_os("C1_SUNSET_STAGE69_RIDE_EXIT").is_some()
+                && sunset_var_os("C1_SUNSET_STAGE69_RIDE_EXIT").is_some()
             {
                 if player.translation[1] > -17_100_000 && player.status_a & 1 != 0 {
                     self.sunset_stage = 70;
@@ -25349,13 +25645,13 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 69
                 && (camera.path.zone == g1 || camera.path.zone == g2)
-                && let Some(held) = std::env::var("C1_SUNSET_STAGE69_TEST")
+                && let Some(held) = sunset_var("C1_SUNSET_STAGE69_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
             {
                 return held;
             }
-            if right_route && std::env::var_os("C1_SUNSET_ALL_TAS").is_none() {
+            if right_route && sunset_var_os("C1_SUNSET_ALL_TAS").is_none() {
                 if self.sunset_stage == 68 && camera.path.zone == g1 {
                     if self.sunset_attack_tick > 0
                         && player.translation[1] > -18_050_000
@@ -25365,7 +25661,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    let wait = std::env::var("C1_SUNSET_STAGE68_WAIT")
+                    let wait = sunset_var("C1_SUNSET_STAGE68_WAIT")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
@@ -25376,15 +25672,14 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                     return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
                 }
-                if self.sunset_stage >= 62 && std::env::var_os("C1_SUNSET_F4_CONTINUOUS").is_some()
-                {
-                    let held = sunset_tas_input(self.sunset_tick);
+                if self.sunset_stage >= 62 && sunset_var_os("C1_SUNSET_F4_CONTINUOUS").is_some() {
+                    let held = sunset_bootstrap_input(self.sunset_tick);
                     self.sunset_tick = self.sunset_tick.saturating_add(1);
                     return held;
                 }
                 if self.sunset_stage == 67 && camera.path.zone == g1 {
                     if let Some((run_frames, down_frames)) =
-                        std::env::var("C1_SUNSET_STAGE67_RUN_DIAG")
+                        sunset_var("C1_SUNSET_STAGE67_RUN_DIAG")
                             .ok()
                             .and_then(|value| {
                                 value
@@ -25411,14 +25706,14 @@ impl HighRoadCompletionRouteController {
                         if tick < run_frames + down_frames {
                             return PAD_LEFT | PAD_DOWN | PAD_CROSS;
                         }
-                        let lane = if std::env::var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
+                        let lane = if sunset_var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
                             0
                         } else {
                             PAD_UP
                         };
                         return PAD_LEFT | lane | PAD_CROSS;
                     }
-                    if let Some(down_frames) = std::env::var("C1_SUNSET_STAGE67_DIAG_LEFT")
+                    if let Some(down_frames) = sunset_var("C1_SUNSET_STAGE67_DIAG_LEFT")
                         .ok()
                         .and_then(|value| value.parse::<u16>().ok())
                     {
@@ -25427,7 +25722,7 @@ impl HighRoadCompletionRouteController {
                         if tick < down_frames {
                             return PAD_LEFT | PAD_DOWN | PAD_CROSS;
                         }
-                        let lane = if std::env::var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
+                        let lane = if sunset_var_os("C1_SUNSET_STAGE67_DIAG_PURE").is_some() {
                             0
                         } else {
                             PAD_UP
@@ -25435,7 +25730,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_LEFT | lane | PAD_CROSS;
                     }
                     if let Some((wait_frames, run_frames)) =
-                        std::env::var("C1_SUNSET_STAGE67_LEFT_JUMP")
+                        sunset_var("C1_SUNSET_STAGE67_LEFT_JUMP")
                             .ok()
                             .and_then(|value| {
                                 value
@@ -25456,21 +25751,20 @@ impl HighRoadCompletionRouteController {
                         }
                         return PAD_LEFT | PAD_CROSS;
                     }
-                    if let Some((left_frames, up_frames)) =
-                        std::env::var("C1_SUNSET_STAGE67_AROUND")
-                            .ok()
-                            .and_then(|value| {
-                                value
-                                    .split_once(',')
-                                    .map(|(left, up)| (left.to_owned(), up.to_owned()))
-                            })
-                            .and_then(|(left, up)| {
-                                Some((left.parse::<u16>().ok()?, up.parse::<u16>().ok()?))
-                            })
+                    if let Some((left_frames, up_frames)) = sunset_var("C1_SUNSET_STAGE67_AROUND")
+                        .ok()
+                        .and_then(|value| {
+                            value
+                                .split_once(',')
+                                .map(|(left, up)| (left.to_owned(), up.to_owned()))
+                        })
+                        .and_then(|(left, up)| {
+                            Some((left.parse::<u16>().ok()?, up.parse::<u16>().ok()?))
+                        })
                     {
                         let tick = u16::from(self.sunset_attack_tick);
                         self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                        let depth = if std::env::var_os("C1_SUNSET_STAGE67_DOWN").is_some() {
+                        let depth = if sunset_var_os("C1_SUNSET_STAGE67_DOWN").is_some() {
                             PAD_DOWN
                         } else {
                             PAD_UP
@@ -25483,7 +25777,7 @@ impl HighRoadCompletionRouteController {
                         }
                         return PAD_RIGHT | depth | PAD_CROSS;
                     }
-                    if let Some(tick) = std::env::var("C1_SUNSET_STAGE67_TAS_TICK")
+                    if let Some(tick) = sunset_var("C1_SUNSET_STAGE67_TAS_TICK")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                     {
@@ -25491,11 +25785,11 @@ impl HighRoadCompletionRouteController {
                             self.sunset_tick = tick;
                             self.sunset_attack_tick = 1;
                         }
-                        let held = sunset_tas_input(self.sunset_tick);
+                        let held = sunset_bootstrap_input(self.sunset_tick);
                         self.sunset_tick = self.sunset_tick.saturating_add(1);
                         return held;
                     }
-                    if let Some(held) = std::env::var("C1_SUNSET_STAGE67_TEST")
+                    if let Some(held) = sunset_var("C1_SUNSET_STAGE67_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                     {
@@ -25515,7 +25809,7 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 if self.sunset_stage == 65 && camera.path.zone == g1 {
-                    if let Some(held) = std::env::var("C1_SUNSET_STAGE65_LANE_TEST")
+                    if let Some(held) = sunset_var("C1_SUNSET_STAGE65_LANE_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                     {
@@ -25559,7 +25853,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         self.jump_hold = 0;
                         self.sunset_wait = 18;
-                        if std::env::var_os("C1_SUNSET_STAGE65_LANE_TEST").is_some() {
+                        if sunset_var_os("C1_SUNSET_STAGE65_LANE_TEST").is_some() {
                             return 0;
                         }
                         return PAD_RIGHT;
@@ -25630,7 +25924,7 @@ impl HighRoadCompletionRouteController {
                     }
                     return PAD_LEFT | lane;
                 }
-                let d1_lane_target = std::env::var("C1_SUNSET_D1_LANE")
+                let d1_lane_target = sunset_var("C1_SUNSET_D1_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(237_056);
@@ -25643,11 +25937,11 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                let f2_lane_target = std::env::var("C1_SUNSET_F2_LANE")
+                let f2_lane_target = sunset_var("C1_SUNSET_F2_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(player.translation[2]);
-                let f2_lane_start = std::env::var("C1_SUNSET_F2_LANE_X")
+                let f2_lane_start = sunset_var("C1_SUNSET_F2_LANE_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(28_000_000);
@@ -25664,7 +25958,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                let e3_lane_target = std::env::var("C1_SUNSET_E3_LANE")
+                let e3_lane_target = sunset_var("C1_SUNSET_E3_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(player.translation[2]);
@@ -25681,11 +25975,11 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                let f3_lane_target = std::env::var("C1_SUNSET_F3_LANE")
+                let f3_lane_target = sunset_var("C1_SUNSET_F3_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(player.translation[2]);
-                let f3_lane_start = std::env::var("C1_SUNSET_F3_LANE_X")
+                let f3_lane_start = sunset_var("C1_SUNSET_F3_LANE_X")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(28_160_000);
@@ -25704,7 +25998,7 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                let f3_negative_lane_target = std::env::var("C1_SUNSET_F3_NEGATIVE_LANE")
+                let f3_negative_lane_target = sunset_var("C1_SUNSET_F3_NEGATIVE_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(-100_000);
@@ -25725,31 +26019,31 @@ impl HighRoadCompletionRouteController {
                         self.sunset_stage = 62;
                         self.sunset_attack_tick = 0;
                         self.jump_hold = 20;
-                        if std::env::var_os("C1_SUNSET_F4_CONTINUOUS").is_some() {
-                            let held = sunset_tas_input(self.sunset_tick);
+                        if sunset_var_os("C1_SUNSET_F4_CONTINUOUS").is_some() {
+                            let held = sunset_bootstrap_input(self.sunset_tick);
                             self.sunset_tick = self.sunset_tick.saturating_add(1);
                             return held;
                         }
                         return PAD_LEFT;
                     }
-                    if std::env::var("C1_SUNSET_F4_TAS_START")
+                    if sunset_var("C1_SUNSET_F4_TAS_START")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
                         .is_some()
                     {
-                        let held = sunset_tas_input(self.sunset_tick);
+                        let held = sunset_bootstrap_input(self.sunset_tick);
                         self.sunset_tick = self.sunset_tick.saturating_add(1);
                         return held;
                     }
                     if self.sunset_attack_tick == 0 {
-                        if std::env::var_os("C1_SUNSET_F4_DIRECT").is_some()
+                        if sunset_var_os("C1_SUNSET_F4_DIRECT").is_some()
                             && player.status_a & 1 != 0
                         {
                             if player.velocity[0] > 0 {
                                 return PAD_LEFT;
                             }
                             self.sunset_attack_tick = 1;
-                            self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                            self.jump_hold = sunset_var("C1_SUNSET_F4_FOURTH_HOLD")
                                 .ok()
                                 .and_then(|value| value.parse().ok())
                                 .unwrap_or(20);
@@ -25758,7 +26052,7 @@ impl HighRoadCompletionRouteController {
                         if player.status_a & 1 != 0 {
                             if player.translation[0] <= 29_390_000 {
                                 self.sunset_attack_tick = 1;
-                                self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                                self.jump_hold = sunset_var("C1_SUNSET_F4_FOURTH_HOLD")
                                     .ok()
                                     .and_then(|value| value.parse().ok())
                                     .unwrap_or(20);
@@ -25766,7 +26060,7 @@ impl HighRoadCompletionRouteController {
                             }
                             return PAD_LEFT;
                         }
-                        let coyote_delay = std::env::var("C1_SUNSET_F4_FOURTH_DELAY")
+                        let coyote_delay = sunset_var("C1_SUNSET_F4_FOURTH_DELAY")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(0);
@@ -25775,14 +26069,14 @@ impl HighRoadCompletionRouteController {
                             return PAD_LEFT | PAD_DOWN;
                         }
                         self.sunset_attack_tick = 1;
-                        self.jump_hold = std::env::var("C1_SUNSET_F4_FOURTH_HOLD")
+                        self.jump_hold = sunset_var("C1_SUNSET_F4_FOURTH_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(20);
                         return PAD_LEFT | PAD_DOWN | PAD_CROSS;
                     }
-                    let direct = std::env::var_os("C1_SUNSET_F4_DIRECT").is_some();
-                    let normal_lane = std::env::var("C1_SUNSET_F4_FOURTH_LANE")
+                    let direct = sunset_var_os("C1_SUNSET_F4_DIRECT").is_some();
+                    let normal_lane = sunset_var("C1_SUNSET_F4_FOURTH_LANE")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(250_000);
@@ -25807,7 +26101,7 @@ impl HighRoadCompletionRouteController {
                     };
                     let jump_tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
-                    let spin = std::env::var("C1_SUNSET_F4_FOURTH_SPIN")
+                    let spin = sunset_var("C1_SUNSET_F4_FOURTH_SPIN")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .is_some_and(|spin_tick| jump_tick == spin_tick);
@@ -25826,7 +26120,7 @@ impl HighRoadCompletionRouteController {
                         return horizontal
                             | depth
                             | PAD_CROSS
-                            | if std::env::var_os("C1_SUNSET_F4_DIRECT_REJUMP_SPIN").is_some() {
+                            | if sunset_var_os("C1_SUNSET_F4_DIRECT_REJUMP_SPIN").is_some() {
                                 PAD_SQUARE
                             } else {
                                 0
@@ -25849,14 +26143,14 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 61;
                         self.sunset_attack_tick = 0;
-                        self.sunset_tick = std::env::var("C1_SUNSET_F4_TAS_START")
+                        self.sunset_tick = sunset_var("C1_SUNSET_F4_TAS_START")
                             .ok()
                             .and_then(|value| value.parse::<u32>().ok())
                             .unwrap_or(2_240);
                         self.jump_hold = 0;
                         return 0;
                     }
-                    let runup = std::env::var("C1_SUNSET_F4_THIRD_RUNUP")
+                    let runup = sunset_var("C1_SUNSET_F4_THIRD_RUNUP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(4);
@@ -25866,7 +26160,7 @@ impl HighRoadCompletionRouteController {
                     }
                     if self.sunset_attack_tick == runup {
                         self.sunset_attack_tick += 1;
-                        self.jump_hold = std::env::var("C1_SUNSET_F4_THIRD_HOLD")
+                        self.jump_hold = sunset_var("C1_SUNSET_F4_THIRD_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(16);
@@ -25888,7 +26182,7 @@ impl HighRoadCompletionRouteController {
                         self.jump_hold = 0;
                         return 0;
                     }
-                    let runup = std::env::var("C1_SUNSET_F4_SECOND_RUNUP")
+                    let runup = sunset_var("C1_SUNSET_F4_SECOND_RUNUP")
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(12);
@@ -25898,7 +26192,7 @@ impl HighRoadCompletionRouteController {
                     }
                     if self.sunset_attack_tick == runup {
                         self.sunset_attack_tick += 1;
-                        self.jump_hold = std::env::var("C1_SUNSET_F4_SECOND_HOLD")
+                        self.jump_hold = sunset_var("C1_SUNSET_F4_SECOND_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(20);
@@ -25925,7 +26219,7 @@ impl HighRoadCompletionRouteController {
                             return PAD_LEFT;
                         }
                         self.sunset_attack_tick = 1;
-                        self.jump_hold = std::env::var("C1_SUNSET_F4_FIRST_HOLD")
+                        self.jump_hold = sunset_var("C1_SUNSET_F4_FIRST_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(20);
@@ -25956,7 +26250,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 56 && camera.path.zone == f3 {
                     self.sunset_stage = 57;
-                    self.jump_hold = std::env::var("C1_SUNSET_F3_FOURTH_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F3_FOURTH_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -25980,11 +26274,11 @@ impl HighRoadCompletionRouteController {
                     return held;
                 }
                 if self.sunset_stage == 54 && camera.path.zone == f3 {
-                    let launch_x = std::env::var("C1_SUNSET_F3_THIRD_X")
+                    let launch_x = sunset_var("C1_SUNSET_F3_THIRD_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(29_730_000);
-                    let launch_speed = std::env::var("C1_SUNSET_F3_THIRD_SPEED")
+                    let launch_speed = sunset_var("C1_SUNSET_F3_THIRD_SPEED")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(-300_000);
@@ -25992,7 +26286,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_LEFT | f3_lane;
                     }
                     self.sunset_stage = 55;
-                    self.jump_hold = std::env::var("C1_SUNSET_F3_THIRD_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F3_THIRD_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26012,7 +26306,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 52 && camera.path.zone == f3 {
                     self.sunset_stage = 53;
-                    self.jump_hold = std::env::var("C1_SUNSET_F3_SECOND_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F3_SECOND_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26031,7 +26325,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 50 && (camera.path.zone == f2 || camera.path.zone == f3) {
                     self.sunset_stage = 51;
-                    self.jump_hold = std::env::var("C1_SUNSET_F3_FIRST_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F3_FIRST_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26049,7 +26343,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 48 && (camera.path.zone == f2 || camera.path.zone == f3) {
                     self.sunset_stage = 49;
-                    self.jump_hold = std::env::var("C1_SUNSET_F2_TRANSFER_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F2_TRANSFER_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26061,7 +26355,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 48;
-                    self.sunset_wait = std::env::var("C1_SUNSET_F2_TRANSFER_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_F2_TRANSFER_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26074,7 +26368,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
                 if self.sunset_stage == 46 && (camera.path.zone == e3 || camera.path.zone == f1) {
-                    let launch_x = std::env::var("C1_SUNSET_F1_FIRST_X")
+                    let launch_x = sunset_var("C1_SUNSET_F1_FIRST_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(25_250_000);
@@ -26082,7 +26376,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | PAD_SQUARE;
                     }
                     self.sunset_stage = 47;
-                    self.jump_hold = std::env::var("C1_SUNSET_F1_FIRST_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_F1_FIRST_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26095,7 +26389,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 45;
-                    self.sunset_wait = std::env::var("C1_SUNSET_F1_FIRST_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_F1_FIRST_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26105,7 +26399,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 43 && camera.path.zone == e3 {
                     self.sunset_stage = 44;
-                    self.jump_hold = std::env::var("C1_SUNSET_E3_THIRD_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_E3_THIRD_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26123,7 +26417,7 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 if self.sunset_stage == 41 && camera.path.zone == e3 {
-                    let launch_x = std::env::var("C1_SUNSET_E3_SECOND_X")
+                    let launch_x = sunset_var("C1_SUNSET_E3_SECOND_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(24_200_000);
@@ -26131,7 +26425,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | e3_lane | PAD_SQUARE;
                     }
                     self.sunset_stage = 42;
-                    self.jump_hold = std::env::var("C1_SUNSET_E3_SECOND_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_E3_SECOND_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26144,7 +26438,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 41;
-                    self.sunset_wait = std::env::var("C1_SUNSET_E3_SECOND_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_E3_SECOND_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26157,7 +26451,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | e3_lane | PAD_SQUARE;
                 }
                 if self.sunset_stage == 39 && (camera.path.zone == e2 || camera.path.zone == e3) {
-                    let launch_x = std::env::var("C1_SUNSET_E3_FIRST_X")
+                    let launch_x = sunset_var("C1_SUNSET_E3_FIRST_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(23_800_000);
@@ -26165,7 +26459,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | e3_lane | PAD_SQUARE;
                     }
                     self.sunset_stage = 40;
-                    self.jump_hold = std::env::var("C1_SUNSET_E3_FIRST_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_E3_FIRST_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26178,7 +26472,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 38;
-                    self.sunset_wait = std::env::var("C1_SUNSET_E3_FIRST_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_E3_FIRST_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26187,7 +26481,7 @@ impl HighRoadCompletionRouteController {
                     return 0;
                 }
                 if self.sunset_stage == 36 && (camera.path.zone == d3 || camera.path.zone == e1) {
-                    let launch_x = std::env::var("C1_SUNSET_E1_FIRST_X")
+                    let launch_x = sunset_var("C1_SUNSET_E1_FIRST_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20_340_000);
@@ -26195,7 +26489,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | PAD_SQUARE;
                     }
                     self.sunset_stage = 37;
-                    self.jump_hold = std::env::var("C1_SUNSET_E1_FIRST_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_E1_FIRST_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26214,7 +26508,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 34 && (camera.path.zone == d1 || camera.path.zone == d2) {
                     self.sunset_stage = 35;
-                    self.jump_hold = std::env::var("C1_SUNSET_D2_FIRST_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_D2_FIRST_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26227,7 +26521,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 34;
-                    self.sunset_wait = std::env::var("C1_SUNSET_D2_FIRST_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_D2_FIRST_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26240,7 +26534,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | d1_lane;
                 }
                 if camera.path.zone == d1 && self.sunset_stage == 32 {
-                    let launch_x = std::env::var("C1_SUNSET_D1_THIRD_X")
+                    let launch_x = sunset_var("C1_SUNSET_D1_THIRD_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16_500_000);
@@ -26248,7 +26542,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | d1_lane;
                     }
                     self.sunset_stage = 33;
-                    self.jump_hold = std::env::var("C1_SUNSET_D1_THIRD_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_D1_THIRD_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
@@ -26261,7 +26555,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 31;
-                    self.sunset_wait = std::env::var("C1_SUNSET_D1_THIRD_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_D1_THIRD_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26278,13 +26572,13 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | d1_lane;
                 }
                 if camera.path.zone == d1 && self.sunset_stage == 28 {
-                    let attack_x = std::env::var("C1_SUNSET_D1_BOX_ATTACK_X")
+                    let attack_x = sunset_var("C1_SUNSET_D1_BOX_ATTACK_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16_100_000);
                     if player.translation[0] >= attack_x {
                         self.sunset_stage = 29;
-                        self.sunset_attack_tick = std::env::var("C1_SUNSET_D1_BOX_ATTACK_HOLD")
+                        self.sunset_attack_tick = sunset_var("C1_SUNSET_D1_BOX_ATTACK_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(5);
@@ -26297,11 +26591,11 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | d1_lane;
                 }
                 if camera.path.zone == d1 && self.sunset_stage == 27 {
-                    let launch_x = std::env::var("C1_SUNSET_D1_SECOND_X")
+                    let launch_x = sunset_var("C1_SUNSET_D1_SECOND_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(15_800_000);
-                    let launch_speed = std::env::var("C1_SUNSET_D1_SECOND_SPEED")
+                    let launch_speed = sunset_var("C1_SUNSET_D1_SECOND_SPEED")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(400_000);
@@ -26309,7 +26603,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | d1_lane;
                     }
                     self.sunset_stage = 28;
-                    self.jump_hold = std::env::var("C1_SUNSET_D1_SECOND_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_D1_SECOND_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16);
@@ -26321,7 +26615,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 26;
-                    self.sunset_wait = std::env::var("C1_SUNSET_D1_SECOND_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_D1_SECOND_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(0);
@@ -26331,7 +26625,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 22 {
                     self.sunset_stage = 23;
-                    self.sunset_attack_tick = std::env::var("C1_SUNSET_D1_RUNUP")
+                    self.sunset_attack_tick = sunset_var("C1_SUNSET_D1_RUNUP")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(12);
@@ -26361,7 +26655,7 @@ impl HighRoadCompletionRouteController {
                         };
                 }
                 if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 24 {
-                    let launch_x = std::env::var("C1_SUNSET_D1_X")
+                    let launch_x = sunset_var("C1_SUNSET_D1_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(15_450_000);
@@ -26374,7 +26668,7 @@ impl HighRoadCompletionRouteController {
                             };
                     }
                     self.sunset_stage = 25;
-                    self.jump_hold = std::env::var("C1_SUNSET_D1_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_D1_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16);
@@ -26393,7 +26687,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 22;
-                    self.sunset_wait = std::env::var("C1_SUNSET_D1_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_D1_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(40);
@@ -26403,7 +26697,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if (camera.path.zone == c2 || camera.path.zone == c3) && self.sunset_stage == 18 {
                     self.sunset_stage = 19;
-                    self.sunset_attack_tick = std::env::var("C1_SUNSET_C3_RUNUP")
+                    self.sunset_attack_tick = sunset_var("C1_SUNSET_C3_RUNUP")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(12);
@@ -26422,7 +26716,7 @@ impl HighRoadCompletionRouteController {
                         return PAD_RIGHT | PAD_SQUARE;
                     }
                     self.sunset_stage = 21;
-                    self.jump_hold = std::env::var("C1_SUNSET_C3_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_C3_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16);
@@ -26445,7 +26739,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 18;
-                    self.sunset_wait = std::env::var("C1_SUNSET_C3_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_C3_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(40);
@@ -26460,7 +26754,7 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 17;
-                    self.sunset_wait = std::env::var("C1_SUNSET_C2_SECOND_WAIT")
+                    self.sunset_wait = sunset_var("C1_SUNSET_C2_SECOND_WAIT")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(40);
@@ -26468,7 +26762,7 @@ impl HighRoadCompletionRouteController {
                     self.jump_hold = 0;
                     return 0;
                 }
-                let c3_lane = std::env::var("C1_SUNSET_C3_LANE")
+                let c3_lane = sunset_var("C1_SUNSET_C3_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(237_056);
@@ -26497,7 +26791,7 @@ impl HighRoadCompletionRouteController {
                     && self.jump_hold == 0
                 {
                     self.sunset_attack_tick = 0;
-                    self.jump_hold = std::env::var("C1_SUNSET_C3_HOLD")
+                    self.jump_hold = sunset_var("C1_SUNSET_C3_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16);
@@ -26508,7 +26802,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = if camera.path.zone == c4
                             || camera.path.zone == d1
                         {
-                            std::env::var(if camera.path.zone == c4 {
+                            sunset_var(if camera.path.zone == c4 {
                                 "C1_SUNSET_C4_DELAY"
                             } else {
                                 "C1_SUNSET_D1_DELAY"
@@ -26517,7 +26811,7 @@ impl HighRoadCompletionRouteController {
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(5)
                         } else if camera.path.zone == f2 && player.translation[0] >= 27_800_000 {
-                            std::env::var("C1_SUNSET_F2_DELAY")
+                            sunset_var("C1_SUNSET_F2_DELAY")
                                 .ok()
                                 .and_then(|value| value.parse().ok())
                                 .unwrap_or(5)
@@ -26532,7 +26826,7 @@ impl HighRoadCompletionRouteController {
                         return held;
                     }
                     self.jump_hold = if camera.path.zone == c4 || camera.path.zone == d1 {
-                        std::env::var(if camera.path.zone == c4 {
+                        sunset_var(if camera.path.zone == c4 {
                             "C1_SUNSET_C4_HOLD"
                         } else {
                             "C1_SUNSET_D1_LATE_HOLD"
@@ -26541,7 +26835,7 @@ impl HighRoadCompletionRouteController {
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(16)
                     } else if camera.path.zone == f2 && player.translation[0] >= 27_800_000 {
-                        std::env::var("C1_SUNSET_F2_HOLD")
+                        sunset_var("C1_SUNSET_F2_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(16)
@@ -26569,7 +26863,7 @@ impl HighRoadCompletionRouteController {
                 };
                 return PAD_RIGHT | lane | PAD_CROSS | PAD_SQUARE;
             }
-            let mut held = sunset_tas_input(self.sunset_tick);
+            let mut held = sunset_bootstrap_input(self.sunset_tick);
             self.sunset_tick = self.sunset_tick.saturating_add(1);
             if self.sunset_stage == 3 {
                 held &= !(PAD_UP | PAD_DOWN);
@@ -31997,7 +32291,11 @@ impl SurveyInputController {
             self.road_to_nowhere.final_stage = 0;
             self.road_to_nowhere.final_tick = 0;
         }
-        if self.profile == SurveyInputProfile::HighRoadCompletionRoute {
+        if matches!(
+            self.profile,
+            SurveyInputProfile::HighRoadCompletionRoute
+                | SurveyInputProfile::SunsetVistaCompletionRoute
+        ) {
             self.high_road.jump_hold = 0;
         }
         if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
@@ -32210,7 +32508,8 @@ impl SurveyInputController {
                 self.road_to_nowhere
                     .held(camera, player, player_collider_entity, route_objects)
             }
-            SurveyInputProfile::HighRoadCompletionRoute => self.high_road.held(camera, player),
+            SurveyInputProfile::HighRoadCompletionRoute
+            | SurveyInputProfile::SunsetVistaCompletionRoute => self.high_road.held(camera, player),
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, boss_state)
             }
@@ -34711,6 +35010,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
                 | SurveyInputProfile::JawsOfDarknessCompletionRoute
                 | SurveyInputProfile::LabCompletionRoute
+                | SurveyInputProfile::SunsetVistaCompletionRoute
                 | SurveyInputProfile::SlipperyClimbCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
@@ -35074,6 +35374,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             )
             && (matches!(
@@ -35085,6 +35386,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) || frame >= 300
                 || frame <= 120)
@@ -42925,7 +43227,7 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
             } else if known.id == LevelId::new_const(0x23)
                 && std::env::var_os("C1_SURVEY_SUNSET_ROUTE").is_some()
             {
-                SurveyInputProfile::HighRoadCompletionRoute
+                SurveyInputProfile::SunsetVistaCompletionRoute
             } else if known.id == LevelId::new_const(0x03)
                 && std::env::var_os("C1_SURVEY_CORTEX_POWER_ROUTE").is_some()
             {

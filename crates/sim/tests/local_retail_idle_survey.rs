@@ -47466,7 +47466,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(boulders_survey.unexpected_spawn_errors, 0);
         assert_eq!(
             boulders_survey.executions,
-            18_257,
+            18_301,
             "{}",
             boulders_survey.summary()
         );
@@ -47526,7 +47526,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             boulders_survey.final_player_translation,
             Some([2_313_984, 8_158_316, -14_955_008])
         );
-        assert_eq!(boulders_runtime.machine().random_seed(), 0x7ca0_4317);
+        assert_eq!(boulders_runtime.machine().random_seed(), 0x89f3_9240);
         assert_eq!(boulders_runtime.draw_count(), 10_221);
 
         let completion_route_runtime =
@@ -47552,7 +47552,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(completion_route_survey.final_live_objects, 18);
         assert_eq!(
             completion_route_survey.max_live_objects,
-            43,
+            44,
             "{}",
             completion_route_survey.summary()
         );
@@ -47560,7 +47560,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(completion_route_survey.spawn_attempts, 28_891);
         assert_eq!(completion_route_survey.expected_spawn_rejections, 28_797);
         assert_eq!(completion_route_survey.unexpected_spawn_errors, 0);
-        assert_eq!(completion_route_survey.executions, 56_500);
+        assert_eq!(completion_route_survey.executions, 56_696);
         assert_eq!(completion_route_survey.zone_transitions, 24);
         assert_eq!(completion_route_survey.camera_ranges.len(), 48);
         assert_eq!(completion_route_survey.camera_path_changes, 47);
@@ -47635,7 +47635,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             completion_route_runtime.machine().random_seed(),
-            0x071e_421c
+            0x5637_fe9d
         );
         assert_eq!(completion_route_runtime.draw_count(), 11_686);
         assert!(
@@ -47662,7 +47662,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(boulders_completion_carry.random_seed, 0x071e_421c);
+        assert_eq!(boulders_completion_carry.random_seed, 0x5637_fe9d);
         assert_eq!(boulders_completion_carry.draw_count, 11_686);
         assert_eq!(
             [

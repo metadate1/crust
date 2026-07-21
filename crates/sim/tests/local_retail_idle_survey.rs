@@ -37497,10 +37497,10 @@ native_fortress_d6_milestone_test!(
         zone: "a6_qZ",
         camera_path_index: 1,
         camera_progress: 7_033,
-        player_translation: [6_463_232, -10_734_411, 116_736],
-        player_velocity: [0, -136_000, 0],
-        player_state: 2,
-        player_status_a: 395_273,
+        player_translation: [6_463_232, -10_698_711, 116_736],
+        player_velocity: [-42_500, 939_200, 0],
+        player_state: 3,
+        player_status_a: 133_128,
         collider_entity: None,
         entity: 30,
         entity_trace: SpawnedEntityTrace {
@@ -37511,10 +37511,10 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 17,
         zone_transitions: 5,
-        executions: 7_076,
+        executions: 7_069,
         last_player_movement: 414,
         solid_effects: 25,
-        random_seed: 0x1beb_2577,
+        random_seed: 0xb993_65e4,
     }
 );
 
@@ -37524,8 +37524,8 @@ native_fortress_d6_milestone_test!(
         frames: 480,
         zone: "a7_qZ",
         camera_path_index: 0,
-        camera_progress: 20_532,
-        player_translation: [5_303_240, -10_958_775, 116_736],
+        camera_progress: 20_801,
+        player_translation: [5_292_492, -10_939_215, 116_736],
         player_velocity: [-614_400, -136_000, 0],
         player_state: 2,
         player_status_a: 395_529,
@@ -37539,7 +37539,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 19,
         zone_transitions: 6,
-        executions: 7_988,
+        executions: 7_984,
         last_player_movement: 480,
         solid_effects: 25,
         random_seed: 0xdb62_a213,
@@ -37567,8 +37567,8 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 22,
         zone_transitions: 7,
-        executions: 9_964,
-        last_player_movement: 570,
+        executions: 9_962,
+        last_player_movement: 569,
         solid_effects: 25,
         random_seed: 0x5cdb_20bd,
     }
@@ -37595,7 +37595,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 61,
         zone_transitions: 13,
-        executions: 19_313,
+        executions: 19_315,
         last_player_movement: 1_042,
         solid_effects: 108,
         random_seed: 0x0718_f04b,
@@ -37623,7 +37623,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 74,
         zone_transitions: 14,
-        executions: 21_469,
+        executions: 21_471,
         last_player_movement: 1_113,
         solid_effects: 136,
         random_seed: 0x0a04_4627,
@@ -37651,7 +37651,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 83,
         zone_transitions: 17,
-        executions: 24_975,
+        executions: 24_977,
         last_player_movement: 1_240,
         solid_effects: 165,
         random_seed: 0x242a_5435,
@@ -37679,7 +37679,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 87,
         zone_transitions: 19,
-        executions: 27_262,
+        executions: 27_264,
         last_player_movement: 1_340,
         solid_effects: 172,
         random_seed: 0x5732_0f22,
@@ -37707,7 +37707,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 90,
         zone_transitions: 20,
-        executions: 29_180,
+        executions: 29_182,
         last_player_movement: 1_440,
         solid_effects: 173,
         random_seed: 0xd0fc_702b,
@@ -37735,7 +37735,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 92,
         zone_transitions: 21,
-        executions: 31_883,
+        executions: 31_885,
         last_player_movement: 1_590,
         solid_effects: 174,
         random_seed: 0xe4d3_dcf7,
@@ -37763,7 +37763,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 94,
         zone_transitions: 22,
-        executions: 33_020,
+        executions: 33_022,
         last_player_movement: 1_650,
         solid_effects: 175,
         random_seed: 0x2562_6985,
@@ -37791,7 +37791,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 96,
         zone_transitions: 23,
-        executions: 35_624,
+        executions: 35_626,
         last_player_movement: 1_790,
         solid_effects: 179,
         random_seed: 0x07e9_bdf5,
@@ -37819,7 +37819,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 99,
         zone_transitions: 24,
-        executions: 37_321,
+        executions: 37_323,
         last_player_movement: 1_900,
         solid_effects: 184,
         random_seed: 0xd1d4_0b5c,
@@ -37847,7 +37847,7 @@ native_fortress_d6_milestone_test!(
         },
         successful_spawns: 104,
         zone_transitions: 25,
-        executions: 38_921,
+        executions: 38_923,
         last_player_movement: 1_988,
         solid_effects: 186,
         random_seed: 0x6161_90bf,
@@ -37914,7 +37914,7 @@ fn native_fortress_ordinary_pad_route_reaches_c6_launcher_landing() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 122);
     assert_eq!(survey.zone_transitions, 31);
-    assert_eq!(survey.executions, 50_212);
+    assert_eq!(survey.executions, 50_214);
     assert_eq!(survey.last_player_movement, 2_547);
     assert_eq!(survey.box_count_samples.last(), Some(&(2_540, 1_024)));
     assert_eq!(
@@ -37994,7 +37994,7 @@ fn native_fortress_ordinary_pad_route_reaches_d6_handoff() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 200);
     assert_eq!(survey.zone_transitions, 43);
-    assert_eq!(survey.executions, 98_003);
+    assert_eq!(survey.executions, 98_005);
     assert_eq!(survey.last_player_movement, 4_200);
     assert_eq!(survey.box_count_samples.last(), Some(&(3_421, 2_560)));
     assert_eq!(
@@ -38078,7 +38078,7 @@ fn native_fortress_ordinary_pad_route_crosses_d6_wall_into_d7() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 202);
     assert_eq!(survey.zone_transitions, 44);
-    assert_eq!(survey.executions, 103_696);
+    assert_eq!(survey.executions, 103_698);
     assert_eq!(survey.last_player_movement, 4_400);
     assert_eq!(survey.box_count_samples.last(), Some(&(3_421, 2_560)));
     assert_eq!(
@@ -38164,7 +38164,7 @@ fn native_fortress_ordinary_pad_route_crosses_d7_launchers_into_d9() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 216);
     assert_eq!(survey.zone_transitions, 48);
-    assert_eq!(survey.executions, 107_302);
+    assert_eq!(survey.executions, 107_304);
     assert_eq!(survey.last_player_movement, 4_550);
     assert_eq!(survey.box_count_samples.last(), Some(&(4_482, 2_816)));
     assert_eq!(
@@ -38250,7 +38250,7 @@ fn native_fortress_ordinary_pad_route_crosses_d9_wall_into_e0() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 218);
     assert_eq!(survey.zone_transitions, 49);
-    assert_eq!(survey.executions, 109_079);
+    assert_eq!(survey.executions, 109_081);
     assert_eq!(survey.last_player_movement, 4_620);
     assert_eq!(survey.box_count_samples.last(), Some(&(4_482, 2_816)));
     assert_eq!(
@@ -38336,7 +38336,7 @@ fn native_fortress_ordinary_pad_route_chains_final_launchers_into_e2() {
     assert!(survey.first_issue.is_none());
     assert_eq!(survey.successful_spawns, 233);
     assert_eq!(survey.zone_transitions, 53);
-    assert_eq!(survey.executions, 114_182);
+    assert_eq!(survey.executions, 114_184);
     assert_eq!(survey.last_player_movement, 4_855);
     assert_eq!(survey.box_count_samples.last(), Some(&(4_482, 2_816)));
     assert_eq!(
@@ -41823,24 +41823,24 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     .expect("Up the Creek's authored WarpC must request Level Complete");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 4_184);
+    assert_eq!(survey.frames, 4_183);
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 4184 requested level transition to 0x2d")
+        Some("frame 4183 requested level transition to 0x2d")
     );
-    assert_eq!(survey.next_lid, Some((4_184, 0x2d)));
+    assert_eq!(survey.next_lid, Some((4_183, 0x2d)));
     assert_eq!(survey.successful_spawns, 196);
-    assert_eq!(survey.spawn_attempts, 64_673);
-    assert_eq!(survey.expected_spawn_rejections, 64_477);
+    assert_eq!(survey.spawn_attempts, 64_662);
+    assert_eq!(survey.expected_spawn_rejections, 64_466);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 123_309);
+    assert_eq!(survey.executions, 123_277);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 38);
     assert_eq!(survey.camera_ranges.len(), 53);
     assert_eq!(survey.camera_path_changes, 60);
-    assert_eq!(survey.last_camera_path_change, 4_029);
-    assert_eq!(survey.last_camera_progress_change, 4_095);
-    assert_eq!(survey.last_player_movement, 4_180);
+    assert_eq!(survey.last_camera_path_change, 4_028);
+    assert_eq!(survey.last_camera_progress_change, 4_094);
+    assert_eq!(survey.last_player_movement, 4_179);
 
     let final_camera = survey
         .final_camera
@@ -41886,7 +41886,7 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert_eq!(
         spawned_entity_trace(&runtime, 22),
         Ok(Some(SpawnedEntityTrace {
-            translation: [1_894_162, 3_214_787, -7_643_139],
+            translation: [1_800_917, 3_166_537, -7_811_501],
             state: 1,
             path_progress: 1_370,
             status_a: 133_128,
@@ -41917,20 +41917,20 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
-            (3_846, 0x700),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
+            (3_845, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     for state in 0..=4 {
         assert!(
             survey.observed_program_states.contains(&(warp, state)),
@@ -41943,7 +41943,7 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert!(!survey.effect_counts.contains_key("load-state"));
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
-    assert_eq!(runtime.draw_count(), 4_184);
+    assert_eq!(runtime.draw_count(), 4_183);
     assert!(
         survey.is_clean(),
         "Up the Creek completion route must remain clean: {}",
@@ -44348,12 +44348,12 @@ fn ripper_roo_ordinary_pad_completion_route() {
         [(2, 8, 0), (152, 8, 1), (1_932, 8, 2)],
         "the authored boss must progress from setup through combat and defeat"
     );
-    // Matching the native transform-vector writeback order delays only the third
-    // excursion: Crash arms the TNT at 1787, RooOC starts its event cluster at
-    // 1867, and the counter is visible to the following pre-frame sample at 1868.
+    // Matching native atomic child-spawn and transform-vector writeback order
+    // makes RooOC's second and third event clusters visible to the subsequent
+    // deterministic pre-frame samples at 1453 and 1868 respectively.
     assert_eq!(
         survey.entity_counter_samples,
-        [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_868, 8, 3),],
+        [(2, 8, 0), (1_000, 8, 1), (1_453, 8, 2), (1_868, 8, 3),],
         "only RooOC's authored explosion event may advance Ripper Roo's hit counter"
     );
 
@@ -44370,7 +44370,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .collect::<BTreeSet<_>>();
     assert_eq!(
         activation_frames,
-        [919, 1_371, 1_787].into_iter().collect(),
+        [919, 1_372, 1_787].into_iter().collect(),
         "the route must arm the authored TNT objects through Crash collision events"
     );
     let boss_event_frames = survey
@@ -44379,7 +44379,7 @@ fn ripper_roo_ordinary_pad_completion_route() {
         .filter(|sample| sample.event == 0x300 && sample.recipient == Some(ripper))
         .map(|sample| sample.frame)
         .collect::<BTreeSet<_>>();
-    for frame in [999, 1_451, 1_867] {
+    for frame in [999, 1_452, 1_867] {
         assert!(
             boss_event_frames.contains(&frame),
             "missing authored RooOC-to-RRooC event cluster at frame {frame}: {boss_event_frames:?}"

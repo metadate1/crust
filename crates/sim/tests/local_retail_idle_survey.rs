@@ -45971,7 +45971,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     .expect("N. Sanity authored route must execute");
     assert_eq!(
         n_sanity_survey.next_lid,
-        Some((1_900, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap())),
+        Some((1_899, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap())),
         "N. Sanity's authored end warp must request Level Complete: {}",
         n_sanity_survey.summary()
     );
@@ -45989,10 +45989,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
 
     let n_sanity_draw_count = n_sanity_runtime.draw_count();
     assert_eq!(
-        n_sanity_draw_count, 1_911,
+        n_sanity_draw_count, 1_910,
         "N. Sanity completion draw-count drift"
     );
-    assert_eq!(n_sanity_runtime.machine().random_seed(), 0x4258_7668);
+    assert_eq!(n_sanity_runtime.machine().random_seed(), 0xc3ec_ee7c);
     let completion_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&n_sanity_nsd, &n_sanity_nsf, &n_sanity_nsf_bytes);
         let report = n_sanity_runtime
@@ -46033,7 +46033,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     .expect("Level Complete authored runtime must execute");
     assert_eq!(
         completion_survey.next_lid,
-        Some((513, i32::try_from(LevelId::TITLE.get()).unwrap())),
+        Some((465, i32::try_from(LevelId::TITLE.get()).unwrap())),
         "authored completion input must request Title: {}",
         completion_survey.summary()
     );
@@ -46045,10 +46045,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
 
     let completion_draw_count = completion_runtime.draw_count();
     assert_eq!(
-        completion_draw_count, 2_424,
+        completion_draw_count, 2_375,
         "Level Complete draw-count drift"
     );
-    assert_eq!(completion_runtime.machine().random_seed(), 0x2a88_b685);
+    assert_eq!(completion_runtime.machine().random_seed(), 0xbaf8_76c9);
     let title_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
         let report = completion_runtime
@@ -46167,7 +46167,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     assert_eq!(jungle_rollers_carry.globals[LEVEL_COUNT_GLOBAL], 1);
     assert_eq!(jungle_rollers_carry.globals[LEVELS_UNLOCKED_GLOBAL], 2);
     assert_eq!(
-        jungle_rollers_carry.draw_count, 2_677,
+        jungle_rollers_carry.draw_count, 2_628,
         "post-completion Map draw-count drift"
     );
     let jungle = LevelId::new_const(0x0c);
@@ -46178,12 +46178,12 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .expect("Jungle Rollers must import the authentic post-completion carry");
     assert_eq!(
         jungle_runtime.machine().random_seed(),
-        0x8014_c400,
+        0x7b8c_313d,
         "Jungle Rollers must inherit the authentic Map RNG-A phase"
     );
     assert_eq!(
         jungle_runtime.draw_count(),
-        2_677,
+        2_628,
         "Jungle Rollers must inherit the authentic Map draw count"
     );
     let (jungle_survey, mut jungle_runtime) = survey_pair_with_runtime(
@@ -46227,8 +46227,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         jungle_survey.box_count_samples,
         [
             (1, 0),
-            (545, 0x100),
-            (546, 0x200),
+            (544, 0x100),
+            (545, 0x200),
             (1_274, 0x300),
             (1_305, 0x400),
             (1_306, 0x500),
@@ -46248,7 +46248,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         jungle_survey.effect_counts.get("transition").copied(),
         Some(1)
     );
-    for expected in [(543, 16, 3), (731, 25, 3), (1_274, 46, 9)] {
+    for expected in [(542, 16, 3), (730, 25, 3), (1_274, 46, 9)] {
         assert!(jungle_survey.spawn_flag_samples.contains(&expected));
     }
     assert_eq!(
@@ -46278,10 +46278,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     assert_eq!(jungle_final_camera.progress.raw(), 17_836);
     assert_eq!(
         jungle_survey.final_player_translation,
-        Some([2_193_152, 7_732_266, -2_147_072])
+        Some([2_193_152, 7_732_265, -2_147_072])
     );
-    assert_eq!(jungle_runtime.machine().random_seed(), 0x679d_ffe4);
-    assert_eq!(jungle_runtime.draw_count(), 5_435);
+    assert_eq!(jungle_runtime.machine().random_seed(), 0xb8c1_1011);
+    assert_eq!(jungle_runtime.draw_count(), 5_386);
 
     let jungle_completion_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&jungle_nsd, &jungle_nsf, &jungle_nsf_bytes);
@@ -46327,8 +46327,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             0,
         ]
     );
-    assert_eq!(jungle_completion_carry.random_seed, 0x679d_ffe4);
-    assert_eq!(jungle_completion_carry.draw_count, 5_435);
+    assert_eq!(jungle_completion_carry.random_seed, 0xb8c1_1011);
+    assert_eq!(jungle_completion_carry.draw_count, 5_386);
     let jungle_completion_runtime = RetailRuntime::new_from_session(
         GLOBAL_WORDS,
         LevelId::LEVEL_COMPLETE,
@@ -46347,7 +46347,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         COMPLETION_FRAMES,
     )
     .expect("Jungle Rollers' Level Complete runtime must execute");
-    assert_eq!(jungle_completion_survey.frames, 345);
+    assert_eq!(jungle_completion_survey.frames, 393);
     assert_eq!(jungle_completion_survey.zone_transitions, 0);
     assert_eq!(jungle_completion_survey.restarts, 0);
     assert!(jungle_completion_survey.restart_frames.is_empty());
@@ -46356,7 +46356,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     assert!(jungle_completion_survey.first_terminal_fall.is_none());
     assert_eq!(
         jungle_completion_survey.next_lid,
-        Some((345, i32::try_from(LevelId::TITLE.get()).unwrap()))
+        Some((393, i32::try_from(LevelId::TITLE.get()).unwrap()))
     );
     assert_eq!(jungle_completion_survey.faulted_objects, 0);
     assert_eq!(jungle_completion_survey.execution_errors, 0);
@@ -46395,9 +46395,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     );
     assert_eq!(
         jungle_completion_runtime.machine().random_seed(),
-        0x73cd_1aca
+        0x1bf4_a635
     );
-    assert_eq!(jungle_completion_runtime.draw_count(), 5_780);
+    assert_eq!(jungle_completion_runtime.draw_count(), 5_779);
 
     let post_jungle_title_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -46440,16 +46440,16 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             0,
         ]
     );
-    assert_eq!(post_jungle_title_carry.random_seed, 0x73cd_1aca);
-    assert_eq!(post_jungle_title_carry.draw_count, 5_780);
+    assert_eq!(post_jungle_title_carry.random_seed, 0x1bf4_a635);
+    assert_eq!(post_jungle_title_carry.draw_count, 5_779);
     let mut post_jungle_map = AuthoredTitleMapHarness::from_session(
         &title_nsd,
         &title_nsf,
         &title_nsf_bytes,
         post_jungle_title_carry,
     );
-    assert_eq!(post_jungle_map.runtime.draw_count(), 5_780);
-    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x73cd_1aca);
+    assert_eq!(post_jungle_map.runtime.draw_count(), 5_779);
+    assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x1bf4_a635);
     post_jungle_map.wait_until_ready(64);
     assert_eq!(post_jungle_map.frame, 10);
     for _ in 0..120 {
@@ -46495,7 +46495,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     );
     assert_eq!(post_jungle_map.runtime.faulted_object_count(), 0);
     assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x2f32_c56e);
-    assert_eq!(post_jungle_map.runtime.draw_count(), 6_033);
+    assert_eq!(post_jungle_map.runtime.draw_count(), 6_032);
 
     let great_gate_carry: RetailSessionCarry = {
         let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -46537,7 +46537,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         ]
     );
     assert_eq!(great_gate_carry.random_seed, 0x2f32_c56e);
-    assert_eq!(great_gate_carry.draw_count, 6_033);
+    assert_eq!(great_gate_carry.draw_count, 6_032);
     let (great_gate_nsd, great_gate_nsf, great_gate_nsf_bytes) =
         parse_local_pair(&root, great_gate).expect("The Great Gate pair must parse");
     let great_gate_runtime =

@@ -765,7 +765,7 @@ fn sunset_vista_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.spawn_attempts, 103_015);
     assert_eq!(survey.expected_spawn_rejections, 102_741);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 220_788);
+    assert_eq!(survey.executions, 220_793);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.final_live_objects, 23);
     assert_eq!(survey.max_live_objects, 47);
@@ -862,6 +862,160 @@ fn sunset_vista_direct_boot_reaches_authored_end_warp() {
     assert!(!report.resolved.bonus_return);
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn sunset_vista_cortex_tokens_round_trip_the_exact_parent_snapshot() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let parent = LevelId::new_const(0x23);
+    let bonus = LevelId::new_const(0x34);
+    let known_name = |level| {
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("the Cortex route level is present in the retail catalog")
+    };
+
+    let (parent_nsd, parent_nsf, parent_nsf_bytes) =
+        parse_local_pair(&root, parent).expect("Sunset Vista pair must parse");
+    let (parent_survey, mut parent_runtime) = survey_pair_with_runtime(
+        known_name(parent),
+        parent,
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::SunsetVistaCortexBonusRoute,
+        7_500,
+    )
+    .expect("ordinary pad input must collect Sunset Vista's three Cortex tokens");
+
+    assert_eq!(parent_survey.next_lid, Some((6_963, 0x34)));
+    assert_eq!(
+        parent_survey.terminal.as_deref(),
+        Some("frame 6963 requested level transition to 0x34")
+    );
+    assert_eq!(parent_survey.restarts, 0, "{}", parent_survey.summary());
+    assert!(parent_survey.restart_frames.is_empty());
+    assert_eq!(parent_survey.effect_counts.get("save-state"), Some(&4));
+    assert_eq!(parent_survey.effect_counts.get("transition"), Some(&1));
+    assert!(!parent_survey.effect_counts.contains_key("load-state"));
+    for (entity, flags) in [(202, 14), (175, 11), (210, 14)] {
+        assert!(
+            parent_survey
+                .spawn_flag_samples
+                .iter()
+                .any(|(_, observed_entity, observed_flags)| {
+                    (*observed_entity, *observed_flags) == (entity, flags)
+                }),
+            "Cortex token entity {entity} must complete its authored pickup handshake"
+        );
+    }
+    let ordinary_parent_pad = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        parent_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_parent_pad == 0),
+        "the parent route must use ordinary pad input only"
+    );
+    assert!(parent_survey.is_clean(), "{}", parent_survey.summary());
+    assert_eq!(parent_runtime.global_word(60), Ok(9));
+    assert_eq!(
+        parent_runtime.global_word(CHECKPOINT_ID_GLOBAL),
+        Ok(210 << 8)
+    );
+    let exact_parent_snapshot = parent_runtime
+        .saved_level_state()
+        .cloned()
+        .expect("the third Cortex token must save Sunset Vista's complete return state");
+    assert_eq!(exact_parent_snapshot.level, parent);
+    assert_eq!(exact_parent_snapshot.box_count, 0x1200);
+    assert_eq!(exact_parent_snapshot.player_translation, [0, 42_496, 0]);
+
+    let parent_transition = {
+        let mut host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
+        parent_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(bonus.get()).expect("bonus LID fits i32"),
+            )
+            .expect("Sunset Vista LEVEL_END must preserve the Cortex bonus target")
+    };
+    assert!(parent_transition.event_failures.is_empty());
+    assert_eq!(parent_transition.resolved.level, bonus);
+    assert!(!parent_transition.resolved.bonus_return);
+    assert_eq!(
+        parent_transition.carry.saved_level_state.as_ref(),
+        Some(&exact_parent_snapshot)
+    );
+
+    let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
+        parse_local_pair(&root, bonus).expect("Cortex Bonus pair must parse");
+    let bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, parent_transition.carry)
+            .expect("Cortex Bonus must import Sunset Vista's complete session carry");
+    assert_eq!(bonus_runtime.global_word(60), Ok(9));
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&exact_parent_snapshot)
+    );
+    let (bonus_survey, mut bonus_runtime) = survey_pair_with_runtime(
+        known_name(bonus),
+        bonus,
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        bonus_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::CortexBonusCompletionRoute,
+        900,
+    )
+    .expect("ordinary pad input must traverse Cortex Bonus and request its carried return");
+
+    assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
+    assert!(bonus_survey.restart_frames.is_empty());
+    assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
+    assert!(!bonus_survey.effect_counts.contains_key("transition"));
+    assert_eq!(bonus_survey.next_lid, None);
+    assert_eq!(
+        bonus_survey.terminal.as_deref(),
+        Some("requested cross-level restart from 0x34 to 0x23")
+    );
+    let ordinary_bonus_pad = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        bonus_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_bonus_pad == 0),
+        "the Cortex Bonus route must use ordinary pad input only"
+    );
+    assert!(bonus_survey.is_clean(), "{}", bonus_survey.summary());
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&exact_parent_snapshot),
+        "the bonus LoadState handshake must retain every parent-snapshot field"
+    );
+
+    let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    let return_transition = bonus_runtime
+        .finish_level_transition(&mut bonus_host, -2)
+        .expect("Cortex Bonus LEVEL_END must resolve the carried Sunset Vista snapshot");
+    assert!(return_transition.event_failures.is_empty());
+    assert_eq!(return_transition.next_lid_after_event, -2);
+    assert_eq!(return_transition.resolved.level, parent);
+    assert!(return_transition.resolved.bonus_return);
+    assert_eq!(
+        return_transition.carry.saved_level_state.as_ref(),
+        Some(&exact_parent_snapshot),
+        "the returned carry must be exactly the snapshot saved by token 210"
+    );
+}
+
 fn progression_frame_count() -> u32 {
     std::env::var("C1_PROGRESSION_FRAMES")
         .ok()
@@ -923,6 +1077,7 @@ enum SurveyInputProfile {
     RoadToNowhereCompletionRoute,
     HighRoadCompletionRoute,
     SunsetVistaCompletionRoute,
+    SunsetVistaCortexBonusRoute,
     PapuPapuCompletionRoute,
     KoalaKongCompletionRoute,
     PinstripeCompletionRoute,
@@ -997,6 +1152,7 @@ impl SurveyInputProfile {
             Self::RoadToNowhereCompletionRoute => "road-to-nowhere-completion-route",
             Self::HighRoadCompletionRoute => "high-road-completion-route",
             Self::SunsetVistaCompletionRoute => "sunset-vista-completion-route",
+            Self::SunsetVistaCortexBonusRoute => "sunset-vista-cortex-bonus-route",
             Self::PapuPapuCompletionRoute => "papu-papu-completion-route",
             Self::KoalaKongCompletionRoute => "koala-kong-completion-route",
             Self::PinstripeCompletionRoute => "pinstripe-completion-route",
@@ -1058,6 +1214,7 @@ impl SurveyInputProfile {
                 | Self::RoadToNowhereCompletionRoute
                 | Self::HighRoadCompletionRoute
                 | Self::SunsetVistaCompletionRoute
+                | Self::SunsetVistaCortexBonusRoute
                 | Self::PapuPapuCompletionRoute
                 | Self::KoalaKongCompletionRoute
                 | Self::PinstripeCompletionRoute
@@ -21285,6 +21442,9 @@ struct HighRoadCompletionRouteController {
     sunset_wait: u16,
     sunset_stage: u8,
     sunset_attack_tick: u8,
+    collect_sunset_cortex_tokens: bool,
+    sunset_token_detour_stage: u8,
+    sunset_token_detour_tick: u16,
 }
 
 #[allow(clippy::match_same_arms)] // This is a named route-parameter lookup table.
@@ -21490,7 +21650,13 @@ fn sunset_bootstrap_input(tick: u32) -> u32 {
 }
 
 impl HighRoadCompletionRouteController {
-    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
         let Some(player) = player else {
             return 0;
         };
@@ -23040,6 +23206,215 @@ impl HighRoadCompletionRouteController {
                 };
                 return horizontal | lane | PAD_CROSS;
             }
+            // Sunset Vista hides its first Cortex-token crate in the depth
+            // branch opened by switch crate 156. The ordinary completion
+            // route crosses this `ix_zZ` bank in the foreground; the bonus
+            // route instead doubles back through the opened lane, spins the
+            // token crate, waits for its physical pickup, and rejoins `i4`.
+            if self.collect_sunset_cortex_tokens
+                && self.sunset_stage == 132
+                && self.sunset_token_detour_stage == 0
+            {
+                self.sunset_token_detour_stage = 9;
+                self.sunset_token_detour_tick = 0;
+            }
+            if self.sunset_token_detour_stage == 9 {
+                if player_collider_entity == Some(156) && player.status_a & 1 != 0 {
+                    self.sunset_token_detour_stage = 10;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_RIGHT;
+                }
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                let horizontal = match self.sunset_token_detour_tick {
+                    1..=6 | 18.. => PAD_RIGHT,
+                    9..=17 => PAD_LEFT,
+                    _ => 0,
+                };
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | lane | PAD_CROSS;
+            }
+            if self.sunset_token_detour_stage == 10 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                let bank_is_live = objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 201)
+                        && object.status_b & 0x10 != 0
+                });
+                if bank_is_live {
+                    self.sunset_token_detour_stage = 1;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_RIGHT;
+                }
+                let horizontal = if player.translation[0] < 22_590_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_670_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] < 180_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let spin = if (9..=20).contains(&self.sunset_token_detour_tick) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+                if self.sunset_token_detour_tick > 45 && player.status_a & 1 != 0 {
+                    self.sunset_token_detour_stage = 9;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_LEFT;
+                }
+                return horizontal | lane | PAD_CROSS | spin;
+            }
+            if self.sunset_token_detour_stage == 1 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                // After checkpoint crate 156 opens the main path, step right
+                // to the narrow elevated opening into the depth lane.
+                if player.translation[0] >= 23_120_000 {
+                    self.sunset_token_detour_stage = 2;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_LEFT | PAD_UP | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.sunset_token_detour_stage == 2 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                if player.translation[2] <= -245_000 {
+                    self.sunset_token_detour_stage = 3;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                let horizontal = if player.translation[0] < 23_200_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 23_280_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_UP | PAD_CROSS;
+            }
+            if self.sunset_token_detour_stage == 3 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                if player.cortex_counter >= 0x100 {
+                    self.sunset_token_detour_stage = 4;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_RIGHT | PAD_DOWN;
+                }
+                if self.sunset_token_detour_tick <= 40 {
+                    return PAD_UP;
+                }
+                if player.translation[0] <= 22_180_000 && player.status_a & 1 != 0 {
+                    self.sunset_token_detour_stage = 6;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_CROSS | PAD_SQUARE;
+                }
+                let horizontal = if player.translation[0] > 22_000_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_930_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] > -350_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal
+                    | lane
+                    | if player.translation[0] > 22_300_000 && player.status_a & 1 != 0 {
+                        PAD_CROSS
+                    } else {
+                        0
+                    };
+            }
+            if self.sunset_token_detour_stage == 6 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                if player.cortex_counter >= 0x100 {
+                    self.sunset_token_detour_stage = 4;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_RIGHT | PAD_DOWN;
+                }
+                let horizontal = if player.translation[0] > 22_000_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 21_930_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.translation[2] > -360_000 {
+                    PAD_UP
+                } else if player.translation[2] < -390_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                let attack = if self.sunset_token_detour_tick.is_multiple_of(20) {
+                    PAD_CROSS | PAD_SQUARE
+                } else {
+                    0
+                };
+                return horizontal | lane | attack;
+            }
+            if self.sunset_token_detour_stage == 4 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                if player.translation[2] >= 205_000 && player.translation[0] >= 23_180_000 {
+                    self.sunset_token_detour_stage = 11;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_LEFT;
+                }
+                if player.translation[0] < 23_120_000 {
+                    return PAD_RIGHT;
+                }
+                let horizontal = if player.translation[0] < 23_200_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 23_280_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return horizontal | PAD_DOWN | PAD_CROSS;
+            }
+            if self.sunset_token_detour_stage == 11 {
+                if player.translation[0] <= 22_050_000 && player.status_a & 1 != 0 {
+                    self.sunset_token_detour_stage = 12;
+                    self.sunset_token_detour_tick = 0;
+                    return PAD_RIGHT;
+                }
+                return PAD_LEFT;
+            }
+            if self.sunset_token_detour_stage == 12 {
+                self.sunset_token_detour_tick = self.sunset_token_detour_tick.saturating_add(1);
+                let horizontal = if player.translation[0] < 21_980_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 22_080_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if self.sunset_token_detour_tick >= 20 && player.status_a & 1 != 0 {
+                    self.sunset_token_detour_stage = 5;
+                    self.sunset_stage = 132;
+                    self.sunset_attack_tick = 0;
+                    return PAD_RIGHT;
+                }
+                let lane = if self.sunset_token_detour_tick <= 2 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return horizontal | lane;
+            }
             if self.sunset_stage == 132
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
@@ -23186,10 +23561,14 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let wait = sunset_var("C1_SUNSET_STAGE140_WAIT")
-                    .ok()
-                    .and_then(|value| value.parse::<u8>().ok())
-                    .unwrap_or(29);
+                let wait = if self.collect_sunset_cortex_tokens {
+                    0
+                } else {
+                    sunset_var("C1_SUNSET_STAGE140_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(29)
+                };
                 if tick < wait {
                     return if player.translation[0] > 24_320_000 {
                         PAD_LEFT
@@ -23209,13 +23588,29 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let lane = if player.translation[2] < 180_000 {
+                let (lane_min, lane_max) = if self.collect_sunset_cortex_tokens {
+                    (225_000, 235_000)
+                } else {
+                    (180_000, 230_000)
+                };
+                let lane = if player.translation[2] < lane_min {
                     PAD_DOWN
-                } else if player.translation[2] > 230_000 {
+                } else if player.translation[2] > lane_max {
                     PAD_UP
                 } else {
                     0
                 };
+                if self.collect_sunset_cortex_tokens {
+                    if player.status_a & 1 != 0 {
+                        if self.sunset_attack_tick == 0 {
+                            self.sunset_attack_tick = 1;
+                            return PAD_RIGHT | lane;
+                        }
+                        self.sunset_attack_tick = 0;
+                    } else {
+                        self.sunset_attack_tick = 0;
+                    }
+                }
                 return PAD_RIGHT | lane | PAD_CROSS;
             }
             if self.sunset_stage == 142
@@ -23248,7 +23643,12 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 145
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
-                if player.status_a & 1 != 0 && player.translation[0] > 25_650_000 {
+                let stage_end = if self.collect_sunset_cortex_tokens {
+                    25_760_000
+                } else {
+                    25_650_000
+                };
+                if player.status_a & 1 != 0 && player.translation[0] > stage_end {
                     self.sunset_stage = 146;
                     self.sunset_attack_tick = 0;
                     return 0;
@@ -23361,6 +23761,7 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 149;
                         self.sunset_attack_tick = 0;
+                        self.jump_hold = 0;
                         return 0;
                     }
                     let tick = self.sunset_attack_tick;
@@ -23369,10 +23770,14 @@ impl HighRoadCompletionRouteController {
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(8);
+                    let lane = 0;
+                    if self.collect_sunset_cortex_tokens && player.translation[0] > 27_000_000 {
+                        return PAD_RIGHT;
+                    }
                     return sunset_var("C1_SUNSET_STAGE148_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
-                        .unwrap_or(PAD_RIGHT | if tick < run { 0 } else { PAD_CROSS });
+                        .unwrap_or(PAD_RIGHT | lane | if tick < run { 0 } else { PAD_CROSS });
                 }
                 self.sunset_stage = 149;
                 self.sunset_attack_tick = 0;
@@ -23385,15 +23790,53 @@ impl HighRoadCompletionRouteController {
                     if player.status_a & 1 != 0
                         && player.translation[0] > 27_500_000
                         && player.translation[1] > -10_800_000
+                        && (!self.collect_sunset_cortex_tokens || self.sunset_attack_tick >= 30)
                     {
                         self.sunset_stage = 150;
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
+                    if self.collect_sunset_cortex_tokens {
+                        let tick = self.sunset_attack_tick;
+                        self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                        if tick < 2 {
+                            return PAD_LEFT;
+                        }
+                        let ruin = Eid::from_name("RuiOC").expect("fixed Sunset ruin EID is valid");
+                        let rolling_stones_are_active = objects.iter().any(|object| {
+                            object.program == ruin
+                                && matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 42,
+                                        subtype: 11
+                                    }
+                                )
+                                && object.frame_bound.is_some()
+                        });
+                        if rolling_stones_are_active {
+                            return 0;
+                        }
+                        if self.jump_hold < 8 {
+                            self.jump_hold += 1;
+                            return PAD_RIGHT;
+                        }
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
+                    let lane = 0;
                     return sunset_var("C1_SUNSET_STAGE149_TEST")
                         .ok()
                         .and_then(|value| value.parse::<u32>().ok())
-                        .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                        .unwrap_or(
+                            PAD_RIGHT
+                                | lane
+                                | PAD_CROSS
+                                | if self.collect_sunset_cortex_tokens {
+                                    PAD_SQUARE
+                                } else {
+                                    0
+                                },
+                        );
                 }
                 if player.status_a & 1 != 0 && player.translation[0] > 26_600_000 {
                     self.sunset_stage = 150;
@@ -23570,7 +24013,11 @@ impl HighRoadCompletionRouteController {
                 {
                     self.sunset_stage = 158;
                     self.sunset_attack_tick = 0;
-                    return 0;
+                    return if self.collect_sunset_cortex_tokens {
+                        PAD_RIGHT | PAD_CROSS
+                    } else {
+                        0
+                    };
                 }
                 return sunset_var("C1_SUNSET_STAGE157_TEST")
                     .ok()
@@ -23586,10 +24033,34 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
+                if self.collect_sunset_cortex_tokens
+                    && player.status_a & 1 != 0
+                    && player.translation[0] > 31_900_000
+                    && self.sunset_attack_tick == 0
+                {
+                    // The token detour reaches this ledge one authored hazard
+                    // phase later. Release Cross on landing so the next sample
+                    // starts a fresh jump across the second half of the gap.
+                    self.sunset_attack_tick = 1;
+                    return PAD_RIGHT;
+                }
+                let lane = if self.collect_sunset_cortex_tokens
+                    && player.translation[0] < 31_950_000
+                    && player.translation[2] < 270_000
+                {
+                    PAD_DOWN
+                } else if self.collect_sunset_cortex_tokens
+                    && player.translation[0] < 31_950_000
+                    && player.translation[2] > 285_000
+                {
+                    PAD_UP
+                } else {
+                    0
+                };
                 return sunset_var("C1_SUNSET_STAGE158_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
-                    .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                    .unwrap_or(PAD_RIGHT | lane | PAD_CROSS);
             }
             if self.sunset_stage == 159 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
                 if player.status_a & 1 != 0
@@ -23745,6 +24216,27 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
+                if self.collect_sunset_cortex_tokens && player.translation[0] < 35_800_000 {
+                    let rotating_walls_are_open = [208, 209].into_iter().all(|id| {
+                        objects
+                            .iter()
+                            .find(|object| {
+                                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == id)
+                            })
+                            .is_some_and(|object| object.frame_bound.is_none())
+                    });
+                    if !rotating_walls_are_open {
+                        return 0;
+                    }
+                }
+                if self.collect_sunset_cortex_tokens
+                    && player.status_a & 1 != 0
+                    && player.translation[0] > 35_950_000
+                    && self.sunset_attack_tick == 0
+                {
+                    self.sunset_attack_tick = 1;
+                    return PAD_RIGHT;
+                }
                 return sunset_var("C1_SUNSET_STAGE168_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -23765,8 +24257,13 @@ impl HighRoadCompletionRouteController {
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
             if self.sunset_stage == 170 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let stage_end = if self.collect_sunset_cortex_tokens {
+                    37_000_000
+                } else {
+                    37_080_000
+                };
                 if player.status_a & 1 != 0
-                    && player.translation[0] > 37_080_000
+                    && player.translation[0] > stage_end
                     && player.translation[1] > -11_250_000
                 {
                     self.sunset_stage = 171;
@@ -32523,6 +33020,12 @@ impl SurveyInputController {
                 sunset_wait: 0,
                 sunset_stage: 0,
                 sunset_attack_tick: 0,
+                collect_sunset_cortex_tokens: matches!(
+                    profile,
+                    SurveyInputProfile::SunsetVistaCortexBonusRoute
+                ),
+                sunset_token_detour_stage: 0,
+                sunset_token_detour_tick: 0,
             },
             papu_papu: PapuPapuCompletionRouteController {
                 started: false,
@@ -32568,6 +33071,7 @@ impl SurveyInputController {
             self.profile,
             SurveyInputProfile::HighRoadCompletionRoute
                 | SurveyInputProfile::SunsetVistaCompletionRoute
+                | SurveyInputProfile::SunsetVistaCortexBonusRoute
         ) {
             self.high_road.jump_hold = 0;
         }
@@ -32785,7 +33289,11 @@ impl SurveyInputController {
                     .held(camera, player, player_collider_entity, route_objects)
             }
             SurveyInputProfile::HighRoadCompletionRoute
-            | SurveyInputProfile::SunsetVistaCompletionRoute => self.high_road.held(camera, player),
+            | SurveyInputProfile::SunsetVistaCompletionRoute
+            | SurveyInputProfile::SunsetVistaCortexBonusRoute => {
+                self.high_road
+                    .held(camera, player, player_collider_entity, route_objects)
+            }
             SurveyInputProfile::PapuPapuCompletionRoute => {
                 self.papu_papu.held(camera, player, boss_state)
             }
@@ -32836,6 +33344,7 @@ struct PlayerTrace {
     state_flags: u32,
     status_a: u32,
     status_b: u32,
+    cortex_counter: u32,
     tawna_counter: u32,
     event: u32,
     animation_stamp: u32,
@@ -32866,6 +33375,7 @@ struct ProgramObjectTrace {
     frame_bound: Option<Bounds3>,
     bound: Option<Bounds3>,
     animation_counter: u32,
+    status_b: u32,
     register_72: u32,
 }
 
@@ -34148,6 +34658,7 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
         state_flags: register(process_register::STATE_FLAGS)?,
         status_a: register(process_register::STATUS_A)?,
         status_b: register(process_register::STATUS_B)?,
+        cortex_counter: register(0x46)?,
         tawna_counter: register(0x48)?,
         event: register(process_register::EVENT)?,
         animation_stamp: register(process_register::ANIMATION_STAMP)?,
@@ -34251,6 +34762,7 @@ fn program_object_traces(
                 }))
             }),
             animation_counter: register(process_register::ANIMATION_COUNTER)?,
+            status_b: register(process_register::STATUS_B)?,
             register_72: register(72)?,
         });
     }
@@ -35119,6 +35631,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCortexBonusRoute
             ) {
             player_collider_entity(&runtime)?
         } else {
@@ -35225,6 +35738,16 @@ fn survey_pair_with_runtime(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
             )?,
+            SurveyInputProfile::SunsetVistaCompletionRoute
+            | SurveyInputProfile::SunsetVistaCortexBonusRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("BoxsC").expect("fixed Sunset crate EID is valid"),
+                    Eid::from_name("FruiC").expect("fixed Sunset pickup EID is valid"),
+                    Eid::from_name("RWaOC").expect("fixed Sunset platform EID is valid"),
+                    Eid::from_name("RuiOC").expect("fixed Sunset ruin EID is valid"),
+                ],
+            )?,
             _ => Vec::new(),
         };
         let pinstripe_boss_state =
@@ -35288,6 +35811,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::JawsOfDarknessCompletionRoute
                 | SurveyInputProfile::LabCompletionRoute
                 | SurveyInputProfile::SunsetVistaCompletionRoute
+                | SurveyInputProfile::SunsetVistaCortexBonusRoute
                 | SurveyInputProfile::SlipperyClimbCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
@@ -35652,6 +36176,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
                     | SurveyInputProfile::SunsetVistaCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCortexBonusRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             )
             && (matches!(
@@ -35664,6 +36189,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
                     | SurveyInputProfile::SunsetVistaCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCortexBonusRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) || frame >= 300
                 || frame <= 120)

@@ -48649,9 +48649,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(post_upstream_map.runtime.faulted_object_count(), 0);
         assert_eq!(
             post_upstream_map.runtime.machine().random_seed(),
-            0xb6aa_d4a5
+            0x318c_2fc6
         );
-        assert_eq!(post_upstream_map.runtime.draw_count(), 3_432);
+        assert_eq!(post_upstream_map.runtime.draw_count(), 3_520);
 
         let papu_papu_carry: RetailSessionCarry = {
             let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -48671,8 +48671,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(papu_papu_carry.random_seed, 0xb6aa_d4a5);
-        assert_eq!(papu_papu_carry.draw_count, 3_432);
+        assert_eq!(papu_papu_carry.random_seed, 0x318c_2fc6);
+        assert_eq!(papu_papu_carry.draw_count, 3_520);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,

@@ -805,7 +805,7 @@ impl ObjectArena {
     /// runtime program may later replace that word. Native teardown reads the
     /// live process word, so the paired runtime supplies its validated ID here
     /// instead of relying on immutable arena provenance.
-    pub fn despawn_leaf_with_spawn_id(
+    pub(crate) fn despawn_leaf_with_spawn_id(
         &mut self,
         object: ObjectHandle,
         spawn_id: u16,

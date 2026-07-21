@@ -674,6 +674,7 @@ enum SurveyInputProfile {
     BoulderDashCompletionRoute,
     CortexPowerCompletionRoute,
     GeneratorRoomCompletionRoute,
+    JawsOfDarknessCompletionRoute,
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
@@ -742,6 +743,7 @@ impl SurveyInputProfile {
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
             Self::CortexPowerCompletionRoute => "cortex-power-completion-route",
             Self::GeneratorRoomCompletionRoute => "generator-room-completion-route",
+            Self::JawsOfDarknessCompletionRoute => "jaws-of-darkness-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
@@ -797,6 +799,7 @@ impl SurveyInputProfile {
                 | Self::BoulderDashCompletionRoute
                 | Self::CortexPowerCompletionRoute
                 | Self::GeneratorRoomCompletionRoute
+                | Self::JawsOfDarknessCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
@@ -24490,6 +24493,2353 @@ impl RoadToNowhereRouteController {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
+struct JawsOfDarknessCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    platform_jump_delay: u8,
+    last_platform_entity: Option<u16>,
+    waiting_for_first_flame: bool,
+    first_flame_active_seen: bool,
+    opening_stage: u8,
+    opening_airborne_seen: bool,
+    a2_gap_launched: bool,
+    a4_gap_launched: bool,
+    corner_jump_launched: bool,
+    corner_relaunch_stage: u8,
+    a7_rat_attack_fired: bool,
+    b0_axe_stage: u8,
+    b0_axe_peak_z: i32,
+    b1_platform_stage: u8,
+    b1_platform_last_y: i32,
+    b2_corner_stage: u8,
+    b3_shuttle_stage: u8,
+    b5_entry_attack_fired: bool,
+    b5_runup_start_z: Option<i32>,
+    b5_spear_wait_done: bool,
+    b5_spear_launch_pending: bool,
+    b5_fire_wait_done: bool,
+    b7_spider_stage: u8,
+    b7_checkpoint_attack_fired: bool,
+    b9_pillar_stage: u8,
+    c0_platform_target: Option<VmObjectHandle>,
+    c0_platform_landings: u8,
+    c3_plant_stage: u8,
+    c4_island_stage: u8,
+    c5_trap_stage: u8,
+    c5_trap_wait_frames: u8,
+    c6_gap_stage: u8,
+    c7_crusher_stage: u8,
+    c9_platform_stage: u8,
+    d1_spear_stage: u8,
+    d1_spear_active_seen: bool,
+    d7_turn_stage: u8,
+}
+
+impl JawsOfDarknessCompletionRouteController {
+    fn path_direction(camera: RetailCameraLocation) -> u32 {
+        let zone = camera.path.zone;
+        let path = camera.path.index;
+        let is =
+            |name| zone == Eid::from_name(name).expect("fixed Jaws of Darkness zone EID is valid");
+
+        if ["a0_tZ", "a1_tZ", "a2_tZ", "a3_tZ", "a4_tZ", "a5_tZ"]
+            .into_iter()
+            .any(is)
+            || is("c5_tZ") && path == 1
+            || is("d7_tZ") && path == 1
+            || is("d8_tZ") && path == 2
+            || is("d9_tZ") && path == 0
+        {
+            PAD_RIGHT
+        } else if is("b2_tZ") && path == 1
+            || is("b3_tZ")
+            || is("b4_tZ")
+            || is("b7_tZ") && path == 1
+            || is("b8_tZ")
+            || is("b9_tZ") && path == 0
+            || is("c2_tZ")
+            || is("c3_tZ")
+            || is("d3_tZ") && path == 1
+            || is("d4_tZ")
+            || is("d5_tZ") && path == 1
+            || is("d6_tZ")
+        {
+            PAD_LEFT
+        } else if is("b5_tZ") || is("b6_tZ") || is("b7_tZ") && path == 0 {
+            PAD_DOWN
+        } else {
+            PAD_UP
+        }
+    }
+
+    fn platform_centering_direction(
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+        entity: u16,
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let Some(platform) = objects.iter().find_map(|object| match object.origin {
+            ObjectOrigin::Entity(descriptor) if descriptor.id == entity => Some(object.translation),
+            _ => None,
+        }) else {
+            return 0;
+        };
+        let x = if player.velocity[0] < -100_000 {
+            PAD_RIGHT
+        } else if player.velocity[0] > 100_000
+            || player.translation[0] > platform[0].saturating_add(20_000)
+        {
+            PAD_LEFT
+        } else if player.translation[0] < platform[0].saturating_sub(20_000) {
+            PAD_RIGHT
+        } else {
+            0
+        };
+        let z = if player.velocity[2] < -100_000 {
+            PAD_DOWN
+        } else if player.velocity[2] > 100_000
+            || player.translation[2] > platform[2].saturating_add(20_000)
+        {
+            PAD_UP
+        } else if player.translation[2] < platform[2].saturating_sub(20_000) {
+            PAD_DOWN
+        } else {
+            0
+        };
+        x | z
+    }
+
+    fn move_toward(translation: [i32; 3], target_x: i32, target_z: i32) -> u32 {
+        let mut held = 0;
+        if translation[0] < target_x - 20_000 {
+            held |= PAD_RIGHT;
+        } else if translation[0] > target_x + 20_000 {
+            held |= PAD_LEFT;
+        }
+        if translation[2] > target_z + 20_000 {
+            held |= PAD_UP;
+        } else if translation[2] < target_z - 20_000 {
+            held |= PAD_DOWN;
+        }
+        held
+    }
+
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        collider_entity: Option<u16>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let mut direction = Self::path_direction(camera);
+        let corner_zone = camera.path.zone
+            == Eid::from_name("a5_tZ").expect("fixed Jaws corner-approach zone EID is valid")
+            || camera.path.zone
+                == Eid::from_name("a6_tZ").expect("fixed Jaws corner zone EID is valid");
+        let a7_zone = camera.path.zone
+            == Eid::from_name("a7_tZ").expect("fixed Jaws rat-corridor zone EID is valid");
+        let attack =
+            if self.corner_jump_launched && corner_zone || a7_zone || self.b3_shuttle_stage >= 2 {
+                0
+            } else if self.tick % 12 < 3 {
+                PAD_SQUARE
+            } else {
+                0
+            };
+        let d6_turn_approach = camera.path.zone
+            == Eid::from_name("d6_tZ").expect("fixed Jaws late-turn approach EID is valid")
+            && camera.path.index == 0;
+        let d7_turn = camera.path.zone
+            == Eid::from_name("d7_tZ").expect("fixed Jaws late-corridor turn EID is valid")
+            && camera.path.index == 0;
+        if d7_turn && self.d7_turn_stage == 0 {
+            self.d7_turn_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+        }
+        if self.d7_turn_stage == 1 && (d6_turn_approach || d7_turn) {
+            if player.is_some_and(|player| {
+                player.velocity[0] < -100_000 || player.translation[0] < 10_940_000
+            }) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 2;
+            return PAD_LEFT;
+        }
+        if self.d7_turn_stage == 2 && (d6_turn_approach || d7_turn) {
+            if player.is_some_and(|player| player.velocity[0] > 100_000) {
+                return PAD_LEFT;
+            }
+            self.d7_turn_stage = 3;
+            self.jump_frames = 45;
+            self.release_frames = 4;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 3 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 11_080_000
+            }) {
+                self.d7_turn_stage = 4;
+                self.jump_frames = 0;
+                self.release_frames = 4;
+                return PAD_LEFT;
+            }
+            let mut toward_crates =
+                if player.is_some_and(|player| player.translation[0] >= 11_100_000) {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            if player.is_some_and(|player| player.translation[2] > 21_750_000) {
+                toward_crates |= PAD_UP;
+            } else if player.is_some_and(|player| player.translation[2] < 21_650_000) {
+                toward_crates |= PAD_DOWN;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return toward_crates | PAD_CROSS;
+            }
+            return toward_crates;
+        }
+        if self.d7_turn_stage == 4 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            self.d7_turn_stage = 5;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        let crate_bridge_direction = |brake_x: i32| {
+            let mut held = if player.is_some_and(|player| player.translation[0] >= brake_x) {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if player.is_some_and(|player| player.translation[2] > 21_750_000) {
+                held |= PAD_UP;
+            } else if player.is_some_and(|player| player.translation[2] < 21_650_000) {
+                held |= PAD_DOWN;
+            }
+            held
+        };
+        if self.d7_turn_stage == 5 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 11_450_000
+            }) {
+                self.d7_turn_stage = 6;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return crate_bridge_direction(11_494_000) | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 6 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[0] < 11_580_000) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 7;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 7 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 11_850_000
+            }) {
+                self.d7_turn_stage = 8;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return crate_bridge_direction(11_920_000) | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 8 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            self.d7_turn_stage = 9;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 9 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 12_250_000
+            }) {
+                self.d7_turn_stage = 10;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return crate_bridge_direction(12_313_000) | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 10 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            self.d7_turn_stage = 11;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 11 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 12_480_000
+            }) {
+                self.d7_turn_stage = 12;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return crate_bridge_direction(12_520_000) | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 12 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[2] < 21_780_000) {
+                return PAD_DOWN;
+            }
+            self.d7_turn_stage = 13;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 13 {
+            if player.is_some_and(|player| player.velocity[2] > 100_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 14;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 14 {
+            if player.is_some_and(|player| player.translation[2] > 21_620_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 15;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 15 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 21_180_000
+            }) {
+                self.d7_turn_stage = 16;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_DOWN;
+            }
+            let mut toward_crate =
+                if player.is_some_and(|player| player.translation[2] <= 21_160_000) {
+                    PAD_DOWN
+                } else {
+                    PAD_UP
+                };
+            if player.is_some_and(|player| player.translation[0] < 12_570_000) {
+                toward_crate |= PAD_RIGHT;
+            } else if player.is_some_and(|player| player.translation[0] > 12_620_000) {
+                toward_crate |= PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return toward_crate | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 16 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[2] < 21_150_000) {
+                return PAD_DOWN;
+            }
+            self.d7_turn_stage = 17;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 17 {
+            if player.is_some_and(|player| player.velocity[2] > 100_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 18;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 18 {
+            if player.is_some_and(|player| player.translation[2] > 21_040_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 19;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 19 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 20_570_000
+            }) {
+                self.d7_turn_stage = 20;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_DOWN;
+            }
+            let mut toward_crate =
+                if player.is_some_and(|player| player.translation[2] <= 20_540_000) {
+                    PAD_DOWN
+                } else {
+                    PAD_UP
+                };
+            if player.is_some_and(|player| player.translation[0] < 12_570_000) {
+                toward_crate |= PAD_RIGHT;
+            } else if player.is_some_and(|player| player.translation[0] > 12_620_000) {
+                toward_crate |= PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return toward_crate | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 20 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[0] > 12_540_000) {
+                return PAD_LEFT;
+            }
+            self.d7_turn_stage = 40;
+            return PAD_RIGHT;
+        }
+        if self.d7_turn_stage == 40 {
+            if player.is_some_and(|player| player.velocity[0] < -100_000) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 41;
+            return PAD_RIGHT;
+        }
+        if self.d7_turn_stage == 41 {
+            if player.is_some_and(|player| player.translation[0] < 12_660_000) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 42;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 42 {
+            if collider_entity == Some(105) && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.d7_turn_stage = 43;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            let mut held = if player.is_some_and(|player| player.translation[0] >= 13_080_000) {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if player.is_some_and(|player| player.translation[2] > 20_530_000) {
+                held |= PAD_UP;
+            } else if player.is_some_and(|player| player.translation[2] < 20_430_000) {
+                held |= PAD_DOWN;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return held | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 43 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[0] > 13_060_000) {
+                return PAD_LEFT;
+            }
+            self.d7_turn_stage = 44;
+            return PAD_RIGHT;
+        }
+        if self.d7_turn_stage == 44 {
+            if player.is_some_and(|player| player.velocity[0] < -100_000) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 45;
+            return PAD_RIGHT;
+        }
+        if self.d7_turn_stage == 45 {
+            if player.is_some_and(|player| player.translation[0] < 13_180_000) {
+                return PAD_RIGHT;
+            }
+            self.d7_turn_stage = 46;
+            self.jump_frames = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 46 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 13_650_000
+            }) {
+                self.d7_turn_stage = 47;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_LEFT;
+            }
+            let mut held = if player.is_some_and(|player| player.translation[0] >= 13_760_000) {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
+            if player.is_some_and(|player| player.translation[2] > 20_630_000) {
+                held |= PAD_UP;
+            } else if player.is_some_and(|player| player.translation[2] < 20_500_000) {
+                held |= PAD_DOWN;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return held | PAD_CROSS;
+        }
+        if self.d7_turn_stage == 47 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[2] < 20_600_000) {
+                return PAD_DOWN;
+            }
+            self.d7_turn_stage = 48;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 48 {
+            if player.is_some_and(|player| player.velocity[2] > 100_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 49;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 49 {
+            if player.is_some_and(|player| player.translation[2] > 20_470_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 50;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 50 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 20_050_000
+            }) {
+                self.d7_turn_stage = 51;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            let mut held = if player.is_some_and(|player| player.translation[2] <= 19_980_000) {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            };
+            if player.is_some_and(|player| player.translation[0] < 13_680_000) {
+                held |= PAD_RIGHT;
+            } else if player.is_some_and(|player| player.translation[0] > 13_740_000) {
+                held |= PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 51 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            self.d7_turn_stage = 52;
+            self.release_frames = 1;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 70 {
+            if player.is_some_and(|player| player.velocity[2] < -100_000) {
+                return PAD_DOWN;
+            }
+            self.d7_turn_stage = 71;
+            self.jump_frames = 5;
+            return PAD_CROSS;
+        }
+        if self.d7_turn_stage == 71 {
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_CROSS;
+            }
+            self.d7_turn_stage = 59;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 72 {
+            let spin = if self.tick % 12 < 3 { PAD_SQUARE } else { 0 };
+            return PAD_UP | PAD_CROSS | spin;
+        }
+        if self.d7_turn_stage == 52 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            if player.is_some_and(|player| player.velocity[2] > 100_000) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.d7_turn_stage = 53;
+            return PAD_UP | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 53 {
+            if player.is_some_and(|player| player.translation[2] > 19_820_000) {
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.d7_turn_stage = 54;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 54 {
+            if collider_entity == Some(248) && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.d7_turn_stage = 55;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_DOWN;
+            }
+            let mut held = if player.is_some_and(|player| player.translation[2] <= 19_320_000) {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            };
+            if player.is_some_and(|player| player.translation[0] < 13_800_000) {
+                held |= PAD_RIGHT;
+            } else if player.is_some_and(|player| player.translation[0] > 13_845_000) {
+                held |= PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 55 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.status_a & 1 == 0) {
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[2] < 19_310_000) {
+                return PAD_DOWN;
+            }
+            self.d7_turn_stage = 56;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 56 {
+            if player.is_some_and(|player| player.velocity[2] > 100_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 57;
+            return PAD_UP;
+        }
+        if self.d7_turn_stage == 57 {
+            if player.is_some_and(|player| player.translation[2] > 19_170_000) {
+                return PAD_UP;
+            }
+            self.d7_turn_stage = 58;
+            self.jump_frames = 45;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 58 {
+            if collider_entity == Some(247) && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.d7_turn_stage = 59;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_DOWN;
+            }
+            let mut held = if player.is_some_and(|player| player.translation[2] <= 18_710_000) {
+                PAD_DOWN
+            } else {
+                PAD_UP
+            };
+            if player.is_some_and(|player| player.translation[0] < 13_790_000) {
+                held |= PAD_RIGHT;
+            } else if player.is_some_and(|player| player.translation[0] > 13_850_000) {
+                held |= PAD_LEFT;
+            }
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.d7_turn_stage == 59 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] < 15_700_000
+            }) {
+                self.d7_turn_stage = 72;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] < 17_100_000
+            }) {
+                self.d7_turn_stage = 70;
+                return PAD_DOWN;
+            }
+            let jump = if self.tick % 24 < 12 { PAD_CROSS } else { 0 };
+            let spin = if self.tick % 12 < 3 { PAD_SQUARE } else { 0 };
+            return PAD_UP | jump | spin;
+        }
+        let opening = camera.path.zone
+            == Eid::from_name("a0_tZ").expect("fixed Jaws opening-zone EID is valid")
+            && camera.path.index == 0;
+        if opening {
+            if self.opening_stage == 0 && collider_entity == Some(9) {
+                self.opening_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            if self.opening_stage == 1 {
+                if player.is_some_and(|player| player.status_a & 1 == 0) {
+                    self.opening_airborne_seen = true;
+                    return PAD_LEFT;
+                }
+                if self.opening_airborne_seen {
+                    self.opening_stage = 2;
+                    return PAD_RIGHT;
+                }
+                return PAD_LEFT;
+            }
+            if self.opening_stage == 2 {
+                if player.is_some_and(|player| player.translation[0] >= 16_050_000) {
+                    self.opening_stage = 3;
+                    self.jump_frames = 45;
+                    self.release_frames = 4;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_RIGHT;
+            }
+            if self.opening_stage == 0 && self.tick < 55 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.opening_stage == 0 && self.tick == 55 {
+                self.jump_frames = 45;
+                self.release_frames = 4;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+        }
+        let first_moving_platform_approach = camera.path.zone
+            == Eid::from_name("a2_tZ").expect("fixed Jaws moving-platform zone EID is valid")
+            && camera.path.index == 0
+            && !self.a2_gap_launched
+            && player.is_some_and(|player| player.translation[0] >= 18_150_000);
+        if first_moving_platform_approach {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| player.translation[0] >= 18_400_000) {
+                self.a2_gap_launched = true;
+                self.jump_frames = 44;
+                return PAD_RIGHT | PAD_CROSS | attack;
+            }
+            return PAD_RIGHT | attack;
+        }
+        let second_moving_platform_approach = camera.path.zone
+            == Eid::from_name("a4_tZ").expect("fixed Jaws second platform zone EID is valid")
+            && camera.path.index == 0
+            && !self.a4_gap_launched
+            && player.is_some_and(|player| player.translation[0] >= 20_400_000);
+        if second_moving_platform_approach {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player.is_some_and(|player| player.translation[0] >= 20_470_000) {
+                self.a4_gap_launched = true;
+                self.jump_frames = 44;
+                return PAD_RIGHT | PAD_CROSS | attack;
+            }
+            return PAD_RIGHT | attack;
+        }
+        let corner_approach = camera.path.zone
+            == Eid::from_name("a5_tZ").expect("fixed Jaws corner-approach zone EID is valid")
+            && camera.path.index == 0
+            && !self.corner_jump_launched
+            && player.is_some_and(|player| player.translation[0] >= 21_950_000);
+        if corner_approach {
+            self.corner_jump_launched = true;
+            self.jump_frames = 44;
+            self.release_frames = 0;
+            return PAD_UP | PAD_RIGHT | PAD_CROSS | attack;
+        }
+        if self.corner_jump_launched
+            && camera.path.zone
+                == Eid::from_name("a5_tZ").expect("fixed Jaws corner-approach zone EID is valid")
+            && player.is_some_and(|player| player.translation[0] > 22_240_000)
+        {
+            direction = PAD_UP | PAD_LEFT;
+        }
+        if !self.a7_rat_attack_fired
+            && camera.path.zone
+                == Eid::from_name("a7_tZ").expect("fixed Jaws rat-corridor zone EID is valid")
+            && player.is_some_and(|player| player.translation[2] <= 36_130_000)
+        {
+            self.a7_rat_attack_fired = true;
+            return direction | PAD_SQUARE;
+        }
+        let hold_first_flame_platform = || match player.map(|player| player.translation[0]) {
+            Some(x) if x < 19_740_000 => PAD_RIGHT,
+            Some(x) if x > 19_780_000 => PAD_LEFT,
+            _ => 0,
+        };
+        if self.waiting_for_first_flame {
+            let flames_active = objects.iter().any(|object| {
+                matches!(
+                    &object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 10,
+                    }
+                ) && object.state == 7
+            });
+            self.first_flame_active_seen |= flames_active;
+            if flames_active
+                || !self.first_flame_active_seen
+                || player.is_none_or(|player| player.translation[1] < 1_080_000)
+            {
+                return hold_first_flame_platform();
+            }
+            if player.is_some_and(|player| player.translation[0] < 19_835_000) {
+                return PAD_RIGHT | attack;
+            }
+            self.waiting_for_first_flame = false;
+            self.jump_frames = 44;
+            return PAD_RIGHT | PAD_CROSS | attack;
+        }
+        if collider_entity == Some(15) && self.last_platform_entity != Some(15) {
+            self.last_platform_entity = Some(15);
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.platform_jump_delay = 0;
+            self.waiting_for_first_flame = true;
+            self.first_flame_active_seen = false;
+            return hold_first_flame_platform();
+        }
+        if self.platform_jump_delay != 0 {
+            self.platform_jump_delay -= 1;
+            if self.platform_jump_delay == 0 {
+                self.jump_frames = 17;
+                return direction | PAD_CROSS | attack;
+            }
+            return direction | attack;
+        }
+        if matches!(collider_entity, Some(11 | 12 | 14 | 50 | 74))
+            && collider_entity != self.last_platform_entity
+        {
+            self.last_platform_entity = collider_entity;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.platform_jump_delay = if collider_entity == Some(74) { 10 } else { 5 };
+            return direction | attack;
+        }
+        if camera.path.zone == Eid::from_name("a6_tZ").expect("fixed Jaws corner zone EID is valid")
+        {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x > 22_340_000 => direction |= PAD_LEFT,
+                Some(x) if x < 22_300_000 => direction |= PAD_RIGHT,
+                _ => {}
+            }
+            if self.corner_relaunch_stage == 0
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.corner_relaunch_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return direction;
+            }
+            if (1..=4).contains(&self.corner_relaunch_stage) {
+                self.corner_relaunch_stage += 1;
+                return direction;
+            }
+            if self.corner_relaunch_stage == 5 {
+                self.corner_relaunch_stage = 6;
+                self.jump_frames = 44;
+                return direction | PAD_CROSS;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("b0_tZ").expect("fixed Jaws dart-corridor zone EID is valid")
+        {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x < 22_395_000 => direction |= PAD_RIGHT,
+                Some(x) if x > 22_415_000 => direction |= PAD_LEFT,
+                _ => {}
+            }
+            let axe_front_z = objects
+                .iter()
+                .filter_map(|object| match object.origin {
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 11,
+                    } => Some(object.translation[2]),
+                    _ => None,
+                })
+                .max();
+            if self.b0_axe_stage == 0
+                && player.is_some_and(|player| player.translation[2] <= 32_450_000)
+            {
+                self.b0_axe_stage = 1;
+                self.b0_axe_peak_z = axe_front_z.unwrap_or(i32::MIN);
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.b0_axe_stage == 1 {
+                if let Some(front_z) = axe_front_z {
+                    if front_z > self.b0_axe_peak_z {
+                        self.b0_axe_peak_z = front_z;
+                    } else if self.b0_axe_peak_z.saturating_sub(front_z) >= 20_000 {
+                        self.b0_axe_stage = 2;
+                        self.jump_frames = 44;
+                        return direction | PAD_CROSS;
+                    }
+                }
+                return 0;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("b1_tZ").expect("fixed Jaws lift-approach zone EID is valid")
+        {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x > 22_335_000 => direction |= PAD_LEFT,
+                Some(x) if x < 22_315_000 => direction |= PAD_RIGHT,
+                _ => {}
+            }
+            if self.b1_platform_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 31_350_000
+                })
+            {
+                self.b1_platform_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return direction;
+            }
+            if self.b1_platform_stage == 0 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return direction;
+            }
+            if self.b1_platform_stage == 1 {
+                if player.is_some_and(|player| player.translation[2] <= 31_100_000) {
+                    self.b1_platform_stage = 2;
+                    self.b1_platform_last_y = objects
+                        .iter()
+                        .find_map(|object| match object.origin {
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 132 => {
+                                Some(object.translation[1])
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(i32::MIN);
+                    return 0;
+                }
+                return direction;
+            }
+            if self.b1_platform_stage == 2 {
+                let platform_y = objects.iter().find_map(|object| match object.origin {
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 132 => {
+                        Some(object.translation[1])
+                    }
+                    _ => None,
+                });
+                if let Some(platform_y) = platform_y {
+                    let rising = platform_y > self.b1_platform_last_y;
+                    self.b1_platform_last_y = platform_y;
+                    if rising && platform_y >= 750_000 {
+                        self.b1_platform_stage = 3;
+                        self.jump_frames = 44;
+                        return direction | PAD_CROSS;
+                    }
+                }
+                return 0;
+            }
+            if self.b1_platform_stage == 3 && collider_entity == Some(132) {
+                self.b1_platform_stage = 4;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return direction;
+            }
+            if self.b1_platform_stage == 4 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return direction;
+                }
+                self.b1_platform_stage = 5;
+                self.jump_frames = 44;
+                return direction | PAD_CROSS;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("b2_tZ").expect("fixed Jaws lift-exit zone EID is valid")
+            && camera.path.index == 0
+            && self.b2_corner_stage == 0
+            && player.is_some_and(|player| player.translation[2] <= 29_980_000)
+        {
+            self.b2_corner_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 3;
+            return PAD_UP;
+        }
+        if self.b2_corner_stage == 1 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.b2_corner_stage = 2;
+            self.jump_frames = 44;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.b2_corner_stage == 2 {
+            let landed_on_corner_platform = collider_entity == Some(91)
+                && player.is_some_and(|player| player.status_a & 1 != 0);
+            if landed_on_corner_platform {
+                self.b2_corner_stage = 3;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return 0;
+            }
+            let Some(player) = player else {
+                return PAD_CROSS;
+            };
+            let platform = objects.iter().find_map(|object| match object.origin {
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 91 => Some(object.translation),
+                _ => None,
+            });
+            let mut centering = 0;
+            if player.velocity[0] < -100_000 {
+                centering |= PAD_RIGHT;
+            } else if player.velocity[0] > 100_000
+                || platform.is_some_and(|platform| {
+                    player.translation[0] > platform[0].saturating_add(20_000)
+                })
+            {
+                centering |= PAD_LEFT;
+            } else if platform
+                .is_some_and(|platform| player.translation[0] < platform[0].saturating_sub(20_000))
+            {
+                centering |= PAD_RIGHT;
+            }
+            if player.velocity[2] < -100_000 {
+                centering |= PAD_DOWN;
+            } else if player.velocity[2] > 100_000
+                || platform.is_some_and(|platform| {
+                    player.translation[2] > platform[2].saturating_add(20_000)
+                })
+            {
+                centering |= PAD_UP;
+            } else if platform
+                .is_some_and(|platform| player.translation[2] < platform[2].saturating_sub(20_000))
+            {
+                centering |= PAD_DOWN;
+            }
+            return centering | PAD_CROSS;
+        }
+        if self.b2_corner_stage == 3 {
+            let shuttle_is_at_far_pause = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 91
+                ) && object.state == 6
+                    && object.translation[0] < 21_100_000
+            });
+            if shuttle_is_at_far_pause {
+                self.b2_corner_stage = 4;
+                self.jump_frames = 44;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return 0;
+        }
+        if self.b3_shuttle_stage == 0
+            && collider_entity == Some(92)
+            && player.is_some_and(|player| player.status_a & 0x0020_0000 != 0)
+        {
+            self.b3_shuttle_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return Self::platform_centering_direction(player, objects, 92);
+        }
+        if self.b3_shuttle_stage == 1 {
+            let shuttle_is_at_far_pause = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 92
+                ) && object.state == 6
+                    && object.translation[1] > 1_900_000
+            });
+            if shuttle_is_at_far_pause {
+                self.b3_shuttle_stage = 2;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_DOWN;
+            }
+            return Self::platform_centering_direction(player, objects, 92);
+        }
+        if self.b3_shuttle_stage == 2 {
+            if !self.b5_entry_attack_fired
+                && player.is_some_and(|player| player.translation[2] >= 31_575_000)
+            {
+                self.b5_entry_attack_fired = true;
+                return PAD_DOWN | PAD_SQUARE;
+            }
+            if collider_entity != Some(92)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] >= 31_800_000
+                })
+            {
+                self.b3_shuttle_stage = 3;
+                self.jump_frames = 17;
+                return PAD_DOWN | PAD_CROSS;
+            }
+            return PAD_DOWN;
+        }
+        let b7_spider_approach = camera.path.zone
+            == Eid::from_name("b7_tZ").expect("fixed Jaws spider-turn zone EID is valid")
+            && camera.path.index == 1;
+        if b7_spider_approach {
+            let spider_has_solid_bound = objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 157
+                ) && object.frame_bound.is_some()
+            });
+            if self.b7_spider_stage == 0 && player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let player = player.expect("checked above");
+                if player.translation[2] < 35_240_000 {
+                    return PAD_DOWN;
+                }
+                if !self.b7_checkpoint_attack_fired && player.translation[0] <= 20_030_000 {
+                    self.b7_checkpoint_attack_fired = true;
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                if player.translation[0] > 19_620_000 {
+                    return PAD_LEFT;
+                }
+                if player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                self.b7_spider_stage = 1;
+                return 0;
+            }
+            if self.b7_spider_stage == 1 {
+                let player = player.expect("the spider approach keeps the player live");
+                if spider_has_solid_bound {
+                    self.b7_spider_stage = 2;
+                    self.jump_frames = 44;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if player.velocity[0] < -100_000 || player.translation[0] < 19_560_000 {
+                    return PAD_RIGHT;
+                }
+                if player.velocity[0] > 100_000 || player.translation[0] > 19_620_000 {
+                    return PAD_LEFT;
+                }
+                return 0;
+            }
+            if self.b7_spider_stage == 2 {
+                if collider_entity == Some(157) {
+                    self.b7_spider_stage = 3;
+                    self.jump_frames = 0;
+                    return 0;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_LEFT;
+            }
+            if self.b7_spider_stage == 3 {
+                return Self::platform_centering_direction(player, objects, 157);
+            }
+        }
+        if collider_entity == Some(157) {
+            self.b7_spider_stage = 4;
+        }
+        if self.b9_pillar_stage == 0 && collider_entity == Some(162) {
+            if player.is_some_and(|player| player.translation[0] <= 18_660_000) {
+                self.b9_pillar_stage = 3;
+                self.jump_frames = 44;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            self.b9_pillar_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return Self::platform_centering_direction(player, objects, 162);
+        }
+        if self.b7_spider_stage == 4 && self.b9_pillar_stage == 0 {
+            if collider_entity == Some(157) || player.is_none_or(|player| player.velocity[1] <= 0) {
+                return PAD_LEFT;
+            }
+            return PAD_LEFT | PAD_SQUARE;
+        }
+        if self.b9_pillar_stage == 1 {
+            let settled = player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (18_610_000..=18_660_000).contains(&player.translation[0])
+                    && player.velocity[0].unsigned_abs() <= 100_000
+            });
+            if settled {
+                self.b9_pillar_stage = 2;
+                return PAD_LEFT;
+            }
+            return Self::platform_centering_direction(player, objects, 162);
+        }
+        if self.b9_pillar_stage == 2 {
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] <= 18_620_000
+            }) {
+                self.b9_pillar_stage = 3;
+                self.jump_frames = 44;
+                return PAD_LEFT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT;
+        }
+        if self.b9_pillar_stage == 3 {
+            if collider_entity == Some(161) && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.b9_pillar_stage = 5;
+                self.jump_frames = 44;
+                self.release_frames = 0;
+                return PAD_UP | PAD_CROSS;
+            }
+            let approach = if player.is_some_and(|player| player.translation[2] > 34_650_000) {
+                PAD_LEFT | PAD_UP
+            } else {
+                PAD_LEFT
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return if self.jump_frames > 11 {
+                    approach | PAD_CROSS | PAD_SQUARE
+                } else {
+                    approach | PAD_SQUARE
+                };
+            }
+            return approach | PAD_SQUARE;
+        }
+        if self.b9_pillar_stage == 5 {
+            if camera.path.zone
+                == Eid::from_name("c0_tZ").expect("fixed Jaws pillar-exit zone EID is valid")
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.b9_pillar_stage = 6;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return PAD_UP;
+            }
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        if self.b9_pillar_stage == 6 {
+            let Some(player) = player else {
+                return PAD_UP;
+            };
+            if self.c0_platform_target.is_none() {
+                self.c0_platform_target = objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 2
+                            }
+                        ) && object.translation[1] >= 1_300_000
+                            && object.translation[2] < player.translation[2]
+                            && object.translation[2].abs_diff(player.translation[2]) <= 900_000
+                            && object.translation[0].abs_diff(player.translation[0]) <= 600_000
+                    })
+                    .min_by_key(|object| object.translation[2].abs_diff(player.translation[2]))
+                    .map(|object| object.object);
+            }
+            if player.status_a & 1 == 0 {
+                return PAD_UP;
+            }
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+            }
+            let target = self
+                .c0_platform_target
+                .and_then(|target| objects.iter().find(|object| object.object == target));
+            let align = target.map_or(0, |target| {
+                if player.translation[0] + 20_000 < target.translation[0] {
+                    PAD_RIGHT
+                } else if player.translation[0] > target.translation[0] + 20_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            });
+            if player.translation[2] > 33_900_000 {
+                return align | PAD_UP;
+            }
+            self.b9_pillar_stage = 7;
+            self.jump_frames = 44;
+            return align | PAD_UP | PAD_CROSS;
+        }
+        if self.b9_pillar_stage == 7 {
+            let target = self
+                .c0_platform_target
+                .and_then(|target| objects.iter().find(|object| object.object == target));
+            let landed_on_target = player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && target.is_some_and(|target| {
+                        target.frame_bound.is_some_and(|bound| {
+                            bound.min.x <= player.translation[0]
+                                && player.translation[0] <= bound.max.x
+                                && bound.min.z <= player.translation[2]
+                                && player.translation[2] <= bound.max.z
+                        })
+                    })
+            });
+            if landed_on_target {
+                self.c0_platform_landings = self.c0_platform_landings.saturating_add(1);
+                let completed_target = self.c0_platform_target;
+                self.c0_platform_target = if self.c0_platform_landings < 4 {
+                    let player = player.expect("the moving-platform landing has a live player");
+                    objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 2
+                                }
+                            ) && Some(object.object) != completed_target
+                                && object.frame_bound.is_some()
+                                && object.translation[0] + 180_000 < player.translation[0]
+                                && object.translation[0].abs_diff(player.translation[0]) <= 900_000
+                                && object.translation[2].abs_diff(player.translation[2]) <= 650_000
+                        })
+                        .min_by_key(|object| {
+                            object.translation[0].abs_diff(player.translation[0])
+                                + object.translation[2].abs_diff(player.translation[2])
+                        })
+                        .map(|object| object.object)
+                } else {
+                    None
+                };
+                self.b9_pillar_stage = 8;
+                self.jump_frames = 0;
+                self.release_frames = if self.c0_platform_landings >= 4 { 0 } else { 4 };
+                return 0;
+            }
+            let toward_target = match (player, target) {
+                (Some(player), Some(target)) => {
+                    let mut held = 0;
+                    if player.translation[0] + 20_000 < target.translation[0] {
+                        held |= PAD_RIGHT;
+                    } else if player.translation[0] > target.translation[0] + 20_000 {
+                        held |= PAD_LEFT;
+                    }
+                    if player.translation[2] > target.translation[2] + 20_000 {
+                        held |= PAD_UP;
+                    } else if player.translation[2] + 20_000 < target.translation[2] {
+                        held |= PAD_DOWN;
+                    }
+                    held
+                }
+                _ => 0,
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return if self.jump_frames > 10 {
+                    toward_target | PAD_CROSS
+                } else {
+                    toward_target
+                };
+            }
+            return toward_target;
+        }
+        if self.b9_pillar_stage == 8 {
+            let Some(player) = player else {
+                return 0;
+            };
+            if self.c0_platform_landings >= 4 {
+                if player.translation[0] > 17_065_000 {
+                    return PAD_LEFT;
+                }
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return 0;
+                }
+                self.b9_pillar_stage = 9;
+                self.jump_frames = 44;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.c0_platform_target.is_none() {
+                self.c0_platform_target = objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 2
+                            }
+                        ) && object.frame_bound.is_some()
+                            && object.translation[0] + 180_000 < player.translation[0]
+                            && object.translation[0].abs_diff(player.translation[0]) <= 900_000
+                            && object.translation[2].abs_diff(player.translation[2]) <= 650_000
+                    })
+                    .min_by_key(|object| {
+                        object.translation[0].abs_diff(player.translation[0])
+                            + object.translation[2].abs_diff(player.translation[2])
+                    })
+                    .map(|object| object.object);
+            }
+            let target = self
+                .c0_platform_target
+                .and_then(|target| objects.iter().find(|object| object.object == target));
+            let toward_target = target.map_or(0, |target| {
+                let mut held = 0;
+                if player.translation[0] + 20_000 < target.translation[0] {
+                    held |= PAD_RIGHT;
+                } else if player.translation[0] > target.translation[0] + 20_000 {
+                    held |= PAD_LEFT;
+                }
+                if player.translation[2] > target.translation[2] + 20_000 {
+                    held |= PAD_UP;
+                } else if player.translation[2] + 20_000 < target.translation[2] {
+                    held |= PAD_DOWN;
+                }
+                held
+            });
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            let target_is_ready = target.is_some_and(|target| {
+                target.frame_bound.is_some()
+                    && (self.c0_platform_landings < 2 || target.translation[1] >= 1_300_000)
+            });
+            if target_is_ready {
+                self.b9_pillar_stage = 7;
+                self.jump_frames = 44;
+                return toward_target | PAD_CROSS;
+            }
+            return 0;
+        }
+        if self.b9_pillar_stage == 9 {
+            let orbit_exit_zone = camera.path.zone
+                == Eid::from_name("c2_tZ").expect("fixed Jaws orbit zone EID is valid")
+                || camera.path.zone
+                    == Eid::from_name("c3_tZ").expect("fixed Jaws orbit-exit zone EID is valid");
+            if orbit_exit_zone && player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.b9_pillar_stage = 10;
+                self.jump_frames = 44;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            let toward_exit = player.map_or(PAD_LEFT, |player| {
+                let mut held = 0;
+                if player.translation[0] > 16_650_000 {
+                    held |= PAD_LEFT;
+                } else if player.translation[0] < 16_600_000 {
+                    held |= PAD_RIGHT;
+                }
+                held
+            });
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return if self.jump_frames > 24 {
+                    toward_exit | PAD_CROSS
+                } else {
+                    toward_exit
+                };
+            }
+            return toward_exit;
+        }
+        if self.b9_pillar_stage == 10 {
+            if camera.path.zone
+                == Eid::from_name("c3_tZ").expect("fixed Jaws far-side zone EID is valid")
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[0] <= 16_750_000
+                })
+            {
+                self.b9_pillar_stage = 11;
+                self.jump_frames = 0;
+                self.release_frames = 4;
+                return PAD_LEFT;
+            }
+            let toward_far_side = player.map_or(PAD_LEFT, |player| {
+                let mut held = 0;
+                if player.translation[0] > 16_650_000 {
+                    held |= PAD_LEFT;
+                } else if player.translation[0] < 16_600_000 {
+                    held |= PAD_RIGHT;
+                }
+                held
+            });
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return if self.jump_frames > 10 {
+                    toward_far_side | PAD_CROSS
+                } else {
+                    toward_far_side
+                };
+            }
+            return toward_far_side;
+        }
+        let c3_far_side = camera.path.zone
+            == Eid::from_name("c3_tZ").expect("fixed Jaws far-side zone EID is valid");
+        let c3_turn_connector = camera.path.zone
+            == Eid::from_name("s0_tZ").expect("fixed Jaws c3 turn-connector EID is valid");
+        if self.b9_pillar_stage == 11
+            && (c3_far_side || self.c3_plant_stage >= 13 && c3_turn_connector)
+        {
+            if self.c3_plant_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && player.translation[0] <= 16_300_000
+                        && player.translation[2] <= 32_650_000
+                })
+            {
+                self.c3_plant_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+            if (1..=8).contains(&self.c3_plant_stage) {
+                self.c3_plant_stage += 1;
+                return PAD_SQUARE;
+            }
+            if self.c3_plant_stage == 9 {
+                if player.is_some_and(|player| player.status_a & 1 != 0) {
+                    self.c3_plant_stage = 10;
+                    return PAD_RIGHT;
+                }
+                return player.map_or(PAD_RIGHT, |player| {
+                    let mut held = PAD_RIGHT;
+                    if player.translation[2] > 32_620_000 {
+                        held |= PAD_UP;
+                    } else if player.translation[2] < 32_500_000 {
+                        held |= PAD_DOWN;
+                    }
+                    held
+                });
+            }
+            if self.c3_plant_stage == 10 {
+                if player.is_some_and(|player| player.translation[0] >= 16_300_000) {
+                    self.c3_plant_stage = 11;
+                    return PAD_LEFT;
+                }
+                return PAD_RIGHT;
+            }
+            if self.c3_plant_stage == 11 {
+                if player.is_some_and(|player| player.translation[0] <= 15_940_000) {
+                    self.c3_plant_stage = 12;
+                    self.jump_frames = 44;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_LEFT;
+            }
+            if self.c3_plant_stage == 12 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[0] <= 15_600_000
+                }) {
+                    self.c3_plant_stage = 13;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_LEFT;
+                }
+                let mut held = PAD_LEFT;
+                if player.is_some_and(|player| player.translation[2] > 32_620_000) {
+                    held |= PAD_UP;
+                } else if player.is_some_and(|player| player.translation[2] < 32_500_000) {
+                    held |= PAD_DOWN;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            if self.c3_plant_stage == 13 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[0] <= 15_230_000
+                }) {
+                    self.c3_plant_stage = 14;
+                    self.jump_frames = 44;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            if self.c3_plant_stage == 14 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[1] >= 1_500_000
+                }) {
+                    self.c3_plant_stage = 15;
+                    self.jump_frames = 0;
+                    self.release_frames = 1;
+                    return 0;
+                }
+                let mut held = if player.is_some_and(|player| player.translation[0] > 15_110_000) {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+                if self.jump_frames == 0 && player.is_some_and(|player| player.status_a & 1 != 0) {
+                    self.jump_frames = 44;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            if self.c3_plant_stage == 15 {
+                if player.is_some_and(|player| player.translation[0] < 15_180_000) {
+                    return PAD_RIGHT;
+                }
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return 0;
+                }
+                self.c3_plant_stage = 16;
+                self.jump_frames = 44;
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            if self.c3_plant_stage == 16 {
+                let mut held = if player.is_some_and(|player| player.translation[0] < 15_240_000) {
+                    PAD_RIGHT
+                } else {
+                    PAD_UP
+                };
+                if held == PAD_UP {
+                    if player.is_some_and(|player| player.translation[0] < 15_300_000) {
+                        held |= PAD_RIGHT;
+                    } else if player.is_some_and(|player| player.translation[0] > 15_400_000) {
+                        held |= PAD_LEFT;
+                    }
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    held |= PAD_CROSS;
+                }
+                return held;
+            }
+            let target_z = 32_560_000;
+            let toward_plant = player.map_or(PAD_LEFT | PAD_UP, |player| {
+                let mut held = PAD_LEFT;
+                if player.translation[2] > target_z + 40_000 {
+                    held |= PAD_UP;
+                } else if player.translation[2] < target_z - 40_000 {
+                    held |= PAD_DOWN;
+                }
+                held
+            });
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return toward_plant | PAD_CROSS;
+            }
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return toward_plant;
+            }
+            if player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.jump_frames = 18;
+                self.release_frames = 4;
+                return toward_plant | PAD_CROSS;
+            }
+            return toward_plant;
+        }
+        let c4_zone = camera.path.zone
+            == Eid::from_name("c4_tZ").expect("fixed Jaws c4 island zone EID is valid");
+        if self.b9_pillar_stage == 11 && c4_zone {
+            if self.c4_island_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 32_100_000
+                })
+            {
+                self.c4_island_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_UP;
+            }
+            if self.c4_island_stage == 1 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return PAD_UP;
+                }
+                if player.is_some_and(|player| player.translation[2] <= 31_900_000) {
+                    self.c4_island_stage = 2;
+                    self.jump_frames = 44;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return PAD_UP;
+            }
+            if self.c4_island_stage == 2 {
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return PAD_UP;
+            }
+        }
+        let c5_zone = camera.path.zone
+            == Eid::from_name("c5_tZ").expect("fixed Jaws c5 trap zone EID is valid");
+        if self.b9_pillar_stage == 11 && c5_zone {
+            if self.c5_trap_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 30_900_000
+                })
+            {
+                self.c5_trap_stage = 1;
+                self.jump_frames = 0;
+                return PAD_DOWN;
+            }
+            if self.c5_trap_stage == 1 {
+                if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    return PAD_DOWN;
+                }
+                if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                    return PAD_UP;
+                }
+                self.c5_trap_stage = 2;
+                self.c5_trap_wait_frames = 30;
+                return 0;
+            }
+            if self.c5_trap_stage == 2 {
+                if self.c5_trap_wait_frames != 0 {
+                    self.c5_trap_wait_frames -= 1;
+                    return 0;
+                }
+                self.c5_trap_stage = 3;
+                self.jump_frames = 45;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c5_trap_stage == 3 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 30_400_000
+                }) {
+                    self.c5_trap_stage = 4;
+                    self.c6_gap_stage = 1;
+                    self.jump_frames = 0;
+                    self.release_frames = 2;
+                    return PAD_UP;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_UP | PAD_SQUARE;
+            }
+        }
+        let c6_zone = camera.path.zone
+            == Eid::from_name("c6_tZ").expect("fixed Jaws post-trap gap EID is valid");
+        if self.b9_pillar_stage == 11 && c6_zone {
+            if self.c6_gap_stage == 1 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return PAD_UP;
+                }
+                self.c6_gap_stage = 2;
+                self.jump_frames = 45;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c6_gap_stage == 2 && self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        let c7_zone = camera.path.zone
+            == Eid::from_name("c7_tZ").expect("fixed Jaws crusher corridor EID is valid");
+        if self.b9_pillar_stage == 11 && c7_zone {
+            let crusher_gap = objects
+                .iter()
+                .find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 209)
+                        .then_some(object.translation[0])
+                })
+                .zip(objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 216)
+                        .then_some(object.translation[0])
+                }))
+                .map(|(left, right)| right.saturating_sub(left));
+            if self.c7_crusher_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 29_350_000
+                })
+            {
+                self.c7_crusher_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_DOWN;
+            }
+            if self.c7_crusher_stage == 1 {
+                if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    return PAD_DOWN;
+                }
+                if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                    return PAD_UP;
+                }
+                if crusher_gap.is_some_and(|gap| gap <= 20_000) {
+                    self.c7_crusher_stage = 2;
+                }
+                return 0;
+            }
+            if self.c7_crusher_stage == 2 {
+                if crusher_gap.is_some_and(|gap| gap >= 300_000) {
+                    self.c7_crusher_stage = 3;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                return 0;
+            }
+            if self.c7_crusher_stage == 3
+                && player.is_some_and(|player| player.translation[2] > 28_500_000)
+            {
+                self.jump_frames = self.jump_frames.saturating_sub(1);
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        let c8_zone = camera.path.zone
+            == Eid::from_name("c8_tZ").expect("fixed Jaws pre-platform gap EID is valid");
+        let c9_zone = camera.path.zone
+            == Eid::from_name("c9_tZ").expect("fixed Jaws moving-platform zone EID is valid");
+        let d0_zone = camera.path.zone
+            == Eid::from_name("d0_tZ").expect("fixed Jaws moving-bridge zone EID is valid");
+        if self.b9_pillar_stage == 11 && (c8_zone || c9_zone || d0_zone) {
+            if self.c9_platform_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 27_350_000
+                })
+            {
+                self.c9_platform_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            if self.c9_platform_stage == 1 {
+                if collider_entity == Some(203)
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                {
+                    self.c9_platform_stage = 2;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                if player.is_some_and(|player| player.status_a & 1 == 0) {
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 27_180_000
+                }) {
+                    self.c9_platform_stage = 2;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_UP;
+            }
+            if self.c9_platform_stage == 2 {
+                let platform_203_y = objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 203)
+                        .then_some(object.translation[1])
+                });
+                let platform_202_y = objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 202)
+                        .then_some(object.translation[1])
+                });
+                if collider_entity == Some(203)
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                    && platform_203_y.is_some_and(|y| y >= 1_460_000)
+                    && platform_202_y.is_some_and(|y| y <= 1_460_000)
+                {
+                    self.c9_platform_stage = 3;
+                    self.release_frames = 0;
+                    return PAD_UP;
+                }
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c9_platform_stage == 3 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return PAD_UP;
+                }
+                if collider_entity == Some(203) {
+                    self.c9_platform_stage = 4;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_UP;
+            }
+            if self.c9_platform_stage == 4 {
+                if collider_entity == Some(202)
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                {
+                    self.c9_platform_stage = 5;
+                    self.jump_frames = 0;
+                    return Self::platform_centering_direction(player, objects, 202);
+                }
+                self.jump_frames = self.jump_frames.saturating_sub(1);
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c9_platform_stage == 5
+                && collider_entity == Some(201)
+                && player.is_some_and(|player| player.status_a & 1 != 0)
+            {
+                self.c9_platform_stage = 6;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_UP;
+            }
+            if self.c9_platform_stage == 6 {
+                if player.is_some_and(|player| player.translation[2] > 25_830_000) {
+                    return PAD_UP;
+                }
+                self.c9_platform_stage = 7;
+                return PAD_DOWN;
+            }
+            if self.c9_platform_stage == 7 {
+                if player.is_some_and(|player| player.status_a & 1 == 0) {
+                    self.c9_platform_stage = 8;
+                    let platform = objects.iter().find_map(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 201)
+                            .then_some(object.translation)
+                    });
+                    return platform.map_or(PAD_UP | PAD_LEFT, |platform| {
+                        player.map_or(PAD_UP | PAD_LEFT, |player| {
+                            Self::move_toward(
+                                player.translation,
+                                platform[0].saturating_sub(40_000),
+                                platform[2].saturating_sub(100_000),
+                            )
+                        })
+                    }) | PAD_CROSS
+                        | PAD_SQUARE;
+                }
+                return if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    PAD_DOWN
+                } else if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                    PAD_UP
+                } else {
+                    0
+                };
+            }
+            if self.c9_platform_stage == 8 {
+                if collider_entity == Some(201)
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                {
+                    self.c9_platform_stage = 7;
+                    return 0;
+                }
+                let platform = objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 201)
+                        .then_some(object.translation)
+                });
+                return platform.map_or(PAD_UP | PAD_LEFT, |platform| {
+                    player.map_or(PAD_UP | PAD_LEFT, |player| {
+                        Self::move_toward(
+                            player.translation,
+                            platform[0].saturating_sub(40_000),
+                            platform[2].saturating_sub(100_000),
+                        )
+                    })
+                }) | PAD_CROSS
+                    | PAD_SQUARE;
+            }
+        }
+        let d1_zone = camera.path.zone
+            == Eid::from_name("d1_tZ").expect("fixed Jaws spear corridor EID is valid")
+            || camera.path.zone
+                == Eid::from_name("d2_tZ").expect("fixed Jaws post-spear corridor EID is valid");
+        if self.b9_pillar_stage == 11 && d1_zone {
+            if self.d1_spear_stage == 0
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 23_650_000
+                })
+            {
+                self.d1_spear_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_DOWN;
+            }
+            if self.d1_spear_stage == 1 {
+                if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    return PAD_DOWN;
+                }
+                if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                    return PAD_UP;
+                }
+                self.d1_spear_stage = 2;
+                self.d1_spear_active_seen = false;
+                return 0;
+            }
+            if self.d1_spear_stage == 2 {
+                let lane_blocked = player.is_some_and(|player| {
+                    objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 18,
+                            }
+                        ) && (22_950_000..=23_350_000).contains(&object.translation[2])
+                            && object.frame_bound.is_some_and(|bound| {
+                                bound.max.x > player.translation[0].saturating_sub(100_000)
+                                    && bound.min.x < player.translation[0].saturating_add(100_000)
+                            })
+                    })
+                });
+                self.d1_spear_active_seen |= lane_blocked;
+                let destination_open = player.is_some_and(|player| {
+                    objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 18,
+                            }
+                        ) && (23_050_000..=23_110_000).contains(&object.translation[2])
+                            && object.frame_bound.is_some_and(|bound| {
+                                bound.min.x > player.translation[0].saturating_sub(20_000)
+                            })
+                    })
+                });
+                if self.d1_spear_active_seen && destination_open {
+                    self.d1_spear_stage = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 1;
+                    return 0;
+                }
+                return 0;
+            }
+            if self.d1_spear_stage == 3 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return 0;
+                }
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 23_380_000
+                }) {
+                    self.d1_spear_stage = 4;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE | PAD_LEFT;
+                }
+                let lateral = if player.is_some_and(|player| player.translation[0] > 14_835_000) {
+                    PAD_LEFT
+                } else if player.is_some_and(|player| player.translation[0] < 14_815_000) {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return PAD_UP | PAD_SQUARE | lateral;
+            }
+            if self.d1_spear_stage == 4 {
+                if player.is_some_and(|player| player.translation[2] <= 22_900_000) {
+                    self.d1_spear_stage = 5;
+                    self.release_frames = 2;
+                } else {
+                    self.jump_frames = self.jump_frames.saturating_sub(1);
+                    let lateral = if player.is_some_and(|player| player.translation[0] > 14_835_000)
+                    {
+                        PAD_LEFT
+                    } else if player.is_some_and(|player| player.translation[0] < 14_815_000) {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE | lateral;
+                }
+            }
+            if self.d1_spear_stage == 5 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return PAD_UP;
+                }
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 22_850_000
+                }) {
+                    self.d1_spear_stage = 6;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_UP | PAD_SQUARE;
+            }
+            if self.d1_spear_stage == 6 {
+                if player.is_some_and(|player| {
+                    player.state == 14
+                        && player.velocity[1] > 500_000
+                        && player.translation[2] <= 22_600_000
+                }) {
+                    self.d1_spear_stage = 7;
+                    return PAD_DOWN;
+                }
+                self.jump_frames = self.jump_frames.saturating_sub(1);
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.d1_spear_stage == 7 {
+                if player.is_some_and(|player| player.status_a & 1 == 0) {
+                    return if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                        PAD_DOWN
+                    } else if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                }
+                if player.is_some_and(|player| player.translation[2] > 22_180_000) {
+                    return PAD_UP | PAD_SQUARE;
+                }
+                self.d1_spear_stage = 8;
+                self.jump_frames = 45;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.d1_spear_stage == 8 {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[2] <= 21_700_000
+                }) {
+                    self.d1_spear_stage = 9;
+                    self.release_frames = 1;
+                    return 0;
+                }
+                self.jump_frames = self.jump_frames.saturating_sub(1);
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        let d3_entry = camera.path.zone
+            == Eid::from_name("d3_tZ").expect("fixed Jaws post-gap turn EID is valid")
+            && camera.path.index == 0;
+        if self.d1_spear_stage >= 7 && d3_entry {
+            if self.d1_spear_stage == 7 {
+                if player.is_some_and(|player| player.status_a & 1 == 0) {
+                    return if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                        PAD_DOWN
+                    } else if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                }
+                if player.is_some_and(|player| player.translation[2] > 22_180_000) {
+                    return PAD_UP | PAD_SQUARE;
+                }
+                if player.is_some_and(|player| player.translation[2] > 21_900_000) {
+                    self.d1_spear_stage = 8;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                }
+                self.d1_spear_stage = 9;
+                self.release_frames = 1;
+                return 0;
+            }
+            if self.d1_spear_stage == 9 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return 0;
+                }
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && player.translation[0] > 14_720_000
+                }) {
+                    return PAD_LEFT;
+                }
+                self.d1_spear_stage = 10;
+                self.jump_frames = 18;
+                self.release_frames = 4;
+                return player.map_or(PAD_LEFT, |player| {
+                    Self::move_toward(player.translation, 14_336_000, 21_708_032)
+                }) | PAD_CROSS;
+            }
+            if self.d1_spear_stage == 10 {
+                return player.map_or(PAD_LEFT, |player| {
+                    Self::move_toward(player.translation, 14_336_000, 21_708_032)
+                }) | PAD_CROSS;
+            }
+            if player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[2] <= 21_700_000
+            }) {
+                self.d1_spear_stage = 9;
+                self.release_frames = 1;
+                return 0;
+            }
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
+        }
+        let d3_exit = camera.path.zone
+            == Eid::from_name("d3_tZ").expect("fixed Jaws post-gap exit EID is valid")
+            && camera.path.index == 1;
+        if d3_exit
+            && self.d1_spear_stage == 10
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] <= 14_380_000
+            })
+        {
+            self.d1_spear_stage = 11;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if d3_exit && self.d1_spear_stage == 11 {
+            if player.is_some_and(|player| player.velocity[0] < -100_000) {
+                return PAD_RIGHT;
+            }
+            self.d1_spear_stage = 12;
+            self.release_frames = 1;
+            return 0;
+        }
+        if d3_exit && self.d1_spear_stage == 12 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return 0;
+            }
+            if player.is_some_and(|player| player.translation[0] > 14_120_000) {
+                return PAD_LEFT;
+            }
+            self.d1_spear_stage = 13;
+            self.jump_frames = 18;
+            self.release_frames = 4;
+            return PAD_LEFT | PAD_CROSS;
+        }
+        let stepping_stone_zone = camera.path.zone
+            == Eid::from_name("b5_tZ").expect("fixed Jaws first stepping-stone zone EID is valid")
+            || camera.path.zone
+                == Eid::from_name("b6_tZ")
+                    .expect("fixed Jaws second stepping-stone zone EID is valid")
+            || camera.path.zone
+                == Eid::from_name("b7_tZ").expect("fixed Jaws turn zone EID is valid")
+                && camera.path.index == 0;
+        if self.b3_shuttle_stage >= 3 && stepping_stone_zone {
+            if let Some(player) = player
+                && player.status_a & 1 != 0
+            {
+                self.jump_frames = 0;
+                if !self.b5_spear_wait_done && player.translation[2] >= 32_950_000 {
+                    self.b5_runup_start_z = None;
+                    let corridor_spears = objects.iter().filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 18,
+                            }
+                        ) && (33_200_000..=33_360_000).contains(&object.translation[2])
+                    });
+                    let (count, all_retracted) =
+                        corridor_spears.fold((0_u8, true), |(count, all_retracted), object| {
+                            let safely_outside_lane = object.frame_bound.is_none_or(|bound| {
+                                bound.max.x <= player.translation[0].saturating_sub(100_000)
+                                    || bound.min.x >= player.translation[0].saturating_add(100_000)
+                            });
+                            (
+                                count.saturating_add(1),
+                                all_retracted && safely_outside_lane,
+                            )
+                        });
+                    if count >= 3 && all_retracted {
+                        self.b5_spear_wait_done = true;
+                        self.b5_spear_launch_pending = true;
+                        self.b5_runup_start_z = Some(player.translation[2]);
+                        return PAD_DOWN;
+                    }
+                    return 0;
+                }
+                if self.b5_spear_wait_done
+                    && !self.b5_fire_wait_done
+                    && player.translation[2] >= 33_650_000
+                {
+                    self.b5_runup_start_z = None;
+                    let corridor_flames = objects.iter().filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 10,
+                            }
+                        ) && (33_900_000..=34_150_000).contains(&object.translation[2])
+                    });
+                    let (count, all_inactive) =
+                        corridor_flames.fold((0_u8, true), |(count, all_inactive), object| {
+                            (
+                                count.saturating_add(1),
+                                all_inactive && object.frame_bound.is_none(),
+                            )
+                        });
+                    if count >= 3 && all_inactive {
+                        self.b5_fire_wait_done = true;
+                        self.jump_frames = 44;
+                        return PAD_DOWN | PAD_CROSS;
+                    }
+                    return if player.velocity[2] > 100_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -100_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+                }
+                if self.b5_spear_launch_pending {
+                    let runup_start = self.b5_runup_start_z.unwrap_or(player.translation[2]);
+                    if player.translation[2].saturating_sub(runup_start) >= 70_000 {
+                        self.b5_spear_launch_pending = false;
+                        self.b5_runup_start_z = None;
+                        self.jump_frames = 44;
+                        return PAD_DOWN | PAD_CROSS;
+                    }
+                    return PAD_DOWN;
+                }
+                let runup_start = *self.b5_runup_start_z.get_or_insert(player.translation[2]);
+                let runup_distance = if self.b5_fire_wait_done {
+                    70_000
+                } else {
+                    160_000
+                };
+                if player.translation[2].saturating_sub(runup_start) >= runup_distance {
+                    self.b5_runup_start_z = None;
+                    self.jump_frames = 17;
+                    return PAD_DOWN | PAD_CROSS;
+                }
+                return PAD_DOWN;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_DOWN | PAD_CROSS;
+            }
+            return PAD_DOWN;
+        }
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return direction | PAD_CROSS | attack;
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            return direction | attack;
+        }
+        if player.is_some_and(|player| player.status_a & 1 != 0) {
+            self.jump_frames = 18;
+            self.release_frames = 4;
+            return direction | PAD_CROSS | attack;
+        }
+        direction | attack
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct TempleRuinsCompletionRouteController {
     tick: u32,
     jump_frames: u8,
@@ -26225,6 +28575,7 @@ struct SurveyInputController {
     boulders: BouldersCompletionRouteController,
     cortex_power: CortexPowerCompletionRouteController,
     generator_room: GeneratorRoomCompletionRouteController,
+    jaws_of_darkness: JawsOfDarknessCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
     slippery_climb: SlipperyClimbCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
@@ -26359,6 +28710,48 @@ impl SurveyInputController {
                 c3_gap_airborne_seen: false,
                 bridge_hit: false,
                 bridge_returned: false,
+            },
+            jaws_of_darkness: JawsOfDarknessCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
+                platform_jump_delay: 0,
+                last_platform_entity: None,
+                waiting_for_first_flame: false,
+                first_flame_active_seen: false,
+                opening_stage: 0,
+                opening_airborne_seen: false,
+                a2_gap_launched: false,
+                a4_gap_launched: false,
+                corner_jump_launched: false,
+                corner_relaunch_stage: 0,
+                a7_rat_attack_fired: false,
+                b0_axe_stage: 0,
+                b0_axe_peak_z: i32::MIN,
+                b1_platform_stage: 0,
+                b1_platform_last_y: i32::MIN,
+                b2_corner_stage: 0,
+                b3_shuttle_stage: 0,
+                b5_entry_attack_fired: false,
+                b5_runup_start_z: None,
+                b5_spear_wait_done: false,
+                b5_spear_launch_pending: false,
+                b5_fire_wait_done: false,
+                b7_spider_stage: 0,
+                b7_checkpoint_attack_fired: false,
+                b9_pillar_stage: 0,
+                c0_platform_target: None,
+                c0_platform_landings: 0,
+                c3_plant_stage: 0,
+                c4_island_stage: 0,
+                c5_trap_stage: 0,
+                c5_trap_wait_frames: 0,
+                c6_gap_stage: 0,
+                c7_crusher_stage: 0,
+                c9_platform_stage: 0,
+                d1_spear_stage: 0,
+                d1_spear_active_seen: false,
+                d7_turn_stage: 0,
             },
             toxic_waste: ToxicWasteCompletionRouteController {
                 tick: 0,
@@ -26721,6 +29114,10 @@ impl SurveyInputController {
                 self.generator_room
                     .held(player, player_collider_entity, route_objects)
             }
+            SurveyInputProfile::JawsOfDarknessCompletionRoute => {
+                self.jaws_of_darkness
+                    .held(camera, player, player_collider_entity, route_objects)
+            }
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 HeavyMachineryCompletionRouteController::held(frame)
             }
@@ -26871,6 +29268,7 @@ struct ProgramObjectTrace {
     program: Eid,
     state: u16,
     translation: [i32; 3],
+    frame_bound: Option<Bounds3>,
     bound: Option<Bounds3>,
     animation_counter: u32,
     register_72: u32,
@@ -28237,25 +30635,26 @@ fn program_object_traces(
             register(process_register::TRANSLATION_Y)?.cast_signed(),
             register(process_register::TRANSLATION_Z)?.cast_signed(),
         ];
+        let frame_bound = runtime
+            .machine()
+            .frame_bounds()
+            .iter()
+            .find(|bound| bound.object == object.vm())
+            .map(|bound| bound.bound);
         traces.push(ProgramObjectTrace {
             object: object.vm(),
             origin: spawned.origin(),
             program: identity.global_eid(),
             state: vm.state(),
             translation,
-            bound: runtime
-                .machine()
-                .frame_bounds()
-                .iter()
-                .find(|bound| bound.object == object.vm())
-                .map(|bound| bound.bound)
-                .or_else(|| {
-                    Some(vm.retail_local_bound().translated(crust_sim::Vec3 {
-                        x: translation[0],
-                        y: translation[1],
-                        z: translation[2],
-                    }))
-                }),
+            frame_bound,
+            bound: frame_bound.or_else(|| {
+                Some(vm.retail_local_bound().translated(crust_sim::Vec3 {
+                    x: translation[0],
+                    y: translation[1],
+                    z: translation[2],
+                }))
+            }),
             animation_counter: register(process_register::ANIMATION_COUNTER)?,
             register_72: register(72)?,
         });
@@ -29122,6 +31521,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::TempleRuinsCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
+                    | SurveyInputProfile::JawsOfDarknessCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) {
             player_collider_entity(&runtime)?
@@ -29209,6 +31609,7 @@ fn survey_pair_with_runtime(
             SurveyInputProfile::LostCityCompletionRoute
             | SurveyInputProfile::TempleRuinsCompletionRoute
             | SurveyInputProfile::GeneratorRoomCompletionRoute
+            | SurveyInputProfile::JawsOfDarknessCompletionRoute
             | SurveyInputProfile::ToxicWasteCompletionRoute
             | SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 program_object_traces(&runtime, &[])?
@@ -29277,6 +31678,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
+                | SurveyInputProfile::JawsOfDarknessCompletionRoute
                 | SurveyInputProfile::SlipperyClimbCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
@@ -36971,6 +39373,169 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     assert!(
         survey.is_clean(),
         "Toxic Waste end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1d);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Jaws of Darkness");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Jaws pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        5_000,
+    )
+    .expect("Jaws of Darkness' ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 4_335, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((4_335, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 4335 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.death_camera_pose_changes, 0);
+    assert_eq!(survey.death_camera_max_count, 0);
+    assert!(survey.first_death_camera_pose.is_none());
+    assert!(survey.last_death_camera_pose.is_none());
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+
+    assert_eq!(survey.zone_transitions, 46);
+    assert_eq!(survey.camera_ranges.len(), 56);
+    assert_eq!(survey.camera_path_changes, 57);
+    assert_eq!(survey.last_camera_path_change, 4_113);
+    assert_eq!(survey.last_camera_progress_change, 4_230);
+    let initial_camera = survey
+        .initial_camera
+        .expect("Jaws of Darkness must retain its opening camera path");
+    assert_eq!(
+        initial_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a0_tZ")
+                .expect("fixed Jaws of Darkness opening camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(initial_camera.progress.raw(), 0);
+    let final_camera = survey
+        .final_camera
+        .expect("Jaws of Darkness must retain its final camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("e3_tZ").expect("fixed Jaws of Darkness end camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 27_647);
+
+    assert_eq!(survey.successful_spawns, 1_114);
+    assert_eq!(survey.spawn_attempts, 70_980);
+    assert_eq!(survey.expected_spawn_rejections, 69_866);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 137_842);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.final_live_objects, 41);
+    assert_eq!(survey.max_live_objects, 59);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, -1, [0, 0, 0]),
+            (1_829, 0x9500, [19_865_344, 1_945_088, 35_327_232]),
+            (2_811, 0xde00, [15_360_000, 1_433_088, 27_238_400]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (1_829, 0x100),
+            (2_241, 0x200),
+            (2_811, 0x300),
+            (3_967, 0x400),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_829, 0), (2_811, 0x200)]);
+    assert_eq!(survey.save_handshakes, 0);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(survey.pad_change_samples.first(), Some(&(1, PAD_RIGHT)));
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([15_462_144, 1_740_288, 38_087_680])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([13_833_488, 5_562_970, 15_117_856])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([10_865_936, 498_946, 15_117_856])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([22_429_904, 5_562_970, 38_087_680])
+    );
+    assert_eq!(survey.last_player_movement, 4_331);
+    let player = player_trace(&runtime)
+        .expect("Jaws of Darkness completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(
+        player.zone,
+        Eid::from_name("e3_tZ").expect("fixed Jaws of Darkness end-warp EID is valid")
+    );
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [13_833_488, 5_562_970, 15_117_856]);
+    assert_eq!(runtime.machine().random_seed(), 0xb97f_0fd5);
+    assert_eq!(runtime.draw_count(), 4_335);
+    assert!(
+        survey.is_clean(),
+        "Jaws of Darkness end-warp route must remain clean: {}",
         survey.summary()
     );
 }

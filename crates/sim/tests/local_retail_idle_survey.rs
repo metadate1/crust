@@ -220,45 +220,75 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
     // The route uses only ordinary pad input and the authored outside rope
     // lanes, preserving the fresh runtime's life stock through every
     // collapsing span and reaching the normal Level Complete handoff.
-    assert_eq!(survey.frames, 2_452);
-    assert_eq!(survey.next_lid, Some((2_452, 0x2d)));
+    assert_eq!(survey.frames, 2_449);
+    assert_eq!(survey.next_lid, Some((2_449, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2452 requested level transition to 0x2d")
+        Some("frame 2449 requested level transition to 0x2d")
     );
+    assert_eq!(survey.zone_transitions, 26);
+    assert_eq!(survey.camera_ranges.len(), 50);
+    assert_eq!(survey.camera_path_changes, 49);
+    assert_eq!(survey.last_camera_path_change, 2_336);
+    assert_eq!(survey.last_camera_progress_change, 2_360);
+    let final_camera = survey
+        .final_camera
+        .expect("Road to Nowhere must retain the end-zone camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("c7_kZ").expect("fixed Road to Nowhere end-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 10_700);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_terminal_fall.is_none());
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (1_120, 0x4_900, [0, 25_600, -18_662_400]),
-            (1_403, 0xa4_00, [0, 25_600, -24_012_800]),
+            (1_119, 0x4_900, [0, 25_600, -18_662_400]),
+            (1_402, 0xa4_00, [0, 25_600, -24_012_800]),
         ]
     );
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (915, 0x100),
-            (1_120, 0x200),
-            (1_403, 0x300),
-            (1_982, 0x400),
-            (1_984, 0x500),
+            (914, 0x100),
+            (1_119, 0x200),
+            (1_402, 0x300),
+            (1_979, 0x400),
         ]
+    );
+    assert_eq!(
+        survey.saved_box_count_samples,
+        [(1_119, 0x100), (1_402, 0x200)]
     );
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
     assert_eq!(survey.effect_counts.get("load-state"), None);
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
     assert_eq!(
         survey.final_player_translation,
-        Some([-4_096, 3_720_270, -40_225_400])
+        Some([-16_384, 3_720_267, -40_210_336])
     );
     let player = player_trace(&runtime)
         .expect("Road to Nowhere completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [-4_096, 3_720_270, -40_225_400]);
+    assert_eq!(player.translation, [-16_384, 3_720_267, -40_210_336]);
     let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
     for state in 0..=4 {
         assert!(
@@ -266,7 +296,10 @@ fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.draw_count(), 2_452);
+    assert_eq!(runtime.global_word(GAME_STATE_GLOBAL), Ok(0x500));
+    assert_eq!(runtime.machine().random_seed(), 0xc94d_feed);
+    assert_eq!(runtime.draw_count(), 2_449);
+    assert_eq!(survey.executions, 71_778);
     assert_eq!(survey.unexpected_spawn_errors, 0);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.faulted_objects, 0);
@@ -36204,6 +36237,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::SunsetVistaCompletionRoute
                 | SurveyInputProfile::SunsetVistaCortexBonusRoute
                 | SurveyInputProfile::SlipperyClimbCompletionRoute
+                | SurveyInputProfile::RoadToNowhereCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
                 | SurveyInputProfile::HogWildCompletionRoute

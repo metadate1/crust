@@ -385,7 +385,7 @@ Temple Ruins now has a complete direct-boot ordinary-pad route. It crosses 60 ca
 zone transitions without a restart, reaches `d3_sZ`'s authored WarpC, and requests Level Complete
 `0x2d` on frame 4,473 after 148,192 clean executions. Road to Nowhere now also has a no-death
 direct-boot route: it follows the authored outside rope lanes across every collapsing span, retains
-the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,452 without a restart
+the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,449 without a restart
 or load-state effect. The High Road now has its own clean ordinary-pad route: it follows the
 authored right rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives
 WarpC states zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming

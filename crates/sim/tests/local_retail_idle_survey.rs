@@ -6971,7 +6971,7 @@ impl NativeFortressRouteController {
                 return held;
             }
             if self.stage == 8 {
-                if self.route_tick < 20 {
+                if self.route_tick < 21 {
                     return 0;
                 }
                 self.stage = 9;
@@ -8488,7 +8488,7 @@ impl NativeFortressRouteController {
                         }
                     ) && object.translation[0].abs_diff(9_112_832) <= 16_000
                         && object.state == 16
-                        && object.bound.is_none()
+                        && object.frame_bound.is_none()
                 });
                 if self.route_tick >= 45
                     && flame_is_safe
@@ -38010,10 +38010,10 @@ fn native_fortress_ordinary_pad_route_reaches_level_complete_warp() {
     assert_eq!(survey.final_live_objects, 27);
     assert_eq!(survey.max_live_objects, 51);
     assert_eq!(survey.successful_spawns, 317);
-    assert_eq!(survey.spawn_attempts, 84_438);
-    assert_eq!(survey.expected_spawn_rejections, 84_121);
+    assert_eq!(survey.spawn_attempts, 84_441);
+    assert_eq!(survey.expected_spawn_rejections, 84_124);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 153_291);
+    assert_eq!(survey.executions, 153_293);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 64);
     assert_eq!(survey.camera_ranges.len(), 60);

@@ -486,6 +486,80 @@ fn lights_out_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn castle_machinery_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x37);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Castle Machinery");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Castle Machinery pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::CastleMachineryCompletionRoute,
+        6_500,
+    )
+    .expect("Castle Machinery's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 6_306, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((6_306, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 6306 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.observed_player_states.contains(&32));
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(
+        survey.final_player_translation,
+        Some([12_186_198, 3_717_863, 146_588])
+    );
+    let player = player_trace(&runtime)
+        .expect("Castle Machinery completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.translation, [12_186_198, 3_717_863, 146_588]);
+    assert_eq!(runtime.draw_count(), 6_306);
+    assert!(
+        survey.is_clean(),
+        "Castle Machinery end-warp route must remain clean: {}",
+        survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn fumbling_in_the_dark_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -679,6 +753,7 @@ enum SurveyInputProfile {
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LightsOutCompletionRoute,
+    CastleMachineryCompletionRoute,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
     UpstreamCarriedRecovery,
@@ -749,6 +824,7 @@ impl SurveyInputProfile {
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
+            Self::CastleMachineryCompletionRoute => "castle-machinery-completion-route",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
@@ -806,6 +882,7 @@ impl SurveyInputProfile {
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LightsOutCompletionRoute
+                | Self::CastleMachineryCompletionRoute
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
                 | Self::UpstreamCarriedRecovery
@@ -16669,6 +16746,2601 @@ impl UpstreamRecoveryRouteController {
     }
 }
 
+/// Deterministic ordinary-pad route for Castle Machinery's no-gem path.
+///
+/// The retail camera graph alternates long horizontal corridors with authored
+/// lift shafts. Horizontal banks drive in their forward world-X direction;
+/// vertical banks stay centered while a released Cross cadence negotiates
+/// ordinary ledges and moving machinery.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+struct CastleMachineryCompletionRouteController {
+    tick: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    a7_entered: bool,
+    a7_takeoff_fired: bool,
+    a7_rod_wait_started: bool,
+    a7_rod_low_seen: bool,
+    a7_rods_released: bool,
+    a8_reactor_wait_started: bool,
+    a8_reactor_low_seen: bool,
+    a8_reactor_released: bool,
+    a8_reactors_centered: bool,
+    a9_platform_departed: bool,
+    a9_side_route_stage: u8,
+    b1_dismount_started: bool,
+    b2_dismount_started: bool,
+    b2_upper_dismount_started: bool,
+    b3_piston_jump_started: bool,
+    b3_piston_low_seen: bool,
+    b3_piston_high_seen: bool,
+    b5_first_lower_landed: bool,
+    b5_rod_left_seen: bool,
+    b5_lower_crossing_started: bool,
+    b6_second_lower_landed: bool,
+    b6_second_drop_started: bool,
+    b6_bottom_jump_started: bool,
+    b6_second_hazard_jump_started: bool,
+    b7_electric_gate_released: bool,
+    b7_platform_stage: u8,
+    c1_electric_stage: u8,
+    c6_floor_stage: u8,
+    c9_approach_run_frames: u8,
+    c9_approach_jump_started: bool,
+    c9_bounce_released: bool,
+    c9_depth_turn_started: bool,
+    c9_corner_ready: bool,
+    c9_stair_jump_started: bool,
+    c9_wall_stage: u8,
+    c9_lift_centering: bool,
+    c9_pad_room_centered: bool,
+    c9_last_pad_bounced: bool,
+    c9_piston_side_cleared: bool,
+    c9_upper_walkway_departed: bool,
+    a2_drop_side_cleared: bool,
+    d0_hot_platform_stage: u8,
+    d1_pipe_low_seen: bool,
+    d1_pipe_high_seen: bool,
+    d1_pipe_vertical_frames: u8,
+    d9_pipe_hops: u8,
+    d9_phase_wait: u8,
+    d9_airborne_seen: bool,
+}
+
+#[allow(
+    clippy::if_same_then_else,
+    clippy::match_same_arms,
+    clippy::redundant_else
+)]
+impl CastleMachineryCompletionRouteController {
+    fn held(
+        &mut self,
+        frame: u32,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        route_objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        self.tick = self.tick.saturating_add(1);
+        let name = camera.path.zone.name().unwrap_or_default();
+        let index = camera.path.index;
+        if self.c9_pad_room_centered
+            && player_collider_entity == Some(207)
+            && player.is_some_and(|player| player.state == 6)
+        {
+            self.c9_last_pad_bounced = true;
+        }
+        let mut movement = match name.as_str() {
+            "a1_TZ" if index == 0 => PAD_RIGHT,
+            "a5_TZ" | "a6_TZ" => PAD_LEFT | PAD_UP,
+            "a7_TZ" | "a8_TZ" | "a9_TZ" => PAD_LEFT,
+            "b3_TZ" | "b4_TZ" => PAD_RIGHT,
+            "b5_TZ" if matches!(index, 0 | 2) => PAD_RIGHT,
+            "b5_TZ" if index == 1 => PAD_LEFT,
+            "b6_TZ" if matches!(index, 1 | 3) => PAD_RIGHT,
+            "b7_TZ" if matches!(index, 0 | 2) => PAD_RIGHT,
+            "C0_TZ" if index == 1 => PAD_LEFT,
+            "c1_TZ" | "c2_TZ" | "c3_TZ" | "c4_TZ" => PAD_LEFT,
+            "c5_TZ" if index == 0 => PAD_LEFT,
+            "c6_TZ" if matches!(index, 1 | 2) => PAD_RIGHT,
+            "c7_TZ" if matches!(index, 1 | 2) => PAD_RIGHT,
+            "c8_TZ" if matches!(index, 0 | 1) => PAD_RIGHT,
+            "C8_TZ" if index == 0 => PAD_RIGHT,
+            "c9_TZ" | "C9_TZ" | "cc_TZ" | "A2_TZ" | "d0_TZ" | "d3_TZ" | "d4_TZ" | "d5_TZ" => {
+                PAD_RIGHT
+            }
+            "Ca_TZ" if index == 2 => PAD_RIGHT,
+            "Ca_TZ" if index == 3 && self.c9_upper_walkway_departed => PAD_RIGHT,
+            "Ca_TZ" if index == 3 && self.c9_last_pad_bounced => PAD_RIGHT,
+            "d1_TZ" if matches!(index, 0 | 4) => PAD_RIGHT,
+            "d1_TZ" if matches!(index, 1 | 2 | 5) => PAD_LEFT,
+            "d6_TZ" if matches!(index, 0 | 2) => PAD_RIGHT,
+            "d8_TZ" if index == 1 => PAD_LEFT,
+            "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ" => PAD_LEFT,
+            _ => 0,
+        };
+        if name == "d0_TZ" {
+            movement |= player.map_or(0, |player| {
+                if player.translation[2] > 120_000 {
+                    PAD_UP
+                } else if player.translation[2] < 84_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                }
+            });
+        }
+        if matches!(name.as_str(), "d0_TZ" | "d1_TZ") {
+            let player = player.expect("Castle Machinery hot-platform corridor keeps Crash live");
+            let depth = movement & (PAD_UP | PAD_DOWN);
+
+            if self.d0_hot_platform_stage == 0
+                && player_collider_entity == Some(139)
+                && player.status_a & 1 != 0
+            {
+                self.d0_hot_platform_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+
+            if self.d0_hot_platform_stage == 1 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if player.translation[0] >= 13_245_000 && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 2;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 2 {
+                if player_collider_entity == Some(148) && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_RIGHT | depth;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 3 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if player.translation[0] >= 13_955_000 && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 4;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 4 {
+                if player_collider_entity == Some(151) && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 5;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_RIGHT | depth;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 5 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if player.translation[0] >= 14_665_000 && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 6;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 6 {
+                if player_collider_entity == Some(220) && player.status_a & 1 != 0 {
+                    self.d0_hot_platform_stage = 7;
+                    self.jump_frames = 0;
+                    self.release_frames = 5;
+                    return PAD_RIGHT | depth;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | depth | PAD_CROSS;
+                }
+                return PAD_RIGHT | depth;
+            }
+
+            if self.d0_hot_platform_stage == 7
+                && player_collider_entity == Some(222)
+                && player.status_a & 1 != 0
+            {
+                self.d0_hot_platform_stage = 8;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+
+            if self.d0_hot_platform_stage == 8 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let pipe_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 221)
+                        .then_some(object.translation[1])
+                });
+                self.d1_pipe_low_seen |= pipe_y.is_some_and(|y| y <= -2_750_000);
+                self.d1_pipe_high_seen |=
+                    self.d1_pipe_low_seen && pipe_y.is_some_and(|y| y >= -2_520_000);
+
+                let horizontal = if player.translation[0] > 15_520_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 15_460_000 || player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if horizontal == 0
+                    && self.d1_pipe_high_seen
+                    && pipe_y.is_some_and(|y| y >= -2_520_000)
+                    && player.status_a & 1 != 0
+                {
+                    self.d0_hot_platform_stage = 10;
+                    self.jump_frames = 0;
+                    self.d1_pipe_vertical_frames = 0;
+                    return PAD_LEFT | PAD_SQUARE;
+                }
+                return horizontal;
+            }
+
+            if self.d0_hot_platform_stage == 9 {
+                if self.d1_pipe_vertical_frames != 0 {
+                    self.d1_pipe_vertical_frames -= 1;
+                    self.jump_frames = self.jump_frames.saturating_sub(1);
+                    return PAD_CROSS;
+                }
+                self.d0_hot_platform_stage = 10;
+                self.jump_frames = self.jump_frames.saturating_sub(1);
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+
+            if self.d0_hot_platform_stage == 10 && name == "d1_TZ" {
+                if player.translation[0] <= 14_630_000 {
+                    self.d0_hot_platform_stage = 11;
+                    return PAD_RIGHT;
+                }
+                return PAD_LEFT;
+            }
+
+            if self.d0_hot_platform_stage == 11 && name == "d1_TZ" {
+                return PAD_RIGHT;
+            }
+        }
+        if name == "d4_TZ" && self.d0_hot_platform_stage == 11 {
+            let player = player.expect("Castle Machinery lower box corridor keeps Crash live");
+            let horizontal = if player.translation[0] < 15_700_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 15_800_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if matches!(player_collider_entity, Some(84 | 85)) && player.status_a & 1 != 0 {
+                self.d0_hot_platform_stage = 12;
+            }
+            return horizontal;
+        }
+        if name == "d4_TZ" && self.d0_hot_platform_stage == 12 {
+            let player = player.expect("Castle Machinery pipe approach keeps Crash live");
+            let pipe_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 87)
+                    .then_some(object.translation[1])
+            });
+            let horizontal = if player.translation[0] < 16_430_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 16_510_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if horizontal == 0
+                && player.status_a & 1 != 0
+                && pipe_y.is_some_and(|y| y >= -3_220_000)
+            {
+                self.d0_hot_platform_stage = 13;
+                return PAD_RIGHT;
+            }
+            return horizontal;
+        }
+        if name == "d4_TZ" && self.d0_hot_platform_stage == 13 {
+            let player = player.expect("Castle Machinery pipe crossing keeps Crash live");
+            if player.translation[0] >= 17_000_000 {
+                self.d0_hot_platform_stage = 14;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name.as_str(), "d4_TZ" | "d5_TZ") && self.d0_hot_platform_stage == 14 {
+            let player = player.expect("Castle Machinery second pipe approach keeps Crash live");
+            let pipe_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 226)
+                    .then_some(object.translation[1])
+            });
+            let horizontal = if player.translation[0] < 17_150_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 17_230_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if horizontal == 0
+                && player.status_a & 1 != 0
+                && pipe_y.is_some_and(|y| y >= -3_220_000)
+            {
+                self.d0_hot_platform_stage = 15;
+                return PAD_RIGHT;
+            }
+            return horizontal;
+        }
+        if name == "d5_TZ" && self.d0_hot_platform_stage == 15 {
+            let player = player.expect("Castle Machinery second pipe crossing keeps Crash live");
+            if player.translation[0] >= 17_650_000 {
+                self.d0_hot_platform_stage = 16;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "d5_TZ" && self.d0_hot_platform_stage == 16 {
+            let player = player.expect("Castle Machinery lower hazard approach keeps Crash live");
+            if player_collider_entity == Some(228)
+                && player.status_a & 1 != 0
+                && (18_170_000..=18_240_000).contains(&player.translation[0])
+            {
+                self.d0_hot_platform_stage = 17;
+                self.jump_frames = 29;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] < 18_170_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 18_240_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if name == "d5_TZ" && self.d0_hot_platform_stage == 17 {
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if name == "d6_TZ" && self.d0_hot_platform_stage == 17 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery final lift approach keeps Crash live");
+            if player.translation[0] >= 19_380_000
+                && player_collider_entity == Some(171)
+                && player.status_a & 1 != 0
+            {
+                self.d0_hot_platform_stage = 18;
+                self.jump_frames = 24;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "d6_TZ" && self.d0_hot_platform_stage == 18 {
+            let player = player.expect("Castle Machinery final lift transfer keeps Crash live");
+            if player_collider_entity == Some(173) && player.status_a & 1 != 0 {
+                self.d0_hot_platform_stage = 19;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] < 19_930_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 || player.translation[0] > 20_010_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if matches!(name.as_str(), "d6_TZ" | "d7_TZ") && self.d0_hot_platform_stage == 19 {
+            let player = player.expect("Castle Machinery final lift keeps Crash live");
+            let upper_lift_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 177)
+                    .then_some(object.translation[1])
+            });
+            if matches!(name.as_str(), "d6_TZ" | "d7_TZ")
+                && upper_lift_y.is_some_and(|y| {
+                    (-2_750_000..=-2_550_000).contains(&y)
+                        && player.translation[1] >= -2_900_000
+                        && (y - player.translation[1]).unsigned_abs() <= 150_000
+                })
+            {
+                self.d0_hot_platform_stage = 20;
+                return PAD_LEFT;
+            }
+            let horizontal = if player.translation[0] < 19_890_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 19_920_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let depth = if player.translation[2] < 202_000 || player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 206_000 || player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth;
+        }
+        if matches!(name.as_str(), "d6_TZ" | "d7_TZ") && self.d0_hot_platform_stage == 20 {
+            let player = player.expect("Castle Machinery upper-lift run-up keeps Crash live");
+            if player_collider_entity == Some(173)
+                && player.status_a & 1 != 0
+                && player.translation[0] <= 19_890_000
+                && player.velocity[0] <= -250_000
+            {
+                self.d0_hot_platform_stage = 22;
+                self.jump_frames = 24;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT;
+        }
+        if matches!(name.as_str(), "d6_TZ" | "d7_TZ") && self.d0_hot_platform_stage == 22 {
+            let player = player.expect("Castle Machinery upper-lift transfer keeps Crash live");
+            if player_collider_entity == Some(177) && player.status_a & 1 != 0 {
+                self.d0_hot_platform_stage = 21;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] > 19_390_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 || player.translation[0] < 19_310_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if matches!(name.as_str(), "d7_TZ" | "d8_TZ") && self.d0_hot_platform_stage == 21 {
+            let player = player.expect("Castle Machinery upper lift keeps Crash live");
+            if name == "d8_TZ" && player.translation[1] >= -120_000 {
+                self.d0_hot_platform_stage = 23;
+                self.jump_frames = 24;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = if player.translation[0] < 19_320_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 19_390_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let depth = if player.translation[2] < 202_000 || player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 206_000 || player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth;
+        }
+        if name == "d8_TZ" && self.d0_hot_platform_stage == 23 {
+            let player = player.expect("Castle Machinery lift exit keeps Crash live");
+            let depth = if player.translation[2] > 110_000 || player.velocity[2] > 80_000 {
+                PAD_UP
+            } else if player.translation[2] < 90_000 || player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.translation[0] <= 18_750_000 && player.status_a & 1 != 0 {
+                self.d0_hot_platform_stage = 24;
+                self.jump_frames = 29;
+                return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT | depth | PAD_SQUARE;
+        }
+        if matches!(
+            name.as_str(),
+            "d8_TZ" | "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ"
+        ) && self.d0_hot_platform_stage == 24
+        {
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.is_some_and(|player| player.status_a & 1 != 0) {
+                self.d0_hot_platform_stage = 25;
+                self.release_frames = 3;
+            }
+            return PAD_LEFT | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ")
+            && self.d0_hot_platform_stage == 25
+        {
+            if self.d9_pipe_hops >= 5 {
+                self.d0_hot_platform_stage = 27;
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            let pipe_state = |id| {
+                route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == id)
+                        .then_some(object.state)
+                })
+            };
+            let phase_is_safe = match self.d9_pipe_hops {
+                0 => pipe_state(244) == Some(6) && pipe_state(243) == Some(7),
+                1 => pipe_state(243) == Some(6) && pipe_state(242) == Some(6),
+                2 => pipe_state(241) == Some(6) && pipe_state(240) == Some(6),
+                3 => pipe_state(240) == Some(6) && pipe_state(236) == Some(6),
+                4 => pipe_state(235) == Some(6),
+                _ => false,
+            };
+            if phase_is_safe {
+                self.d9_phase_wait = self.d9_phase_wait.saturating_add(1);
+            } else {
+                self.d9_phase_wait = 0;
+            }
+            let required_wait = if self.d9_pipe_hops == 0 { 8 } else { 1 };
+            if self.d9_phase_wait >= required_wait {
+                self.d0_hot_platform_stage = 26;
+                self.d9_airborne_seen = false;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ")
+            && self.d0_hot_platform_stage == 26
+        {
+            let player = player.expect("Castle Machinery timed pipe jump keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_pipe_hops = self.d9_pipe_hops.saturating_add(1);
+                self.d9_phase_wait = 0;
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 25;
+                return if self.d9_pipe_hops == 4 {
+                    PAD_LEFT | PAD_SQUARE
+                } else {
+                    PAD_SQUARE
+                };
+            }
+            let depth = if self.d9_pipe_hops == 4 {
+                let predicted_depth =
+                    i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+                if predicted_depth < 160_000 {
+                    PAD_DOWN
+                } else if predicted_depth > 180_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+            return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ")
+            && self.d0_hot_platform_stage == 27
+        {
+            let player = player.expect("Castle Machinery final approach keeps Crash live");
+            let predicted_depth =
+                i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+            let depth = if predicted_depth < 200_000 {
+                PAD_DOWN
+            } else if predicted_depth > 210_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return if player_collider_entity == Some(232) {
+                let platform_x = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 232)
+                        .then_some(object.translation[0])
+                });
+                if platform_x.is_some_and(|platform_x| platform_x <= 15_750_000) {
+                    self.d0_hot_platform_stage = 28;
+                    self.d9_airborne_seen = false;
+                    return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+                }
+                let horizontal = platform_x.map_or(0, |platform_x| {
+                    let predicted_x =
+                        i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                    if predicted_x > i64::from(platform_x) + 15_000 {
+                        PAD_LEFT
+                    } else if predicted_x < i64::from(platform_x) - 15_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    }
+                });
+                horizontal | depth | PAD_SQUARE
+            } else {
+                PAD_LEFT | depth | PAD_SQUARE
+            };
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 28
+        {
+            let player = player.expect("Castle Machinery final platform jump keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 29;
+                return PAD_SQUARE;
+            }
+            let predicted_depth =
+                i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+            let depth = if predicted_depth < 200_000 {
+                PAD_DOWN
+            } else if predicted_depth > 210_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 232)
+                    .then_some(object.translation[0])
+            });
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            return horizontal | depth | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 29
+        {
+            let player = player.expect("Castle Machinery final platform ride keeps Crash live");
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 232)
+                    .then_some(object.translation[0])
+            });
+            if player_collider_entity == Some(232)
+                && platform_x.is_some_and(|platform_x| platform_x <= 15_230_000)
+            {
+                self.d0_hot_platform_stage = 30;
+                self.d9_airborne_seen = false;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            let predicted_depth =
+                i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+            let depth = if predicted_depth < 200_000 {
+                PAD_DOWN
+            } else if predicted_depth > 210_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 30
+        {
+            let player =
+                player.expect("Castle Machinery second platform obstacle keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 31;
+                return PAD_SQUARE;
+            }
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 232)
+                    .then_some(object.translation[0])
+            });
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            let predicted_depth =
+                i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+            let depth = if predicted_depth < 200_000 {
+                PAD_DOWN
+            } else if predicted_depth > 210_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 31
+        {
+            let player = player.expect("Castle Machinery first platform exit keeps Crash live");
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 232)
+                    .then_some(object.translation[0])
+            });
+            if player_collider_entity == Some(232)
+                && platform_x.is_some_and(|platform_x| platform_x <= 14_600_000)
+            {
+                self.d0_hot_platform_stage = 32;
+                self.d9_airborne_seen = false;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            return horizontal | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 32
+        {
+            let player = player.expect("Castle Machinery platform transfer keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 33;
+                return PAD_SQUARE;
+            }
+            return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 33
+        {
+            let player = player.expect("Castle Machinery second platform ride keeps Crash live");
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 237)
+                    .then_some(object.translation[0])
+            });
+            if player_collider_entity == Some(237)
+                && platform_x.is_some_and(|platform_x| platform_x <= 13_700_000)
+            {
+                self.d0_hot_platform_stage = 34;
+                self.d9_airborne_seen = false;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            return horizontal | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 34
+        {
+            let player = player.expect("Castle Machinery last platform obstacle keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 35;
+                return PAD_SQUARE;
+            }
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 237)
+                    .then_some(object.translation[0])
+            });
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            return horizontal | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 35
+        {
+            let player = player.expect("Castle Machinery last platform exit keeps Crash live");
+            let platform_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 237)
+                    .then_some(object.translation[0])
+            });
+            if player_collider_entity == Some(237)
+                && platform_x.is_some_and(|platform_x| platform_x <= 12_900_000)
+            {
+                self.d0_hot_platform_stage = 36;
+                self.d9_airborne_seen = false;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = platform_x.map_or(PAD_LEFT, |platform_x| {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                if predicted_x > i64::from(platform_x) + 15_000 {
+                    PAD_LEFT
+                } else if predicted_x < i64::from(platform_x) - 15_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+            });
+            return horizontal | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 36
+        {
+            let player = player.expect("Castle Machinery exit jump keeps Crash live");
+            if player.status_a & 1 == 0 {
+                self.d9_airborne_seen = true;
+            } else if self.d9_airborne_seen {
+                self.d9_airborne_seen = false;
+                self.d0_hot_platform_stage = 37;
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 37
+        {
+            let player = player.expect("Castle Machinery exit warp approach keeps Crash live");
+            let depth = if player.translation[2] < 145_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 165_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            if player.translation[0] <= 12_500_000 && player.status_a & 1 != 0 {
+                self.d0_hot_platform_stage = 38;
+                return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT | depth | PAD_SQUARE;
+        }
+        if matches!(name.as_str(), "e0_TZ" | "e1_TZ" | "e2_TZ") && self.d0_hot_platform_stage == 38
+        {
+            let player = player.expect("Castle Machinery exit warp jump keeps Crash live");
+            let depth = if player.translation[2] < 145_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 165_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return PAD_LEFT | depth | PAD_CROSS | PAD_SQUARE;
+        }
+        if name == "b5_TZ" && matches!(index, 1 | 3) {
+            let player = player.expect("Castle Machinery lower descent keeps Crash live");
+            if index == 3 && player.translation[1] <= -5_350_000 && player.status_a & 1 != 0 {
+                self.b5_first_lower_landed = true;
+            }
+            movement = if self.b5_first_lower_landed {
+                0
+            } else if player.translation[0] > 7_820_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 7_700_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if name == "b6_TZ" && index == 0 && self.b5_lower_crossing_started {
+            let player = player.expect("Castle Machinery second lower tier remains reachable");
+            movement = if player.translation[0] < 8_050_000 && player.velocity[0] <= 80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 8_180_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        let a7_depth = if name == "a7_TZ" {
+            player.map_or(0, |player| {
+                if player.translation[2] < 90_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 114_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            })
+        } else {
+            0
+        };
+        movement |= a7_depth;
+        if name == "a8_TZ" && self.a8_reactor_released && !self.a8_reactors_centered {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery player is present after reactor release");
+            let horizontal = if player.velocity[0] < -80_000 || player.translation[0] < 6_340_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 || player.translation[0] > 6_380_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if player.translation[0] > 6_380_000 || player.velocity[0].unsigned_abs() > 80_000 {
+                let depth = if player.velocity[2] > 80_000 || player.translation[2] > 198_000 {
+                    PAD_UP
+                } else if player.velocity[2] < -80_000 || player.translation[2] < 194_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                return horizontal | depth;
+            }
+            let depth = if player.velocity[2] > 80_000 || player.translation[2] > 110_000 {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 || player.translation[2] < 98_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            if depth == 0 && player.status_a & 1 != 0 {
+                self.a8_reactors_centered = true;
+                self.jump_frames = 20;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return horizontal | depth;
+        }
+        if name == "a8_TZ"
+            && self.a8_reactors_centered
+            && player.is_some_and(|player| player.translation[0] > 6_350_000)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_LEFT;
+        }
+        if matches!(name.as_str(), "a8_TZ" | "a9_TZ") && !self.a9_platform_departed {
+            let platform = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 70)
+            });
+            if let (Some(player), Some(platform)) = (player, platform)
+                && (player.translation[0] < 5_850_000 || platform.state >= 2)
+            {
+                self.release_frames = 0;
+                if platform.state >= 2 {
+                    self.a9_platform_departed = true;
+                    self.jump_frames = 29;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                let horizontal =
+                    if player.velocity[0] < -500_000 || player.translation[0] < 5_650_000 {
+                        PAD_RIGHT
+                    } else if player.velocity[0] > 80_000 || player.translation[0] > 5_770_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                return horizontal
+                    | if self.jump_frames != 0 {
+                        self.jump_frames -= 1;
+                        PAD_CROSS
+                    } else {
+                        0
+                    };
+            }
+        }
+        if name == "a9_TZ" && self.a9_platform_departed {
+            let player = player.expect("Castle Machinery player remains live in a9");
+            if self.a9_side_route_stage == 0
+                && player.status_a & 1 != 0
+                && (5_000_000..=5_500_000).contains(&player.translation[0])
+            {
+                self.a9_side_route_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+            if self.a9_side_route_stage == 1 {
+                let horizontal = if player.translation[0] > 5_280_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 || player.translation[0] < 5_180_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 || player.translation[0] > 5_320_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if !(5_140_000..=5_340_000).contains(&player.translation[0]) {
+                    0
+                } else if player.translation[2] > 320_000 {
+                    PAD_UP
+                } else if player.translation[2] < 280_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 {
+                    PAD_UP
+                } else if player.velocity[2] < -80_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if horizontal == 0 && depth == 0 && player.status_a & 1 != 0 {
+                    self.a9_side_route_stage = 2;
+                    return PAD_LEFT;
+                }
+                return horizontal | depth;
+            }
+            if self.a9_side_route_stage == 2 {
+                let depth = if player.translation[2] > 320_000 {
+                    PAD_UP
+                } else if player.translation[2] < 280_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if player.translation[0] <= 4_340_000 && player.status_a & 1 != 0 {
+                    self.a9_side_route_stage = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_UP;
+                }
+                let held = PAD_LEFT | depth;
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS;
+                }
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return held;
+                }
+                if player.status_a & 1 != 0 {
+                    self.jump_frames = 20;
+                    self.release_frames = 5;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
+            if matches!(self.a9_side_route_stage, 3 | 4) {
+                let horizontal = if player.translation[0] > 3_650_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 || player.translation[0] < 3_520_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 || player.translation[0] > 3_640_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.translation[2] > 125_000 {
+                    PAD_UP
+                } else if player.translation[2] < 80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] < -80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let held = horizontal | depth;
+                if self.a9_side_route_stage == 3 {
+                    if self.release_frames != 0 {
+                        self.release_frames -= 1;
+                        return held;
+                    }
+                    if player.status_a & 1 != 0 {
+                        self.a9_side_route_stage = 4;
+                        self.jump_frames = 29;
+                        return held | PAD_CROSS;
+                    }
+                    return held;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
+        }
+        if matches!(name.as_str(), "b0_TZ" | "b1_TZ") {
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery lift keeps Crash live");
+            let lift = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 64)
+            });
+            let second_lift = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 73)
+            });
+            if name == "b1_TZ"
+                && self.b1_dismount_started
+                && (self.b2_dismount_started
+                    || second_lift.is_some_and(|lift| lift.translation[1] >= -5_300_000))
+            {
+                if !self.b2_dismount_started {
+                    self.b2_dismount_started = true;
+                    self.jump_frames = 12;
+                }
+                let horizontal = if player.translation[0] > 3_180_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 3_100_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.velocity[2] < -80_000 || player.translation[2] < 80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 || player.translation[2] > 125_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return horizontal | depth | PAD_CROSS;
+                }
+                return horizontal | depth;
+            }
+            if name == "b1_TZ"
+                && (self.b1_dismount_started
+                    || lift.is_some_and(|lift| lift.translation[1] >= -5_950_000))
+            {
+                if !self.b1_dismount_started {
+                    self.b1_dismount_started = true;
+                    self.jump_frames = 12;
+                }
+                let horizontal = if player.translation[0] > 3_350_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 3_310_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.velocity[2] < -80_000 || player.translation[2] < 80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 || player.translation[2] > 125_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return horizontal | depth | PAD_CROSS;
+                }
+                return horizontal | depth;
+            }
+            self.jump_frames = 0;
+            let horizontal = if player.velocity[0] < -80_000 || player.translation[0] < 3_540_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 || player.translation[0] > 3_630_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            let depth = if player.velocity[2] < -80_000 || player.translation[2] < 80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 || player.translation[2] > 125_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth;
+        }
+        if name == "b2_TZ" {
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery second lift keeps Crash live");
+            let lift = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 73)
+            });
+            let upper_lift = route_objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 77)
+            });
+            if self.b2_upper_dismount_started
+                || (self.b2_dismount_started
+                    && self.jump_frames == 0
+                    && upper_lift.is_some_and(|lift| lift.state == 7))
+            {
+                if self.b2_upper_dismount_started
+                    || upper_lift.is_some_and(|lift| lift.translation[1] >= -4_040_000)
+                {
+                    if !self.b2_upper_dismount_started {
+                        self.b2_upper_dismount_started = true;
+                        self.jump_frames = 20;
+                    }
+                    let horizontal = if player.translation[0] < 3_660_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 3_740_000 {
+                        PAD_LEFT
+                    } else if player.velocity[0] > 80_000 {
+                        PAD_LEFT
+                    } else if player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    let depth = if player.translation[2] < 42_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 58_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    if self.jump_frames != 0 {
+                        self.jump_frames -= 1;
+                        return horizontal | depth | PAD_CROSS | PAD_SQUARE;
+                    }
+                    return horizontal | depth;
+                }
+                let near_apex = upper_lift.is_some_and(|lift| lift.translation[1] >= -4_100_000);
+                let horizontal = if near_apex {
+                    PAD_RIGHT
+                } else if player.translation[0] < 3_225_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 3_237_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.translation[2] < 39_500 {
+                    PAD_DOWN
+                } else if player.translation[2] > 43_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                return horizontal | depth;
+            }
+            if self.b2_dismount_started
+                || lift.is_some_and(|lift| lift.translation[1] >= -5_180_000)
+            {
+                if !self.b2_dismount_started {
+                    self.b2_dismount_started = true;
+                    self.jump_frames = 12;
+                }
+                let horizontal = if player.translation[0] > 3_180_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 3_100_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.velocity[2] < -80_000 || player.translation[2] < 80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 || player.translation[2] > 125_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return horizontal | depth | PAD_CROSS;
+                }
+                return horizontal | depth;
+            }
+            self.jump_frames = 0;
+            return if player.translation[0] < 3_340_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 3_420_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if name == "b3_TZ"
+            && index == 1
+            && player.is_some_and(|player| player.translation[0] < 5_050_000)
+        {
+            self.release_frames = 0;
+            let player = player.expect("checked Castle Machinery player is present at the piston");
+            let piston_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 89)
+                    .then_some(object.translation[1])
+            });
+            self.b3_piston_low_seen |= piston_y.is_some_and(|y| y <= -4_150_000);
+            self.b3_piston_high_seen |=
+                self.b3_piston_low_seen && piston_y.is_some_and(|y| y >= -3_650_000);
+            if self.b3_piston_jump_started {
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT;
+            }
+            self.jump_frames = 0;
+            let piston_is_descending =
+                self.b3_piston_high_seen && piston_y.is_some_and(|y| y <= -3_650_000);
+            if player.translation[0] >= 4_650_000
+                && player.status_a & 1 != 0
+                && piston_is_descending
+            {
+                self.b3_piston_jump_started = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let horizontal = if piston_is_descending {
+                PAD_RIGHT
+            } else if player.translation[0] < 4_540_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 4_580_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            return horizontal;
+        }
+        if name == "b5_TZ" && index == 3 && self.b5_first_lower_landed {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery first lower platform keeps Crash live");
+            let rod_x = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 102)
+                    .then_some(object.translation[0])
+            });
+            self.b5_rod_left_seen |= rod_x.is_some_and(|x| x <= 8_030_000);
+            if !self.b5_lower_crossing_started
+                && self.b5_rod_left_seen
+                && rod_x.is_some_and(|x| x >= 8_220_000)
+            {
+                self.b5_lower_crossing_started = true;
+            }
+            if self.b5_lower_crossing_started {
+                return if player.translation[0] < 8_050_000 && player.velocity[0] <= 80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 8_180_000 || player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+            return if player.translation[0] < 7_700_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 7_780_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if name == "b6_TZ" && self.b6_second_drop_started && !self.b6_bottom_jump_started {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery bottom floor remains reachable");
+            if player.translation[1] <= -6_400_000 && player.status_a & 1 != 0 {
+                if player.translation[0] < 8_160_000 {
+                    return PAD_RIGHT;
+                }
+                self.b6_bottom_jump_started = true;
+                self.jump_frames = 10;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] < 7_850_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 7_980_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if name == "b6_TZ" && self.b6_bottom_jump_started && !self.b6_second_hazard_jump_started {
+            let player = player.expect("Castle Machinery first bottom hazard remains clearable");
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 8_600_000 {
+                self.b6_second_hazard_jump_started = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if name == "b6_TZ" && self.b6_second_hazard_jump_started && self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if name == "b6_TZ" && matches!(index, 0 | 2) && self.b5_lower_crossing_started {
+            if self.b6_bottom_jump_started && self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery second lower tier remains reachable");
+            if !self.b6_second_lower_landed
+                && player.translation[1] <= -5_880_000
+                && player.status_a & 1 != 0
+            {
+                self.b6_second_lower_landed = true;
+            }
+            if self.b6_second_lower_landed {
+                if !self.b6_second_drop_started && player.translation[1] < -6_050_000 {
+                    self.b6_second_drop_started = true;
+                }
+                if !self.b6_second_drop_started {
+                    return if player.translation[0] > 7_840_000 && player.velocity[0] >= -170_000 {
+                        PAD_LEFT
+                    } else if player.velocity[0] < 0 || player.translation[0] < 7_810_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                }
+                return if player.translation[0] < 7_850_000 || player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 7_980_000 || player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if player.translation[1] > -5_580_000 {
+                return if player.translation[0] < 8_180_000 && player.velocity[0] <= 170_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 0 || player.translation[0] > 8_205_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            return if player.translation[0] < 8_080_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 8_180_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if name == "b6_TZ" && index == 1 && self.b6_bottom_jump_started {
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.is_some_and(|player| player.translation[0] < 8_550_000) {
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+        }
+        if name == "b7_TZ"
+            && !self.b7_electric_gate_released
+            && player.is_some_and(|player| player.translation[0] >= 9_700_000)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery electric-gate approach keeps Crash live");
+            let gate_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 117)
+                    .then_some(object.translation[1])
+            });
+            if player.translation[0] >= 9_880_000
+                && player.status_a & 1 != 0
+                && gate_y.is_some_and(|y| y <= -6_490_000)
+            {
+                self.b7_electric_gate_released = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return if player.translation[0] > 9_940_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 9_880_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if name == "b7_TZ"
+            && self.b7_electric_gate_released
+            && player.is_some_and(|player| player.translation[0] < 10_220_000)
+        {
+            self.release_frames = 0;
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(
+            name.as_str(),
+            "b7_TZ" | "b8_TZ" | "b9_TZ" | "c0_TZ" | "C0_TZ"
+        ) && self.b7_electric_gate_released
+            && self.b7_platform_stage <= 12
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery first platform chain keeps Crash live");
+            if self.b7_platform_stage == 0 {
+                if player.status_a & 1 != 0
+                    && (10_220_000..=10_450_000).contains(&player.translation[0])
+                    && player.translation[1] <= -6_300_000
+                {
+                    self.b7_platform_stage = 1;
+                }
+                return if player.translation[0] < 10_300_000 || player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_380_000 || player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 1 {
+                let platform_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 118)
+                        .then_some(object.translation[1])
+                });
+                if player.status_a & 1 != 0 && platform_y.is_some_and(|y| y >= -5_860_000) {
+                    self.b7_platform_stage = 2;
+                    self.jump_frames = 20;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return if player.translation[0] < 10_300_000 || player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_380_000 || player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 2 {
+                if player.status_a & 1 != 0
+                    && player.translation[0] >= 10_420_000
+                    && (-5_780_000..=-5_680_000).contains(&player.translation[1])
+                {
+                    self.b7_platform_stage = 3;
+                    return 0;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.b7_platform_stage == 3 {
+                let platform_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 119)
+                        .then_some(object.translation[1])
+                });
+                if player.status_a & 1 != 0 && platform_y.is_some_and(|y| y >= -4_980_000) {
+                    self.b7_platform_stage = 4;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if player.translation[0] < 10_440_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_460_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 4 {
+                if player.status_a & 1 != 0
+                    && player.translation[0] <= 10_240_000
+                    && player.translation[1] >= -4_950_000
+                {
+                    self.b7_platform_stage = 5;
+                    return PAD_RIGHT;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.b7_platform_stage == 5 {
+                let platform_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 123)
+                        .then_some(object.translation[1])
+                });
+                if player.status_a & 1 != 0 && platform_y.is_some_and(|y| y >= -3_850_000) {
+                    self.b7_platform_stage = 6;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 10_100_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_170_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 6
+                && player.status_a & 1 != 0
+                && player.translation[0] >= 10_420_000
+                && player.translation[1] >= -3_900_000
+            {
+                self.b7_platform_stage = 7;
+                return 0;
+            }
+            if self.b7_platform_stage == 6 {
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.b7_platform_stage == 7 {
+                let platform_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 130)
+                        .then_some(object.translation[1])
+                });
+                if player.status_a & 1 != 0 && platform_y.is_some_and(|y| y >= -3_360_000) {
+                    self.b7_platform_stage = 8;
+                    self.jump_frames = 10;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 10_500_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_570_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 8
+                && player.status_a & 1 != 0
+                && player.translation[0] <= 10_470_000
+                && player.translation[1] >= -3_250_000
+            {
+                self.b7_platform_stage = 9;
+                return 0;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.b7_platform_stage == 8 {
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if self.b7_platform_stage == 9 {
+                let next_platform_loaded = route_objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 142)
+                });
+                let platform_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 135)
+                        .then_some(object.translation[1])
+                });
+                if next_platform_loaded
+                    && player.status_a & 1 != 0
+                    && platform_y.is_some_and(|y| y >= -2_680_000)
+                {
+                    self.b7_platform_stage = 10;
+                    return PAD_DOWN;
+                }
+                return if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 10_300_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 10_380_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+            if self.b7_platform_stage == 10
+                && player.status_a & 1 != 0
+                && player.translation[2] >= 260_000
+            {
+                self.b7_platform_stage = 11;
+                return PAD_UP;
+            }
+            if self.b7_platform_stage == 10 {
+                return PAD_DOWN;
+            }
+            let platform = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 142)
+                    .then_some((object.state, object.translation[1], object.translation[2]))
+            });
+            if self.b7_platform_stage == 11
+                && player.status_a & 1 != 0
+                && platform.is_some_and(|(state, y, _)| state == 7 && y >= -400_000)
+            {
+                self.b7_platform_stage = 12;
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.b7_platform_stage == 12 {
+                if player.status_a & 1 != 0 && player.translation[2] <= 180_000 {
+                    self.b7_platform_stage = 13;
+                    return PAD_LEFT;
+                }
+                return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            let depth = if let Some((7, _, platform_z)) = platform {
+                let target_z = platform_z + 40_000;
+                if player.translation[2] < target_z - 8_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > target_z + 8_000 {
+                    PAD_UP
+                } else if player.velocity[2] < -80_000 {
+                    PAD_DOWN
+                } else if player.velocity[2] > 80_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            } else {
+                PAD_UP | PAD_DOWN
+            };
+            let lateral = if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 10_300_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 10_380_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            return depth | lateral;
+        }
+        if name == "c1_TZ" && index == 1 && self.b7_platform_stage == 13 {
+            let player = player.expect("Castle Machinery upper electric corridor keeps Crash live");
+            let obstacle_state = |id| {
+                route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == id)
+                        .then_some(object.state)
+                })
+            };
+            let center_on = |target: i32| {
+                if player.translation[0] > target + 120_000 {
+                    PAD_LEFT
+                } else if player.translation[0] > target + 20_000 {
+                    if player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    }
+                } else if player.translation[0] < target - 20_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            };
+            if self.c1_electric_stage == 0 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if obstacle_state(146) == Some(6) && player.status_a & 1 != 0 {
+                    self.c1_electric_stage = 1;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return center_on(8_650_000);
+            }
+            if self.c1_electric_stage == 1 {
+                if player.translation[0] <= 8_420_000 {
+                    self.c1_electric_stage = 2;
+                    self.jump_frames = 0;
+                    return PAD_RIGHT;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            if self.c1_electric_stage == 2 {
+                if (8_315_000..=8_365_000).contains(&player.translation[0])
+                    && player.velocity[0].unsigned_abs() <= 80_000
+                    && player.status_a & 1 != 0
+                    && obstacle_state(165) == Some(6)
+                {
+                    self.c1_electric_stage = 3;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                } else {
+                    return center_on(8_340_000);
+                }
+            }
+            if self.c1_electric_stage == 3 {
+                if player.translation[0] <= 7_740_000 {
+                    self.c1_electric_stage = 4;
+                    self.jump_frames = 0;
+                    return PAD_RIGHT;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            if self.c1_electric_stage == 4 {
+                if (7_620_000..=7_680_000).contains(&player.translation[0])
+                    && player.velocity[0].unsigned_abs() <= 80_000
+                    && player.status_a & 1 != 0
+                    && obstacle_state(164) == Some(6)
+                {
+                    self.c1_electric_stage = 5;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return center_on(7_650_000);
+            }
+            if self.c1_electric_stage == 5 {
+                if player.translation[0] <= 7_200_000 {
+                    self.c1_electric_stage = 6;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                }
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        if matches!(name.as_str(), "c2_TZ" | "c3_TZ")
+            && self.b7_platform_stage == 13
+            && (self.c1_electric_stage >= 6
+                || player.is_some_and(|player| player.translation[0] <= 7_200_000))
+            && player.is_some_and(|player| player.translation[0] >= 6_200_000)
+        {
+            let player = player.expect("Castle Machinery upper gap platforms keep Crash live");
+            if self.c1_electric_stage < 6 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if player.status_a & 1 != 0 {
+                    self.c1_electric_stage = 6;
+                    return PAD_LEFT;
+                }
+                return PAD_LEFT;
+            }
+            if self.c1_electric_stage == 6 {
+                if player.status_a & 1 != 0 && player.translation[0] <= 6_920_000 {
+                    self.c1_electric_stage = 7;
+                    self.jump_frames = 29;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT;
+            }
+            if self.c1_electric_stage == 7 {
+                if player.status_a & 1 != 0 && player.translation[0] <= 6_560_000 {
+                    self.c1_electric_stage = 8;
+                    self.jump_frames = 0;
+                    return 0;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                }
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        if matches!(name.as_str(), "c3_TZ" | "c4_TZ")
+            && self.b7_platform_stage == 13
+            && self.c1_electric_stage >= 8
+            && player.is_some_and(|player| player.translation[0] <= 5_900_000)
+            && player.is_some_and(|player| player.translation[0] >= 4_900_000)
+        {
+            let player =
+                player.expect("Castle Machinery second upper electric pair keeps Crash live");
+            let obstacle_state = |id| {
+                route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == id)
+                        .then_some(object.state)
+                })
+            };
+            let center_on = |target: i32| {
+                if player.translation[0] > target + 120_000 {
+                    PAD_LEFT
+                } else if player.translation[0] > target + 20_000 {
+                    if player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    }
+                } else if player.translation[0] < target - 20_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            };
+            if self.c1_electric_stage == 8 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if obstacle_state(167) == Some(6) && player.status_a & 1 != 0 {
+                    self.c1_electric_stage = 9;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return center_on(5_750_000);
+            }
+            if self.c1_electric_stage == 9 {
+                if player.translation[0] <= 5_550_000 {
+                    self.c1_electric_stage = 10;
+                    self.jump_frames = 0;
+                    return PAD_RIGHT;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_LEFT | PAD_SQUARE;
+            }
+            if self.c1_electric_stage == 10 {
+                if (5_435_000..=5_485_000).contains(&player.translation[0])
+                    && player.velocity[0].unsigned_abs() <= 80_000
+                    && player.status_a & 1 != 0
+                    && obstacle_state(166) == Some(6)
+                {
+                    self.c1_electric_stage = 11;
+                    self.jump_frames = 24;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
+                return center_on(5_460_000);
+            }
+            if self.c1_electric_stage == 11 {
+                if player.translation[0] <= 5_050_000 {
+                    self.c1_electric_stage = 12;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                }
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+        }
+        if name == "c6_TZ"
+            && matches!(index, 1 | 2)
+            && player.is_some_and(|player| player.translation[0] < 4_200_000)
+            && player.is_some_and(|player| player.translation[1] < -2_800_000)
+        {
+            let player =
+                player.expect("Castle Machinery bottom machinery corridor keeps Crash live");
+            if self.c6_floor_stage == 0 {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if player.status_a & 1 != 0 {
+                    self.c6_floor_stage = 1;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                return PAD_LEFT;
+            }
+            if self.c6_floor_stage == 1 {
+                if player.translation[0] >= 3_100_000 && player.velocity[0] >= 500_000 {
+                    self.c6_floor_stage = 2;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            if self.c6_floor_stage == 2 {
+                if player.status_a & 1 != 0 && player.translation[0] >= 3_550_000 {
+                    self.c6_floor_stage = 3;
+                    self.jump_frames = 0;
+                    self.release_frames = 4;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                self.c6_floor_stage = 3;
+            }
+            if self.c6_floor_stage == 3 {
+                if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if player.status_a & 1 != 0 {
+                    self.c6_floor_stage = 4;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                return PAD_RIGHT | PAD_SQUARE;
+            }
+            if self.c6_floor_stage == 4 && self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            self.c6_floor_stage = 5;
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if ((name == "C8_TZ" && index == 1) || (name == "c8_TZ" && index == 2))
+            && player.is_some_and(|player| {
+                player.translation[0] >= 6_800_000
+                    && player.translation[1] <= -2_500_000
+                    && player.status_a & 1 == 0
+            })
+        {
+            let player = player.expect("Castle Machinery final shaft descent keeps Crash live");
+            return if player.translation[2] < 150_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 170_000 {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+        }
+        if ((name == "c8_TZ" && index == 2) || (name == "c9_TZ" && index == 0))
+            && !self.c9_approach_jump_started
+            && player
+                .is_some_and(|player| player.translation[0] < 7_200_000 && player.status_a & 1 != 0)
+        {
+            self.c9_approach_jump_started = true;
+            self.jump_frames = 8;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if name == "Ca_TZ" && index == 1 && !self.c9_pad_room_centered {
+            self.c9_lift_centering = true;
+        }
+        if name == "Ca_TZ" && self.c9_last_pad_bounced && !self.c9_upper_walkway_departed {
+            let player = player.expect("Castle Machinery piston transfer keeps Crash live");
+            if player.translation[0] >= 9_015_000 {
+                self.c9_piston_side_cleared = true;
+            }
+            let (min_depth, max_depth) = if self.c9_piston_side_cleared {
+                (90_000, 114_000)
+            } else {
+                (270_000, 290_000)
+            };
+            let depth = if player.translation[2] < min_depth {
+                PAD_DOWN
+            } else if player.translation[2] > max_depth {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let horizontal = if !self.c9_piston_side_cleared {
+                PAD_RIGHT
+            } else if player.translation[0] < 9_015_000 || player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 9_055_000 || player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if self.c9_piston_side_cleared
+                && player.translation[1] >= -2_800_000
+                && player.status_a & 1 != 0
+            {
+                self.c9_upper_walkway_departed = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            return horizontal | depth | if player.state == 6 { PAD_CROSS } else { 0 };
+        }
+        if name == "A2_TZ" && index == 0 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery upper walkway drop keeps Crash live");
+            if player.translation[0] >= 11_330_000 {
+                self.a2_drop_side_cleared = true;
+            }
+            let (min_depth, max_depth) = if self.a2_drop_side_cleared {
+                (90_000, 114_000)
+            } else {
+                (270_000, 290_000)
+            };
+            let depth = if player.translation[2] < min_depth {
+                PAD_DOWN
+            } else if player.translation[2] > max_depth {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let jump = if frame % 24 < 12 { PAD_CROSS } else { 0 };
+            return PAD_RIGHT | depth | jump;
+        }
+        if self.c9_lift_centering && matches!(name.as_str(), "C9_TZ" | "Ca_TZ") {
+            let player = player.expect("Castle Machinery final lift keeps Crash live");
+            let depth = if player.translation[2] < 320_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 340_000 {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let horizontal = if player.velocity[0] > 80_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -80_000 {
+                PAD_RIGHT
+            } else if player.translation[0] < 8_535_000 {
+                PAD_RIGHT
+            } else if player.translation[0] > 8_585_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if player.translation[2] >= 310_000 && player.status_a & 1 != 0 {
+                self.c9_lift_centering = false;
+                self.c9_pad_room_centered = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            self.jump_frames = 0;
+            return horizontal | depth;
+        }
+        if matches!(name.as_str(), "c9_TZ" | "C9_TZ")
+            && index == 0
+            && player.is_some_and(|player| player.translation[0] >= 6_900_000)
+            && !self.c9_pad_room_centered
+        {
+            let player = player.expect("Castle Machinery second bounce shaft keeps Crash live");
+            // Entity 22 is the authored bounce crate at the base of this
+            // shaft. Its launch begins beside a narrow red-pipe collision leaf,
+            // so retain rightward momentum and clear the pipe horizontally.
+            if player.state == 6 {
+                self.c9_bounce_released = true;
+            }
+            if self.c9_bounce_released
+                && player.translation[0] >= 7_570_000
+                && player.translation[2] <= -140_000
+            {
+                self.c9_depth_turn_started = true;
+            }
+            if self.c9_bounce_released
+                && !self.c9_corner_ready
+                && player.translation[0] >= 8_210_000
+                && player.translation[2] <= -130_000
+            {
+                self.c9_corner_ready = true;
+            }
+            let (min_depth, max_depth) = if self.c9_corner_ready {
+                (90_000, 114_000)
+            } else if self.c9_depth_turn_started {
+                (90_000, 114_000)
+            } else if self.c9_bounce_released {
+                if player.translation[1] < -3_160_000 {
+                    (270_000, 285_000)
+                } else {
+                    (-155_000, -135_000)
+                }
+            } else {
+                (230_000, 245_000)
+            };
+            let depth = if player.translation[2] < min_depth {
+                PAD_DOWN
+            } else if player.translation[2] > max_depth {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            if self.c9_bounce_released && !self.c9_stair_jump_started && player.status_a & 1 != 0 {
+                self.c9_stair_jump_started = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            if self.c9_stair_jump_started && self.jump_frames == 0 && player.status_a & 1 != 0 {
+                self.jump_frames = 20;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            let horizontal = if self.c9_corner_ready {
+                if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] < 8_270_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 8_315_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            } else {
+                PAD_RIGHT
+            };
+            if self.c9_stair_jump_started && self.jump_frames != 0 {
+                self.jump_frames -= 1;
+            }
+            let hold_approach_jump = !self.c9_bounce_released && self.jump_frames != 0;
+            if hold_approach_jump {
+                self.jump_frames -= 1;
+            }
+            if self.c9_corner_ready
+                && matches!(player_collider_entity, Some(192 | 197 | 202 | 207))
+                && player.translation[1] >= -3_350_000
+            {
+                self.c9_pad_room_centered = true;
+                self.jump_frames = 20;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            return horizontal
+                | depth
+                | if player.state == 6
+                    || hold_approach_jump
+                    || (self.c9_stair_jump_started && self.jump_frames != 0)
+                {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+        }
+        if (name == "C9_TZ" && index == 0) || (name == "Ca_TZ" && index == 1) {
+            let player = player.expect("Castle Machinery trampoline stair keeps Crash live");
+            if self.c9_corner_ready {
+                self.c9_pad_room_centered = true;
+            }
+            if !self.c9_pad_room_centered {
+                if self.c9_wall_stage == 0 {
+                    if player.translation[0] >= 8_080_000 && player.status_a & 1 != 0 {
+                        self.c9_wall_stage = 1;
+                        self.jump_frames = 20;
+                        return PAD_UP | PAD_CROSS;
+                    }
+                    let depth = if player.translation[2] < 150_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 170_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    return PAD_RIGHT | depth;
+                }
+                if self.c9_wall_stage == 1 {
+                    let depth = if player.translation[2] > 20_000 {
+                        PAD_UP
+                    } else if player.translation[2] < 0 {
+                        PAD_DOWN
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    if player.status_a & 1 != 0 {
+                        self.c9_wall_stage = 2;
+                        self.jump_frames = 20;
+                        return PAD_UP | PAD_CROSS;
+                    }
+                    if self.jump_frames != 0 {
+                        self.jump_frames -= 1;
+                    }
+                    return depth | if self.jump_frames != 0 { PAD_CROSS } else { 0 };
+                }
+                if self.c9_wall_stage == 2 {
+                    let depth = if player.translation[2] > -130_000 {
+                        PAD_UP
+                    } else if player.translation[2] < -160_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    if player.translation[2] <= 20_000 {
+                        self.c9_wall_stage = 3;
+                        return PAD_RIGHT | PAD_UP | PAD_CROSS;
+                    }
+                    if self.jump_frames != 0 {
+                        self.jump_frames -= 1;
+                    }
+                    return depth | PAD_CROSS;
+                }
+                if self.c9_wall_stage == 3 && player.translation[0] >= 8_210_000 {
+                    self.c9_wall_stage = 4;
+                    return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                }
+                if self.c9_wall_stage == 4 {
+                    let depth = if player.translation[2] < 90_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 114_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    let horizontal = if player.velocity[0] > 80_000 {
+                        PAD_LEFT
+                    } else if player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] < 8_270_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 8_315_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    if player_collider_entity == Some(192) && player.translation[1] >= -3_350_000 {
+                        self.c9_pad_room_centered = true;
+                        self.jump_frames = 20;
+                        return PAD_RIGHT | depth | PAD_CROSS;
+                    }
+                    return horizontal | depth | PAD_CROSS;
+                }
+                let depth =
+                    if player.translation[0] <= 8_085_000 && player.translation[2] > -100_000 {
+                        PAD_UP
+                    } else if player.translation[2] < 90_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 114_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -80_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 80_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                let horizontal = if player.translation[0] < 8_600_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if player.translation[2] >= 20_000 && player.velocity[2] >= -80_000 {
+                    self.c9_pad_room_centered = true;
+                    self.jump_frames = 0;
+                    return PAD_RIGHT | PAD_DOWN | PAD_CROSS;
+                }
+                return horizontal | depth | PAD_CROSS;
+            }
+            let (min_depth, max_depth) = (90_000, 114_000);
+            let depth = if player.translation[2] < min_depth {
+                PAD_DOWN
+            } else if player.translation[2] > max_depth {
+                PAD_UP
+            } else if player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            if self.c9_last_pad_bounced && player.state == 6 {
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            if player.status_a & 1 != 0 {
+                self.jump_frames = 20;
+                return PAD_RIGHT | depth | PAD_CROSS;
+            }
+            return PAD_RIGHT | depth;
+        }
+        if matches!(name.as_str(), "a1_TZ" | "a2_TZ" | "a3_TZ" | "a4_TZ") {
+            return movement;
+        }
+        let mut held = movement;
+        if name == "Ca_TZ"
+            && self.c9_last_pad_bounced
+            && player.is_some_and(|player| player.state == 6)
+        {
+            held |= PAD_CROSS;
+        }
+        if name == "a7_TZ" && !self.a7_entered {
+            self.a7_entered = true;
+            self.a7_rods_released = true;
+            self.jump_frames = 0;
+            self.release_frames = 5;
+            return held;
+        }
+        if name == "a7_TZ"
+            && !self.a7_rods_released
+            && player.is_some_and(|player| player.translation[0] < 8_350_000)
+        {
+            self.a7_rod_wait_started = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let rod_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 69)
+                    .then_some(object.translation[1])
+            });
+            self.a7_rod_low_seen |= rod_y.is_some_and(|y| y <= -7_220_000);
+            if self.a7_rod_low_seen && rod_y.is_some_and(|y| y >= -7_080_000) {
+                self.a7_rods_released = true;
+                self.jump_frames = 29;
+                return PAD_LEFT | a7_depth | PAD_CROSS | PAD_SQUARE;
+            }
+            let player = player.expect("checked Castle Machinery player is present");
+            return a7_depth
+                | if player.velocity[0] < -80_000 || player.translation[0] < 8_172_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 || player.translation[0] > 8_212_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+        }
+        if name == "a8_TZ"
+            && player.is_some_and(|player| {
+                (7_000_000..7_300_000).contains(&player.translation[0])
+            })
+            && route_objects.iter().any(|object| {
+                object.state != 3
+                    && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 68)
+            })
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return movement
+                | if player.is_some_and(|player| player.status_a & 1 != 0) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if name == "a8_TZ" && !self.a8_reactor_released {
+            self.a8_reactor_wait_started |= player.is_some_and(|player| {
+                player.translation[0] < 7_250_000
+                    && route_objects.iter().any(|object| {
+                        object.state == 3
+                            && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 68)
+                    })
+            });
+            if self.a8_reactor_wait_started {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let player = player.expect("Castle Machinery player is present at reactor entry");
+                let depth = if player.velocity[2] > 80_000 || player.translation[2] > 198_000 {
+                    PAD_UP
+                } else if player.velocity[2] < -80_000 || player.translation[2] < 194_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if depth == 0
+                    && (7_080_000..=7_140_000).contains(&player.translation[0])
+                    && player.velocity[0].unsigned_abs() <= 80_000
+                {
+                    self.a8_reactor_released = true;
+                    return PAD_LEFT;
+                }
+                return depth
+                    | if player.velocity[0] < -80_000 || player.translation[0] < 7_080_000 {
+                        PAD_RIGHT
+                    } else if player.velocity[0] > 80_000 || player.translation[0] > 7_140_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+            }
+        }
+        if matches!(name.as_str(), "a7_TZ" | "a8_TZ")
+            && player.is_some_and(|player| (7_400_000..7_700_000).contains(&player.translation[0]))
+        {
+            held |= PAD_SQUARE;
+        } else if !matches!(name.as_str(), "a7_TZ" | "a8_TZ") && self.tick.is_multiple_of(24) {
+            held |= PAD_SQUARE;
+        }
+        if self.jump_frames != 0 {
+            self.jump_frames -= 1;
+            return held | PAD_CROSS;
+        }
+        if self.release_frames != 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if player.is_some_and(|player| player.status_a & 1 != 0) {
+            self.jump_frames = if name == "a9_TZ" {
+                29
+            } else if name == "d0_TZ" {
+                20
+            } else if matches!(name.as_str(), "a7_TZ" | "a8_TZ") {
+                self.a7_takeoff_fired = true;
+                20
+            } else {
+                10
+            };
+            self.release_frames = 5;
+            held |= PAD_CROSS;
+        }
+        held
+    }
+}
+
 /// Ordinary-pad completion route for Slippery Climb.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -28699,6 +31371,7 @@ struct SurveyInputController {
     generator_room: GeneratorRoomCompletionRouteController,
     jaws_of_darkness: JawsOfDarknessCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
+    castle_machinery: CastleMachineryCompletionRouteController,
     slippery_climb: SlipperyClimbCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
@@ -28885,6 +31558,59 @@ impl SurveyInputController {
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
+            },
+            castle_machinery: CastleMachineryCompletionRouteController {
+                tick: 0,
+                jump_frames: 0,
+                release_frames: 0,
+                a7_entered: false,
+                a7_takeoff_fired: false,
+                a7_rod_wait_started: false,
+                a7_rod_low_seen: false,
+                a7_rods_released: false,
+                a8_reactor_wait_started: false,
+                a8_reactor_low_seen: false,
+                a8_reactor_released: false,
+                a8_reactors_centered: false,
+                a9_platform_departed: false,
+                a9_side_route_stage: 0,
+                b1_dismount_started: false,
+                b2_dismount_started: false,
+                b2_upper_dismount_started: false,
+                b3_piston_jump_started: false,
+                b3_piston_low_seen: false,
+                b3_piston_high_seen: false,
+                b5_first_lower_landed: false,
+                b5_rod_left_seen: false,
+                b5_lower_crossing_started: false,
+                b6_second_lower_landed: false,
+                b6_second_drop_started: false,
+                b6_bottom_jump_started: false,
+                b6_second_hazard_jump_started: false,
+                b7_electric_gate_released: false,
+                b7_platform_stage: 0,
+                c1_electric_stage: 0,
+                c6_floor_stage: 0,
+                c9_approach_run_frames: 0,
+                c9_approach_jump_started: false,
+                c9_bounce_released: false,
+                c9_depth_turn_started: false,
+                c9_corner_ready: false,
+                c9_stair_jump_started: false,
+                c9_wall_stage: 0,
+                c9_lift_centering: false,
+                c9_pad_room_centered: false,
+                c9_last_pad_bounced: false,
+                c9_piston_side_cleared: false,
+                c9_upper_walkway_departed: false,
+                a2_drop_side_cleared: false,
+                d0_hot_platform_stage: 0,
+                d1_pipe_low_seen: false,
+                d1_pipe_high_seen: false,
+                d1_pipe_vertical_frames: 0,
+                d9_pipe_hops: 0,
+                d9_phase_wait: 0,
+                d9_airborne_seen: false,
             },
             slippery_climb: SlipperyClimbCompletionRouteController {
                 jump_hold: 0,
@@ -29129,6 +31855,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
             self.cortex_power = CortexPowerCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::CastleMachineryCompletionRoute {
+            self.castle_machinery = CastleMachineryCompletionRouteController::default();
+        }
         if self.profile == SurveyInputProfile::SlipperyClimbCompletionRoute {
             self.slippery_climb = SlipperyClimbCompletionRouteController::default();
         }
@@ -29261,6 +31990,13 @@ impl SurveyInputController {
             SurveyInputProfile::LightsOutCompletionRoute => {
                 LightsOutCompletionRouteController::held(frame)
             }
+            SurveyInputProfile::CastleMachineryCompletionRoute => self.castle_machinery.held(
+                frame,
+                camera,
+                player,
+                player_collider_entity,
+                route_objects,
+            ),
             SurveyInputProfile::FumblingInTheDarkCompletionRoute => {
                 FumblingInTheDarkCompletionRouteController::held(frame)
             }
@@ -31656,6 +34392,7 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::TempleRuinsCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                    | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
             ) {
             player_collider_entity(&runtime)?
@@ -31745,6 +34482,7 @@ fn survey_pair_with_runtime(
             | SurveyInputProfile::GeneratorRoomCompletionRoute
             | SurveyInputProfile::JawsOfDarknessCompletionRoute
             | SurveyInputProfile::ToxicWasteCompletionRoute
+            | SurveyInputProfile::CastleMachineryCompletionRoute
             | SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 program_object_traces(&runtime, &[])?
             }

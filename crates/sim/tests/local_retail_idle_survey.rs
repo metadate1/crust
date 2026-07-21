@@ -669,6 +669,7 @@ enum SurveyInputProfile {
     GreatGateTawnaBonus,
     GreatGateYellowGemExactCarry,
     TawnaBonusCompletionRoute,
+    TawnaBonusTwoCompletionRoute,
     LocalPbakPrefix,
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
@@ -738,6 +739,7 @@ impl SurveyInputProfile {
             Self::GreatGateTawnaBonus => "great-gate-tawna-bonus",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::TawnaBonusCompletionRoute => "tawna-bonus-completion-route",
+            Self::TawnaBonusTwoCompletionRoute => "tawna-bonus-two-completion-route",
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
@@ -795,6 +797,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
                 | Self::TawnaBonusCompletionRoute
+                | Self::TawnaBonusTwoCompletionRoute
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
                 | Self::CortexPowerCompletionRoute
@@ -881,6 +884,124 @@ impl TawnaBonusCompletionRouteController {
             held |= PAD_CROSS;
         }
         if frame % 48 < 4 {
+            held |= PAD_SQUARE;
+        }
+        held
+    }
+}
+
+/// Ordinary-pad completion route for Bonus 2 after The Great Gate supplies
+/// the three-Tawna-token carry. The carried global 60 value selects the
+/// authored full crate staircase; a fresh level boot intentionally does not.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TawnaBonusTwoCompletionRouteController {
+    jump_hold: u8,
+    release_wait: u8,
+    warp_tick: u16,
+    stage: u8,
+}
+
+impl TawnaBonusTwoCompletionRouteController {
+    fn continue_jump(&mut self, direction: u32) -> u32 {
+        if self.jump_hold == 0 {
+            direction
+        } else {
+            self.jump_hold -= 1;
+            direction | PAD_CROSS
+        }
+    }
+
+    fn held(&mut self, frame: u32, player: Option<PlayerTrace>) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        let [x, y, _z] = player.translation;
+        let grounded = player.status_a & 1 != 0;
+
+        if player.state == 32 {
+            self.warp_tick = self.warp_tick.saturating_add(1);
+            return if self.warp_tick == 300 { PAD_CROSS } else { 0 };
+        }
+
+        // Release and re-press jump after the first arrow-crate launch. This
+        // keeps the opening stack traversal stable without injecting motion.
+        if self.stage == 0 && player.state == 14 && x < 1_000_000 {
+            self.stage = 10;
+            return PAD_RIGHT;
+        }
+        if self.stage == 10 {
+            self.stage = 0;
+            self.jump_hold = 13;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+
+        // The second arrow crate launches Crash above one isolated high
+        // crate. Brake over it, then use it as the takeoff for the final bank.
+        if self.stage == 0 && player.state == 14 && x > 1_700_000 {
+            self.stage = 1;
+        }
+        if self.stage == 1 && grounded && x > 2_300_000 {
+            self.stage = 2;
+            self.jump_hold = 30;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 1 {
+            return (if x < 2_240_000 { PAD_RIGHT } else { PAD_LEFT }) | PAD_CROSS;
+        }
+
+        // Climb the three crate tiers with two short hops, then clear the
+        // final gap with a full jump.
+        if self.stage == 2 && grounded && x > 2_900_000 {
+            self.stage = 3;
+            self.jump_hold = 1;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 3 && grounded && x > 3_100_000 && y >= 900_000 {
+            self.stage = 4;
+            self.jump_hold = 1;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 4 && grounded && x > 3_300_000 && y >= 1_000_000 {
+            self.stage = 5;
+            self.jump_hold = 30;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if matches!(self.stage, 2..=5) {
+            if self.stage == 5 && grounded && x > 4_000_000 {
+                self.stage = 6;
+                self.jump_hold = 13;
+                return PAD_RIGHT | PAD_UP | PAD_CROSS;
+            }
+            return self.continue_jump(PAD_RIGHT);
+        }
+
+        // The portal is behind the last crate bank. Jump diagonally over its
+        // near lip, then center on WarpC until the normal WARP event fires.
+        if self.stage == 6 {
+            let horizontal = if x > 4_200_000 {
+                PAD_LEFT
+            } else if x < 4_120_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            return self.continue_jump(horizontal | PAD_UP);
+        }
+
+        let mut held = PAD_RIGHT;
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            held |= PAD_CROSS;
+        } else if self.release_wait > 0 {
+            self.release_wait -= 1;
+        } else if player.state != 40 && grounded {
+            self.jump_hold = 13;
+            self.release_wait = 2;
+            held |= PAD_CROSS;
+        }
+        if ((450_000..1_200_000).contains(&x) || frame % 48 < 4)
+            && !(1_400_000..2_800_000).contains(&x)
+        {
             held |= PAD_SQUARE;
         }
         held
@@ -28572,6 +28693,7 @@ struct SurveyInputController {
     jungle_restart_tick: u16,
     great_gate: GreatGateRouteController,
     tawna_bonus: TawnaBonusCompletionRouteController,
+    tawna_bonus_two: TawnaBonusTwoCompletionRouteController,
     boulders: BouldersCompletionRouteController,
     cortex_power: CortexPowerCompletionRouteController,
     generator_room: GeneratorRoomCompletionRouteController,
@@ -28651,6 +28773,12 @@ impl SurveyInputController {
                 jump_hold: 0,
                 release_wait: 0,
                 warp_tick: 0,
+            },
+            tawna_bonus_two: TawnaBonusTwoCompletionRouteController {
+                jump_hold: 0,
+                release_wait: 0,
+                warp_tick: 0,
+                stage: 0,
             },
             boulders: BouldersCompletionRouteController {
                 zero_t_takeoff_fired: false,
@@ -29007,6 +29135,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::TawnaBonusCompletionRoute {
             self.tawna_bonus = TawnaBonusCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::TawnaBonusTwoCompletionRoute {
+            self.tawna_bonus_two = TawnaBonusTwoCompletionRouteController::default();
+        }
     }
 
     fn held(
@@ -29099,6 +29230,9 @@ impl SurveyInputController {
                 self.great_gate.held(camera, player, true, route_objects)
             }
             SurveyInputProfile::TawnaBonusCompletionRoute => self.tawna_bonus.held(frame, player),
+            SurveyInputProfile::TawnaBonusTwoCompletionRoute => {
+                self.tawna_bonus_two.held(frame, player)
+            }
             SurveyInputProfile::LocalPbakPrefix => local_pbak_held
                 .expect("the legally local PBAK prefix is loaded before frame execution"),
             SurveyInputProfile::BouldersCompletionRoute => {
@@ -31689,6 +31823,8 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::CortexCompletionRoute
                 | SurveyInputProfile::GreatHallCortexRoute
                 | SurveyInputProfile::NativeFortressD6Route
+                | SurveyInputProfile::TawnaBonusCompletionRoute
+                | SurveyInputProfile::TawnaBonusTwoCompletionRoute
         ) && survey
             .pad_change_samples
             .last()
@@ -31832,6 +31968,7 @@ fn survey_pair_with_runtime(
                     input_profile,
                     SurveyInputProfile::PapuPapuCompletionRoute
                         | SurveyInputProfile::TawnaBonusCompletionRoute
+                        | SurveyInputProfile::TawnaBonusTwoCompletionRoute
                         | SurveyInputProfile::KoalaKongCompletionRoute
                         | SurveyInputProfile::PinstripeCompletionRoute
                         | SurveyInputProfile::RipperRooCompletionRoute
@@ -31855,7 +31992,8 @@ fn survey_pair_with_runtime(
                 };
                 let retain = match input_profile {
                     SurveyInputProfile::PapuPapuCompletionRoute => true,
-                    SurveyInputProfile::TawnaBonusCompletionRoute => {
+                    SurveyInputProfile::TawnaBonusCompletionRoute
+                    | SurveyInputProfile::TawnaBonusTwoCompletionRoute => {
                         sample.event == 0x1600
                             && sample.sender
                                 == Some(
@@ -42339,7 +42477,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     let bonus_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, bonus_transition.carry)
             .expect("Bonus 2 must import the Great Gate session carry");
-    let (_, mut bonus_runtime) = survey_pair_with_runtime(
+    let (bonus_survey, mut bonus_runtime) = survey_pair_with_runtime(
         known_name(bonus),
         bonus,
         &bonus_nsd,
@@ -42347,118 +42485,87 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         &bonus_nsf_bytes,
         bonus_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::Idle,
-        1,
+        SurveyInputProfile::TawnaBonusTwoCompletionRoute,
+        700,
     )
-    .expect("Bonus 2 must mount with the carried Great Gate snapshot");
+    .expect("ordinary pad input must traverse Bonus 2 and request its Great Gate return");
+    assert_eq!(bonus_survey.frames, 610, "{}", bonus_survey.summary());
+    assert_eq!(bonus_survey.final_live_objects, 12);
+    assert_eq!(bonus_survey.max_live_objects, 64);
+    assert_eq!(bonus_survey.successful_spawns, 25);
+    assert_eq!(bonus_survey.spawn_attempts, 4_235);
+    assert_eq!(bonus_survey.expected_spawn_rejections, 4_210);
+    assert_eq!(bonus_survey.executions, 23_977);
+    assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
+    assert!(bonus_survey.restart_frames.is_empty());
+    assert_eq!(bonus_survey.zone_transitions, 2);
+    assert_eq!(bonus_survey.camera_ranges.len(), 5);
+    assert_eq!(bonus_survey.camera_path_changes, 4);
+    assert_eq!(bonus_survey.last_camera_path_change, 227);
+    assert_eq!(bonus_survey.last_camera_progress_change, 287);
+    assert_eq!(bonus_survey.last_player_movement, 398);
+    assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
+    assert_eq!(bonus_survey.effect_counts.get("transition"), None);
+    assert_eq!(bonus_survey.next_lid, None);
+    assert_eq!(
+        bonus_survey.terminal.as_deref(),
+        Some("requested cross-level restart from 0x33 to 0x12")
+    );
+    assert_eq!(
+        bonus_survey.box_count_samples,
+        [(1, 0), (81, 0x100), (165, 0x200), (188, 0x300)]
+    );
+    assert!(bonus_survey.first_terminal_fall.is_none());
+    assert_eq!(bonus_survey.death_camera_frames, 0);
+    assert_eq!(
+        bonus_survey.final_player_translation,
+        Some([4_139_008, 4_561_995, -312_320])
+    );
+    assert_eq!(
+        bonus_survey.player_minimum,
+        Some([102_400, 819_200, -312_320])
+    );
+    assert_eq!(
+        bonus_survey.player_maximum,
+        Some([4_139_008, 4_561_995, -25_600])
+    );
+    let warp_event = bonus_survey
+        .direct_send_program_samples
+        .iter()
+        .find(|sample| sample.event == 22 << 8)
+        .expect("Bonus 2's authored WarpC must send WillC the WARP event");
+    assert_eq!(warp_event.frame, 309);
+    assert_eq!(
+        (warp_event.sender, warp_event.recipient),
+        (
+            Some(Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid")),
+            Some(Eid::from_name("WillC").expect("fixed retail player EID is valid")),
+        )
+    );
+    assert_eq!(bonus_survey.unexpected_spawn_errors, 0);
+    assert_eq!(bonus_survey.execution_errors, 0);
+    assert_eq!(bonus_survey.faulted_objects, 0);
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        bonus_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "Bonus 2's physical route must use ordinary player input only"
+    );
+    assert!(bonus_survey.pad_change_samples.contains(&(609, PAD_CROSS)));
+    assert!(
+        bonus_survey.is_clean(),
+        "Bonus 2's physical completion route must remain clean: {}",
+        bonus_survey.summary()
+    );
     assert_eq!(
         bonus_runtime.saved_level_state(),
         Some(&expected_parent_snapshot),
         "the save-restricted bonus spawn must not replace its parent return"
     );
 
-    let player = bonus_runtime
-        .arena()
-        .main_object()
-        .and_then(|arena| bonus_runtime.object_for_arena(arena))
-        .expect("mounted Bonus 2 must have Crash");
     let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
-    let portal_entities = [portal_entity.clone()];
-    let portal_display_flags = bonus_graph
-        .zone(portal_zone)
-        .expect("Bonus 2 portal zone must be in its graph")
-        .display_flags
-        | 2;
-    let portal_attempts = bonus_runtime.spawn_current_zone_neighbors(
-        &[NeighborZone {
-            eid: portal_zone,
-            display_flags: portal_display_flags,
-            entities: &portal_entities,
-        }],
-        &mut bonus_host,
-    );
-    assert_eq!(portal_attempts.len(), 1);
-    let warp = *portal_attempts[0]
-        .result
-        .as_ref()
-        .expect("Bonus 2's authored WarpC portal must materialize");
-    assert_eq!(
-        bonus_runtime
-            .machine()
-            .object(warp.vm())
-            .ok()
-            .and_then(crust_sim::gool::VmObject::program_identity)
-            .map(GoolProgramIdentity::global_eid),
-        Some(Eid::from_name("WarpC").expect("fixed retail portal EID is valid"))
-    );
-    let dispatch = bonus_runtime
-        .dispatch_event(
-            &mut bonus_host,
-            Some(warp),
-            Some(player),
-            22 << 8,
-            Some(&[0]),
-        )
-        .expect("WarpC must synchronously select WillC's authored WARP state");
-    assert_eq!(
-        dispatch.state_change.as_ref().map(|change| change.state),
-        Some(32)
-    );
-
-    let mut load_state = None;
-    for frame in 1..=5_400_u32 {
-        bonus_runtime.set_frame_timing(34, 34);
-        let pad = if frame == 300 {
-            RetailPadSnapshot {
-                tapped: PAD_CROSS,
-                held: PAD_CROSS,
-                ..RetailPadSnapshot::default()
-            }
-        } else {
-            RetailPadSnapshot::default()
-        };
-        bonus_runtime
-            .set_pad_snapshot(0, pad)
-            .expect("Bonus 2 must accept the return prompt input");
-        let report = bonus_runtime
-            .run_frame(&mut bonus_host, INSTRUCTION_BUDGET)
-            .unwrap_or_else(|error| panic!("Bonus 2 WARP frame {frame} failed: {error:?}"));
-        assert!(
-            report
-                .executions
-                .iter()
-                .all(|execution| execution.result.is_ok()),
-            "Bonus 2 WARP frame {frame} faulted: {:?}",
-            report.executions
-        );
-        let load_states = report
-            .effects
-            .iter()
-            .filter_map(|effect| match effect {
-                VmEffect::LoadState { saved_level, .. } => Some(*saved_level),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        if !load_states.is_empty() {
-            assert_eq!(load_states.len(), 1);
-            load_state = Some((
-                frame,
-                load_states[0].expect("Bonus 2 must resolve its parent save level"),
-            ));
-            break;
-        }
-    }
-    let (load_frame, captured_saved_level) =
-        load_state.expect("Bonus 2 WillC WARP must reach LoadState");
-    assert_eq!(load_frame, 301);
-    assert_eq!(captured_saved_level, great_gate);
-    assert_eq!(
-        bonus_runtime.restart_saved_level_from_effect(&mut bonus_host, captured_saved_level),
-        Ok(RetailRestartOutcome::DifferentLevel {
-            saved_level: great_gate,
-            requested_level_sentinel: -2,
-        })
-    );
     let return_transition = bonus_runtime
         .finish_level_transition(&mut bonus_host, -2)
         .expect("Bonus 2 LEVEL_END must resolve the carried Great Gate snapshot");

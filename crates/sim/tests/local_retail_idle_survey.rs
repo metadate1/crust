@@ -930,6 +930,7 @@ enum SurveyInputProfile {
     BrioCompletionRoute,
     CortexCompletionRoute,
     GreatHallCortexRoute,
+    CortexBonusCompletionRoute,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1003,6 +1004,7 @@ impl SurveyInputProfile {
             Self::BrioCompletionRoute => "brio-completion-route",
             Self::CortexCompletionRoute => "cortex-completion-route",
             Self::GreatHallCortexRoute => "great-hall-cortex-route",
+            Self::CortexBonusCompletionRoute => "cortex-bonus-completion-route",
         }
     }
 
@@ -1063,6 +1065,7 @@ impl SurveyInputProfile {
                 | Self::BrioCompletionRoute
                 | Self::CortexCompletionRoute
                 | Self::GreatHallCortexRoute
+                | Self::CortexBonusCompletionRoute
         )
     }
 }
@@ -1077,6 +1080,269 @@ struct TawnaBonusCompletionRouteController {
     jump_hold: u8,
     release_wait: u8,
     warp_tick: u16,
+}
+
+/// Deterministic ordinary-pad route through Cortex Bonus's two timed TNT
+/// retreats, bridge jumps, and authored `WillC` warp. Coordinates are used
+/// only to decide what a player would press; the route never mutates runtime
+/// state or teleports Crash.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct CortexBonusCompletionRouteController {
+    stage: u8,
+    retreat_stage: u8,
+    jump_hold: u8,
+    release_wait: u8,
+}
+
+impl CortexBonusCompletionRouteController {
+    const FIRST_RETREAT_FRAME: u32 = 200;
+    const FIRST_BRIDGE_RUN_FRAME: u32 = 220;
+    const SECOND_RETREAT_FRAME: u32 = 455;
+    const SECOND_BRIDGE_RETURN_FRAME: u32 = 521;
+
+    fn held(&mut self, frame: u32, player: Option<PlayerTrace>) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if player.state == 32 {
+            return 0;
+        }
+
+        if self.stage == 2 && player.translation[0] >= 1_060_000 && player.status_a & 1 != 0 {
+            self.stage = 3;
+            self.retreat_stage = 1;
+        }
+        if self.retreat_stage == 1 {
+            if frame >= Self::FIRST_RETREAT_FRAME
+                && player.translation[0] < 800_000
+                && player.state == 14
+            {
+                self.retreat_stage = 2;
+                self.jump_hold = 13;
+                return PAD_CROSS;
+            }
+            if frame >= Self::FIRST_RETREAT_FRAME {
+                let direction = if player.translation[0] > 840_000 || player.velocity[0] > 100_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 780_000 || player.velocity[0] < -100_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return direction | PAD_CROSS;
+            }
+            return if player.translation[0] > 1_100_000 || player.velocity[0] > 100_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 1_050_000 || player.velocity[0] < -100_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.retreat_stage == 2 {
+            let mut held = if frame >= Self::FIRST_BRIDGE_RUN_FRAME {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            }
+            if frame >= Self::FIRST_BRIDGE_RUN_FRAME
+                && player.translation[0] >= 1_100_000
+                && player.status_a & 1 != 0
+            {
+                self.retreat_stage = 0;
+                self.stage = 4;
+                self.jump_hold = 13;
+                self.release_wait = 2;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.stage == 4
+            && (2_200_000..2_400_000).contains(&player.translation[0])
+            && player.state == 14
+        {
+            self.stage = 9;
+            self.jump_hold = 13;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 9 {
+            if player.translation[0] >= 2_600_000 && player.state == 14 {
+                self.stage = 5;
+            } else {
+                let mut held = if player.translation[0] < 2_620_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 2_700_000 || player.velocity[0] > 100_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -100_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if self.jump_hold > 0 {
+                    self.jump_hold -= 1;
+                    held |= PAD_CROSS;
+                }
+                if player.translation[0] < 2_500_000 {
+                    held |= PAD_SQUARE;
+                }
+                return held;
+            }
+        }
+        if self.stage == 5
+            && (Self::SECOND_RETREAT_FRAME.saturating_sub(5)..Self::SECOND_RETREAT_FRAME)
+                .contains(&frame)
+        {
+            return PAD_LEFT;
+        }
+        if self.stage == 5 && frame >= Self::SECOND_RETREAT_FRAME && player.status_a & 1 != 0 {
+            self.stage = 6;
+            self.jump_hold = 3;
+            self.release_wait = 2;
+            return PAD_LEFT | PAD_CROSS;
+        }
+        if self.stage == 6 {
+            if (2_400_000..2_550_000).contains(&player.translation[0]) && player.state == 14 {
+                self.stage = 7;
+                self.jump_hold = 13;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            let mut held = if player.translation[0] > 2_550_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 2_430_000 || player.velocity[0] < -100_000 {
+                PAD_RIGHT
+            } else if player.velocity[0] > 100_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.stage == 7 {
+            if (Self::SECOND_BRIDGE_RETURN_FRAME.saturating_sub(7)
+                ..Self::SECOND_BRIDGE_RETURN_FRAME)
+                .contains(&frame)
+            {
+                return PAD_RIGHT;
+            }
+            if frame >= Self::SECOND_BRIDGE_RETURN_FRAME {
+                self.stage = 8;
+                self.jump_hold = 20;
+                self.release_wait = 2;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let mut held = if player.translation[0] > 2_080_000 || player.velocity[0] > 100_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 2_020_000 || player.velocity[0] < -100_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.stage == 8 {
+            if player.translation[0] >= 2_580_000 && player.status_a & 1 != 0 && player.state != 40
+            {
+                self.stage = 10;
+                self.jump_hold = 30;
+                self.release_wait = 2;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let mut held = PAD_RIGHT | PAD_SQUARE;
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if self.stage == 10 {
+            if player.translation[0] >= 4_100_000 {
+                self.stage = 11;
+                return 0;
+            }
+            let mut held = PAD_RIGHT;
+            if player.translation[0] < 3_300_000 {
+                held |= PAD_SQUARE;
+            }
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if self.release_wait > 0 {
+                self.release_wait -= 1;
+            } else if player.state != 40 && player.status_a & 1 != 0 {
+                self.jump_hold = 30;
+                self.release_wait = 2;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return held;
+        }
+        if self.stage == 11 {
+            return PAD_UP;
+        }
+
+        if self.stage == 4 && player.translation[0] >= 2_400_000 && player.state == 14 {
+            self.stage = 5;
+        }
+        let mut held = if self.stage == 5 {
+            if player.translation[0] < 2_620_000 {
+                0
+            } else if player.translation[0] > 2_700_000 || player.velocity[0] > 100_000 {
+                PAD_LEFT
+            } else if player.velocity[0] < -100_000 {
+                PAD_RIGHT
+            } else {
+                0
+            }
+        } else {
+            PAD_RIGHT
+        };
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            held |= PAD_CROSS;
+        } else if self.release_wait > 0 {
+            self.release_wait -= 1;
+        } else if player.state != 40 && player.status_a & 1 != 0 {
+            let takeoff = match self.stage {
+                0 => {
+                    self.stage = 1;
+                    true
+                }
+                1 if player.translation[0] >= 400_000 => {
+                    self.stage = 2;
+                    true
+                }
+                3 if player.translation[0] >= 900_000 => {
+                    self.stage = 4;
+                    true
+                }
+                4 if player.translation[0] >= 1_950_000 => true,
+                _ => false,
+            };
+            if takeoff {
+                self.jump_hold = if self.stage == 4 { 3 } else { 13 };
+                self.release_wait = 2;
+                held |= PAD_CROSS;
+            }
+        }
+        if self.stage >= 4 && player.translation[0] < 1_800_000 && frame % 48 < 4 {
+            held |= PAD_SQUARE;
+        }
+        if self.stage == 2 && self.jump_hold > 0 {
+            held |= PAD_SQUARE;
+        }
+        held
+    }
 }
 
 impl TawnaBonusCompletionRouteController {
@@ -31808,6 +32074,7 @@ struct SurveyInputController {
     great_gate: GreatGateRouteController,
     tawna_bonus: TawnaBonusCompletionRouteController,
     tawna_bonus_two: TawnaBonusTwoCompletionRouteController,
+    cortex_bonus: CortexBonusCompletionRouteController,
     boulders: BouldersCompletionRouteController,
     cortex_power: CortexPowerCompletionRouteController,
     generator_room: GeneratorRoomCompletionRouteController,
@@ -31894,6 +32161,12 @@ impl SurveyInputController {
                 release_wait: 0,
                 warp_tick: 0,
                 stage: 0,
+            },
+            cortex_bonus: CortexBonusCompletionRouteController {
+                stage: 0,
+                retreat_stage: 0,
+                jump_hold: 0,
+                release_wait: 0,
             },
             boulders: BouldersCompletionRouteController {
                 zero_t_takeoff_fired: false,
@@ -32313,6 +32586,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::TawnaBonusTwoCompletionRoute {
             self.tawna_bonus_two = TawnaBonusTwoCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::CortexBonusCompletionRoute {
+            self.cortex_bonus = CortexBonusCompletionRouteController::default();
+        }
     }
 
     fn held(
@@ -32536,6 +32812,7 @@ impl SurveyInputController {
                     PAD_UP
                 }
             }
+            SurveyInputProfile::CortexBonusCompletionRoute => self.cortex_bonus.held(frame, player),
         }
     }
 }
@@ -43506,6 +43783,127 @@ fn every_direct_bonus_boot_has_a_restartable_local_snapshot() {
             survey.summary()
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jaws_cortex_bonus_warp_loads_the_carried_parent_snapshot() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let parent = LevelId::new_const(0x1d);
+    let bonus = LevelId::new_const(0x34);
+    let known_name = |level| {
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("the vertical-flow level is present in the retail catalog")
+    };
+
+    let (parent_nsd, parent_nsf, parent_nsf_bytes) =
+        parse_local_pair(&root, parent).expect("Jaws of Darkness pair must parse");
+    let (_, mut parent_runtime) = survey_pair_with_runtime(
+        known_name(parent),
+        parent,
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Jaws of Darkness must establish its initial retail save snapshot");
+    let original_parent_snapshot = parent_runtime
+        .saved_level_state()
+        .cloned()
+        .expect("Jaws of Darkness must retain the complete parent snapshot");
+    assert_eq!(original_parent_snapshot.level, parent);
+
+    let parent_transition = {
+        let mut host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
+        parent_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(bonus.get()).expect("bonus LID fits i32"),
+            )
+            .expect("the parent LEVEL_END phase must preserve the Cortex bonus target")
+    };
+    assert!(parent_transition.event_failures.is_empty());
+    assert_eq!(parent_transition.resolved.level, bonus);
+    assert!(!parent_transition.resolved.bonus_return);
+    assert_eq!(
+        parent_transition
+            .carry
+            .saved_level_state
+            .as_ref()
+            .map(|snapshot| snapshot.level),
+        Some(parent)
+    );
+
+    let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
+        parse_local_pair(&root, bonus).expect("Cortex Bonus pair must parse");
+    let mut bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, parent_transition.carry)
+            .expect("the Cortex bonus stream must import the parent session carry");
+    bonus_runtime
+        .set_global_word(60, 15)
+        .expect("the Cortex bonus selector global must exist");
+    let (bonus_survey, mut bonus_runtime) = survey_pair_with_runtime(
+        known_name(bonus),
+        bonus,
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        bonus_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::CortexBonusCompletionRoute,
+        900,
+    )
+    .expect("ordinary pad input must traverse the carried Cortex bonus and request its return");
+    eprintln!("{}", bonus_survey.summary());
+    assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
+    assert!(bonus_survey.restart_frames.is_empty());
+    assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
+    assert_eq!(bonus_survey.effect_counts.get("transition"), None);
+    assert_eq!(bonus_survey.next_lid, None);
+    assert_eq!(
+        bonus_survey.terminal.as_deref(),
+        Some("requested cross-level restart from 0x34 to 0x1D")
+    );
+    assert!(
+        bonus_survey.observed_player_states.contains(&32),
+        "the physical route must enter WillC's authored WARP state"
+    );
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        bonus_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the physical Cortex bonus route must use ordinary player input only"
+    );
+    assert!(bonus_survey.is_clean(), "{}", bonus_survey.summary());
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&original_parent_snapshot),
+        "the save-restricted traversal must not overwrite the Jaws return"
+    );
+
+    let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    let return_transition = bonus_runtime
+        .finish_level_transition(&mut bonus_host, -2)
+        .expect("the bonus LEVEL_END phase must resolve the carried Jaws snapshot");
+    assert!(return_transition.event_failures.is_empty());
+    assert_eq!(return_transition.next_lid_after_event, -2);
+    assert_eq!(return_transition.resolved.level, parent);
+    assert!(return_transition.resolved.bonus_return);
+    assert_eq!(
+        return_transition.carry.saved_level_state.as_ref(),
+        Some(&original_parent_snapshot)
+    );
 }
 
 #[test]

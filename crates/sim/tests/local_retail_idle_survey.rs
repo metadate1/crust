@@ -10670,6 +10670,39 @@ impl GreatGateRouteController {
             self.action_tick = 0;
         }
         if let Some(action) = self.active {
+            if !self.yellow_gem_route
+                && self.stage == 94
+                && let Some(player) = player
+                && player.status_a & 1 != 0
+                && route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 95
+                    ) && object.state == 2
+                        && object.translation[0] >= player.translation[0] - 300_000
+                })
+            {
+                // The carried scheduler can advance c2's MonkC during this
+                // neutral bank wait. Launch the existing jump-and-spin when
+                // its authored attack state reaches Crash's collision lane,
+                // before the damaging contact, instead of waiting for a
+                // fixed action window to expire.
+                self.active = None;
+                self.action_tick = 0;
+                self.stage = 95;
+                return self.held(camera, Some(player), collect_tawna_tokens, route_objects);
+            }
+            if !self.yellow_gem_route
+                && self.stage == 96
+                && let Some(player) = player
+                && (player.translation[0] > 9_300_000 || player.velocity[0] > 80_000)
+            {
+                // Spinning through the advanced monk imparts a rightward
+                // rebound. Keep the next action parked while ordinary left
+                // input cancels that authored collision velocity and returns
+                // Crash to the route's existing c2 takeoff window.
+                return PAD_LEFT;
+            }
             let mut held = action.held(self.action_tick);
             if self.yellow_gem_route && !self.c4_anchored && self.stage == 94 {
                 let player = player.expect("checked Yellow Gem route player is present");
@@ -35711,6 +35744,7 @@ fn survey_pair_with_runtime(
                 &runtime,
                 &[
                     Eid::from_name("WalOC").expect("fixed Great Gate hazard EID is valid"),
+                    Eid::from_name("MonkC").expect("fixed Great Gate enemy EID is valid"),
                     Eid::from_name("GemsC").expect("fixed Great Gate gem EID is valid"),
                     Eid::from_name("BoxsC").expect("fixed Great Gate crate EID is valid"),
                 ],
@@ -46557,73 +46591,73 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     .expect("The Great Gate must execute through its Tawna bonus transition");
     assert_eq!(
         great_gate_survey.frames,
-        2_835,
+        2_836,
         "{}",
         great_gate_survey.summary()
     );
     assert_eq!(great_gate_survey.successful_spawns, 92);
-    assert_eq!(great_gate_survey.executions, 51_027);
+    assert_eq!(great_gate_survey.executions, 50_983);
     assert_eq!(great_gate_survey.zone_transitions, 36);
     assert_eq!(great_gate_survey.camera_ranges.len(), 28);
     assert_eq!(great_gate_survey.camera_path_changes, 39);
-    assert_eq!(great_gate_survey.last_camera_path_change, 2_706);
+    assert_eq!(great_gate_survey.last_camera_path_change, 2_707);
     assert_eq!(great_gate_survey.restarts, 0);
     assert!(great_gate_survey.restart_frames.is_empty());
     assert_eq!(great_gate_survey.death_camera_frames, 0);
     assert!(great_gate_survey.first_terminal_fall.is_none());
     assert_eq!(
         great_gate_survey.terminal.as_deref(),
-        Some("frame 2835 requested level transition to 0x33")
+        Some("frame 2836 requested level transition to 0x33")
     );
-    assert_eq!(great_gate_survey.next_lid, Some((2_835, 0x33)));
+    assert_eq!(great_gate_survey.next_lid, Some((2_836, 0x33)));
     assert_eq!(great_gate_survey.faulted_objects, 0);
     assert_eq!(great_gate_survey.execution_errors, 0);
     assert_eq!(
         great_gate_survey.box_count_samples,
         [
             (1, 0),
-            (73, 0x100),
-            (93, 0x200),
-            (107, 0x300),
-            (127, 0x400),
-            (314, 0x500),
-            (315, 0x600),
-            (529, 0x700),
-            (787, 0x800),
-            (797, 0x900),
-            (1_170, 0xa00),
-            (1_632, 0xb00),
-            (1_633, 0xc00),
-            (1_646, 0xd00),
-            (1_942, 0xe00),
-            (2_753, 0xf00),
+            (72, 0x100),
+            (92, 0x200),
+            (106, 0x300),
+            (126, 0x400),
+            (313, 0x500),
+            (314, 0x600),
+            (528, 0x700),
+            (786, 0x800),
+            (796, 0x900),
+            (1_169, 0xa00),
+            (1_631, 0xb00),
+            (1_632, 0xc00),
+            (1_645, 0xd00),
+            (1_941, 0xe00),
+            (2_754, 0xf00),
         ]
     );
     assert_eq!(
         great_gate_survey.checkpoint_samples,
         [
             (1, -1, [-563_968, 2_236_928, 15_717_376]),
-            (530, -1, [15_871_744, -10_670_848, 127_744]),
-            (1_170, 76 << 8, [20_991_488, -8_397_312, 127_744]),
-            (1_670, 76 << 8, [15_154_944, -8_185_290, 127_744]),
-            (2_777, 76 << 8, [5_426_944, -8_346_368, 127_744]),
-            (2_779, 113 << 8, [5_426_944, -8_346_368, 127_744]),
+            (529, -1, [15_871_744, -10_670_848, 127_744]),
+            (1_169, 76 << 8, [20_991_488, -8_397_312, 127_744]),
+            (1_669, 76 << 8, [15_154_944, -8_185_290, 127_744]),
+            (2_778, 76 << 8, [5_426_944, -8_346_368, 127_744]),
+            (2_780, 113 << 8, [5_426_944, -8_346_368, 127_744]),
         ]
     );
     assert_eq!(
         great_gate_survey.saved_box_count_samples,
-        [(1_170, 0x900), (2_779, 0xf00)]
+        [(1_169, 0x900), (2_780, 0xf00)]
     );
     assert!(
         great_gate_survey
             .spawn_flag_samples
-            .contains(&(1_072, 63, 3)),
+            .contains(&(1_071, 63, 3)),
         "the carried route must trigger the first vertical arrow crate"
     );
     assert!(
         great_gate_survey
             .spawn_flag_samples
-            .contains(&(1_170, 76, 9)),
+            .contains(&(1_169, 76, 9)),
         "the carried route must break checkpoint crate 76"
     );
     assert_eq!(
@@ -46653,10 +46687,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             index: 0,
         }
     );
-    assert_eq!(great_gate_camera.progress.raw(), 17_442);
+    assert_eq!(great_gate_camera.progress.raw(), 17_493);
     assert_eq!(
         great_gate_survey.final_player_translation,
-        Some([5_372_832, -8_168_639, 124_672])
+        Some([5_370_784, -8_168_630, 124_672])
     );
     assert_eq!(great_gate_runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xf00));
     assert_eq!(
@@ -46680,14 +46714,14 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .contains(&(waloc, 2)),
         "the route must flip the rotating log into its horizontal state before climbing"
     );
-    for token in [(529, 27, 7), (1_646, 89, 7), (2_777, 113, 10)] {
+    for token in [(528, 27, 7), (1_645, 89, 7), (2_778, 113, 10)] {
         assert!(
             great_gate_survey.spawn_flag_samples.contains(&token),
             "all three authored Tawna crates must break on the carried route: {token:?}"
         );
     }
     assert_eq!(great_gate_runtime.global_word(60), Ok(4));
-    assert_eq!(great_gate_runtime.machine().random_seed(), 0x4605_ec78);
+    assert_eq!(great_gate_runtime.machine().random_seed(), 0x2b6e_8d06);
     assert_eq!(great_gate_runtime.draw_count(), 8_868);
     assert_eq!(
         player_trace(&great_gate_runtime)
@@ -46711,7 +46745,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     // frame's CamFollow -> LevelUpdate. Native LevelSaveState reads the live
     // cur_progress word at that point, so the bonus-return snapshot retains
     // the current c5 camera progress rather than its old path-entry fraction.
-    assert_eq!(expected_parent_snapshot.location.progress.raw(), 17_442);
+    assert_eq!(expected_parent_snapshot.location.progress.raw(), 17_493);
 
     let bonus = LevelId::new_const(0x33);
     let bonus_transition = {
@@ -46778,21 +46812,21 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         700,
     )
     .expect("ordinary pad input must traverse Bonus 2 and request its Great Gate return");
-    assert_eq!(bonus_survey.frames, 610, "{}", bonus_survey.summary());
+    assert_eq!(bonus_survey.frames, 609, "{}", bonus_survey.summary());
     assert_eq!(bonus_survey.final_live_objects, 12);
     assert_eq!(bonus_survey.max_live_objects, 64);
     assert_eq!(bonus_survey.successful_spawns, 25);
-    assert_eq!(bonus_survey.spawn_attempts, 4_235);
-    assert_eq!(bonus_survey.expected_spawn_rejections, 4_210);
-    assert_eq!(bonus_survey.executions, 23_977);
+    assert_eq!(bonus_survey.spawn_attempts, 4_229);
+    assert_eq!(bonus_survey.expected_spawn_rejections, 4_204);
+    assert_eq!(bonus_survey.executions, 23_997);
     assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
     assert!(bonus_survey.restart_frames.is_empty());
     assert_eq!(bonus_survey.zone_transitions, 2);
     assert_eq!(bonus_survey.camera_ranges.len(), 5);
     assert_eq!(bonus_survey.camera_path_changes, 4);
-    assert_eq!(bonus_survey.last_camera_path_change, 227);
-    assert_eq!(bonus_survey.last_camera_progress_change, 287);
-    assert_eq!(bonus_survey.last_player_movement, 398);
+    assert_eq!(bonus_survey.last_camera_path_change, 226);
+    assert_eq!(bonus_survey.last_camera_progress_change, 286);
+    assert_eq!(bonus_survey.last_player_movement, 397);
     assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
     assert_eq!(bonus_survey.effect_counts.get("transition"), None);
     assert_eq!(bonus_survey.next_lid, None);
@@ -46802,7 +46836,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
     );
     assert_eq!(
         bonus_survey.box_count_samples,
-        [(1, 0), (81, 0x100), (165, 0x200), (188, 0x300)]
+        [(1, 0), (80, 0x100), (164, 0x200), (187, 0x300)]
     );
     assert!(bonus_survey.first_terminal_fall.is_none());
     assert_eq!(bonus_survey.death_camera_frames, 0);
@@ -46823,7 +46857,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         .iter()
         .find(|sample| sample.event == 22 << 8)
         .expect("Bonus 2's authored WarpC must send WillC the WARP event");
-    assert_eq!(warp_event.frame, 309);
+    assert_eq!(warp_event.frame, 308);
     assert_eq!(
         (warp_event.sender, warp_event.recipient),
         (
@@ -46842,7 +46876,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .all(|(_, held)| held & !ordinary_pad_mask == 0),
         "Bonus 2's physical route must use ordinary player input only"
     );
-    assert!(bonus_survey.pad_change_samples.contains(&(609, PAD_CROSS)));
+    assert!(bonus_survey.pad_change_samples.contains(&(608, PAD_CROSS)));
     assert!(
         bonus_survey.is_clean(),
         "Bonus 2's physical completion route must remain clean: {}",
@@ -47009,27 +47043,27 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         .expect("The Great Gate must execute through its end WarpC transition");
         assert_eq!(
             great_gate_survey.frames,
-            2_940,
+            2_941,
             "{}",
             great_gate_survey.summary()
         );
         assert_eq!(great_gate_survey.successful_spawns, 104);
-        assert_eq!(great_gate_survey.executions, 53_626);
+        assert_eq!(great_gate_survey.executions, 53_582);
         assert_eq!(great_gate_survey.zone_transitions, 38);
         assert_eq!(great_gate_survey.camera_ranges.len(), 30);
         assert_eq!(great_gate_survey.camera_path_changes, 41);
-        assert_eq!(great_gate_survey.last_camera_path_change, 2_844);
+        assert_eq!(great_gate_survey.last_camera_path_change, 2_845);
         assert_eq!(great_gate_survey.restarts, 0);
         assert!(great_gate_survey.restart_frames.is_empty());
         assert_eq!(great_gate_survey.death_camera_frames, 0);
         assert!(great_gate_survey.first_terminal_fall.is_none());
         assert_eq!(
             great_gate_survey.terminal.as_deref(),
-            Some("frame 2940 requested level transition to 0x2d")
+            Some("frame 2941 requested level transition to 0x2d")
         );
         assert_eq!(
             great_gate_survey.next_lid,
-            Some((2_940, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+            Some((2_941, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
         );
         assert_eq!(great_gate_survey.faulted_objects, 0);
         assert_eq!(great_gate_survey.execution_errors, 0);
@@ -47037,42 +47071,42 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             great_gate_survey.box_count_samples,
             [
                 (1, 0),
-                (73, 0x100),
-                (93, 0x200),
-                (107, 0x300),
-                (127, 0x400),
-                (314, 0x500),
-                (315, 0x600),
-                (529, 0x700),
-                (787, 0x800),
-                (797, 0x900),
-                (1_170, 0xa00),
-                (1_632, 0xb00),
-                (1_633, 0xc00),
-                (1_646, 0xd00),
-                (1_942, 0xe00),
+                (72, 0x100),
+                (92, 0x200),
+                (106, 0x300),
+                (126, 0x400),
+                (313, 0x500),
+                (314, 0x600),
+                (528, 0x700),
+                (786, 0x800),
+                (796, 0x900),
+                (1_169, 0xa00),
+                (1_631, 0xb00),
+                (1_632, 0xc00),
+                (1_645, 0xd00),
+                (1_941, 0xe00),
             ]
         );
         assert_eq!(
             great_gate_survey.checkpoint_samples,
             [
                 (1, -1, [-563_968, 2_236_928, 15_717_376]),
-                (530, -1, [15_871_744, -10_670_848, 127_744]),
-                (1_170, 76 << 8, [20_991_488, -8_397_312, 127_744]),
-                (1_670, 76 << 8, [15_154_944, -8_185_290, 127_744]),
+                (529, -1, [15_871_744, -10_670_848, 127_744]),
+                (1_169, 76 << 8, [20_991_488, -8_397_312, 127_744]),
+                (1_669, 76 << 8, [15_154_944, -8_185_290, 127_744]),
             ]
         );
-        assert_eq!(great_gate_survey.saved_box_count_samples, [(1_170, 0x900)]);
+        assert_eq!(great_gate_survey.saved_box_count_samples, [(1_169, 0x900)]);
         assert!(
             great_gate_survey
                 .spawn_flag_samples
-                .contains(&(1_072, 63, 3)),
+                .contains(&(1_071, 63, 3)),
             "the carried route must trigger the first vertical arrow crate"
         );
         assert!(
             great_gate_survey
                 .spawn_flag_samples
-                .contains(&(1_170, 76, 9)),
+                .contains(&(1_169, 76, 9)),
             "the carried route must break checkpoint crate 76"
         );
         assert_eq!(
@@ -47164,7 +47198,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 0,
             ]
         );
-        assert_eq!(great_gate_runtime.machine().random_seed(), 0x339f_8218);
+        assert_eq!(great_gate_runtime.machine().random_seed(), 0x2604_43a6);
         assert_eq!(great_gate_runtime.draw_count(), 8_973);
 
         let great_gate_completion_carry: RetailSessionCarry = {
@@ -47207,7 +47241,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 0,
             ]
         );
-        assert_eq!(great_gate_completion_carry.random_seed, 0x339f_8218);
+        assert_eq!(great_gate_completion_carry.random_seed, 0x2604_43a6);
         assert_eq!(great_gate_completion_carry.draw_count, 8_973);
         let great_gate_completion_runtime = RetailRuntime::new_from_session(
             GLOBAL_WORDS,
@@ -47276,7 +47310,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             great_gate_completion_runtime.machine().random_seed(),
-            0x7186_4345
+            0x3c78_e2ea
         );
         assert_eq!(great_gate_completion_runtime.draw_count(), 9_198);
         let post_great_gate_title_carry: RetailSessionCarry = {
@@ -47300,7 +47334,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(post_great_gate_title_carry.random_seed, 0x7186_4345);
+        assert_eq!(post_great_gate_title_carry.random_seed, 0x3c78_e2ea);
         assert_eq!(post_great_gate_title_carry.draw_count, 9_198);
         let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
             &title_nsd,
@@ -47353,7 +47387,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             post_great_gate_map.runtime.machine().random_seed(),
-            0x592a_ffc0
+            0xc90d_87bc
         );
         assert_eq!(post_great_gate_map.runtime.draw_count(), 9_451);
         let boulders_carry: RetailSessionCarry = {
@@ -47395,7 +47429,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 1,
             ]
         );
-        assert_eq!(boulders_carry.random_seed, 0x592a_ffc0);
+        assert_eq!(boulders_carry.random_seed, 0xc90d_87bc);
         assert_eq!(boulders_carry.draw_count, 9_451);
         let (boulders_nsd, boulders_nsf, boulders_nsf_bytes) =
             parse_local_pair(&root, boulders).expect("Boulders pair must parse");

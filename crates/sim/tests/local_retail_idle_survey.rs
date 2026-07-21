@@ -36544,6 +36544,61 @@ fn requested_survey_level() -> Option<LevelId> {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn intro_fresh_boot_traverses_the_full_cutscene_and_requests_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::INTRO;
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("Intro's legally local pair must parse");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Intro",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::Idle,
+        1_200,
+    )
+    .expect("Intro's authored camera and GOOL sequence must execute");
+
+    assert_eq!(survey.frames, 1_200, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((1_106, 0x19)));
+    assert_eq!(survey.zone_transitions, 7);
+    assert_eq!(survey.camera_path_changes, 35);
+    assert_eq!(survey.last_camera_path_change, 991);
+    assert_eq!(survey.last_camera_progress_change, 1_109);
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert!(survey.pad_change_samples.is_empty());
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.faulted_objects, 0);
+    let final_camera = survey
+        .final_camera
+        .expect("Intro must retain its terminal camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("t1_UZ").expect("fixed Intro terminal EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 30_208);
+    let player = player_trace(&runtime)
+        .expect("Intro's presentation controller trace must resolve")
+        .expect("Intro retains its presentation controller through the Title request");
+    assert_eq!(player.state, 15);
+    assert_eq!(player.translation, [614_144, 409_600, 0]);
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn cortex_power_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")

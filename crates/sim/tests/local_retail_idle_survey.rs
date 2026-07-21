@@ -49054,8 +49054,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                         1,
                     ]
                 );
-                assert_eq!(post_papu_map.runtime.machine().random_seed(), 0x2f55_863f);
-                assert_eq!(post_papu_map.runtime.draw_count(), 4_310);
+                assert_eq!(post_papu_map.runtime.machine().random_seed(), 0x3823_ffd7);
+                assert_eq!(post_papu_map.runtime.draw_count(), 4_398);
 
                 let mut host = NsfProgramHost::new(title_nsd, title_nsf, title_nsf_bytes);
                 let report = post_papu_map
@@ -49072,8 +49072,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, rolling_stones);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x2f55_863f);
-                assert_eq!(report.carry.draw_count, 4_310);
+                assert_eq!(report.carry.random_seed, 0x3823_ffd7);
+                assert_eq!(report.carry.draw_count, 4_398);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,

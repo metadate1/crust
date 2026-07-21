@@ -48488,17 +48488,17 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .expect("Upstream's Level Complete runtime must execute");
         assert_eq!(
             upstream_completion_survey.frames,
-            185,
+            273,
             "{}",
             upstream_completion_survey.summary()
         );
         assert_eq!(upstream_completion_survey.final_live_objects, 5);
         assert_eq!(upstream_completion_survey.max_live_objects, 8);
         assert_eq!(upstream_completion_survey.successful_spawns, 2);
-        assert_eq!(upstream_completion_survey.spawn_attempts, 370);
-        assert_eq!(upstream_completion_survey.expected_spawn_rejections, 368);
+        assert_eq!(upstream_completion_survey.spawn_attempts, 546);
+        assert_eq!(upstream_completion_survey.expected_spawn_rejections, 544);
         assert_eq!(upstream_completion_survey.unexpected_spawn_errors, 0);
-        assert_eq!(upstream_completion_survey.executions, 1_042);
+        assert_eq!(upstream_completion_survey.executions, 1_425);
         assert_eq!(upstream_completion_survey.zone_transitions, 0);
         assert_eq!(upstream_completion_survey.restarts, 0);
         assert!(upstream_completion_survey.restart_frames.is_empty());
@@ -48509,11 +48509,11 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(upstream_completion_survey.execution_errors, 0);
         assert_eq!(
             upstream_completion_survey.next_lid,
-            Some((185, i32::try_from(LevelId::TITLE.get()).unwrap()))
+            Some((273, i32::try_from(LevelId::TITLE.get()).unwrap()))
         );
         assert_eq!(
             upstream_completion_survey.terminal.as_deref(),
-            Some("frame 185 requested level transition to 0x19")
+            Some("frame 273 requested level transition to 0x19")
         );
         assert_eq!(
             upstream_completion_survey
@@ -48551,9 +48551,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         );
         assert_eq!(
             upstream_completion_runtime.machine().random_seed(),
-            0x133a_f4ed
+            0x1a61_2e69
         );
-        assert_eq!(upstream_completion_runtime.draw_count(), 3_179);
+        assert_eq!(upstream_completion_runtime.draw_count(), 3_267);
 
         let post_upstream_title_carry: RetailSessionCarry = {
             let mut host =
@@ -48573,8 +48573,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(post_upstream_title_carry.random_seed, 0x133a_f4ed);
-        assert_eq!(post_upstream_title_carry.draw_count, 3_179);
+        assert_eq!(post_upstream_title_carry.random_seed, 0x1a61_2e69);
+        assert_eq!(post_upstream_title_carry.draw_count, 3_267);
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,

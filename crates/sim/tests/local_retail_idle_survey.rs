@@ -9,8 +9,9 @@
 //! A separate vertical-flow test retains the authored session carry across
 //! N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, their
 //! Level Complete screens, the Title map, Papu Papu's authored win, and the
-//! following Rolling Stones and Hog Wild completions through the first carried
-//! Native Fortress frame without writing any game data.
+//! following Rolling Stones, Hog Wild, Native Fortress, Up the Creek, and
+//! Ripper Roo completions through the first carried Lost City frame without
+//! writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -6836,17 +6837,34 @@ impl UpTheCreekRouteController {
 /// divergent per-zone routes.
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+// These independent latches record authored obstacle handshakes; folding them
+// into one ordinal state would lose combinations used while a jump is active.
+#[allow(clippy::struct_excessive_bools)]
 struct NativeFortressRouteController {
     started: bool,
+    session_carry: bool,
     stage: u8,
     jump_frames: u8,
     grounded_frames: u8,
     route_tick: u32,
+    // Set from entity 45's observed b9 phase; this selects the downstream
+    // timing branch independently of how the level runtime was constructed.
+    phase_shifted_route: bool,
+    c5_launch: bool,
+    d2_spin_released: bool,
+    d4_launch: bool,
+    d4_launch_prep: bool,
+    d4_wait_jump: u8,
+    d4_evaded_platform_cycle: bool,
+    d5_flame_extension_seen: bool,
+    d8_flame_runup: bool,
+    d8_launch: bool,
 }
 
 impl NativeFortressRouteController {
     fn held(
         &mut self,
+        frame: u32,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         player_collider_entity: Option<u16>,
@@ -6910,7 +6928,7 @@ impl NativeFortressRouteController {
                     return PAD_LEFT;
                 }
                 let mut held = 0;
-                if self.route_tick <= 150 {
+                if self.route_tick <= 150 || (self.session_carry && self.route_tick == 189) {
                     held |= PAD_LEFT;
                 }
                 if self.route_tick <= 20
@@ -6939,7 +6957,7 @@ impl NativeFortressRouteController {
                 } else {
                     0
                 };
-                if self.route_tick <= 20 {
+                if self.route_tick <= if self.session_carry { 24 } else { 20 } {
                     held |= PAD_CROSS;
                 }
                 return held;
@@ -6971,6 +6989,8 @@ impl NativeFortressRouteController {
                 return held;
             }
             if self.stage == 8 {
+                // Preserve entity 70's authored low phase after atomic child
+                // spawning moved the route's absolute schedule one frame.
                 if self.route_tick < 21 {
                     return 0;
                 }
@@ -7543,7 +7563,15 @@ impl NativeFortressRouteController {
                 {
                     self.stage = 40;
                     self.route_tick = 0;
-                    return 0;
+                    self.phase_shifted_route = route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 45)
+                            && object.translation[1] > -7_000_000
+                    });
+                    return if self.phase_shifted_route {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
                 }
                 let lane_boundary = 9_350_000;
                 let lane = if player.translation[0] < lane_boundary {
@@ -7590,11 +7618,21 @@ impl NativeFortressRouteController {
                 // route cannot stop on a transient one-frame contact.
                 if camera.path.zone == b9
                     && self.grounded_frames >= 2
-                    && player.translation[0] >= 9_600_000
+                    && player.translation[0]
+                        >= if self.phase_shifted_route {
+                            9_780_000
+                        } else {
+                            9_600_000
+                        }
                 {
                     self.stage = 41;
                     self.route_tick = 0;
                     return PAD_LEFT;
+                }
+                if self.phase_shifted_route {
+                    return PAD_RIGHT
+                        | if self.route_tick == 15 { PAD_CROSS } else { 0 }
+                        | if self.route_tick <= 9 { PAD_SQUARE } else { 0 };
                 }
                 return PAD_RIGHT | if self.route_tick == 9 { PAD_CROSS } else { 0 };
             }
@@ -7641,35 +7679,55 @@ impl NativeFortressRouteController {
             }
             if self.stage == 43 {
                 let c1 = Eid::from_name("c1_qZ").expect("fixed Native Fortress c1 EID is valid");
+                let lateral = if player.translation[2] < 163_936 {
+                    PAD_DOWN
+                } else if player.translation[2] > 171_936 {
+                    PAD_UP
+                } else {
+                    0
+                };
                 if camera.path.zone == c1 && grounded && player.translation[0] >= 11_980_000 {
                     self.stage = 44;
                     self.route_tick = 0;
-                    return PAD_RIGHT | PAD_SQUARE;
+                    return PAD_RIGHT | PAD_SQUARE | lateral;
                 }
                 // Let subtype-three WalOC entity 42 complete its authored
                 // vertical-to-horizontal phase before committing to the
                 // crossing. A running Cross edge then clears its collision
                 // face and enters c1 without invoking WillC's HIT death.
-                return match self.route_tick {
-                    0 => PAD_LEFT,
-                    5..=26 => PAD_RIGHT | PAD_CROSS,
-                    _ => PAD_RIGHT,
-                };
+                return lateral
+                    | match self.route_tick {
+                        0 => PAD_LEFT,
+                        5..=26 => PAD_RIGHT | PAD_CROSS,
+                        _ => PAD_RIGHT,
+                    };
             }
             if self.stage == 44 {
                 let c2 = Eid::from_name("c2_qZ").expect("fixed Native Fortress c2 EID is valid");
-                if camera.path.zone == c2 && grounded && player.translation[0] >= 13_100_000 {
+                let lateral = if player.translation[2] < 163_936 {
+                    PAD_DOWN
+                } else if player.translation[2] > 171_936 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if camera.path.zone == c2
+                    && grounded
+                    && player.translation[0] >= 13_100_000
+                    && player_collider_entity != Some(111)
+                {
                     self.stage = 45;
                     self.route_tick = 0;
-                    return PAD_RIGHT | PAD_SQUARE;
+                    return PAD_RIGHT | PAD_SQUARE | lateral;
                 }
-                return match self.route_tick {
-                    1..=8 => PAD_RIGHT | PAD_SQUARE,
-                    9..=12 => 0,
-                    13..=34 => PAD_RIGHT | PAD_CROSS,
-                    41..=72 => PAD_RIGHT | PAD_CROSS | PAD_SQUARE,
-                    _ => PAD_RIGHT,
-                };
+                return lateral
+                    | match self.route_tick {
+                        1..=8 => PAD_RIGHT | PAD_SQUARE,
+                        9..=12 => 0,
+                        13..=34 => PAD_RIGHT | PAD_CROSS,
+                        41..=72 => PAD_RIGHT | PAD_CROSS | PAD_SQUARE,
+                        _ => PAD_RIGHT,
+                    };
             }
             if self.stage == 45 {
                 let c2 = Eid::from_name("c2_qZ").expect("fixed Native Fortress c2 EID is valid");
@@ -7680,6 +7738,19 @@ impl NativeFortressRouteController {
                 }
                 if self.route_tick <= 8 {
                     return PAD_RIGHT | PAD_SQUARE;
+                }
+                if self.phase_shifted_route && (80..=112).contains(&self.route_tick) {
+                    // A carried session can reach c2 while WalOC 112 is in a
+                    // different authored phase. Start the ordinary run-up as
+                    // soon as its collision face is disabled.
+                    let wall_is_clear = route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 112)
+                            && object.frame_bound.is_none()
+                    });
+                    if wall_is_clear {
+                        self.route_tick = 113;
+                        return PAD_RIGHT;
+                    }
                 }
                 if self.route_tick <= 112 {
                     return 0;
@@ -7706,7 +7777,11 @@ impl NativeFortressRouteController {
                 {
                     self.stage = 48;
                     self.route_tick = 0;
-                    return PAD_RIGHT;
+                    return if self.phase_shifted_route {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    };
                 }
                 // Land across c3's floor break, then take a fresh Cross edge
                 // over c4's approaching SheNC shield instead of running into
@@ -7725,6 +7800,33 @@ impl NativeFortressRouteController {
                     self.stage = 49;
                     self.route_tick = 0;
                     return PAD_LEFT;
+                }
+                if self.phase_shifted_route && !self.c5_launch {
+                    // Align the carried session with WalOC 114's authored
+                    // subtype-six flame idle window before the run-up.
+                    if player.translation[0] > 16_930_000 || player.velocity[0] > 100_000 {
+                        return PAD_LEFT;
+                    }
+                    if player.translation[0] < 16_880_000 || player.velocity[0] < -100_000 {
+                        return PAD_RIGHT;
+                    }
+                    let flame_is_safe = route_objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 33,
+                                subtype: 6,
+                            }
+                        ) && object.translation[0].abs_diff(17_406_976) <= 16_000
+                            && object.state == 16
+                            && object.frame_bound.is_none()
+                    });
+                    if grounded && flame_is_safe {
+                        self.c5_launch = true;
+                        self.route_tick = 0;
+                        return PAD_RIGHT;
+                    }
+                    return 0;
                 }
                 // A short run-up and held jump contacts subtype-five WalOC
                 // entity 114 from above. Its authored launcher state supplies
@@ -7950,6 +8052,13 @@ impl NativeFortressRouteController {
             }
             if self.stage == 64 {
                 if grounded && player_collider_entity == Some(125) {
+                    if self.phase_shifted_route && player.velocity[0].unsigned_abs() > 100_000 {
+                        return if player.velocity[0] < 0 {
+                            PAD_RIGHT
+                        } else {
+                            PAD_LEFT
+                        };
+                    }
                     self.stage = 65;
                     self.route_tick = 0;
                     return 0;
@@ -8159,6 +8268,10 @@ impl NativeFortressRouteController {
             }
             if self.stage == 81 {
                 if grounded && player.translation[0] < 20_800_000 {
+                    if self.phase_shifted_route && !self.d2_spin_released {
+                        self.d2_spin_released = true;
+                        return PAD_LEFT;
+                    }
                     self.stage = 82;
                     self.route_tick = 0;
                     return PAD_LEFT;
@@ -8263,10 +8376,139 @@ impl NativeFortressRouteController {
                 return held;
             }
             if self.stage == 83 {
-                if self.route_tick > 100 && grounded {
+                if self.phase_shifted_route && self.d4_launch && self.route_tick > 90 && grounded {
+                    // The carried route reaches the post-bumper floor with
+                    // residual leftward velocity. Settle into the same narrow
+                    // launch window as a fresh boot before beginning d5.
+                    if player.translation[0] > 17_650_000 {
+                        return PAD_LEFT;
+                    }
+                    if player.velocity[0] < -80_000 {
+                        return PAD_RIGHT;
+                    }
+                    if player.translation[0] < 17_610_000 {
+                        return PAD_RIGHT;
+                    }
+                    if player.velocity[0] > 80_000 {
+                        return PAD_LEFT;
+                    }
+                }
+                if self.route_tick > if self.phase_shifted_route { 99 } else { 100 }
+                    && grounded
+                    && (!self.phase_shifted_route || self.d4_launch)
+                {
+                    if self.phase_shifted_route {
+                        // Wait through one visible flame extension, then
+                        // launch late in the following idle state so Crash
+                        // reaches ledge 162 after its flame retracts.
+                        let ledge_flame = route_objects.iter().find(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 33,
+                                    subtype: 6,
+                                }
+                            ) && object.translation[0].abs_diff(17_201_408) < 50_000
+                        });
+                        if ledge_flame.is_some_and(|flame| flame.state == 18) {
+                            self.d5_flame_extension_seen = true;
+                        }
+                        let next_retraction_approaching = self.d5_flame_extension_seen
+                            && ledge_flame.is_some_and(|flame| {
+                                flame.state == 16 && frame.saturating_sub(flame.state_stamp) >= 48
+                            });
+                        if !next_retraction_approaching {
+                            return 0;
+                        }
+                    }
                     self.stage = 85;
                     self.route_tick = 0;
-                    return PAD_LEFT | PAD_SQUARE;
+                    return if self.phase_shifted_route {
+                        PAD_LEFT | PAD_CROSS | PAD_SQUARE
+                    } else {
+                        PAD_LEFT | PAD_SQUARE
+                    };
+                }
+                if self.phase_shifted_route && !self.d4_launch {
+                    // Stay on entity 174 until its authored moving state
+                    // imparts the leftward velocity needed for the carried
+                    // crossing, and launch while dart entity 167 is low.
+                    if grounded {
+                        match self.route_tick {
+                            115 if player.translation[2] > 168_000 => return PAD_LEFT,
+                            116 => return PAD_UP,
+                            117 => return PAD_DOWN,
+                            _ => {}
+                        }
+                    }
+                    let dart_is_low = route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 167)
+                            && object.translation[1] <= -2_450_000
+                    });
+                    let platform = route_objects.iter().find_map(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 174)
+                            .then_some((object.state, object.translation[0], object.state_stamp))
+                    });
+                    let platform_state = platform.map(|(state, _, _)| state);
+                    let platform_started_moving = platform_state == Some(2);
+                    if !platform_started_moving {
+                        self.d4_evaded_platform_cycle = false;
+                    }
+                    if self.route_tick > 28 {
+                        if self.d4_wait_jump != 0 {
+                            self.d4_wait_jump -= 1;
+                            return PAD_RIGHT | PAD_CROSS;
+                        }
+                        if platform_started_moving {
+                            if grounded
+                                && player_collider_entity == Some(174)
+                                && player.velocity[0] <= -900_000
+                                && dart_is_low
+                            {
+                                self.d4_launch = true;
+                                self.route_tick = 49;
+                                return PAD_CROSS;
+                            } else if grounded && !dart_is_low && !self.d4_evaded_platform_cycle {
+                                self.d4_evaded_platform_cycle = true;
+                                self.d4_launch_prep = true;
+                                self.d4_wait_jump = 10;
+                                return PAD_RIGHT | PAD_CROSS;
+                            }
+                            return if dart_is_low && player.translation[0] > 18_750_000 {
+                                PAD_LEFT
+                            } else if dart_is_low && player.translation[0] < 18_680_000 {
+                                PAD_RIGHT
+                            } else {
+                                0
+                            };
+                        }
+                        if self.d4_launch_prep && matches!(platform_state, Some(3 | 4)) {
+                            if let Some((4, platform_x, state_stamp)) = platform
+                                && dart_is_low
+                                && frame.saturating_sub(state_stamp) >= 20
+                            {
+                                if player.translation[0] < platform_x - 90_000 {
+                                    return PAD_RIGHT;
+                                }
+                                self.d4_launch_prep = false;
+                                return 0;
+                            }
+                            return if player.translation[0] > 18_550_000 {
+                                PAD_LEFT
+                            } else if player.translation[0] < 18_450_000 {
+                                PAD_RIGHT
+                            } else {
+                                0
+                            };
+                        }
+                        return if player.translation[0] < 18_800_000 {
+                            PAD_RIGHT
+                        } else if player.translation[0] > 18_900_000 {
+                            PAD_LEFT
+                        } else {
+                            0
+                        };
+                    }
                 }
                 return if self.route_tick <= 20 {
                     PAD_RIGHT | PAD_DOWN
@@ -8274,6 +8516,16 @@ impl NativeFortressRouteController {
                     PAD_DOWN
                 } else if (49..=75).contains(&self.route_tick) {
                     PAD_CROSS
+                        | if self.phase_shifted_route && self.d4_launch {
+                            PAD_LEFT
+                        } else {
+                            0
+                        }
+                } else if self.phase_shifted_route
+                    && self.d4_launch
+                    && (76..=78).contains(&self.route_tick)
+                {
+                    PAD_LEFT
                 } else {
                     0
                 };
@@ -8332,7 +8584,25 @@ impl NativeFortressRouteController {
                         && object.state == 4
                         && object.translation[1] <= -2_480_000
                 });
-                if grounded && wall_is_low {
+                let third_launcher_will_be_safe = !self.phase_shifted_route
+                    || route_objects.iter().any(|object| {
+                        if !matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 33,
+                                subtype: 6,
+                            }
+                        ) || object.translation[0].abs_diff(14_027_008) >= 50_000
+                        {
+                            return false;
+                        }
+                        let state_age = frame.saturating_sub(object.state_stamp);
+                        matches!(
+                            (object.state, state_age),
+                            (16, 29..) | (17, _) | (18, ..=28)
+                        )
+                    });
+                if grounded && wall_is_low && third_launcher_will_be_safe {
                     self.stage = 89;
                     self.route_tick = 0;
                     return PAD_CROSS;
@@ -8350,7 +8620,13 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
                 }
-                return PAD_CROSS | if self.route_tick > 4 { PAD_LEFT } else { 0 };
+                let runup_start = if self.phase_shifted_route { 2 } else { 4 };
+                return PAD_CROSS
+                    | if self.route_tick > runup_start {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
             }
             if self.stage == 90 {
                 if grounded && player_collider_entity == Some(58) {
@@ -8390,6 +8666,48 @@ impl NativeFortressRouteController {
                     self.stage = 93;
                     self.route_tick = 0;
                     return PAD_LEFT | PAD_SQUARE;
+                }
+                if self.phase_shifted_route && self.route_tick > 8 && !self.d8_launch {
+                    let target_flame = route_objects.iter().find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 33,
+                                subtype: 6,
+                            }
+                        ) && object.translation[0].abs_diff(12_593_408) < 50_000
+                    });
+                    if !self.d8_flame_runup {
+                        let target = 13_190_000;
+                        let settled = player.translation[0].abs_diff(target) <= 40_000
+                            && player.velocity[0].unsigned_abs() <= 80_000;
+                        let fresh_retraction = target_flame.is_some_and(|flame| {
+                            flame.state == 16 && frame.saturating_sub(flame.state_stamp) <= 8
+                        });
+                        if settled && fresh_retraction {
+                            self.d8_flame_runup = true;
+                            return PAD_LEFT | PAD_SQUARE;
+                        }
+                        if player.velocity[0] < -80_000 {
+                            return PAD_RIGHT;
+                        }
+                        if player.velocity[0] > 80_000 {
+                            return PAD_LEFT;
+                        }
+                        if player.translation[0] < target - 40_000 {
+                            return PAD_RIGHT;
+                        }
+                        if player.translation[0] > target + 40_000 {
+                            return PAD_LEFT;
+                        }
+                        return 0;
+                    }
+                    if player.velocity[0] > -600_000 {
+                        return PAD_LEFT | PAD_SQUARE;
+                    }
+                    self.d8_launch = true;
+                    self.route_tick = 9;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
                 }
                 return match self.route_tick {
                     1..=8 => PAD_LEFT | PAD_SQUARE,
@@ -8549,6 +8867,12 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
+                if self.phase_shifted_route && (39..=41).contains(&self.route_tick) {
+                    // The carried route enters e2 slightly farther right.
+                    // Preserve the jump edge but delay the distinct spin edge
+                    // until entity 186 is reached in Crash's spin state.
+                    return PAD_LEFT | PAD_CROSS;
+                }
                 return match self.route_tick {
                     0..=31 => PAD_LEFT | PAD_CROSS,
                     32..=38 => PAD_LEFT,
@@ -8648,9 +8972,26 @@ impl NativeFortressRouteController {
                         && object.state == 4
                         && object.translation[1] <= -2_500_000
                 });
+                // The visible 4.299m subtype-six child shares the downstream
+                // flame clock. The phase-shifted route reaches the safe e5
+                // launch at state 17, age 18; retain a small measured
+                // tolerance instead of accepting an entire nominal phase.
+                let downstream_flames_will_be_safe = !self.phase_shifted_route
+                    || route_objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 33,
+                                subtype: 6,
+                            }
+                        ) && object.translation[0].abs_diff(4_299_520) < 50_000
+                            && object.state == 17
+                            && (16..=20).contains(&frame.saturating_sub(object.state_stamp))
+                    });
                 if self.route_tick >= 150
                     && grounded
                     && wall_is_low
+                    && downstream_flames_will_be_safe
                     && player.velocity[0].abs() <= 100_000
                     && (5_450_000..=5_700_000).contains(&player.translation[0])
                 {
@@ -33026,10 +33367,21 @@ impl SurveyInputController {
             },
             native_fortress: NativeFortressRouteController {
                 started: false,
+                session_carry: matches!(context_source, LevelContextSource::SessionGlobals),
                 stage: 0,
                 jump_frames: 0,
                 grounded_frames: 0,
                 route_tick: 0,
+                phase_shifted_route: false,
+                c5_launch: false,
+                d2_spin_released: false,
+                d4_launch: false,
+                d4_launch_prep: false,
+                d4_wait_jump: 0,
+                d4_evaded_platform_cycle: false,
+                d5_flame_extension_seen: false,
+                d8_flame_runup: false,
+                d8_launch: false,
             },
             lost_city: LostCityCompletionRouteController {
                 pbak_cursor: None,
@@ -33304,10 +33656,13 @@ impl SurveyInputController {
                 self.temple_ruins
                     .held(camera, player, player_collider_entity, route_objects)
             }
-            SurveyInputProfile::NativeFortressD6Route => {
-                self.native_fortress
-                    .held(camera, player, player_collider_entity, route_objects)
-            }
+            SurveyInputProfile::NativeFortressD6Route => self.native_fortress.held(
+                frame,
+                camera,
+                player,
+                player_collider_entity,
+                route_objects,
+            ),
             SurveyInputProfile::LostCityCompletionRoute => self.lost_city.held(
                 frame,
                 camera,
@@ -33408,6 +33763,7 @@ struct ProgramObjectTrace {
     frame_bound: Option<Bounds3>,
     bound: Option<Bounds3>,
     animation_counter: u32,
+    state_stamp: u32,
     status_b: u32,
     register_72: u32,
 }
@@ -34795,6 +35151,7 @@ fn program_object_traces(
                 }))
             }),
             animation_counter: register(process_register::ANIMATION_COUNTER)?,
+            state_stamp: register(process_register::STATE_STAMP)?,
             status_b: register(process_register::STATUS_B)?,
             register_72: register(72)?,
         });
@@ -48978,7 +49335,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             .spawn(move || {
                 let completion_carry =
                     assert_carried_rolling_stones_route(&rolling_stones_root, rolling_stones_carry);
-                carry_rolling_stones_through_hog_to_native(&rolling_stones_root, completion_carry);
+                carry_rolling_stones_through_native_to_lost_city(
+                    &rolling_stones_root,
+                    completion_carry,
+                );
             })
             .expect("the carried Rolling Stones route worker must start")
             .join();
@@ -48987,7 +49347,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         }
 
         #[allow(clippy::items_after_statements)]
-        fn carry_rolling_stones_through_hog_to_native(
+        fn carry_rolling_stones_through_native_to_lost_city(
             root: &Path,
             rolling_stones_completion_carry: RetailSessionCarry,
         ) {
@@ -49002,6 +49362,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             let title = LevelId::TITLE;
             let hog_wild = LevelId::new_const(0x11);
             let native_fortress = LevelId::new_const(0x1a);
+            let up_the_creek = LevelId::new_const(0x18);
+            let ripper_roo = LevelId::new_const(0x17);
+            let lost_city = LevelId::new_const(0x20);
             let (completion_nsd, completion_nsf, completion_nsf_bytes) =
                 parse_local_pair(root, completion).expect("Level Complete pair must parse");
             let (title_nsd, title_nsf, title_nsf_bytes) =
@@ -49459,7 +49822,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             };
             let (native_nsd, native_nsf, native_nsf_bytes) =
                 parse_local_pair(root, native_fortress).expect("Native Fortress pair must parse");
-            let (native_mount_survey, native_runtime) = survey_pair_with_runtime(
+            let (native_survey, mut native_runtime) = survey_pair_with_runtime(
                 known_name(native_fortress),
                 native_fortress,
                 &native_nsd,
@@ -49468,44 +49831,71 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 RetailRuntime::new_from_session(GLOBAL_WORDS, native_fortress, native_carry)
                     .expect("Native Fortress must import the authentic Hog Wild campaign carry"),
                 LevelContextSource::SessionGlobals,
-                SurveyInputProfile::Idle,
-                1,
+                SurveyInputProfile::NativeFortressD6Route,
+                7_000,
             )
-            .expect("the authentic campaign must cross Native Fortress' first runtime frame");
-            assert_eq!(native_mount_survey.frames, 1);
-            assert!(native_mount_survey.terminal.is_none());
-            assert!(native_mount_survey.next_lid.is_none());
-            assert_eq!(native_mount_survey.final_live_objects, 17);
-            assert_eq!(native_mount_survey.max_live_objects, 17);
-            assert_eq!(native_mount_survey.successful_spawns, 9);
-            assert_eq!(native_mount_survey.spawn_attempts, 9);
-            assert_eq!(native_mount_survey.expected_spawn_rejections, 0);
-            assert_eq!(native_mount_survey.unexpected_spawn_errors, 0);
-            assert_eq!(native_mount_survey.executions, 24);
-            assert_eq!(native_mount_survey.execution_errors, 0);
-            assert_eq!(native_mount_survey.restarts, 0);
-            assert_eq!(native_mount_survey.faulted_objects, 0);
-            let native_camera = native_mount_survey
+            .expect("the authentic carried Native Fortress route must execute");
+            assert_eq!(native_survey.frames, 6_641, "{}", native_survey.summary());
+            assert_eq!(
+                native_survey.terminal.as_deref(),
+                Some("frame 6641 requested level transition to 0x2d")
+            );
+            assert_eq!(native_survey.next_lid, Some((6_641, 0x2d)));
+            assert_eq!(native_survey.final_live_objects, 27);
+            assert_eq!(native_survey.max_live_objects, 51);
+            assert_eq!(native_survey.successful_spawns, 319);
+            assert_eq!(native_survey.spawn_attempts, 91_318);
+            assert_eq!(native_survey.expected_spawn_rejections, 90_999);
+            assert_eq!(native_survey.unexpected_spawn_errors, 0);
+            assert_eq!(native_survey.executions, 165_848);
+            assert_eq!(native_survey.execution_errors, 0);
+            assert_eq!(native_survey.zone_transitions, 64);
+            assert_eq!(native_survey.camera_ranges.len(), 60);
+            assert_eq!(native_survey.camera_path_changes, 75);
+            assert_eq!(native_survey.last_camera_path_change, 6_520);
+            assert_eq!(native_survey.last_camera_progress_change, 6_612);
+            assert_eq!(native_survey.last_player_movement, 6_637);
+            assert_eq!(native_survey.restarts, 0, "{}", native_survey.summary());
+            assert!(native_survey.restart_frames.is_empty());
+            assert_eq!(native_survey.death_camera_frames, 0);
+            assert_eq!(native_survey.save_handshakes, 0);
+            assert_eq!(native_survey.faulted_objects, 0);
+            assert!(native_survey.fault_contexts.is_empty());
+            assert!(native_survey.issue_counts.is_empty());
+            assert!(native_survey.first_issue.is_none());
+            assert!(!native_survey.observed_player_states.contains(&27));
+            assert_eq!(native_survey.effect_counts.get("transition"), Some(&1));
+            assert_eq!(native_survey.effect_counts.get("solid"), Some(&722));
+            assert_eq!(native_survey.effect_counts.get("save-state"), Some(&3));
+            assert_eq!(native_survey.effect_counts.get("load-state"), None);
+            assert_eq!(
+                native_survey.box_count_samples.last(),
+                Some(&(5_381, 3_072))
+            );
+            assert_eq!(
+                native_survey.checkpoint_samples.last(),
+                Some(&(4_694, 48_128, [13_106_432, -2_150_400, 128_000]))
+            );
+            let native_camera = native_survey
                 .final_camera
-                .expect("Native Fortress must expose its carried spawn camera");
+                .expect("carried Native Fortress must retain its final camera");
             assert_eq!(
                 native_camera.path,
                 RetailPathId {
-                    zone: Eid::from_name("a1_qZ")
-                        .expect("fixed Native Fortress spawn-zone EID is valid"),
+                    zone: Eid::from_name("f1_qZ")
+                        .expect("fixed Native Fortress end-zone EID is valid"),
                     index: 0,
                 }
             );
-            assert_eq!(native_camera.progress.raw(), 499);
+            assert_eq!(native_camera.progress.raw(), 17_919);
             assert_eq!(
-                native_mount_survey.initial_player_translation,
+                native_survey.initial_player_translation,
                 Some([11_570_944, -12_697_600, 307_200])
             );
             assert_eq!(
-                native_mount_survey.final_player_translation,
-                Some([11_570_944, -12_697_600, 307_200])
+                native_survey.final_player_translation,
+                Some([1_578_316, 6_596_940, 169_984])
             );
-            assert!(!native_mount_survey.effect_counts.contains_key("transition"));
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -49517,15 +49907,624 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     ISLAND_CAMERA_STATE_GLOBAL,
                 ]
                 .map(|index| native_runtime.global_word(index).unwrap()),
-                [0x100, 15, 15, 9, 1, 9, 0]
+                [0x500, 15, 15, 9, 1, 10, 0]
             );
-            assert_eq!(native_runtime.machine().random_seed(), 0x61cf_cb91);
-            assert_eq!(native_runtime.draw_count(), 9_965);
+            assert_eq!(native_runtime.machine().random_seed(), 0x5acd_1365);
+            assert_eq!(native_runtime.draw_count(), 16_605);
+            assert!(native_survey.is_clean(), "{}", native_survey.summary());
+
+            let native_completion_carry = {
+                let mut host = NsfProgramHost::new(&native_nsd, &native_nsf, &native_nsf_bytes);
+                let report = native_runtime
+                    .finish_level_transition(&mut host, 0x2d)
+                    .expect("authentic Native Fortress LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x5acd_1365);
+                assert_eq!(report.carry.draw_count, 16_605);
+                report.carry
+            };
+
+            let (native_completion_survey, mut native_completion_runtime) =
+                survey_pair_with_runtime(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        completion,
+                        native_completion_carry,
+                    )
+                    .expect("Level Complete must import authentic Native Fortress carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    600,
+                )
+                .expect("Native Fortress' authentic Level Complete screen must execute");
+            assert_eq!(native_completion_survey.frames, 393);
+            assert_eq!(
+                native_completion_survey.terminal.as_deref(),
+                Some("frame 393 requested level transition to 0x19")
+            );
+            assert_eq!(native_completion_survey.next_lid, Some((393, 0x19)));
+            assert_eq!(native_completion_survey.final_live_objects, 5);
+            assert_eq!(native_completion_survey.max_live_objects, 8);
+            assert_eq!(native_completion_survey.successful_spawns, 2);
+            assert_eq!(native_completion_survey.spawn_attempts, 786);
+            assert_eq!(native_completion_survey.expected_spawn_rejections, 784);
+            assert_eq!(native_completion_survey.executions, 2_542);
+            assert_eq!(native_completion_survey.restarts, 0);
+            assert_eq!(native_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(native_completion_survey.execution_errors, 0);
+            assert_eq!(native_completion_survey.faulted_objects, 0);
+            assert!(native_completion_survey.is_clean());
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| native_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 9, 1, 10, 0]
+            );
+            assert_eq!(
+                native_completion_runtime.machine().random_seed(),
+                0xdce1_0c8b
+            );
+            assert_eq!(native_completion_runtime.draw_count(), 16_998);
+            let post_native_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = native_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Native Fortress' Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xdce1_0c8b);
+                assert_eq!(report.carry.draw_count, 16_998);
+                report.carry
+            };
+
+            let mut post_native_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_native_title_carry,
+            );
+            post_native_map.wait_until_ready(64);
+            assert_eq!(post_native_map.frame, 10);
+            for _ in 0..120 {
+                post_native_map.step(0);
+            }
+            post_native_map.tap(PAD_UP);
+            for _ in 0..120 {
+                post_native_map.step(0);
+            }
+            post_native_map.step(PAD_CROSS);
+            assert_eq!(post_native_map.frame, 253);
+            assert_eq!(post_native_map.transitions, [(253, 0x18)]);
+            assert_eq!(post_native_map.camera.location().progress.raw(), 3_840);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_native_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 10, 1, 10, 1]
+            );
+            assert_eq!(post_native_map.runtime.machine().random_seed(), 0xb7cd_47fe);
+            assert_eq!(post_native_map.runtime.draw_count(), 17_251);
+            let up_the_creek_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_native_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(up_the_creek.get()).expect("Up the Creek LID fits i32"),
+                    )
+                    .expect("authentic post-Native Map LEVEL_END must export Up the Creek");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x18);
+                assert_eq!(report.next_lid_after_event, 0x18);
+                assert_eq!(report.resolved.level, up_the_creek);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xb7cd_47fe);
+                assert_eq!(report.carry.draw_count, 17_251);
+                report.carry
+            };
+
+            let (up_nsd, up_nsf, up_nsf_bytes) =
+                parse_local_pair(root, up_the_creek).expect("Up the Creek pair must parse");
+            let (up_survey, mut up_runtime) = survey_pair_with_runtime(
+                known_name(up_the_creek),
+                up_the_creek,
+                &up_nsd,
+                &up_nsf,
+                &up_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, up_the_creek, up_the_creek_carry)
+                    .expect("Up the Creek must import authentic Native Fortress campaign carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::UpTheCreekCompletionRoute,
+                4_700,
+            )
+            .expect("the authentic carried Up the Creek route must execute");
+            assert_eq!(up_survey.frames, 4_319, "{}", up_survey.summary());
+            assert_eq!(
+                up_survey.terminal.as_deref(),
+                Some("frame 4319 requested level transition to 0x2d")
+            );
+            assert_eq!(up_survey.next_lid, Some((4_319, 0x2d)));
+            assert_eq!(up_survey.final_live_objects, 22);
+            assert_eq!(up_survey.max_live_objects, 46);
+            assert_eq!(up_survey.successful_spawns, 192);
+            assert_eq!(up_survey.spawn_attempts, 66_656);
+            assert_eq!(up_survey.expected_spawn_rejections, 66_464);
+            assert_eq!(up_survey.unexpected_spawn_errors, 0);
+            assert_eq!(up_survey.executions, 125_373);
+            assert_eq!(up_survey.execution_errors, 0);
+            assert_eq!(up_survey.zone_transitions, 36);
+            assert_eq!(up_survey.restarts, 0);
+            assert!(up_survey.restart_frames.is_empty());
+            assert_eq!(up_survey.faulted_objects, 0);
+            assert_eq!(
+                up_survey.box_count_samples,
+                [
+                    (1, 0),
+                    (69, 0x100),
+                    (76, 0x200),
+                    (964, 0x300),
+                    (982, 0x400),
+                    (1_246, 0x500),
+                    (1_878, 0x600),
+                    (3_981, 0x700),
+                ]
+            );
+            assert_eq!(
+                up_survey.checkpoint_samples,
+                [
+                    (1, -1, [13_106_432, -2_150_400, 128_000]),
+                    (965, -1, [2_148_864, 1_818_624, 21_605_376]),
+                    (1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+                ]
+            );
+            assert_eq!(up_survey.saved_box_count_samples, [(1_246, 0x400)]);
+            assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
+            assert_eq!(up_survey.effect_counts.get("send-event"), Some(&175));
+            assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_688));
+            assert_eq!(up_survey.effect_counts.get("reparent"), Some(&44));
+            assert_eq!(up_survey.effect_counts.get("master-fade-reset"), Some(&1));
+            assert_eq!(up_survey.effect_counts.get("transition"), Some(&1));
+            assert!(up_survey.is_clean(), "{}", up_survey.summary());
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| up_runtime.global_word(index).unwrap()),
+                [0x500, 15, 15, 10, 1, 11, 0]
+            );
+            assert_eq!(up_runtime.machine().random_seed(), 0xf824_b646);
+            assert_eq!(up_runtime.draw_count(), 21_570);
+
+            let up_completion_carry = {
+                let mut host = NsfProgramHost::new(&up_nsd, &up_nsf, &up_nsf_bytes);
+                let report = up_runtime
+                    .finish_level_transition(&mut host, 0x2d)
+                    .expect("authentic Up the Creek LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xf824_b646);
+                assert_eq!(report.carry.draw_count, 21_570);
+                report.carry
+            };
+            let (up_completion_survey, mut up_completion_runtime) = survey_pair_with_runtime(
+                known_name(completion),
+                completion,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, up_completion_carry)
+                    .expect("Level Complete must import authentic Up the Creek carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                600,
+            )
+            .expect("Up the Creek's authentic Level Complete screen must execute");
+            assert_eq!(up_completion_survey.frames, 185);
+            assert_eq!(
+                up_completion_survey.terminal.as_deref(),
+                Some("frame 185 requested level transition to 0x19")
+            );
+            assert_eq!(up_completion_survey.next_lid, Some((185, 0x19)));
+            assert_eq!(up_completion_survey.final_live_objects, 5);
+            assert_eq!(up_completion_survey.max_live_objects, 8);
+            assert_eq!(up_completion_survey.successful_spawns, 2);
+            assert_eq!(up_completion_survey.spawn_attempts, 370);
+            assert_eq!(up_completion_survey.expected_spawn_rejections, 368);
+            assert_eq!(up_completion_survey.executions, 966);
+            assert_eq!(up_completion_survey.zone_transitions, 0);
+            assert_eq!(up_completion_survey.restarts, 0);
+            assert_eq!(up_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(up_completion_survey.execution_errors, 0);
+            assert_eq!(up_completion_survey.faulted_objects, 0);
+            assert_eq!(
+                up_completion_survey.box_count_samples,
+                [
+                    (1, 0),
+                    (62, 0x100),
+                    (71, 0x200),
+                    (80, 0x300),
+                    (89, 0x400),
+                    (98, 0x500),
+                    (107, 0x600),
+                    (116, 0x700),
+                    (125, 0x800),
+                ]
+            );
+            assert_eq!(
+                up_completion_survey.checkpoint_samples,
+                [(1, 76 << 8, [2_048_000, 1_738_240, 19_455_744])]
+            );
+            assert_eq!(
+                up_completion_survey.effect_counts.get("send-event"),
+                Some(&8)
+            );
+            assert_eq!(up_completion_survey.effect_counts.get("solid"), Some(&16));
+            assert_eq!(
+                up_completion_survey.effect_counts.get("reparent"),
+                Some(&16)
+            );
+            assert_eq!(
+                up_completion_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
             assert!(
-                native_mount_survey.is_clean(),
+                up_completion_survey.is_clean(),
                 "{}",
-                native_mount_survey.summary()
+                up_completion_survey.summary()
             );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| up_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 10, 1, 11, 0]
+            );
+            assert_eq!(up_completion_runtime.machine().random_seed(), 0x93e1_3ae8);
+            assert_eq!(up_completion_runtime.draw_count(), 21_755);
+
+            let post_up_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = up_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Up the Creek's Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x93e1_3ae8);
+                assert_eq!(report.carry.draw_count, 21_755);
+                report.carry
+            };
+
+            let mut post_up_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_up_title_carry,
+            );
+            post_up_map.wait_until_ready(64);
+            assert_eq!(post_up_map.frame, 10);
+            for _ in 0..120 {
+                post_up_map.step(0);
+            }
+            post_up_map.tap(PAD_UP);
+            for _ in 0..120 {
+                post_up_map.step(0);
+            }
+            post_up_map.step(PAD_CROSS);
+            assert_eq!(post_up_map.frame, 253);
+            assert_eq!(post_up_map.transitions, [(253, 0x17)]);
+            assert_eq!(
+                post_up_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("2a_pZ").expect("fixed Up-the-Creek map EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(post_up_map.camera.location().progress.raw(), 0x0f00);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_up_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 11, 1, 11, 1]
+            );
+            assert_eq!(post_up_map.runtime.machine().random_seed(), 0x81be_7f00);
+            assert_eq!(post_up_map.runtime.draw_count(), 22_008);
+            assert_eq!(post_up_map.runtime.faulted_object_count(), 0);
+
+            let ripper_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_up_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(ripper_roo.get()).expect("Ripper Roo LID fits i32"),
+                    )
+                    .expect("authentic post-Up Map LEVEL_END must export Ripper Roo");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x17);
+                assert_eq!(report.next_lid_after_event, 0x17);
+                assert_eq!(report.resolved.level, ripper_roo);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x81be_7f00);
+                assert_eq!(report.carry.draw_count, 22_008);
+                report.carry
+            };
+
+            let (ripper_nsd, ripper_nsf, ripper_nsf_bytes) =
+                parse_local_pair(root, ripper_roo).expect("Ripper Roo pair must parse");
+            let (ripper_survey, mut ripper_runtime) = survey_pair_with_runtime(
+                known_name(ripper_roo),
+                ripper_roo,
+                &ripper_nsd,
+                &ripper_nsf,
+                &ripper_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, ripper_roo, ripper_carry)
+                    .expect("Ripper Roo must import authentic Up the Creek campaign carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::RipperRooCompletionRoute,
+                2_600,
+            )
+            .expect("the authentic carried Ripper Roo route must execute");
+            assert_eq!(ripper_survey.frames, 2_064, "{}", ripper_survey.summary());
+            assert_eq!(
+                ripper_survey.terminal.as_deref(),
+                Some("frame 2064 requested level transition to 0x19")
+            );
+            assert_eq!(ripper_survey.next_lid, Some((2_064, 0x19)));
+            assert_eq!(ripper_survey.final_live_objects, 36);
+            assert_eq!(ripper_survey.max_live_objects, 55);
+            assert_eq!(ripper_survey.successful_spawns, 5);
+            assert_eq!(ripper_survey.spawn_attempts, 10_320);
+            assert_eq!(ripper_survey.expected_spawn_rejections, 10_315);
+            assert_eq!(ripper_survey.executions, 46_685);
+            assert_eq!(ripper_survey.zone_transitions, 0);
+            assert_eq!(ripper_survey.save_handshakes, 2);
+            assert_eq!(ripper_survey.restarts, 0);
+            assert_eq!(ripper_survey.unexpected_spawn_errors, 0);
+            assert_eq!(ripper_survey.execution_errors, 0);
+            assert_eq!(ripper_survey.faulted_objects, 0);
+            assert_eq!(ripper_survey.box_count_samples, [(1, 0)]);
+            assert_eq!(
+                ripper_survey.checkpoint_samples,
+                [(1, -1, [2_048_000, 1_738_240, 19_455_744])]
+            );
+            assert_eq!(
+                ripper_survey.entity_state_samples,
+                [(2, 8, 0), (152, 8, 1), (1_932, 8, 2)]
+            );
+            assert_eq!(
+                ripper_survey.entity_counter_samples,
+                [(2, 8, 0), (1_001, 8, 1), (1_452, 8, 2), (1_868, 8, 3)]
+            );
+            let crash = Eid::from_name("WillC").expect("fixed Crash program EID is valid");
+            let roo = Eid::from_name("RooOC").expect("fixed RooOC EID is valid");
+            let ripper = Eid::from_name("RRooC").expect("fixed RRooC EID is valid");
+            let activation_frames = ripper_survey
+                .direct_send_program_samples
+                .iter()
+                .filter(|sample| {
+                    sample.event == 0
+                        && sample.sender == Some(crash)
+                        && sample.recipient == Some(roo)
+                })
+                .map(|sample| sample.frame)
+                .collect::<BTreeSet<_>>();
+            assert_eq!(activation_frames, [920, 1_371, 1_787].into_iter().collect());
+            let boss_event_frames = ripper_survey
+                .direct_send_program_samples
+                .iter()
+                .filter(|sample| sample.event == 0x300 && sample.recipient == Some(ripper))
+                .map(|sample| sample.frame)
+                .collect::<BTreeSet<_>>();
+            for frame in [1_000, 1_451, 1_867] {
+                assert!(boss_event_frames.contains(&frame));
+            }
+            assert_eq!(ripper_survey.effect_counts.get("transition"), Some(&1));
+            assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&102));
+            assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&107));
+            assert!(ripper_survey.is_clean(), "{}", ripper_survey.summary());
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| ripper_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 11, 1, 12, 0]
+            );
+            assert_eq!(ripper_runtime.machine().random_seed(), 0xabc4_15c8);
+            assert_eq!(ripper_runtime.draw_count(), 24_072);
+
+            let post_ripper_title_carry = {
+                let mut host = NsfProgramHost::new(&ripper_nsd, &ripper_nsf, &ripper_nsf_bytes);
+                let report = ripper_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("authentic Ripper Roo LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xabc4_15c8);
+                assert_eq!(report.carry.draw_count, 24_072);
+                report.carry
+            };
+
+            let mut post_ripper_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_ripper_title_carry,
+            );
+            post_ripper_map.wait_until_ready(64);
+            assert_eq!(post_ripper_map.frame, 10);
+            for _ in 0..120 {
+                post_ripper_map.step(0);
+            }
+            post_ripper_map.tap(PAD_UP);
+            for _ in 0..120 {
+                post_ripper_map.step(0);
+            }
+            post_ripper_map.step(PAD_CROSS);
+            assert_eq!(post_ripper_map.frame, 253);
+            assert_eq!(post_ripper_map.transitions, [(253, 0x20)]);
+            assert_eq!(
+                post_ripper_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("2a_pZ").expect("fixed Ripper-Roo map EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(post_ripper_map.camera.location().progress.raw(), 0x0400);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_ripper_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 12, 1, 12, 1]
+            );
+            assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0x45fb_436a);
+            assert_eq!(post_ripper_map.runtime.draw_count(), 24_325);
+            assert_eq!(post_ripper_map.runtime.faulted_object_count(), 0);
+
+            let lost_city_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_ripper_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(lost_city.get()).expect("The Lost City LID fits i32"),
+                    )
+                    .expect("authentic post-Ripper Map LEVEL_END must export The Lost City");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x20);
+                assert_eq!(report.next_lid_after_event, 0x20);
+                assert_eq!(report.resolved.level, lost_city);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x45fb_436a);
+                assert_eq!(report.carry.draw_count, 24_325);
+                report.carry
+            };
+            let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
+                parse_local_pair(root, lost_city).expect("The Lost City pair must parse");
+            let (lost_city_mount_survey, lost_city_runtime) = survey_pair_with_runtime(
+                known_name(lost_city),
+                lost_city,
+                &lost_city_nsd,
+                &lost_city_nsf,
+                &lost_city_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, lost_city, lost_city_carry)
+                    .expect("The Lost City must import authentic Ripper Roo campaign carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::Idle,
+                1,
+            )
+            .expect("the authentic campaign must cross The Lost City's first runtime frame");
+            assert_eq!(lost_city_mount_survey.frames, 1);
+            assert!(lost_city_mount_survey.terminal.is_none());
+            assert!(lost_city_mount_survey.next_lid.is_none());
+            assert_eq!(lost_city_mount_survey.final_live_objects, 41);
+            assert_eq!(lost_city_mount_survey.max_live_objects, 41);
+            assert_eq!(lost_city_mount_survey.successful_spawns, 33);
+            assert_eq!(lost_city_mount_survey.spawn_attempts, 33);
+            assert_eq!(lost_city_mount_survey.expected_spawn_rejections, 0);
+            assert_eq!(lost_city_mount_survey.executions, 56);
+            assert_eq!(lost_city_mount_survey.zone_transitions, 0);
+            assert_eq!(lost_city_mount_survey.restarts, 0);
+            assert_eq!(lost_city_mount_survey.unexpected_spawn_errors, 0);
+            assert_eq!(lost_city_mount_survey.execution_errors, 0);
+            assert_eq!(lost_city_mount_survey.faulted_objects, 0);
+            assert!(
+                lost_city_mount_survey.is_clean(),
+                "{}",
+                lost_city_mount_survey.summary()
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| lost_city_runtime.global_word(index).unwrap()),
+                [0x100, 15, 15, 12, 1, 12, 0]
+            );
+            assert_eq!(lost_city_runtime.machine().random_seed(), 0x34d5_75c5);
+            assert_eq!(lost_city_runtime.draw_count(), 24_326);
+            assert_eq!(lost_city_runtime.faulted_object_count(), 0);
         }
 
         eprintln!(
@@ -49550,7 +50549,11 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "(draw 7235); Map -> Hog Wild at frame 253 (draw 7488); Hog Wild -> Level ",
                 "Complete at frame 1950 (draw 9438); sixth Level Complete -> Title at frame ",
                 "273 (draw 9711); Map -> Native Fortress at frame 253 (draw 9964); Native ",
-                "Fortress crossed its first carried frame (draw 9965)",
+                "Fortress carried route: 6641 frames -> Level Complete, 60 paths/75 changes, ",
+                "64 zone transitions, no deaths/restarts, RNG 0x5acd1365, draw 16605; seventh ",
+                "Level Complete -> Title at frame 393 (draw 16998); Map -> Up the Creek at ",
+                "frame 253 (draw 17251); Up the Creek crossed its first carried frame ",
+                "(draw 17252)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

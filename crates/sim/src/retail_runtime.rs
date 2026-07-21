@@ -57,6 +57,10 @@ use crate::{
 /// cooperative frame. Retail follows state links synchronously; this bound
 /// preserves that ordering while reporting cycles as a typed VM failure.
 const MAX_SYNCHRONOUS_STATE_CHANGES: usize = 64;
+/// Native GOOL completes the instruction tail after a synchronous child
+/// spawn without yielding. Keep that atomic tail bounded if malformed code
+/// never reaches an authored halt.
+const SPAWN_CONTINUATION_LIMIT: usize = 4_096;
 const COLLIDABLE_STATUS_B: u32 = 0x10;
 const FIRST_FRAME_STATUS_A: u32 = 0x20;
 const LOCAL_BOUND_INVALID_STATUS_A: u32 = 0x8000;
@@ -7095,6 +7099,14 @@ impl RetailRuntime {
                 steps: 0,
             });
         }
+        // Native `GoolObjectInterpret` does not yield between a synchronous
+        // child spawn and the authored writes that configure `child[...]`.
+        // Our per-object watchdog normally becomes a cooperative frame
+        // boundary, but doing that after `CHLD`/`CHLF` lets the new child run
+        // (and possibly reparent) before its parent resumes. Continue this
+        // one native update in bounded chunks so the temporary child link
+        // remains valid through the post-spawn configuration tail.
+        let spawned_children_before_update = spawned_children.len();
         let mut remaining = budget;
         let mut total_steps = 0_usize;
         loop {
@@ -7142,11 +7154,26 @@ impl RetailRuntime {
             }
             let execution = execution.map_err(RuntimeError::Vm)?;
             total_steps = total_steps.saturating_add(execution.steps);
-            let HaltReason::StateChanged(state) = execution.reason else {
-                return Ok(Execution {
-                    reason: execution.reason,
-                    steps: total_steps,
-                });
+            let spawned_during_update = spawned_children.len() > spawned_children_before_update;
+            let continuation_remaining = || {
+                SPAWN_CONTINUATION_LIMIT
+                    .saturating_sub(total_steps)
+                    .min(budget.max(1))
+            };
+            let state = match execution.reason {
+                HaltReason::BudgetExhausted
+                    if spawned_during_update && total_steps < SPAWN_CONTINUATION_LIMIT =>
+                {
+                    remaining = continuation_remaining();
+                    continue;
+                }
+                HaltReason::StateChanged(state) => state,
+                reason => {
+                    return Ok(Execution {
+                        reason,
+                        steps: total_steps,
+                    });
+                }
             };
 
             // Normal GoolObjectUpdate code carries SUSPEND_ON_ANIM but not
@@ -7162,13 +7189,19 @@ impl RetailRuntime {
                     steps: total_steps,
                 });
             }
-            if total_steps >= budget {
+            if total_steps >= budget
+                && (!spawned_during_update || total_steps >= SPAWN_CONTINUATION_LIMIT)
+            {
                 return Ok(Execution {
                     reason: HaltReason::StateChanged(state),
                     steps: total_steps,
                 });
             }
-            remaining = budget - total_steps;
+            remaining = if total_steps < budget {
+                budget - total_steps
+            } else {
+                continuation_remaining()
+            };
         }
     }
 
@@ -11258,6 +11291,64 @@ mod tests {
         ) -> Result<VmStateProgram, Self::Error> {
             Err(())
         }
+    }
+
+    struct SpawnTailHost;
+
+    impl ProgramHost for SpawnTailHost {
+        type Error = ();
+
+        fn bind_program(&mut self, binding: ProgramBinding<'_>) -> Result<VmObject, Self::Error> {
+            let no_op = Instruction::encode(0x11, 0x0e3f, 0x0e3f);
+            VmObject::new(binding.object.vm(), vec![no_op; 8]).map_err(|_| ())
+        }
+
+        fn bind_state_program(
+            &mut self,
+            _binding: StateProgramBinding,
+        ) -> Result<VmStateProgram, Self::Error> {
+            Err(())
+        }
+    }
+
+    #[test]
+    fn child_spawn_configuration_tail_is_atomic_across_the_watchdog_budget() {
+        const SPAWN_EXECUTABLE_FIVE_CHILD: u32 = 0x8a00_5001;
+        const CHILD_PID_FLAGS: u16 = 0x0cde;
+        const CHILD_MODE_FLAGS_C: u16 = 0x0cd9;
+
+        let mut runtime = RetailRuntime::new(0);
+        let parent = spawn_test_object(&mut runtime, ZONE, 10, 2, 0);
+        let parent_vm = VmObject::new(
+            parent.vm,
+            vec![
+                SPAWN_EXECUTABLE_FIVE_CHILD,
+                Instruction::encode(0x11, 0x0801, CHILD_PID_FLAGS),
+                Instruction::encode(0x11, 0x0802, CHILD_MODE_FLAGS_C),
+                RETURN,
+            ],
+        )
+        .unwrap();
+        runtime.machine.upsert_object(parent_vm).unwrap();
+
+        let frame = runtime.run_frame(&mut SpawnTailHost, 2).unwrap();
+        let child = frame.spawned_children[0];
+        let parent_execution = frame
+            .executions
+            .iter()
+            .find(|execution| execution.object == parent)
+            .unwrap()
+            .result
+            .as_ref()
+            .unwrap();
+
+        assert!(
+            parent_execution.steps > 2,
+            "the watchdog chunk must extend through the native post-spawn tail"
+        );
+        let child_vm = runtime.machine.object(child.vm).unwrap();
+        assert_eq!(child_vm.register(process_register::PID_FLAGS), Ok(0x100));
+        assert_eq!(child_vm.register(process_register::MODE_FLAGS_C), Ok(0x200));
     }
 
     struct ArgumentProvenanceHost {

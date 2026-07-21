@@ -8123,14 +8123,7 @@ impl RetailRuntime {
         let Some(object) = handles.for_arena(arena_handle) else {
             return Ok(());
         };
-        let spawn_id = arena
-            .get(arena_handle)
-            .map(|spawned| {
-                spawned
-                    .entity_descriptor()
-                    .map_or(0, |descriptor| descriptor.id)
-            })
-            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        let spawn_id = Self::live_spawn_id(machine, object.vm)?;
         machine
             .remove_object_for_host_termination_from_retail_pool_slot(
                 object.vm,
@@ -8143,7 +8136,7 @@ impl RetailRuntime {
         let audio_freed = host.free_object_audio(object);
         handles.release(object);
         arena
-            .despawn_leaf(arena_handle)
+            .despawn_leaf_with_spawn_id(arena_handle, spawn_id)
             .map_err(RuntimeError::Tree)?;
         let spawn_flags = arena
             .spawn_table()
@@ -8171,13 +8164,21 @@ impl RetailRuntime {
     ) -> Result<(), RuntimeError<E>> {
         let removed = self
             .arena
-            .despawn_subtree(root)
+            .subtree_postorder_snapshot(root)
             .map_err(RuntimeError::Tree)?;
-        for arena_handle in removed {
-            let object = self
-                .handles
-                .for_arena(arena_handle)
-                .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        let objects = removed
+            .into_iter()
+            .map(|arena_handle| {
+                let object = self
+                    .handles
+                    .for_arena(arena_handle)
+                    .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+                let spawn_id = Self::live_spawn_id(&self.machine, object.vm)?;
+                Ok((arena_handle, object, spawn_id))
+            })
+            .collect::<Result<Vec<_>, RuntimeError<E>>>()?;
+
+        for (arena_handle, object, spawn_id) in objects {
             self.machine
                 .remove_object_from_retail_pool_slot(object.vm, object.arena.slot())
                 .map_err(RuntimeError::Vm)?;
@@ -8190,6 +8191,17 @@ impl RetailRuntime {
             self.pending_states.remove(&object.vm);
             self.faulted_objects.remove(&object);
             self.handles.release(object);
+            self.arena
+                .despawn_leaf_with_spawn_id(arena_handle, spawn_id)
+                .map_err(RuntimeError::Tree)?;
+            let spawn_flags = self
+                .arena
+                .spawn_table()
+                .flags(spawn_id)
+                .ok_or(RuntimeError::Spawn(SpawnError::InvalidSpawnId(spawn_id)))?;
+            self.machine
+                .set_spawn_flags(spawn_id, spawn_flags)
+                .map_err(RuntimeError::Vm)?;
             report.terminated.push(object);
             report
                 .cleanup_actions
@@ -8197,6 +8209,21 @@ impl RetailRuntime {
         }
         self.clear_stale_retail_box_links()?;
         Ok(())
+    }
+
+    fn live_spawn_id<E>(machine: &Machine, object: VmObjectHandle) -> Result<u16, RuntimeError<E>> {
+        let raw_spawn_id = machine
+            .object(object)
+            .map_err(RuntimeError::Vm)?
+            .register(process_register::PID_FLAGS)
+            .map_err(RuntimeError::Vm)?
+            >> 8;
+        u16::try_from(raw_spawn_id)
+            .ok()
+            .filter(|id| usize::from(*id) < SPAWN_TABLE_CAPACITY)
+            .ok_or(RuntimeError::Spawn(SpawnError::InvalidSpawnId(
+                u16::try_from(raw_spawn_id).unwrap_or(u16::MAX),
+            )))
     }
 
     fn refresh_tree_links<E>(
@@ -8378,14 +8405,7 @@ impl RetailRuntime {
         let Some(object) = handles.for_arena(arena_handle) else {
             return Ok(());
         };
-        let spawn_id = arena
-            .get(arena_handle)
-            .map(|spawned| {
-                spawned
-                    .entity_descriptor()
-                    .map_or(0, |descriptor| descriptor.id)
-            })
-            .ok_or(RuntimeError::UnknownArenaObject(arena_handle))?;
+        let spawn_id = Self::live_spawn_id(machine, object.vm)?;
         machine
             .remove_object_from_retail_pool_slot(object.vm, object.arena.slot())
             .map_err(RuntimeError::Vm)?;
@@ -8395,7 +8415,7 @@ impl RetailRuntime {
         let audio_freed = host.free_object_audio(object);
         handles.release(object);
         arena
-            .despawn_leaf(arena_handle)
+            .despawn_leaf_with_spawn_id(arena_handle, spawn_id)
             .map_err(RuntimeError::Tree)?;
         let spawn_flags = arena
             .spawn_table()
@@ -13293,6 +13313,72 @@ mod tests {
         object
     }
 
+    #[test]
+    fn paired_subtree_teardown_clears_a_runtime_childs_live_pid_slot() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let parent = spawn_test_object(&mut runtime, ZONE, 64, 2, 0);
+        let child = attach_test_child(&mut runtime, parent, ZONE, 5);
+        runtime
+            .machine
+            .object_mut(child.vm)
+            .unwrap()
+            .set_register(process_register::PID_FLAGS, 131 << 8)
+            .unwrap();
+        runtime
+            .arena
+            .spawn_table_mut()
+            .set_flags(0, 0x8000_000f)
+            .unwrap();
+        runtime
+            .arena
+            .spawn_table_mut()
+            .set_flags(131, 0x4000_000f)
+            .unwrap();
+        runtime.machine.set_spawn_flags(0, 0x8000_000f).unwrap();
+        runtime.machine.set_spawn_flags(131, 0x4000_000f).unwrap();
+
+        let mut report = ZoneTerminationReport::<()>::new();
+        runtime
+            .remove_runtime_subtree(child.arena, &mut report)
+            .unwrap();
+
+        assert_eq!(report.terminated, [child]);
+        assert_eq!(
+            report.cleanup_actions,
+            [RuntimeCleanupAction::FreeObjectAudio(child)]
+        );
+        assert!(runtime.arena.get(parent.arena).is_some());
+        assert!(runtime.arena.get(child.arena).is_none());
+        assert_eq!(runtime.arena.spawn_table().flags(0), Some(0x8000_000f));
+        assert_eq!(runtime.arena.spawn_table().flags(131), Some(0x4000_000e));
+        assert_eq!(runtime.machine.spawn_flags(0), Ok(0x8000_000f));
+        assert_eq!(runtime.machine.spawn_flags(131), Ok(0x4000_000e));
+    }
+
+    #[test]
+    fn paired_subtree_teardown_rejects_an_invalid_live_pid_atomically() {
+        let mut runtime = RetailRuntime::new_for_level(0, LevelId::N_SANITY_BEACH);
+        let parent = spawn_test_object(&mut runtime, ZONE, 64, 2, 0);
+        let child = attach_test_child(&mut runtime, parent, ZONE, 5);
+        runtime
+            .machine
+            .object_mut(child.vm)
+            .unwrap()
+            .set_register(process_register::PID_FLAGS, u32::from(u16::MAX) << 8)
+            .unwrap();
+
+        let mut report = ZoneTerminationReport::<()>::new();
+        assert_eq!(
+            runtime.remove_runtime_subtree(child.arena, &mut report),
+            Err(RuntimeError::Spawn(SpawnError::InvalidSpawnId(u16::MAX)))
+        );
+        assert!(report.terminated.is_empty());
+        assert!(report.cleanup_actions.is_empty());
+        assert!(runtime.arena.get(parent.arena).is_some());
+        assert!(runtime.arena.get(child.arena).is_some());
+        assert!(runtime.machine.object(child.vm).is_ok());
+    }
+
     fn configure_level_end_transition(
         runtime: &mut RetailRuntime,
         object: RuntimeObjectHandle,
@@ -13321,11 +13407,19 @@ mod tests {
         requester: RuntimeObjectHandle,
         trailing_code: &[u32],
     ) {
+        let pid_flags = runtime
+            .machine
+            .object(requester.vm)
+            .unwrap()
+            .register(process_register::PID_FLAGS)
+            .unwrap();
         let mut code = vec![misc(12, 7, 0x0be0)];
         code.extend_from_slice(trailing_code);
         code.push(RETURN);
         let mut vm = VmObject::new(requester.vm, code).unwrap();
         vm.set_link(0, Some(requester.vm)).unwrap();
+        vm.set_register(process_register::PID_FLAGS, pid_flags)
+            .unwrap();
         runtime.machine.upsert_object(vm).unwrap();
     }
 

@@ -751,6 +751,22 @@ impl ObjectArena {
         Ok(output)
     }
 
+    /// Takes a deterministic, checked postorder snapshot of one subtree.
+    ///
+    /// Unlike [`Self::despawn_subtree`], this does not mutate allocation or
+    /// spawn state. Paired runtimes use the snapshot to validate live process
+    /// PIDs before releasing children and then their parent.
+    pub fn subtree_postorder_snapshot(
+        &self,
+        root: ObjectHandle,
+    ) -> Result<Vec<ObjectHandle>, TreeError> {
+        let parent = self.object(root)?.parent;
+        let mut output = Vec::new();
+        let mut visited = [false; TOTAL_SLOT_COUNT];
+        self.collect_object_postorder(root, parent, &mut visited, &mut output)?;
+        Ok(output)
+    }
+
     /// Despawns an object and all descendants in retail release order.
     ///
     /// The returned stale handles are ordered children-before-parent, with
@@ -760,10 +776,7 @@ impl ObjectArena {
     /// Entity objects clear their own active spawn bit; runtime children clear
     /// slot zero, matching their zero-initialized retail PID word.
     pub fn despawn_subtree(&mut self, root: ObjectHandle) -> Result<Vec<ObjectHandle>, TreeError> {
-        let parent = self.object(root)?.parent;
-        let mut postorder = Vec::new();
-        let mut visited = [false; TOTAL_SLOT_COUNT];
-        self.collect_object_postorder(root, parent, &mut visited, &mut postorder)?;
+        let postorder = self.subtree_postorder_snapshot(root)?;
         self.detach(root)?;
 
         for handle in postorder.iter().copied() {
@@ -783,6 +796,25 @@ impl ObjectArena {
         }
         self.detach(object)?;
         self.release(object)?;
+        Ok(object)
+    }
+
+    /// Releases one already-childless object using its live GOOL PID.
+    ///
+    /// Entity initialization seeds `pid_flags` from the descriptor, while a
+    /// runtime program may later replace that word. Native teardown reads the
+    /// live process word, so the paired runtime supplies its validated ID here
+    /// instead of relying on immutable arena provenance.
+    pub fn despawn_leaf_with_spawn_id(
+        &mut self,
+        object: ObjectHandle,
+        spawn_id: u16,
+    ) -> Result<ObjectHandle, TreeError> {
+        if self.object(object)?.first_child.is_some() {
+            return Err(TreeError::BrokenTreeLink);
+        }
+        self.detach(object)?;
+        self.release_with_spawn_id(object, spawn_id)?;
         Ok(object)
     }
 
@@ -956,12 +988,21 @@ impl ObjectArena {
     }
 
     fn release(&mut self, handle: ObjectHandle) -> Result<(), TreeError> {
-        let slot_index = usize::from(handle.slot);
-        let object = self.object(handle)?.clone();
+        let object = self.object(handle)?;
         let spawn_id = match object.origin {
             ObjectOrigin::Entity(descriptor) => descriptor.id,
             ObjectOrigin::Runtime { .. } => 0,
         };
+        self.release_with_spawn_id(handle, spawn_id)
+    }
+
+    fn release_with_spawn_id(
+        &mut self,
+        handle: ObjectHandle,
+        spawn_id: u16,
+    ) -> Result<(), TreeError> {
+        let slot_index = usize::from(handle.slot);
+        let object = self.object(handle)?.clone();
         self.spawn_table.clear_active(spawn_id);
         let slot = &mut self.slots[slot_index];
         slot.object = None;
@@ -1406,6 +1447,19 @@ mod tests {
             Some(SPAWN_ACTIVE_BIT),
             "runtime teardown must not clear its live parent's entity bit"
         );
+    }
+
+    #[test]
+    fn paired_runtime_teardown_uses_the_live_pid_spawn_slot() {
+        let mut arena = ObjectArena::new();
+        let parent = arena.spawn_entity(ZONE_A, entity(64, 3, 1, 0)).unwrap();
+        let child = arena.create_child(parent, ZONE_A, 5, 2, false).unwrap();
+        arena.spawn_table_mut().set_flags(0, 0x8000_000f).unwrap();
+        arena.spawn_table_mut().set_flags(131, 0x4000_000f).unwrap();
+
+        assert_eq!(arena.despawn_leaf_with_spawn_id(child, 131).unwrap(), child);
+        assert_eq!(arena.spawn_table().flags(0), Some(0x8000_000f));
+        assert_eq!(arena.spawn_table().flags(131), Some(0x4000_000e));
     }
 
     #[test]

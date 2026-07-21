@@ -9,8 +9,8 @@
 //! A separate vertical-flow test retains the authored session carry across
 //! N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, their
 //! Level Complete screens, the Title map, Papu Papu's authored win, and the
-//! following Rolling Stones mount and normal-end completion without writing
-//! any game data.
+//! following Rolling Stones and Hog Wild completions through the first carried
+//! Native Fortress frame without writing any game data.
 //! Set `C1_SURVEY_REQUIRE_CLEAN=1` to turn a characterized runtime boundary into
 //! a failing assertion. Set `C1_SURVEY_LEVEL` to a
 //! hexadecimal retail level ID (for example `05` or `0x05`) to reproduce only
@@ -47795,7 +47795,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         fn assert_carried_rolling_stones_route(
             root: &Path,
             rolling_stones_carry: RetailSessionCarry,
-        ) {
+        ) -> RetailSessionCarry {
             let rolling_stones = LevelId::new_const(0x15);
             let known_name = |level| {
                 KNOWN_LEVELS
@@ -47806,7 +47806,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             };
             let (rolling_stones_nsd, rolling_stones_nsf, rolling_stones_nsf_bytes) =
                 parse_local_pair(root, rolling_stones).expect("Rolling Stones pair must parse");
-            let rolling_stones_result = Box::new(
+            let mut rolling_stones_result = Box::new(
                 survey_pair_with_runtime(
                     known_name(rolling_stones),
                     rolling_stones,
@@ -47826,7 +47826,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .expect("Rolling Stones' carried ordinary-pad route must execute"),
             );
             let rolling_stones_survey = &rolling_stones_result.0;
-            let rolling_stones_runtime = &rolling_stones_result.1;
+            let rolling_stones_runtime = &mut rolling_stones_result.1;
             assert_eq!(
                 rolling_stones_survey.frames,
                 2_500,
@@ -47965,6 +47965,49 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Rolling Stones' carried ordinary-pad route must remain clean: {}",
                 rolling_stones_survey.summary()
             );
+
+            let mut host = NsfProgramHost::new(
+                &rolling_stones_nsd,
+                &rolling_stones_nsf,
+                &rolling_stones_nsf_bytes,
+            );
+            let report = rolling_stones_runtime
+                .finish_level_transition(&mut host, 0x2d)
+                .expect("Rolling Stones LEVEL_END must export the authentic Level Complete carry");
+            assert!(
+                report.event_failures.is_empty(),
+                "Rolling Stones LEVEL_END handlers must complete cleanly: {:?}",
+                report.event_failures
+            );
+            assert_eq!(report.requested_lid, 0x2d);
+            assert_eq!(report.next_lid_after_event, 0x2d);
+            assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+            assert!(!report.resolved.bonus_return);
+            assert!(report.effects.is_empty());
+            assert_eq!(report.carry.random_seed, 0x2ecb_eaad);
+            assert_eq!(report.carry.draw_count, 6_810);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| report.carry.globals[index]),
+                [
+                    0x500,
+                    TitleScreen::Map.raw(),
+                    TitleScreen::Map.raw(),
+                    7,
+                    1,
+                    8,
+                    0,
+                ]
+            );
+            report.carry
         }
         // This final retail interpreter run otherwise inherits the already
         // deep stack frame for the complete five-level vertical chain. Keep
@@ -47973,15 +48016,560 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         let rolling_stones_root = root.clone();
         let rolling_stones_result = std::thread::Builder::new()
             .name("carried-rolling-stones-route".to_owned())
-            .stack_size(4 * 1024 * 1024)
+            .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                assert_carried_rolling_stones_route(&rolling_stones_root, rolling_stones_carry);
+                let completion_carry =
+                    assert_carried_rolling_stones_route(&rolling_stones_root, rolling_stones_carry);
+                carry_rolling_stones_through_hog_to_native(&rolling_stones_root, completion_carry);
             })
             .expect("the carried Rolling Stones route worker must start")
             .join();
         if let Err(panic) = rolling_stones_result {
             std::panic::resume_unwind(panic);
         }
+
+        #[allow(clippy::items_after_statements)]
+        fn carry_rolling_stones_through_hog_to_native(
+            root: &Path,
+            rolling_stones_completion_carry: RetailSessionCarry,
+        ) {
+            let known_name = |level| {
+                KNOWN_LEVELS
+                    .iter()
+                    .find(|known| known.id == level)
+                    .map(|known| known.name)
+                    .expect("campaign continuation level is present in the retail catalog")
+            };
+            let completion = LevelId::LEVEL_COMPLETE;
+            let title = LevelId::TITLE;
+            let hog_wild = LevelId::new_const(0x11);
+            let native_fortress = LevelId::new_const(0x1a);
+            let (completion_nsd, completion_nsf, completion_nsf_bytes) =
+                parse_local_pair(root, completion).expect("Level Complete pair must parse");
+            let (title_nsd, title_nsf, title_nsf_bytes) =
+                parse_local_pair(root, title).expect("Title pair must parse");
+
+            let (rolling_completion_survey, mut rolling_completion_runtime) =
+                survey_pair_with_runtime(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        completion,
+                        rolling_stones_completion_carry,
+                    )
+                    .expect("Level Complete must import Rolling Stones' authentic carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    600,
+                )
+                .expect("Rolling Stones' Level Complete screen must execute");
+            assert_eq!(rolling_completion_survey.frames, 425);
+            assert_eq!(
+                rolling_completion_survey.terminal.as_deref(),
+                Some("frame 425 requested level transition to 0x19")
+            );
+            assert_eq!(rolling_completion_survey.next_lid, Some((425, 0x19)));
+            assert_eq!(rolling_completion_survey.final_live_objects, 5);
+            assert_eq!(rolling_completion_survey.max_live_objects, 8);
+            assert_eq!(rolling_completion_survey.successful_spawns, 2);
+            assert_eq!(rolling_completion_survey.spawn_attempts, 850);
+            assert_eq!(rolling_completion_survey.expected_spawn_rejections, 848);
+            assert_eq!(rolling_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(rolling_completion_survey.executions, 2_794);
+            assert_eq!(rolling_completion_survey.execution_errors, 0);
+            assert_eq!(rolling_completion_survey.restarts, 0);
+            assert_eq!(rolling_completion_survey.faulted_objects, 0);
+            assert_eq!(rolling_completion_survey.box_count_samples.len(), 35);
+            assert_eq!(
+                rolling_completion_survey.box_count_samples.first(),
+                Some(&(1, 0))
+            );
+            assert_eq!(
+                rolling_completion_survey.box_count_samples.last(),
+                Some(&(344, 0x2200))
+            );
+            assert_eq!(
+                rolling_completion_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| rolling_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 7, 1, 8, 0]
+            );
+            assert_eq!(
+                rolling_completion_runtime.machine().random_seed(),
+                0x6ed2_9d67
+            );
+            assert_eq!(rolling_completion_runtime.draw_count(), 7_235);
+            assert!(
+                rolling_completion_survey.is_clean(),
+                "{}",
+                rolling_completion_survey.summary()
+            );
+            let rolling_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = rolling_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Rolling Stones' Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x6ed2_9d67);
+                assert_eq!(report.carry.draw_count, 7_235);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x300, 15, 15, 7, 1, 8, 0]
+                );
+                report.carry
+            };
+
+            let mut pre_hog_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                rolling_title_carry,
+            );
+            pre_hog_map.wait_until_ready(64);
+            assert_eq!(pre_hog_map.frame, 10);
+            for _ in 0..120 {
+                pre_hog_map.step(0);
+            }
+            pre_hog_map.tap(PAD_UP);
+            for _ in 0..120 {
+                pre_hog_map.step(0);
+            }
+            pre_hog_map.step(PAD_CROSS);
+            assert_eq!(pre_hog_map.frame, 253);
+            assert_eq!(pre_hog_map.transitions, [(253, 0x11)]);
+            assert_eq!(
+                pre_hog_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("1e_pZ").expect("fixed Hog Wild map-node EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(pre_hog_map.camera.location().progress.raw(), 4_096);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| pre_hog_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 8, 1, 8, 1]
+            );
+            assert_eq!(pre_hog_map.runtime.machine().random_seed(), 0x66db_b4ac);
+            assert_eq!(pre_hog_map.runtime.draw_count(), 7_488);
+            assert_eq!(pre_hog_map.runtime.faulted_object_count(), 0);
+            let hog_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = pre_hog_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(hog_wild.get()).expect("Hog Wild LID fits i32"),
+                    )
+                    .expect("authentic pre-Hog Map LEVEL_END must export Hog Wild");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x11);
+                assert_eq!(report.next_lid_after_event, 0x11);
+                assert_eq!(report.resolved.level, hog_wild);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x66db_b4ac);
+                assert_eq!(report.carry.draw_count, 7_488);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0, 15, 15, 8, 1, 8, 1]
+                );
+                report.carry
+            };
+
+            let (hog_nsd, hog_nsf, hog_nsf_bytes) =
+                parse_local_pair(root, hog_wild).expect("Hog Wild pair must parse");
+            let (hog_survey, mut hog_runtime) = survey_pair_with_runtime(
+                known_name(hog_wild),
+                hog_wild,
+                &hog_nsd,
+                &hog_nsf,
+                &hog_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, hog_wild, hog_carry)
+                    .expect("Hog Wild must import the authentic Rolling Stones campaign carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::HogWildCompletionRoute,
+                2_200,
+            )
+            .expect("authentic carried Hog Wild route must execute");
+            assert_eq!(hog_survey.frames, 1_950);
+            assert_eq!(
+                hog_survey.terminal.as_deref(),
+                Some("frame 1950 requested level transition to 0x2d")
+            );
+            assert_eq!(hog_survey.next_lid, Some((1_950, 0x2d)));
+            assert_eq!(hog_survey.final_live_objects, 17);
+            assert_eq!(hog_survey.max_live_objects, 18);
+            assert_eq!(hog_survey.successful_spawns, 39);
+            assert_eq!(hog_survey.spawn_attempts, 5_857);
+            assert_eq!(hog_survey.expected_spawn_rejections, 5_818);
+            assert_eq!(hog_survey.unexpected_spawn_errors, 0);
+            assert_eq!(hog_survey.executions, 24_311);
+            assert_eq!(hog_survey.execution_errors, 0);
+            assert_eq!(hog_survey.zone_transitions, 57);
+            assert_eq!(hog_survey.camera_ranges.len(), 67);
+            assert_eq!(hog_survey.camera_path_changes, 66);
+            assert_eq!(hog_survey.last_camera_path_change, 1_813);
+            assert_eq!(hog_survey.last_camera_progress_change, 1_836);
+            assert_eq!(hog_survey.restarts, 0);
+            assert_eq!(hog_survey.faulted_objects, 0);
+            assert_eq!(
+                hog_survey.initial_player_translation,
+                Some([2_200_832, 1_024_000, 31_948_544])
+            );
+            assert_eq!(
+                hog_survey.final_player_translation,
+                Some([5_395_712, 13_171_420, -31_800_992])
+            );
+            assert_eq!(
+                hog_survey.box_count_samples,
+                [
+                    (1, 0),
+                    (530, 0x100),
+                    (657, 0x200),
+                    (1_082, 0x300),
+                    (1_143, 0x400),
+                    (1_340, 0x500),
+                    (1_588, 0x600),
+                    (1_724, 0x700),
+                ]
+            );
+            assert_eq!(
+                hog_survey.checkpoint_samples,
+                [
+                    (1, -1, [2_815_232, 2_979_072, 17_458_688]),
+                    (657, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
+                    (1_143, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
+                ]
+            );
+            assert_eq!(
+                hog_survey.saved_box_count_samples,
+                [(657, 0x100), (1_143, 0x300)]
+            );
+            assert_eq!(hog_survey.effect_counts.get("save-state"), Some(&2));
+            assert_eq!(hog_survey.effect_counts.get("master-fade-reset"), Some(&1));
+            assert_eq!(hog_survey.effect_counts.get("transition"), Some(&1));
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| hog_runtime.global_word(index).unwrap()),
+                [0x500, 15, 15, 8, 1, 9, 0]
+            );
+            assert_eq!(hog_runtime.machine().random_seed(), 0x251c_8a47);
+            assert_eq!(hog_runtime.draw_count(), 9_438);
+            assert!(hog_survey.is_clean(), "{}", hog_survey.summary());
+            let hog_completion_carry = {
+                let mut host = NsfProgramHost::new(&hog_nsd, &hog_nsf, &hog_nsf_bytes);
+                let report = hog_runtime
+                    .finish_level_transition(&mut host, 0x2d)
+                    .expect("authentic Hog Wild LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x251c_8a47);
+                assert_eq!(report.carry.draw_count, 9_438);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x500, 15, 15, 8, 1, 9, 0]
+                );
+                report.carry
+            };
+
+            let (hog_completion_survey, mut hog_completion_runtime) = survey_pair_with_runtime(
+                known_name(completion),
+                completion,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, hog_completion_carry)
+                    .expect("Level Complete must import authentic Hog Wild carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                600,
+            )
+            .expect("Hog Wild's authentic Level Complete screen must execute");
+            assert_eq!(hog_completion_survey.frames, 273);
+            assert_eq!(
+                hog_completion_survey.terminal.as_deref(),
+                Some("frame 273 requested level transition to 0x19")
+            );
+            assert_eq!(hog_completion_survey.next_lid, Some((273, 0x19)));
+            assert_eq!(hog_completion_survey.final_live_objects, 5);
+            assert_eq!(hog_completion_survey.max_live_objects, 8);
+            assert_eq!(hog_completion_survey.successful_spawns, 2);
+            assert_eq!(hog_completion_survey.spawn_attempts, 546);
+            assert_eq!(hog_completion_survey.expected_spawn_rejections, 544);
+            assert_eq!(hog_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(hog_completion_survey.executions, 1_631);
+            assert_eq!(hog_completion_survey.execution_errors, 0);
+            assert_eq!(hog_completion_survey.restarts, 0);
+            assert_eq!(hog_completion_survey.faulted_objects, 0);
+            assert_eq!(
+                hog_completion_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| hog_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 8, 1, 9, 0]
+            );
+            assert_eq!(hog_completion_runtime.machine().random_seed(), 0x1f22_c22b);
+            assert_eq!(hog_completion_runtime.draw_count(), 9_711);
+            assert!(
+                hog_completion_survey.is_clean(),
+                "{}",
+                hog_completion_survey.summary()
+            );
+            let post_hog_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = hog_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Hog Wild's Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0x1f22_c22b);
+                assert_eq!(report.carry.draw_count, 9_711);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x300, 15, 15, 8, 1, 9, 0]
+                );
+                report.carry
+            };
+
+            let mut post_hog_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_hog_title_carry,
+            );
+            post_hog_map.wait_until_ready(64);
+            assert_eq!(post_hog_map.frame, 10);
+            for _ in 0..120 {
+                post_hog_map.step(0);
+            }
+            post_hog_map.tap(PAD_UP);
+            for _ in 0..120 {
+                post_hog_map.step(0);
+            }
+            post_hog_map.step(PAD_CROSS);
+            assert_eq!(post_hog_map.frame, 253);
+            assert_eq!(post_hog_map.transitions, [(253, 0x1a)]);
+            assert_eq!(
+                post_hog_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("1e_pZ")
+                        .expect("fixed Native Fortress map-node EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(post_hog_map.camera.location().progress.raw(), 6_144);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_hog_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 9, 1, 9, 1]
+            );
+            assert_eq!(post_hog_map.runtime.machine().random_seed(), 0xb333_561e);
+            assert_eq!(post_hog_map.runtime.draw_count(), 9_964);
+            assert_eq!(post_hog_map.runtime.faulted_object_count(), 0);
+            let native_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_hog_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(native_fortress.get()).expect("Native Fortress LID fits i32"),
+                    )
+                    .expect("authentic post-Hog Map LEVEL_END must export Native Fortress");
+                assert!(report.event_failures.is_empty());
+                assert_eq!(report.requested_lid, 0x1a);
+                assert_eq!(report.next_lid_after_event, 0x1a);
+                assert_eq!(report.resolved.level, native_fortress);
+                assert!(!report.resolved.bonus_return);
+                assert!(report.effects.is_empty());
+                assert_eq!(report.carry.random_seed, 0xb333_561e);
+                assert_eq!(report.carry.draw_count, 9_964);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0, 15, 15, 9, 1, 9, 1]
+                );
+                report.carry
+            };
+            let (native_nsd, native_nsf, native_nsf_bytes) =
+                parse_local_pair(root, native_fortress).expect("Native Fortress pair must parse");
+            let (native_mount_survey, native_runtime) = survey_pair_with_runtime(
+                known_name(native_fortress),
+                native_fortress,
+                &native_nsd,
+                &native_nsf,
+                &native_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, native_fortress, native_carry)
+                    .expect("Native Fortress must import the authentic Hog Wild campaign carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::Idle,
+                1,
+            )
+            .expect("the authentic campaign must cross Native Fortress' first runtime frame");
+            assert_eq!(native_mount_survey.frames, 1);
+            assert!(native_mount_survey.terminal.is_none());
+            assert!(native_mount_survey.next_lid.is_none());
+            assert_eq!(native_mount_survey.final_live_objects, 17);
+            assert_eq!(native_mount_survey.max_live_objects, 17);
+            assert_eq!(native_mount_survey.successful_spawns, 9);
+            assert_eq!(native_mount_survey.spawn_attempts, 9);
+            assert_eq!(native_mount_survey.expected_spawn_rejections, 0);
+            assert_eq!(native_mount_survey.unexpected_spawn_errors, 0);
+            assert_eq!(native_mount_survey.executions, 24);
+            assert_eq!(native_mount_survey.execution_errors, 0);
+            assert_eq!(native_mount_survey.restarts, 0);
+            assert_eq!(native_mount_survey.faulted_objects, 0);
+            let native_camera = native_mount_survey
+                .final_camera
+                .expect("Native Fortress must expose its carried spawn camera");
+            assert_eq!(
+                native_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("a1_qZ")
+                        .expect("fixed Native Fortress spawn-zone EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(native_camera.progress.raw(), 499);
+            assert_eq!(
+                native_mount_survey.initial_player_translation,
+                Some([11_570_944, -12_697_600, 307_200])
+            );
+            assert_eq!(
+                native_mount_survey.final_player_translation,
+                Some([11_570_944, -12_697_600, 307_200])
+            );
+            assert!(!native_mount_survey.effect_counts.contains_key("transition"));
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| native_runtime.global_word(index).unwrap()),
+                [0x100, 15, 15, 9, 1, 9, 0]
+            );
+            assert_eq!(native_runtime.machine().random_seed(), 0x61cf_cb91);
+            assert_eq!(native_runtime.draw_count(), 9_965);
+            assert!(
+                native_mount_survey.is_clean(),
+                "{}",
+                native_mount_survey.summary()
+            );
+        }
+
         eprintln!(
             concat!(
                 "vertical-flow: Map -> N. Sanity at frame 11; N. Sanity -> Level Complete ",
@@ -48000,7 +48588,11 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4244); Map -> Rolling ",
                 "Stones at frame 66 (draw 4310); Rolling Stones carried route: 2500 frames -> ",
                 "Level Complete, 45 paths/46 changes, 32 zone transitions, 12 boxes, RNG ",
-                "0x2ecbeaad, draw 6810",
+                "0x2ecbeaad, draw 6810; Rolling Stones Level Complete -> Title at frame 425 ",
+                "(draw 7235); Map -> Hog Wild at frame 253 (draw 7488); Hog Wild -> Level ",
+                "Complete at frame 1950 (draw 9438); sixth Level Complete -> Title at frame ",
+                "273 (draw 9711); Map -> Native Fortress at frame 253 (draw 9964); Native ",
+                "Fortress crossed its first carried frame (draw 9965)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

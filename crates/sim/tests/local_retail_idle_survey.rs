@@ -752,6 +752,7 @@ enum SurveyInputProfile {
     JawsOfDarknessCompletionRoute,
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
+    LabCompletionRoute,
     LightsOutCompletionRoute,
     CastleMachineryCompletionRoute,
     FumblingInTheDarkCompletionRoute,
@@ -823,6 +824,7 @@ impl SurveyInputProfile {
             Self::JawsOfDarknessCompletionRoute => "jaws-of-darkness-completion-route",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
+            Self::LabCompletionRoute => "lab-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::CastleMachineryCompletionRoute => "castle-machinery-completion-route",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
@@ -881,6 +883,7 @@ impl SurveyInputProfile {
                 | Self::JawsOfDarknessCompletionRoute
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
+                | Self::LabCompletionRoute
                 | Self::LightsOutCompletionRoute
                 | Self::CastleMachineryCompletionRoute
                 | Self::FumblingInTheDarkCompletionRoute
@@ -14679,6 +14682,151 @@ impl HeavyMachineryCompletionRouteController {
             }
         }
         held
+    }
+}
+
+/// Deterministic ordinary-pad route through The Lab's complete authored path.
+///
+/// Directional, jump, and spin input opens each laboratory door, crosses the
+/// final collapsing bridge, and enters the retail `WarpC` without a restart.
+struct LabCompletionRouteController;
+
+impl LabCompletionRouteController {
+    // Preserve the discovery trace's chronological stages: equal actions at
+    // distant hazards remain separate so failures map back to exact frames.
+    #[allow(clippy::match_same_arms)]
+    fn held(frame: u32) -> u32 {
+        match frame {
+            1..=120 => PAD_UP | PAD_RIGHT | if frame % 16 < 4 { PAD_SQUARE } else { 0 },
+            121..=142 => PAD_UP | PAD_LEFT,
+            165..=176
+            | 325..=336
+            | 344..=355
+            | 371..=382
+            | 458..=469
+            | 604..=625
+            | 661..=682
+            | 917..=928 => PAD_UP | PAD_SQUARE,
+            177..=186
+            | 318..=324
+            | 363..=370
+            | 393..=400
+            | 470..=485
+            | 754..=763
+            | 850..=865
+            | 929..=939 => PAD_UP | PAD_RIGHT,
+            187..=189 | 356..=362 | 383..=392 | 446..=457 | 683..=692 | 764..=771 | 909..=916 => {
+                PAD_UP | PAD_LEFT
+            }
+            190..=192 | 978..=986 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            193..=215
+            | 401..=430
+            | 486..=520
+            | 546..=580
+            | 590..=603
+            | 652..=660
+            | 703..=753
+            | 870..=899
+            | 987..=1003
+            | 1018..=1043 => PAD_UP | PAD_CROSS,
+            260..=285 | 699..=700 => 0,
+            1044..=1060 => PAD_UP | PAD_SQUARE,
+            1077..=1083 => PAD_UP | PAD_RIGHT,
+            1084..=1088 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            1089..=1096 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            1097..=1107 => PAD_UP | PAD_LEFT,
+            1108..=1132 => PAD_UP | PAD_CROSS,
+            1134..=1146 => PAD_LEFT,
+            1147..=1152 => PAD_LEFT | PAD_SQUARE,
+            1153..=1164 => PAD_UP | PAD_SQUARE,
+            1165..=1179 => PAD_UP | PAD_RIGHT,
+            1180..=1210 => PAD_UP | PAD_CROSS,
+            1238..=1260 => PAD_UP | PAD_CROSS,
+            1261..=1266 => PAD_LEFT | PAD_CROSS,
+            1267..=1314 | 1331..=1340 => PAD_UP,
+            1315..=1330 => PAD_UP | PAD_SQUARE,
+            1350..=1385 => PAD_UP | PAD_CROSS,
+            1400..=1431 => PAD_UP | PAD_CROSS,
+            1432..=1444 => PAD_UP | PAD_SQUARE,
+            1445..=1456 => PAD_RIGHT,
+            1457..=1468 => PAD_RIGHT | PAD_SQUARE,
+            1469..=1495 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            1508..=1540 => PAD_UP | PAD_CROSS,
+            1542..=1575 => PAD_UP | PAD_CROSS,
+            1608..=1642 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            1643..=1654 => PAD_UP | PAD_SQUARE,
+            1655 => PAD_DOWN,
+            1656..=1658 => PAD_DOWN | PAD_RIGHT,
+            1659..=1670 => PAD_DOWN | PAD_SQUARE,
+            1671..=1675 => PAD_UP,
+            1676..=1708 => PAD_UP | PAD_CROSS,
+            1744..=1778 => PAD_UP | PAD_CROSS,
+            1780..=1792 => PAD_UP | PAD_SQUARE,
+            1793..=1823 => PAD_UP | PAD_CROSS,
+            1824..=1837 => PAD_UP | PAD_SQUARE,
+            1884..=1898 => PAD_UP | PAD_SQUARE,
+            1899..=1930 => PAD_UP | PAD_LEFT,
+            1931..=1938 => PAD_RIGHT | PAD_CROSS,
+            1939..=1943 => PAD_RIGHT | PAD_SQUARE,
+            1944..=1951 => PAD_UP | PAD_RIGHT,
+            1952..=1955 => PAD_UP | PAD_RIGHT,
+            1956..=1962 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            1963..=1975 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            1976..=1981 => PAD_UP | PAD_CROSS,
+            1982..=1988 => PAD_LEFT | PAD_SQUARE,
+            1989..=1995 => PAD_RIGHT | PAD_SQUARE,
+            1996..=2000 => PAD_UP,
+            2001..=2040 => PAD_UP | PAD_CROSS,
+            2064..=2110 => 0,
+            2115..=2139 => PAD_UP | PAD_CROSS,
+            2140..=2148 => PAD_UP | PAD_LEFT | PAD_SQUARE,
+            2149..=2153 => PAD_UP | PAD_RIGHT,
+            2154..=2162 => PAD_UP | PAD_CROSS,
+            2163..=2179 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2180..=2185 => PAD_UP | PAD_CROSS,
+            2190..=2199 => PAD_RIGHT | PAD_CROSS,
+            2200..=2225 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2226..=2238 => PAD_UP | PAD_SQUARE,
+            2239..=2250 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2288..=2300 => PAD_UP | PAD_SQUARE,
+            2314..=2329 => PAD_UP | PAD_CROSS,
+            2330..=2336 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2337..=2341 => 0,
+            2342..=2347 => PAD_LEFT | PAD_CROSS,
+            2348..=2354 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2355..=2375 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2376..=2379 => 0,
+            2380 => PAD_LEFT,
+            2381..=2390 => PAD_LEFT | PAD_CROSS,
+            2391..=2396 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2397..=2422 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2423..=2426 => 0,
+            2427 => PAD_LEFT,
+            2428..=2437 => PAD_LEFT | PAD_CROSS,
+            2438..=2443 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2444..=2469 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2470..=2473 => 0,
+            2474..=2482 => PAD_UP | PAD_CROSS,
+            2483..=2505 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2506..=2509 => 0,
+            2510 => PAD_LEFT,
+            2511..=2545 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2546..=2560 => PAD_UP | PAD_RIGHT | PAD_SQUARE,
+            2587..=2594 => PAD_UP | PAD_LEFT | PAD_CROSS,
+            2595..=2599 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2600..=2610 => PAD_LEFT | PAD_CROSS,
+            2611..=2615 => PAD_UP | PAD_LEFT,
+            2616..=2621 => PAD_UP | PAD_RIGHT,
+            2622..=2625 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            2626..=2637 | 2678..=2693 => PAD_UP | PAD_CROSS,
+            310..=317 => PAD_UP | PAD_RIGHT | PAD_SQUARE,
+            632..=651 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+            693..=698 => PAD_RIGHT,
+            701..=702 | 959..=977 | 1004..=1017 => PAD_UP,
+            772..=790 | 900..=908 => PAD_UP | PAD_LEFT | PAD_SQUARE,
+            940..=958 => PAD_LEFT,
+            _ => PAD_UP,
+        }
     }
 }
 
@@ -31987,6 +32135,7 @@ impl SurveyInputController {
             SurveyInputProfile::ToxicWasteCompletionRoute => {
                 self.toxic_waste.held(player, route_objects)
             }
+            SurveyInputProfile::LabCompletionRoute => LabCompletionRouteController::held(frame),
             SurveyInputProfile::LightsOutCompletionRoute => {
                 LightsOutCompletionRouteController::held(frame)
             }
@@ -34486,6 +34635,16 @@ fn survey_pair_with_runtime(
             | SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 program_object_traces(&runtime, &[])?
             }
+            SurveyInputProfile::LabCompletionRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("LabAC").expect("fixed Lab hazard EID is valid"),
+                    Eid::from_name("BoxsC").expect("fixed Lab crate EID is valid"),
+                    Eid::from_name("CasOC").expect("fixed Lab gate EID is valid"),
+                    Eid::from_name("PoRoC").expect("fixed Lab reactor-rod EID is valid"),
+                    Eid::from_name("WarpC").expect("fixed Lab warp EID is valid"),
+                ],
+            )?,
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
@@ -34551,6 +34710,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
                 | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                | SurveyInputProfile::LabCompletionRoute
                 | SurveyInputProfile::SlipperyClimbCompletionRoute
                 | SurveyInputProfile::HeavyMachineryCompletionRoute
                 | SurveyInputProfile::ToxicWasteCompletionRoute
@@ -42495,6 +42655,167 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lab_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x29);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains The Lab");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Lab pair must parse");
+    let (survey, mut runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::LabCompletionRoute,
+        3_000,
+    )
+    .expect("The Lab's ordinary-pad completion route must execute");
+
+    assert_eq!(survey.frames, 2_789, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_789, 0x2d)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2789 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+
+    assert_eq!(survey.zone_transitions, 27);
+    assert_eq!(survey.camera_ranges.len(), 28);
+    assert_eq!(survey.camera_path_changes, 27);
+    assert_eq!(survey.last_camera_path_change, 2_596);
+    assert_eq!(survey.last_camera_progress_change, 2_700);
+    let initial_camera = survey
+        .initial_camera
+        .expect("The Lab must retain its opening camera path");
+    assert_eq!(
+        initial_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("a0_FZ").expect("fixed Lab opening camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(initial_camera.progress.raw(), 256);
+    let final_camera = survey
+        .final_camera
+        .expect("The Lab must retain its final camera path");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("c7_FZ").expect("fixed Lab end camera EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 21_443);
+
+    assert_eq!(survey.successful_spawns, 97);
+    assert_eq!(survey.spawn_attempts, 29_637);
+    assert_eq!(survey.expected_spawn_rejections, 29_540);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 69_149);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.final_live_objects, 56);
+    assert_eq!(survey.max_live_objects, 68);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
+    assert!(survey.first_issue.is_none());
+    assert!(survey.fault_contexts.is_empty());
+
+    assert_eq!(survey.checkpoint_samples, [(1, -1, [0, 0, 0])]);
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (774, 0x100),
+            (902, 0x200),
+            (1_826, 0x300),
+            (2_261, 0x400),
+            (2_771, 0x500),
+            (2_772, 0x600),
+            (2_773, 0x700),
+        ]
+    );
+    assert!(survey.saved_box_count_samples.is_empty());
+    assert_eq!(survey.save_handshakes, 0);
+    assert!(!survey.effect_counts.contains_key("save-state"));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert!(!survey.pad_change_samples.is_empty());
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            survey.observed_program_states.contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+
+    assert_eq!(
+        survey.initial_player_translation,
+        Some([2_048_000, 1_024_000, 31_948_800])
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([2_025_472, 4_748_377, -3_078_144])
+    );
+    assert_eq!(
+        survey.player_minimum,
+        Some([1_579_008, 975_712, -3_078_144])
+    );
+    assert_eq!(
+        survey.player_maximum,
+        Some([2_459_648, 4_748_377, 31_948_800])
+    );
+    assert_eq!(survey.last_player_movement, 2_785);
+    let player = player_trace(&runtime)
+        .expect("Lab completion player trace must resolve")
+        .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(player.zone, Eid::from_name("d1_FZ").unwrap());
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x0f00);
+    assert_eq!(player.translation, [2_025_472, 4_748_377, -3_078_144]);
+    assert_eq!(runtime.draw_count(), 2_789);
+    assert_eq!(runtime.machine().random_seed(), 0xc6f8_3fa1);
+    assert!(
+        survey.is_clean(),
+        "The Lab end-warp route must remain clean: {}",
+        survey.summary()
+    );
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let report = runtime
+        .finish_level_transition(&mut host, 0x2d)
+        .expect("The Lab LEVEL_END must resolve Level Complete");
+    assert!(report.event_failures.is_empty());
+    assert_eq!(report.requested_lid, 0x2d);
+    assert_eq!(report.next_lid_after_event, 0x2d);
+    assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+    assert!(!report.resolved.bonus_return);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn ripper_roo_ordinary_pad_completion_route() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -42625,6 +42946,10 @@ fn every_bootable_pair_runs_a_browser_ordered_idle_window() {
                 && std::env::var_os("C1_SURVEY_BRIO_ROUTE").is_some()
             {
                 SurveyInputProfile::BrioCompletionRoute
+            } else if known.id == LevelId::new_const(0x29)
+                && std::env::var_os("C1_SURVEY_LAB_ROUTE").is_some()
+            {
+                SurveyInputProfile::LabCompletionRoute
             } else if std::env::var_os("C1_SURVEY_ACTIVE_INPUT").is_some() {
                 SurveyInputProfile::DirectionAndButtonSweep
             } else {

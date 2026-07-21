@@ -9821,6 +9821,7 @@ struct RollingStonesRouteController {
     checkpoint_lateral_corrected: bool,
     checkpoint_phase_recovered: bool,
     checkpoint_phase_wait: u8,
+    checkpoint_route_retimed: bool,
     post_bank_tick: Option<u16>,
 }
 
@@ -9911,6 +9912,7 @@ impl RollingStonesRouteController {
         self.checkpoint_lateral_corrected = false;
         self.checkpoint_phase_recovered = false;
         self.checkpoint_phase_wait = 0;
+        self.checkpoint_route_retimed = false;
         self.post_bank_tick = None;
     }
 
@@ -9973,6 +9975,54 @@ impl RollingStonesRouteController {
             let tick = self.checkpoint_tick;
             let zero_y =
                 Eid::from_name("0y_lZ").expect("fixed Rolling Stones correction-zone EID is valid");
+            let zero_upper_b =
+                Eid::from_name("0B_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+            let zero_upper_c =
+                Eid::from_name("0C_lZ").expect("fixed Rolling Stones ledge-zone EID is valid");
+            if self.session_globals
+                && self.checkpoint_phase_recovered
+                && camera.path.zone == zero_y
+                && let Some(player) = player
+                && matches!(player.state, 2 | 3 | 10)
+            {
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let junoc_bound = objects.iter().find_map(|object| {
+                    let ObjectOrigin::Entity(descriptor) = object.origin else {
+                        return None;
+                    };
+                    if descriptor.id != 76
+                        || descriptor.executable != 22
+                        || descriptor.subtype != 6
+                        || object.state != 5
+                    {
+                        return None;
+                    }
+                    object.bound
+                });
+                if let Some(bound) = junoc_bound {
+                    let forward_gap = player.translation[2].saturating_sub(bound.max.z);
+                    let bound_mid_x = bound.min.x + (bound.max.x - bound.min.x) / 2;
+                    let junoc_blocks_route = (0..=350_000).contains(&forward_gap)
+                        && predicted_x >= bound_mid_x
+                        && predicted_x + 64_000 >= bound.min.x
+                        && predicted_x - 64_000 <= bound.max.x;
+                    if junoc_blocks_route {
+                        // Freeze the route clock and move outside the live
+                        // stone wall until its leading edge sweeps past Crash.
+                        return PAD_LEFT;
+                    }
+                    let has_cleared_left = predicted_x + 64_000 < bound.min.x;
+                    let alongside_or_just_past = player.translation[2] <= bound.max.z
+                        && player.translation[2] >= bound.min.z - 64_000;
+                    if player.state == 10 && has_cleared_left && alongside_or_just_past {
+                        // Brake on the live wall's trailing shelf until the
+                        // grounded state confirms that Crash has landed.
+                        self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                        return PAD_DOWN;
+                    }
+                }
+            }
             if self.session_globals
                 && tick == 280
                 && self.checkpoint_phase_wait < 2
@@ -9989,16 +10039,24 @@ impl RollingStonesRouteController {
                 && (280..295).contains(&tick)
                 && camera.path.zone == zero_y
                 && camera.path.index == 0
-                && player.is_some_and(|player| player.translation[0] < 2_340_000)
+                && let Some(player) = player
             {
-                // A carried RNG phase can place the preceding moving shelf
-                // one collision cell farther left. Rejoin the established
-                // landing line while the checkpoint clock continues to run.
+                // Recenter the carried landing before the converging JunOC
+                // pair reaches this shelf, while keeping the route clock live.
                 self.checkpoint_phase_recovered = true;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                return PAD_UP | PAD_RIGHT;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                if predicted_x > 2_302_000 {
+                    return PAD_LEFT;
+                }
+                if predicted_x < 2_270_000 {
+                    return PAD_RIGHT;
+                }
+                return PAD_UP;
             }
             if !self.checkpoint_lateral_corrected
+                && !self.checkpoint_phase_recovered
                 && tick == 295
                 && camera.path.zone == zero_y
                 && camera.path.index == 0
@@ -10013,9 +10071,133 @@ impl RollingStonesRouteController {
                 }
             }
 
+            let zero_u =
+                Eid::from_name("0u_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+            if self.session_globals
+                && (90..110).contains(&tick)
+                && camera.path.zone == zero_u
+                && camera.path.index == 1
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 9
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                // Track the live PoPlC center until Crash has a grounded exit.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                if tick >= 100 && player.status_a & 1 != 0 {
+                    return PAD_UP | PAD_RIGHT;
+                }
+                if tick >= 107 {
+                    return Self::historical_checkpoint_pad(tick) | PAD_RIGHT;
+                }
+                let target_x =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                if predicted_x > target_x + 16_000 {
+                    return PAD_UP | PAD_LEFT;
+                }
+                if predicted_x < target_x - 16_000 {
+                    return PAD_UP | PAD_RIGHT;
+                }
+                return PAD_UP;
+            }
+
+            if self.session_globals
+                && (201..=223).contains(&tick)
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 78
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                // The carried hazard phase meets entity 78 on a different
+                // lateral cycle; steer against its live collision bounds.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let held = Self::historical_checkpoint_pad(tick);
+                if tick >= 209 && player.status_a & 1 != 0 {
+                    return held;
+                }
+                let target_x =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let lateral = if predicted_x < target_x - 16_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 16_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+            }
+
+            if self.session_globals
+                && self.checkpoint_phase_recovered
+                && camera.path.zone == zero_upper_b
+                && let Some(player) = player
+            {
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let wall_blocks_route = objects.iter().any(|object| {
+                    let ObjectOrigin::Entity(descriptor) = object.origin else {
+                        return false;
+                    };
+                    if descriptor.executable != 22 || descriptor.subtype != 6 {
+                        return false;
+                    }
+                    let Some(bound) = object.bound else {
+                        return false;
+                    };
+                    let forward_gap = player.translation[2].saturating_sub(bound.max.z);
+                    (0..=200_000).contains(&forward_gap)
+                        && (bound.min.x - 64_000..=bound.max.x + 64_000).contains(&predicted_x)
+                });
+                if wall_blocks_route {
+                    // Preserve the scheduled action while steering along the
+                    // live subtype-six wall rather than into its sweep.
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    let held = Self::direct_checkpoint_pad(tick);
+                    let lateral = if player.velocity[0] >= 0 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    };
+                    return (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+                }
+            }
+
+            if self.session_globals
+                && self.checkpoint_phase_recovered
+                && camera.path.zone == zero_upper_c
+            {
+                if camera.path.index == 0 && camera.progress.raw() >= 24_000 {
+                    // Release the carried schedule's premature jump before
+                    // entering the next path so the path anchor can create a
+                    // fresh ordinary Cross edge.
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP;
+                }
+                if camera.path.index == 1 && !self.checkpoint_route_retimed {
+                    // This path entrance is invariant across the carried and
+                    // direct sessions. Rebase the route clock to its observed
+                    // direct sample so every later jump remains path-aligned.
+                    self.checkpoint_route_retimed = true;
+                    self.checkpoint_tick = 577;
+                    return Self::direct_checkpoint_pad(576);
+                }
+            }
+
             self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-            let zero_upper_b =
-                Eid::from_name("0B_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
             if self.session_globals
                 && self.checkpoint_phase_recovered
                 && (531..=550).contains(&tick)
@@ -10047,7 +10229,7 @@ impl RollingStonesRouteController {
             let at_post_bank_anchor = tick >= post_bank_phase
                 && camera.path.zone == zero_f
                 && camera.path.index == 0
-                && matches!(camera.progress.raw(), 11_742 | 11_745 | 11_751)
+                && matches!(camera.progress.raw(), 11_742 | 11_745 | 11_748 | 11_751)
                 && player
                     .as_ref()
                     .is_some_and(|player| player.state == 2 && player.status_a & 1 != 0);
@@ -10160,7 +10342,11 @@ impl RollingStonesRouteController {
                 };
             }
             return if self.session_globals {
-                Self::carried_checkpoint_pad(tick)
+                if self.checkpoint_route_retimed || (295..470).contains(&tick) {
+                    Self::direct_checkpoint_pad(tick)
+                } else {
+                    Self::carried_checkpoint_pad(tick)
+                }
             } else {
                 Self::direct_checkpoint_pad(tick)
             };
@@ -10210,6 +10396,7 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         checkpoint_lateral_corrected: true,
         checkpoint_phase_recovered: true,
         checkpoint_phase_wait: 2,
+        checkpoint_route_retimed: true,
         post_bank_tick: Some(23),
     };
 
@@ -10223,6 +10410,7 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert!(!controller.checkpoint_lateral_corrected);
     assert!(!controller.checkpoint_phase_recovered);
     assert_eq!(controller.checkpoint_phase_wait, 0);
+    assert!(!controller.checkpoint_route_retimed);
     assert_eq!(controller.post_bank_tick, None);
 }
 
@@ -33305,6 +33493,7 @@ impl SurveyInputController {
                 checkpoint_lateral_corrected: false,
                 checkpoint_phase_recovered: false,
                 checkpoint_phase_wait: 0,
+                checkpoint_route_retimed: false,
                 post_bank_tick: None,
             },
             hog_wild: HogWildCompletionRouteController {

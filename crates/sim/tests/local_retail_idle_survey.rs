@@ -48292,12 +48292,12 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
         assert_eq!(upstream_survey.final_live_objects, 29);
         assert_eq!(upstream_survey.max_live_objects, 71);
         assert_eq!(upstream_survey.successful_spawns, 152);
-        assert_eq!(upstream_survey.spawn_attempts, 52_659);
-        assert_eq!(upstream_survey.expected_spawn_rejections, 52_507);
+        assert_eq!(upstream_survey.spawn_attempts, 52_669);
+        assert_eq!(upstream_survey.expected_spawn_rejections, 52_517);
         assert_eq!(upstream_survey.unexpected_spawn_errors, 0);
         assert_eq!(
             upstream_survey.executions,
-            111_454,
+            111_418,
             "{}",
             upstream_survey.summary()
         );
@@ -48415,7 +48415,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 state: 13,
             })
         );
-        assert_eq!(upstream_runtime.machine().random_seed(), 0x537c_63d1);
+        assert_eq!(upstream_runtime.machine().random_seed(), 0xc22a_c3b6);
         assert_eq!(upstream_runtime.draw_count(), 2_994);
         assert!(
             upstream_survey.is_clean(),
@@ -48443,7 +48443,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(report.effects.is_empty());
             report.carry
         };
-        assert_eq!(upstream_completion_carry.random_seed, 0x537c_63d1);
+        assert_eq!(upstream_completion_carry.random_seed, 0xc22a_c3b6);
         assert_eq!(upstream_completion_carry.draw_count, 2_994);
         assert_eq!(
             [

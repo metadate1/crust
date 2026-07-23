@@ -16,6 +16,7 @@ use crate::card_persistence::{CardPersistIntent, merge_card_record};
 pub struct StorageState {
     storage: Storage,
     card_record: VirtualCardRecord,
+    writes_enabled: bool,
 }
 
 impl StorageState {
@@ -34,7 +35,14 @@ impl StorageState {
         Ok(Self {
             storage,
             card_record,
+            writes_enabled: true,
         })
+    }
+
+    /// Keeps the mounted browser card readable while making every subsequent
+    /// resume/card write ephemeral for the lifetime of this runtime.
+    pub const fn keep_writes_in_memory(&mut self) {
+        self.writes_enabled = false;
     }
 
     pub fn virtual_card(&self) -> VirtualCard {
@@ -61,6 +69,9 @@ impl StorageState {
         card: &VirtualCard,
         intent: CardPersistIntent,
     ) -> Result<(), JsValue> {
+        if !self.writes_enabled {
+            return Ok(());
+        }
         let timestamp = now_timestamp();
         let next_record = merge_card_record(&self.card_record, card, timestamp, intent);
         let json = encode_virtual_card(&next_record)
@@ -95,9 +106,11 @@ impl StorageState {
                 Ok(ResumeManager::load(Some(stored), current))
             }
             Err(_) => {
-                let key = invalid_resume_key(now_timestamp());
-                self.storage.set_item(&key, &json)?;
-                self.storage.remove_item(RESUME_STORAGE_KEY)?;
+                if self.writes_enabled {
+                    let key = invalid_resume_key(now_timestamp());
+                    self.storage.set_item(&key, &json)?;
+                    self.storage.remove_item(RESUME_STORAGE_KEY)?;
+                }
                 Ok(ResumeManager::load(
                     Some(StoredResume {
                         schema: "invalid".to_owned(),
@@ -111,6 +124,9 @@ impl StorageState {
     }
 
     pub fn persist_resume(&self, payload: CardPayload) -> Result<(), JsValue> {
+        if !self.writes_enabled {
+            return Ok(());
+        }
         let record = ResumeRecord {
             payload: Box::new(payload.into_bytes()),
             updated_at: now_timestamp(),

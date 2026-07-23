@@ -102,8 +102,9 @@ use crate::title_runtime::{
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, VisualState};
 use crate::{
-    RetailIslandWritebackPhase, authoritative_save_or_last, core_objects_pad_update,
-    initial_retail_level_state, require_render_object_snapshot, retail_island_state_writeback,
+    RetailIslandWritebackPhase, apply_all_levels_override, authoritative_save_or_last,
+    core_objects_pad_update, initial_retail_level_state, require_render_object_snapshot,
+    retail_island_state_writeback,
 };
 
 // `web-sys` 0.3 exposes `Element::request_fullscreen` as a caught void
@@ -276,6 +277,7 @@ impl App {
 
         let disabled = playable.is_empty() || self.busy || self.locked;
         self.dom.boot_level.set_disabled(disabled);
+        self.dom.unlock_all.set_disabled(disabled);
         self.dom.launch.set_disabled(disabled);
         self.dom
             .clear
@@ -344,10 +346,19 @@ impl App {
         self.dom.log(message, true);
     }
 
-    fn start_runtime(&mut self, pair: ValidatedPair) -> Result<(), JsValue> {
+    fn start_runtime(
+        &mut self,
+        pair: ValidatedPair,
+        unlock_all_levels: bool,
+    ) -> Result<(), JsValue> {
         let physical_held = self.keyboard_bits | self.touch_bits() | poll_gamepad()?;
         let storage = self.storage.take().or_else(|| StorageState::open().ok());
-        let mut runtime = Runtime::new(pair, storage, physical_held, &self.dom)?;
+        let level_access = if unlock_all_levels {
+            LevelAccessMode::AllLevels
+        } else {
+            LevelAccessMode::Progression
+        };
+        let mut runtime = Runtime::new(pair, storage, physical_held, level_access, &self.dom)?;
         runtime.set_muted(self.muted);
         self.runtime = Some(runtime);
         self.busy = false;
@@ -796,6 +807,46 @@ struct RetailPairMount {
     core_transition: bool,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LevelAccessMode {
+    Progression,
+    AllLevels,
+}
+
+impl LevelAccessMode {
+    const fn all_levels(self) -> bool {
+        matches!(self, Self::AllLevels)
+    }
+
+    const fn persists(self) -> bool {
+        matches!(self, Self::Progression)
+    }
+}
+
+fn apply_level_access(
+    mode: LevelAccessMode,
+    runtime: &mut RetailRuntime,
+    flow: &mut RetailFlowMirror,
+) -> Result<(), crust_sim::gool::VmError> {
+    if mode.all_levels() {
+        apply_all_levels_override(runtime)?;
+        mirror_level_access(mode, runtime, flow)?;
+    }
+    Ok(())
+}
+
+fn mirror_level_access(
+    mode: LevelAccessMode,
+    runtime: &RetailRuntime,
+    flow: &mut RetailFlowMirror,
+) -> Result<(), crust_sim::gool::VmError> {
+    if mode.all_levels() {
+        flow.progress.levels_unlocked = runtime.global_word(LEVELS_UNLOCKED_GLOBAL)?;
+        flow.progress.item_pool_2 = runtime.global_word(ITEM_POOL_2_GLOBAL)?;
+    }
+    Ok(())
+}
+
 struct Runtime {
     flow: RetailFlowMirror,
     scheduler: FrameScheduler,
@@ -832,6 +883,7 @@ struct Runtime {
     storage: Option<StorageState>,
     card: VirtualCard,
     resume: ResumeManager,
+    level_access: LevelAccessMode,
     /// Last payload successfully read from retail GOOL globals. This is the
     /// only persistence fallback used if an impossible fixed-allocation VM
     /// read fails; no high-level mirror state is serialized.
@@ -852,6 +904,7 @@ impl Runtime {
         pair: ValidatedPair,
         mut storage: Option<StorageState>,
         physical_held: u16,
+        level_access: LevelAccessMode,
         dom: &Dom,
     ) -> Result<Self, JsValue> {
         let raw_level = u8::try_from(pair.level.get())
@@ -865,6 +918,11 @@ impl Runtime {
         let card = storage
             .as_ref()
             .map_or_else(VirtualCard::new, StorageState::virtual_card);
+        if level_access.all_levels()
+            && let Some(storage) = &mut storage
+        {
+            storage.keep_writes_in_memory();
+        }
         let (resume, resume_result) = if let Some(storage) = &storage {
             storage.load_resume(save)?
         } else {
@@ -875,7 +933,14 @@ impl Runtime {
             apply_save(&mut flow, restored);
             dom.log("Restored checksummed browser resume data.", false);
         } else if resume_result == ResumeLoadResult::Corrupt {
-            dom.log("Quarantined an invalid browser resume record.", true);
+            dom.log(
+                if level_access.persists() {
+                    "Quarantined an invalid browser resume record."
+                } else {
+                    "Ignored an invalid browser resume record without modifying storage."
+                },
+                true,
+            );
         }
 
         let audio = match WebAudio::new() {
@@ -1021,11 +1086,6 @@ impl Runtime {
                     "could not initialize the CoreObjectsCreate pad boundary: {error:?}"
                 ))
             })?;
-        let last_authoritative_save = retail_objects.card_save_data().map_err(|error| {
-            JsValue::from_str(&format!(
-                "could not snapshot initial retail save globals: {error:?}"
-            ))
-        })?;
         let retail_core_objects = create_retail_core_objects_for_pair(
             &mut retail_objects,
             &pair,
@@ -1036,6 +1096,22 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        apply_level_access(level_access, &mut retail_objects, &mut flow).map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not apply temporary all-level access: {error:?}"
+            ))
+        })?;
+        if level_access.all_levels() {
+            dom.log(
+                "Unlocked every island-map node and both key paths for this session; browser resume and memory-card writes remain untouched.",
+                false,
+            );
+        }
+        let last_authoritative_save = retail_objects.card_save_data().map_err(|error| {
+            JsValue::from_str(&format!(
+                "could not snapshot initial retail save globals: {error:?}"
+            ))
+        })?;
         let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
             .map_err(|_| JsValue::from_str("initial retail pager page count exceeds u32"))?;
         retail_objects
@@ -1095,6 +1171,7 @@ impl Runtime {
             storage: storage.take(),
             card,
             resume,
+            level_access,
             last_authoritative_save,
             // Even the first authored title screen enters through
             // TitleLoadScreen's flag-two LevelUpdate. `sync_title_card` below
@@ -1362,6 +1439,13 @@ impl Runtime {
             &pair,
             retail_camera.location().path.zone,
         )?;
+        if self.level_access.all_levels() {
+            apply_all_levels_override(&mut retail_objects).map_err(|error| {
+                JsValue::from_str(&format!(
+                    "could not carry temporary all-level access into the destination: {error:?}"
+                ))
+            })?;
+        }
         let retail_pager_page_count = u32::try_from(retail_zone_pager.page_count())
             .map_err(|_| JsValue::from_str("destination retail pager page count exceeds u32"))?;
         retail_objects
@@ -1432,6 +1516,13 @@ impl Runtime {
             .map_err(|error| {
                 JsValue::from_str(&format!("could not mirror mounted retail flow: {error:?}"))
             })?;
+        mirror_level_access(self.level_access, &retail_objects, &mut self.flow).map_err(
+            |error| {
+                JsValue::from_str(&format!(
+                    "could not mirror temporary all-level access after the destination mount: {error:?}"
+                ))
+            },
+        )?;
         if flow_level == LevelId::TITLE {
             self.title_seen = true;
         }
@@ -2176,7 +2267,9 @@ impl Runtime {
                 if let Some(audio) = &mut self.audio {
                     audio.set_retail_master_gain(self.retail_master_fade.normalized_gain());
                 }
-                if let Some(payload) = self.resume.update(self.save_data())
+                let resume_payload = self.resume.update(self.save_data());
+                if self.level_access.persists()
+                    && let Some(payload) = resume_payload
                     && let Some(storage) = &self.storage
                 {
                     storage.persist_resume(payload)?;
@@ -2628,6 +2721,20 @@ impl Runtime {
         };
         apply_save(&mut self.flow, save);
         self.last_authoritative_save = save;
+        if let Err(error) =
+            apply_level_access(self.level_access, &mut self.retail_objects, &mut self.flow)
+        {
+            let message =
+                format!("Could not restore temporary all-level access after card load: {error:?}");
+            dom.log(&message, true);
+            self.retail_runtime_error = Some(message);
+            self.retail_tick_state = RetailTickState::Paused;
+            return;
+        }
+        self.last_authoritative_save = authoritative_save_or_last(
+            self.retail_objects.card_save_data(),
+            self.last_authoritative_save,
+        );
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         if let Some(audio) = &mut self.audio {
@@ -2640,6 +2747,11 @@ impl Runtime {
     }
 
     fn sync_retail_globals_to_flow(&mut self, dom: &Dom) -> Result<(), String> {
+        if self.level_access.all_levels() {
+            apply_all_levels_override(&mut self.retail_objects).map_err(|error| {
+                format!("could not enforce temporary all-level access: {error:?}")
+            })?;
+        }
         let read = |index| {
             self.retail_objects
                 .global_word(index)
@@ -3743,7 +3855,9 @@ impl Runtime {
 
     fn apply_protected_title_reset(&mut self, dom: &Dom) -> Result<(), JsValue> {
         let current = self.save_data();
-        if let Some(payload) = self.resume.before_title_reset(current)
+        let resume_payload = self.resume.before_title_reset(current);
+        if self.level_access.persists()
+            && let Some(payload) = resume_payload
             && let Some(storage) = &self.storage
             && let Err(error) = storage.persist_resume(payload)
         {
@@ -3771,7 +3885,15 @@ impl Runtime {
                 ))
             })?;
         apply_save(&mut self.flow, protected);
-        self.last_authoritative_save = protected;
+        apply_level_access(self.level_access, &mut self.retail_objects, &mut self.flow).map_err(
+            |error| {
+                JsValue::from_str(&format!(
+                    "could not restore temporary all-level access after title reset: {error:?}"
+                ))
+            },
+        )?;
+        self.last_authoritative_save =
+            authoritative_save_or_last(self.retail_objects.card_save_data(), protected);
         self.retail_audio
             .set_sfx_volume(self.flow.options.sfx_volume);
         if let Some(audio) = &mut self.audio {
@@ -4256,7 +4378,9 @@ impl Runtime {
 
     fn flush(&mut self) {
         let save = self.save_data();
-        if let Some(payload) = self.resume.flush(save)
+        let resume_payload = self.resume.flush(save);
+        if self.level_access.persists()
+            && let Some(payload) = resume_payload
             && let Some(storage) = &self.storage
         {
             let _ = storage.persist_resume(payload);
@@ -4601,7 +4725,7 @@ fn is_disc_image_name(name: &str) -> bool {
 }
 
 fn launch(app: Rc<RefCell<App>>) {
-    let (store, level) = {
+    let (store, level, unlock_all_levels) = {
         let mut app_ref = app.borrow_mut();
         if app_ref.busy || app_ref.locked {
             return;
@@ -4621,13 +4745,17 @@ fn launch(app: Rc<RefCell<App>>) {
         let _ = app_ref
             .dom
             .set_progress(true, 0.2, "Parsing NSD and NSF pages");
-        (app_ref.assets.clone(), level)
+        (
+            app_ref.assets.clone(),
+            level,
+            app_ref.dom.unlock_all.checked(),
+        )
     };
     spawn_local(async move {
         match store.validate_pair(level).await {
             Ok(pair) => {
                 let mut app = app.borrow_mut();
-                if let Err(error) = app.start_runtime(pair) {
+                if let Err(error) = app.start_runtime(pair, unlock_all_levels) {
                     app.fail(&js_message(&error));
                 }
             }

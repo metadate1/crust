@@ -23,17 +23,22 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   const insert = html.indexOf('id="dropzone"');
   const eject = html.indexOf('id="clearData"');
   const launch = html.indexOf('id="launch"');
+  const unlock = html.indexOf('id="unlockAll"');
   const level = html.indexOf('id="bootLevel"');
 
   assert.notEqual(insert, -1, "the local BIN/ISO action must remain present");
   assert.notEqual(eject, -1, "the local-data eject action must remain present");
   assert.notEqual(launch, -1, "the launch action must remain present");
+  assert.notEqual(unlock, -1, "the all-levels option must remain present");
   assert.notEqual(level, -1, "the optional direct-level selector must remain present");
   assert.ok(insert < launch, "Insert BIN/ISO must precede Launch game");
   assert.ok(eject < launch, "the secondary eject action must stay out of launch step two");
-  assert.ok(launch < level, "the optional level selector must stay below Launch game");
+  assert.ok(launch < unlock, "the all-levels option must stay below Launch game");
+  assert.ok(unlock < level, "the optional level selector must stay below the all-levels option");
   assert.match(html, /Insert BIN \/ ISO/);
   assert.match(html, />\s*Launch game\s*</);
+  assert.match(html, /All levels unlocked/);
+  assert.match(html, /resume and memory card stay untouched/);
   assert.match(html, /Leave on “full game” to begin at the opening/);
   assert.doesNotMatch(html, /Local-data bay|Runtime monitor|Launch Rust runtime/);
   assert.doesNotMatch(html, /standby-glyph|>◆</);
@@ -97,6 +102,7 @@ test("the Rust DOM contract and original interface artwork stay packaged", async
     "pairCount",
     "byteCount",
     "assetMessage",
+    "unlockAll",
     "bootLevel",
     "launch",
     "clearData",

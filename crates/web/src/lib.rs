@@ -7,7 +7,9 @@ use wasm_bindgen::prelude::*;
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::card::SaveData;
 #[cfg(any(target_arch = "wasm32", test))]
-use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject};
+use crust_sim::gool::{ITEM_POOL_2_GLOBAL, LEVELS_UNLOCKED_GLOBAL, VmError};
+#[cfg(any(target_arch = "wasm32", test))]
+use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject, RetailRuntime};
 
 #[cfg(target_arch = "wasm32")]
 mod app;
@@ -113,6 +115,30 @@ pub(crate) fn authoritative_save_or_last<E>(
     current.unwrap_or(last)
 }
 
+/// Native `GOD_MODE` access gate, deliberately separate from saved progress.
+#[cfg(any(target_arch = "wasm32", test))]
+const ALL_LEVELS_UNLOCK_GATE: u32 = 99;
+
+/// The two native `item_pool2` flags that expose the key-gated secret paths.
+#[cfg(any(target_arch = "wasm32", test))]
+const ALL_LEVELS_SECRET_PATH_BITS: u32 = (1 << 10) | (1 << 20);
+
+/// Applies the source project's `GOD_MODE` access gates without moving the
+/// saved island-map cursor or fabricating gems, keys, lives, and options.
+///
+/// The secret-path flags are `ORed` into the live pool so collected state is not
+/// discarded. The browser host keeps the resulting card/resume writes
+/// in-memory for this launch.
+#[cfg(any(target_arch = "wasm32", test))]
+pub(crate) fn apply_all_levels_override(runtime: &mut RetailRuntime) -> Result<(), VmError> {
+    let item_pool_2 = runtime.global_word(ITEM_POOL_2_GLOBAL)?;
+    runtime.set_global_word(LEVELS_UNLOCKED_GLOBAL, ALL_LEVELS_UNLOCK_GATE)?;
+    runtime.set_global_word(
+        ITEM_POOL_2_GLOBAL,
+        item_pool_2 | ALL_LEVELS_SECRET_PATH_BITS,
+    )
+}
+
 /// Performs the `PadUpdate` that native calls at the start of
 /// `CoreObjectsCreate` on every initial boot and stream remount.
 ///
@@ -211,6 +237,112 @@ mod tests {
         assert_eq!(
             initial_presented_path_point(core::num::NonZeroU16::new(3).unwrap(), true),
             2
+        );
+    }
+
+    #[test]
+    fn all_levels_override_preserves_progress_and_adds_secret_access() {
+        let original = SaveData {
+            level_count: 7,
+            initial_lives: 9 << 8,
+            unknown_6190c: 0x1234,
+            mono: true,
+            sfx_volume: 173,
+            music_volume: 211,
+            item_pool_1: 0x1122_3344,
+            item_pool_2: 0x5566_7788,
+            gem_count: 4,
+            key_count: 1,
+        };
+        let mut runtime =
+            RetailRuntime::new_for_level(256, crust_formats::stream::LevelId::N_SANITY_BEACH);
+        runtime.restore_card_save_data(original).unwrap();
+        apply_all_levels_override(&mut runtime).unwrap();
+
+        assert_eq!(
+            runtime.global_word(LEVELS_UNLOCKED_GLOBAL),
+            Ok(ALL_LEVELS_UNLOCK_GATE)
+        );
+        assert_eq!(
+            runtime.global_word(crust_sim::gool::CURRENT_MAP_LEVEL_GLOBAL),
+            Ok(original.level_count),
+            "unlocking access must not move the player's island-map cursor"
+        );
+
+        let unlocked = runtime.card_save_data().unwrap();
+        assert_eq!(
+            unlocked.item_pool_2,
+            original.item_pool_2 | ALL_LEVELS_SECRET_PATH_BITS
+        );
+        assert_eq!(
+            SaveData {
+                item_pool_2: original.item_pool_2,
+                ..unlocked
+            },
+            original,
+            "the launcher option must preserve real progress, collectibles, lives, and options"
+        );
+
+        let loaded = SaveData {
+            level_count: 3,
+            item_pool_2: 0,
+            ..original
+        };
+        runtime.restore_card_save_data(loaded).unwrap();
+        apply_all_levels_override(&mut runtime).unwrap();
+        assert_eq!(runtime.global_word(LEVELS_UNLOCKED_GLOBAL), Ok(99));
+        assert_eq!(
+            runtime.global_word(crust_sim::gool::CURRENT_MAP_LEVEL_GLOBAL),
+            Ok(3),
+            "reapplying after a card load must retain the loaded map cursor"
+        );
+        assert_eq!(
+            runtime.global_word(ITEM_POOL_2_GLOBAL),
+            Ok(ALL_LEVELS_SECRET_PATH_BITS),
+            "both key-gated paths must remain available after a card load"
+        );
+
+        apply_all_levels_override(&mut runtime).unwrap();
+        assert_eq!(
+            runtime.global_word(ITEM_POOL_2_GLOBAL),
+            Ok(ALL_LEVELS_SECRET_PATH_BITS),
+            "the access override must be idempotent"
+        );
+
+        let carry = runtime.export_session_carry();
+        let mut mounted =
+            RetailRuntime::new_from_session(256, crust_formats::stream::LevelId::TITLE, carry)
+                .unwrap();
+        assert_eq!(mounted.global_word(LEVELS_UNLOCKED_GLOBAL), Ok(99));
+        assert_eq!(
+            mounted.global_word(crust_sim::gool::CURRENT_MAP_LEVEL_GLOBAL),
+            Ok(3)
+        );
+        assert_eq!(
+            mounted.global_word(ITEM_POOL_2_GLOBAL),
+            Ok(ALL_LEVELS_SECRET_PATH_BITS)
+        );
+
+        mounted.reset_level_globals().unwrap();
+        let reset_level_count = mounted
+            .global_word(crust_sim::gool::LEVEL_COUNT_GLOBAL)
+            .unwrap();
+        let reset_map_level = mounted
+            .global_word(crust_sim::gool::CURRENT_MAP_LEVEL_GLOBAL)
+            .unwrap();
+        apply_all_levels_override(&mut mounted).unwrap();
+        assert_eq!(
+            mounted.global_word(crust_sim::gool::LEVEL_COUNT_GLOBAL),
+            Ok(reset_level_count)
+        );
+        assert_eq!(
+            mounted.global_word(crust_sim::gool::CURRENT_MAP_LEVEL_GLOBAL),
+            Ok(reset_map_level)
+        );
+        assert_eq!(mounted.global_word(LEVELS_UNLOCKED_GLOBAL), Ok(99));
+        assert_eq!(
+            mounted.global_word(ITEM_POOL_2_GLOBAL),
+            Ok(ALL_LEVELS_SECRET_PATH_BITS)
         );
     }
 

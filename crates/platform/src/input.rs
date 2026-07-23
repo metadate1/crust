@@ -66,24 +66,39 @@ impl PadState {
 #[must_use]
 pub fn keyboard_code(code: &str) -> Option<u16> {
     Some(match code {
-        "Space" => PAD_SELECT,
+        // Preserve the original complete-pad bindings while adding the
+        // familiar gameplay aliases. The browser host accepts a bit mask, so
+        // one physical key can faithfully expose both actions.
+        "Space" => PAD_SELECT | PAD_CROSS,
         "KeyK" => PAD_L3,
         "KeyL" => PAD_R3,
         "Enter" | "NumpadEnter" => PAD_START,
         "ArrowUp" => PAD_UP,
-        "ArrowRight" => PAD_RIGHT,
+        "ArrowRight" | "KeyD" => PAD_RIGHT,
         "ArrowDown" => PAD_DOWN,
         "ArrowLeft" => PAD_LEFT,
         "KeyQ" => PAD_L2,
-        "KeyW" => PAD_R2,
-        "KeyA" => PAD_L1,
-        "KeyS" => PAD_R1,
+        "KeyW" => PAD_R2 | PAD_UP,
+        "KeyA" => PAD_L1 | PAD_LEFT,
+        "KeyS" => PAD_R1 | PAD_DOWN,
         "KeyV" => PAD_TRIANGLE,
         "KeyC" => PAD_CIRCLE,
         "KeyZ" => PAD_CROSS,
         "KeyX" => PAD_SQUARE,
         _ => return None,
     })
+}
+
+/// Map a browser `MouseEvent.button` value for gameplay clicks.
+///
+/// Main (usually left) and auxiliary (usually middle) clicks both spin. The
+/// secondary button remains available for the browser context menu.
+#[must_use]
+pub const fn mouse_button(button: i16) -> Option<u16> {
+    match button {
+        0 | 1 => Some(PAD_SQUARE),
+        _ => None,
+    }
 }
 
 /// Map the standard Gamepad API layout and digitalize the left stick.
@@ -165,6 +180,25 @@ mod tests {
             .map(|code| keyboard_code(code).unwrap())
             .fold(0_u16, |value, bit| value | bit);
         assert_eq!(mapped, u16::MAX);
+    }
+
+    #[test]
+    fn gameplay_aliases_preserve_legacy_keyboard_bits() {
+        assert_eq!(keyboard_code("KeyW"), Some(PAD_R2 | PAD_UP));
+        assert_eq!(keyboard_code("KeyA"), Some(PAD_L1 | PAD_LEFT));
+        assert_eq!(keyboard_code("KeyS"), Some(PAD_R1 | PAD_DOWN));
+        assert_eq!(keyboard_code("KeyD"), Some(PAD_RIGHT));
+        assert_eq!(keyboard_code("Space"), Some(PAD_SELECT | PAD_CROSS));
+        assert_eq!(keyboard_code("KeyZ"), Some(PAD_CROSS));
+        assert_eq!(keyboard_code("ArrowUp"), Some(PAD_UP));
+    }
+
+    #[test]
+    fn main_and_auxiliary_mouse_buttons_spin() {
+        assert_eq!(mouse_button(0), Some(PAD_SQUARE));
+        assert_eq!(mouse_button(1), Some(PAD_SQUARE));
+        assert_eq!(mouse_button(2), None);
+        assert_eq!(mouse_button(-1), None);
     }
 
     #[test]

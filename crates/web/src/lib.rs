@@ -36,7 +36,7 @@ mod storage;
 mod title_runtime;
 #[cfg(target_arch = "wasm32")]
 mod webaudio;
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 mod webgl;
 
 #[cfg(any(target_arch = "wasm32", test))]

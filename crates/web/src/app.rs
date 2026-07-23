@@ -20,12 +20,12 @@ use crust_audio::retail_player::RetailMusicChange;
 use crust_formats::binary::{Eid, FormatError, PageIndex};
 use crust_formats::stream::{
     KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, ObjectVertexKind, RetailPathId,
-    RetailZoneGraph, ZoneEntity, ZoneHeader, load_title_mdat, parse_instrument_entry,
+    RetailZoneGraph, ZoneEntity, ZoneGraphics, ZoneHeader, load_title_mdat, parse_instrument_entry,
     parse_retail_midi, title_mdat_eid,
 };
 use crust_platform::input::{
     PAD_START, PadSnapshot as PlatformPadSnapshot, PadState as PlatformPadState, keyboard_code,
-    standard_gamepad,
+    mouse_button, standard_gamepad,
 };
 use crust_renderer::texture::{DecodedTexture, decode_loading_image};
 use crust_renderer::title::decode_title_card;
@@ -44,11 +44,12 @@ use crust_sim::flow::{
 };
 use crust_sim::gool::{
     AudioHostRequest, AudioHostResponse, CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest,
-    GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL, KEY_COUNT_GLOBAL,
-    LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL, MUSIC_VOLUME_GLOBAL,
-    ModelVertexSource, NEXT_DISPLAY_GLOBAL, PagingHostOperation, PagingHostRequest,
-    PagingHostResponse, RetailPadSnapshot, RetailSolidEnvironment, RetailTransformVectorsCamera,
-    SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject, VmStateProgram, process_register,
+    GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, INITIAL_DISPLAY_MASK, ITEM_POOL_1_GLOBAL,
+    ITEM_POOL_2_GLOBAL, KEY_COUNT_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL, MONO_GLOBAL,
+    MUSIC_VOLUME_GLOBAL, ModelVertexSource, NEXT_DISPLAY_GLOBAL, PagingHostOperation,
+    PagingHostRequest, PagingHostResponse, RetailPadSnapshot, RetailSolidEnvironment,
+    RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject,
+    VmStateProgram, process_register,
 };
 use crust_sim::object_arena::{NeighborZone, SpawnError};
 use crust_sim::object_bounds::AnimationBoundSource;
@@ -78,7 +79,7 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
 use web_sys::{
     DragEvent, Element, Event, FileList, Gamepad, HtmlElement, HtmlOptionElement, KeyboardEvent,
-    PointerEvent,
+    MouseEvent, PointerEvent,
 };
 
 use crate::assets::{AssetStore, ValidatedPair};
@@ -100,7 +101,7 @@ use crate::title_runtime::{
     retail_title_screen_profile, title_mdat_entity_is_unlocked, title_state_number_uses_image,
 };
 use crate::webaudio::WebAudio;
-use crate::webgl::{GlStage, VisualState};
+use crate::webgl::{GlStage, RetailBackgroundFill, VisualState};
 use crate::{
     RetailIslandWritebackPhase, apply_all_levels_override, authoritative_save_or_last,
     core_objects_pad_update, initial_retail_level_state, require_render_object_snapshot,
@@ -179,6 +180,8 @@ pub fn boot() -> Result<(), JsValue> {
         storage,
         runtime: None,
         keyboard_bits: 0,
+        active_keys: HashMap::new(),
+        active_mouse_buttons: HashMap::new(),
         active_touches: HashMap::new(),
         busy: false,
         locked: false,
@@ -197,6 +200,8 @@ struct App {
     storage: Option<StorageState>,
     runtime: Option<Runtime>,
     keyboard_bits: u16,
+    active_keys: HashMap<String, u16>,
+    active_mouse_buttons: HashMap<i16, u16>,
     active_touches: HashMap<i32, u16>,
     busy: bool,
     locked: bool,
@@ -205,6 +210,21 @@ struct App {
 }
 
 impl App {
+    fn rebuild_keyboard_bits(&mut self) {
+        self.keyboard_bits = self
+            .active_keys
+            .values()
+            .copied()
+            .fold(0_u16, |value, bits| value | bits);
+    }
+
+    fn mouse_bits(&self) -> u16 {
+        self.active_mouse_buttons
+            .values()
+            .copied()
+            .fold(0_u16, |value, bit| value | bit)
+    }
+
     fn touch_bits(&self) -> u16 {
         self.active_touches
             .values()
@@ -213,7 +233,7 @@ impl App {
     }
 
     fn frame(&mut self, timestamp_ms: f64) -> Result<Option<FormatLevelId>, JsValue> {
-        let held = self.keyboard_bits | self.touch_bits() | poll_gamepad()?;
+        let held = self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
         if let Some(runtime) = &mut self.runtime {
             runtime.frame(timestamp_ms, held, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
@@ -351,7 +371,8 @@ impl App {
         pair: ValidatedPair,
         unlock_all_levels: bool,
     ) -> Result<(), JsValue> {
-        let physical_held = self.keyboard_bits | self.touch_bits() | poll_gamepad()?;
+        let physical_held =
+            self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
         let storage = self.storage.take().or_else(|| StorageState::open().ok());
         let level_access = if unlock_all_levels {
             LevelAccessMode::AllLevels
@@ -382,6 +403,7 @@ impl App {
 #[derive(Debug)]
 struct OwnedRetailZone {
     eid: Eid,
+    graphics: ZoneGraphics,
     entities: Vec<ZoneEntity>,
 }
 
@@ -1003,6 +1025,17 @@ impl Runtime {
             &retail_zone_graph,
             retail_camera.location().path.zone,
         )?;
+        let initial_zone = retail_camera.location().path.zone;
+        let initial_background_fill = retail_background_fill_for_zone(
+            &retail_zones,
+            initial_zone,
+            INITIAL_DISPLAY_MASK,
+            [0; 3],
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        let initial_next_vram_fill_color =
+            retail_zone_transition_color(&retail_zones, initial_zone)
+                .map_err(|error| JsValue::from_str(&error))?;
         let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
         dom.log(
             &format!(
@@ -1035,6 +1068,7 @@ impl Runtime {
             retail_zone_pager.texture_frame_snapshot(),
             crust_sim::retail_runtime::RetailWorldShaderSnapshot::initialized_for_level(pair.level),
             retail_world_shader_render_state,
+            initial_background_fill,
         )?;
         let retail_frame =
             crate::retail_frame_for_mount(retail_point_count, 0, 0, false, after_loading_image);
@@ -1056,6 +1090,7 @@ impl Runtime {
         );
         // Keep the checksum baseline synchronized even when the restored value was unchanged.
         let mut retail_objects = RetailRuntime::new_for_level(RETAIL_GLOBAL_WORDS, pair.level);
+        retail_objects.set_next_vram_fill_color(initial_next_vram_fill_color);
         retail_objects
             .restore_card_save_data(save)
             .and_then(|()| retail_objects.publish_card_state(card.published_state()))
@@ -1298,6 +1333,16 @@ impl Runtime {
         )?;
         let retail_zone_pager = build_retail_zone_pager(&pair, &retail_zone_lifecycle)?;
         let destination_zone = retail_camera.location().path.zone;
+        let destination_background_fill = retail_background_fill_for_zone(
+            &retail_zones,
+            destination_zone,
+            INITIAL_DISPLAY_MASK,
+            [0; 3],
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
+        let destination_next_vram_fill_color =
+            retail_zone_transition_color(&retail_zones, destination_zone)
+                .map_err(|error| JsValue::from_str(&error))?;
         let destination_music = self
             .prepare_retail_music(&pair, destination_zone, true)
             .map_err(|error| JsValue::from_str(&error))?;
@@ -1329,6 +1374,7 @@ impl Runtime {
                         "could not import retail session across mount: {error:?}"
                     ))
                 })?;
+        retail_objects.set_next_vram_fill_color(destination_next_vram_fill_color);
         retail_objects
             .publish_card_state(self.card.published_state())
             .map_err(|error| {
@@ -1502,6 +1548,7 @@ impl Runtime {
             retail_zone_pager.texture_frame_snapshot(),
             retail_objects.world_shader_snapshot(),
             retail_world_shader_render_state,
+            destination_background_fill,
         )?;
         let retail_frame = crate::retail_frame_for_mount(
             retail_point_count,
@@ -2109,6 +2156,7 @@ impl Runtime {
                 // separately from the per-object values latched later during
                 // the live preorder traversal.
                 let world_display_mask = self.effective_retail_display_mask();
+                let vram_fill_color = self.retail_objects.current_vram_fill_color();
                 let map_path_animation = match self.pre_gool_retail_map_path_animation() {
                     Ok(animation) => animation,
                     Err(error) => {
@@ -2190,6 +2238,11 @@ impl Runtime {
                         .set_random_seed_b(self.retail_audio.random_seed());
                 }
                 if let Some(camera_location) = camera_location {
+                    // Native submits worlds before GOOL but resolves
+                    // `GLClear`'s zone afterward. A synchronous LoadState can
+                    // therefore replace `cur_zone` without retroactively
+                    // changing the already-submitted world camera.
+                    let background_zone = self.retail_camera.location().path.zone;
                     let count_draws =
                         !native_paused && self.effective_retail_display_mask() & 0x1000 != 0;
                     let trace = self.retail_frame.tick_with_draw_count_enabled(count_draws);
@@ -2203,10 +2256,12 @@ impl Runtime {
                     if is_retail_runtime_state(self.flow.state()) {
                         scene_location = Some((
                             camera_location,
+                            background_zone,
                             frame_draw_count,
                             frame_stamp,
                             !native_paused,
                             world_display_mask,
+                            vram_fill_color,
                             map_path_animation,
                             camera_pose_override,
                             texture_frame_snapshot,
@@ -2216,10 +2271,12 @@ impl Runtime {
                 }
                 if let Some((
                     camera_location,
+                    background_zone,
                     draw_count,
                     frame_stamp,
                     advance_world_ripple,
                     world_display_mask,
+                    vram_fill_color,
                     map_path_animation,
                     camera_pose_override,
                     texture_frame_snapshot,
@@ -2227,10 +2284,12 @@ impl Runtime {
                 )) = scene_location
                     && let Err(error) = self.update_retail_scene(
                         camera_location,
+                        background_zone,
                         draw_count,
                         frame_stamp,
                         advance_world_ripple,
                         world_display_mask,
+                        vram_fill_color,
                         map_path_animation,
                         camera_pose_override,
                         texture_frame_snapshot,
@@ -2550,10 +2609,21 @@ impl Runtime {
                     )
             }
         };
-        let boundary_error = result
-            .as_ref()
-            .ok()
-            .and_then(|_| self.complete_retail_source_frame(dom, authored_title).err());
+        let restart_before_display = result.as_ref().is_ok_and(|frame| {
+            frame
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, VmEffect::LoadState { .. }))
+        });
+        // Native LevelRestart is synchronous inside GOOL. The pointer-free
+        // host applies its structural effect after traversal, so defer
+        // TitleUpdate/GLUpdate only for that frame and complete them as soon
+        // as the restart transaction has committed.
+        let boundary_error = result.as_ref().ok().and_then(|_| {
+            (!restart_before_display)
+                .then(|| self.complete_retail_source_frame(dom, authored_title).err())
+                .flatten()
+        });
         self.drain_retail_reclaim_diagnostics(dom);
         match result {
             Ok(frame) => {
@@ -2599,7 +2669,23 @@ impl Runtime {
                 } else {
                     match self.apply_retail_gool_level_effects(&frame.effects, dom) {
                         Ok(()) => {
-                            pbak_finish_effects_applied = pbak_finish.is_some();
+                            let boundary_result = if restart_before_display {
+                                self.complete_retail_source_frame(dom, authored_title)
+                            } else {
+                                Ok(())
+                            };
+                            match boundary_result {
+                                Ok(()) => {
+                                    pbak_finish_effects_applied = pbak_finish.is_some();
+                                }
+                                Err(error) => {
+                                    let message =
+                                        format!("retail title/display boundary failed: {error}");
+                                    dom.log(&message, true);
+                                    self.retail_runtime_error = Some(message);
+                                    self.retail_tick_state = RetailTickState::Paused;
+                                }
+                            }
                         }
                         Err(error) => {
                             let message = format!("retail save/restart effect failed: {error}");
@@ -2711,8 +2797,9 @@ impl Runtime {
         }
         self.retail_objects
             .finish_deferred_display_frame()
-            .map_err(|error| format!("GLUpdate failed: {error:?}"))?;
-        Ok(())
+            .map_err(|error| format!("GLUpdate failed: {error:?}"))?
+            .map(|_| ())
+            .ok_or_else(|| "GLUpdate remained deferred by an unapplied level restart".to_owned())
     }
 
     fn sync_completed_card_load(&mut self, dom: &Dom) {
@@ -3223,10 +3310,14 @@ impl Runtime {
                 report.level_update_flags
             ));
         }
+        let restored_vram_fill_color =
+            retail_zone_transition_color(&self.retail_zones, report.snapshot.location.path.zone)?;
         self.retail_zone_pager = pager_commit;
         self.retail_zone_lifecycle = lifecycle_preview;
         self.retail_camera = camera_preview;
         self.retail_camera_pose_override = None;
+        self.retail_objects
+            .set_next_vram_fill_color(restored_vram_fill_color);
         self.refresh_retail_level_state_context(report.snapshot.location)?;
         self.retail_frame = RetailFrameState::ready(
             restored_point_count,
@@ -3261,10 +3352,12 @@ impl Runtime {
     fn update_retail_scene(
         &mut self,
         location: RetailCameraLocation,
+        background_zone: Eid,
         draw_count: u32,
         frame_stamp: u32,
         advance_world_ripple: bool,
         world_display_mask: u32,
+        vram_fill_color: [u8; 3],
         map_path_animation: Option<RetailMapPathAnimation>,
         camera_pose_override: Option<RetailCameraPose>,
         texture_frame_snapshot: TextureFrameSnapshot,
@@ -3288,6 +3381,13 @@ impl Runtime {
         let field_of_view = self
             .effective_retail_field_of_view()
             .map_err(|error| JsValue::from_str(&error))?;
+        let background_fill = retail_background_fill_for_zone(
+            &self.retail_zones,
+            background_zone,
+            world_display_mask,
+            vram_fill_color,
+        )
+        .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
             .build_at_progress_with_runtime_snapshots(
@@ -3322,7 +3422,7 @@ impl Runtime {
             .as_ref()
             .is_some_and(RetailPbakPlayback::is_armed)
         {
-            self.stage.update_retail_scene(scene)?;
+            self.stage.update_retail_scene(scene, background_fill)?;
         }
         Ok(())
     }
@@ -3606,6 +3706,7 @@ impl Runtime {
         if plan.is_noop() {
             return Ok(());
         }
+        let next_vram_fill_color = retail_zone_transition_color(&self.retail_zones, next_zone)?;
         let prepared_music = self.prepare_retail_music(&self.level_assets, next_zone, false)?;
 
         // Validate every fallible page/entry operation before the first TERM
@@ -3724,6 +3825,8 @@ impl Runtime {
         // lifecycle action succeeds. Until here, the live pager is untouched.
         self.retail_zone_pager = pager_commit;
         self.retail_zone_lifecycle = lifecycle_preview;
+        self.retail_objects
+            .set_next_vram_fill_color(next_vram_fill_color);
         self.apply_prepared_retail_music(prepared_music, false, next_zone, dom)?;
 
         self.retail_metrics.zone_transitions =
@@ -4520,13 +4623,14 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
             if let Some(bit) = keyboard_code(&event.code()) {
                 event.prevent_default();
                 let mut app = app.borrow_mut();
-                app.keyboard_bits |= bit;
+                let newly_pressed = app.active_keys.insert(event.code(), bit).is_none();
+                app.rebuild_keyboard_bits();
                 if let Some(runtime) = &mut app.runtime {
                     // Preserve a complete key press that begins and ends
                     // between two 30 Hz simulation samples. Held input still
                     // comes from `keyboard_bits`; this one-frame latch only
                     // guarantees the authored tapped edge is observable.
-                    if !event.repeat() {
+                    if newly_pressed && !event.repeat() {
                         runtime.pending_buttons |= bit;
                     }
                     runtime.resume_audio();
@@ -4540,9 +4644,11 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
     {
         let app = Rc::clone(app);
         let callback = Closure::<dyn FnMut(KeyboardEvent)>::new(move |event: KeyboardEvent| {
-            if let Some(bit) = keyboard_code(&event.code()) {
+            if keyboard_code(&event.code()).is_some() {
                 event.prevent_default();
-                app.borrow_mut().keyboard_bits &= !bit;
+                let mut app = app.borrow_mut();
+                app.active_keys.remove(&event.code());
+                app.rebuild_keyboard_bits();
             }
         });
         dom.document
@@ -4551,9 +4657,44 @@ fn bind_events(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
     }
     {
         let app = Rc::clone(app);
+        let callback = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if let Some(bit) = mouse_button(event.button()) {
+                event.prevent_default();
+                let mut app = app.borrow_mut();
+                let newly_pressed = app
+                    .active_mouse_buttons
+                    .insert(event.button(), bit)
+                    .is_none();
+                if newly_pressed && let Some(runtime) = &mut app.runtime {
+                    runtime.pending_buttons |= bit;
+                    runtime.resume_audio();
+                }
+            }
+        });
+        dom.screen
+            .add_event_listener_with_callback("mousedown", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+    }
+    {
+        let app = Rc::clone(app);
+        let callback = Closure::<dyn FnMut(MouseEvent)>::new(move |event: MouseEvent| {
+            if mouse_button(event.button()).is_some() {
+                event.prevent_default();
+                app.borrow_mut()
+                    .active_mouse_buttons
+                    .remove(&event.button());
+            }
+        });
+        window()?.add_event_listener_with_callback("mouseup", callback.as_ref().unchecked_ref())?;
+        callback.forget();
+    }
+    {
+        let app = Rc::clone(app);
         let callback = Closure::<dyn FnMut(Event)>::new(move |_| {
             let mut app = app.borrow_mut();
             app.keyboard_bits = 0;
+            app.active_keys.clear();
+            app.active_mouse_buttons.clear();
             app.active_touches.clear();
             if let Some(runtime) = &mut app.runtime {
                 runtime.pending_buttons = 0;
@@ -5315,6 +5456,35 @@ fn retail_entity_count(zones: &BTreeMap<Eid, OwnedRetailZone>) -> usize {
     zones.values().map(|zone| zone.entities.len()).sum()
 }
 
+fn retail_zone_transition_color(
+    zones: &BTreeMap<Eid, OwnedRetailZone>,
+    zone: Eid,
+) -> Result<[u8; 3], String> {
+    zones
+        .get(&zone)
+        .map(|zone| zone.graphics.transition_color)
+        .ok_or_else(|| format!("retail background zone {zone} is absent"))
+}
+
+fn retail_background_fill_for_zone(
+    zones: &BTreeMap<Eid, OwnedRetailZone>,
+    zone: Eid,
+    display_mask: u32,
+    vram_fill_color: [u8; 3],
+) -> Result<Option<RetailBackgroundFill>, String> {
+    let graphics = zones
+        .get(&zone)
+        .map(|zone| zone.graphics)
+        .ok_or_else(|| format!("retail background zone {zone} is absent"))?;
+    RetailBackgroundFill::for_zone(
+        display_mask,
+        graphics.vram_fill_height,
+        vram_fill_color,
+        graphics.vram_fill,
+    )
+    .map_err(|error| format!("retail background zone {zone}: {error}"))
+}
+
 fn parse_retail_zone_catalog(
     pair: &ValidatedPair,
     graph: &RetailZoneGraph,
@@ -5360,7 +5530,14 @@ fn parse_retail_zone_catalog(
             OrderedZoneLoadList::from(&header.load_list),
         ));
         if zones
-            .insert(eid, OwnedRetailZone { eid, entities })
+            .insert(
+                eid,
+                OwnedRetailZone {
+                    eid,
+                    graphics: header.graphics,
+                    entities,
+                },
+            )
             .is_some()
         {
             return Err(JsValue::from_str(&format!(
@@ -5624,6 +5801,7 @@ fn install_retail_scene_for_pair(
     texture_frame_snapshot: TextureFrameSnapshot,
     world_shader_snapshot: crust_sim::retail_runtime::RetailWorldShaderSnapshot,
     world_shader_render_state: RetailWorldShaderRenderState,
+    background_fill: Option<RetailBackgroundFill>,
 ) -> Result<NonZeroU16, JsValue> {
     let draw_count = initial_draw_count.wrapping_add(u32::from(after_loading_image));
     // Title and external-transition dummy zones legally have one-point paths.
@@ -5655,7 +5833,7 @@ fn install_retail_scene_for_pair(
     let stats = scene.stats;
     debug_assert_eq!(scene.path_point_count, point_count.get());
     if install_preview {
-        stage.install_retail_scene(scene)?;
+        stage.install_retail_scene(scene, background_fill)?;
     }
     if stats.worlds == 0 {
         dom.log(

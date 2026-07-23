@@ -1,10 +1,19 @@
+#![cfg_attr(
+    test,
+    allow(
+        dead_code,
+        reason = "host tests exercise pure presentation planning; the live stage is Wasm-only"
+    )
+)]
+
 use core::fmt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crust_renderer::cache::TextureHandle;
 use crust_renderer::command::{
-    BlendMode, OrderingTable, PrimitiveCommand, ScreenRect, SpriteCommand, UvRect,
+    BlendMode, ColoredQuad, ColoredVertex, OrderingTable, PrimitiveCommand, PrimitiveStyle,
+    ScreenPoint, ScreenRect, SpriteCommand, UvRect,
 };
 use crust_renderer::projection::Viewport;
 use crust_renderer::texture::{DecodedTexture, Rgba8};
@@ -18,6 +27,11 @@ const LOADING_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX);
 const TITLE_IMAGE_HANDLE: TextureHandle = TextureHandle::new(u64::MAX - 1);
 const LOADING_IMAGE_DEPTH: u16 = 2_047;
 const TITLE_IMAGE_DEPTH: u16 = 0;
+const RETAIL_BACKGROUND_DEPTH: u16 = 0;
+const RETAIL_GAMEPLAY_TOP: i32 = -108;
+const RETAIL_GAMEPLAY_HEIGHT: u16 = 216;
+const RETAIL_DISPLAY_BACKGROUND_COLORS: u32 = 0x2000;
+const RETAIL_DISPLAY_SUPPRESS_BACKGROUND: u32 = 0x8_0000;
 const NEUTRAL_TEXTURE_COLOR: Rgba8 = Rgba8 {
     r: 128,
     g: 128,
@@ -33,6 +47,64 @@ pub struct VisualState {
     /// Nonlinear black-overlay alpha selected by the native title fade.
     pub title_overlay_alpha: u8,
 }
+
+/// Zone-authored colors painted by native `GLClear` before any OT primitive.
+///
+/// The 12-pixel top and bottom masks remain black from the framebuffer clear;
+/// these two bands cover only the 512×216 gameplay region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetailBackgroundFill {
+    top_height: u16,
+    top_color: Rgba8,
+    bottom_color: Rgba8,
+}
+
+impl RetailBackgroundFill {
+    /// Reproduce the source display-mask gate and validate the ZDAT split.
+    ///
+    /// `None` means the ordinary black framebuffer clear is the complete
+    /// native result for this frame.
+    pub fn for_zone(
+        display_mask: u32,
+        top_height: u32,
+        top_color: [u8; 3],
+        bottom_color: [u8; 3],
+    ) -> Result<Option<Self>, RetailBackgroundFillError> {
+        if display_mask & RETAIL_DISPLAY_SUPPRESS_BACKGROUND != 0
+            || display_mask & RETAIL_DISPLAY_BACKGROUND_COLORS == 0
+        {
+            return Ok(None);
+        }
+        let top_height = u16::try_from(top_height)
+            .ok()
+            .filter(|height| *height <= RETAIL_GAMEPLAY_HEIGHT)
+            .ok_or(RetailBackgroundFillError::SplitOutsideGameplay(top_height))?;
+        Ok(Some(Self {
+            top_height,
+            top_color: opaque_rgb(top_color),
+            bottom_color: opaque_rgb(bottom_color),
+        }))
+    }
+}
+
+/// A malformed ZDAT cannot describe a background rectangle outside 512×216.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RetailBackgroundFillError {
+    SplitOutsideGameplay(u32),
+}
+
+impl fmt::Display for RetailBackgroundFillError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SplitOutsideGameplay(height) => write!(
+                formatter,
+                "retail background split height {height} is outside 0..={RETAIL_GAMEPLAY_HEIGHT}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RetailBackgroundFillError {}
 
 /// Work performed while replacing one camera-projected retail scene.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -89,6 +161,7 @@ pub struct GlStage {
     title_image_dimensions: Option<[i32; 2]>,
     retail_scene_commands: Vec<RetailSceneCommand>,
     retail_scene_textures: BTreeMap<TextureHandle, Arc<DecodedTexture>>,
+    retail_background_fill: Option<RetailBackgroundFill>,
     last_error: u32,
 }
 
@@ -102,6 +175,7 @@ impl GlStage {
             title_image_dimensions: None,
             retail_scene_commands: Vec::new(),
             retail_scene_textures: BTreeMap::new(),
+            retail_background_fill: None,
             last_error: 0,
         })
     }
@@ -142,8 +216,12 @@ impl GlStage {
     ///
     /// This preserves the original installation API while using the same
     /// immutable-content-identity texture diff as [`Self::update_retail_scene`].
-    pub fn install_retail_scene(&mut self, scene: RetailScene) -> Result<(), JsValue> {
-        self.update_retail_scene(scene).map(|_| ())
+    pub fn install_retail_scene(
+        &mut self,
+        scene: RetailScene,
+        background_fill: Option<RetailBackgroundFill>,
+    ) -> Result<(), JsValue> {
+        self.update_retail_scene(scene, background_fill).map(|_| ())
     }
 
     /// Installs one camera-projected retail scene without re-uploading exact
@@ -164,6 +242,7 @@ impl GlStage {
     pub fn update_retail_scene(
         &mut self,
         scene: RetailScene,
+        background_fill: Option<RetailBackgroundFill>,
     ) -> Result<RetailSceneUpdateDiagnostics, JsValue> {
         let backend_resident = scene
             .textures
@@ -208,12 +287,23 @@ impl GlStage {
             .into_iter()
             .map(|texture| (texture.handle, texture.pixels))
             .collect();
+        self.retail_background_fill = background_fill;
         self.backend.retain_textures(retained);
         Ok(diagnostics)
     }
 
     pub fn render(&mut self, state: VisualState) -> Result<(), JsValue> {
         self.ordering.clear();
+
+        if state.show_retail_scene
+            && let Some(background_fill) = self.retail_background_fill
+        {
+            for primitive in retail_background_commands(background_fill) {
+                self.ordering
+                    .submit_overlay(RETAIL_BACKGROUND_DEPTH, primitive)
+                    .map_err(|error| command_error(&error))?;
+            }
+        }
 
         // Type-three retail title screens use the MDAT image as a backdrop.
         // Submit it before same-depth GOOL commands so FIFO ordering matches
@@ -294,6 +384,41 @@ impl GlStage {
             self.last_error
         }
     }
+}
+
+fn opaque_rgb([r, g, b]: [u8; 3]) -> Rgba8 {
+    Rgba8 { r, g, b, a: 255 }
+}
+
+fn retail_background_commands(fill: RetailBackgroundFill) -> [PrimitiveCommand; 2] {
+    let top_height = i32::from(fill.top_height);
+    let bottom_height = i32::from(RETAIL_GAMEPLAY_HEIGHT - fill.top_height);
+    [
+        retail_background_quad(RETAIL_GAMEPLAY_TOP, top_height, fill.top_color),
+        retail_background_quad(
+            RETAIL_GAMEPLAY_TOP + top_height,
+            bottom_height,
+            fill.bottom_color,
+        ),
+    ]
+}
+
+fn retail_background_quad(y: i32, height: i32, color: Rgba8) -> PrimitiveCommand {
+    let bottom = y.saturating_add(height);
+    let vertex = |x, y| ColoredVertex {
+        position: ScreenPoint { x, y, z: -1 },
+        color,
+    };
+    PrimitiveCommand::ColoredQuad(ColoredQuad {
+        vertices: [
+            vertex(-256, y),
+            vertex(256, y),
+            vertex(-256, bottom),
+            vertex(256, bottom),
+        ],
+        blend: BlendMode::Opaque,
+        style: PrimitiveStyle::Fill,
+    })
 }
 
 fn plan_retail_scene_update(
@@ -407,6 +532,106 @@ mod tests {
                 blend: BlendMode::Opaque,
             }),
         }
+    }
+
+    #[test]
+    fn retail_background_fill_matches_native_display_flags_and_bounds() {
+        let fill = RetailBackgroundFill::for_zone(
+            RETAIL_DISPLAY_BACKGROUND_COLORS,
+            80,
+            [10, 20, 30],
+            [40, 50, 60],
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(fill.top_height, 80);
+        assert_eq!(fill.top_color, opaque_rgb([10, 20, 30]));
+        assert_eq!(fill.bottom_color, opaque_rgb([40, 50, 60]));
+        assert_eq!(
+            RetailBackgroundFill::for_zone(0, 80, [1; 3], [2; 3]).unwrap(),
+            None
+        );
+        assert_eq!(
+            RetailBackgroundFill::for_zone(
+                RETAIL_DISPLAY_BACKGROUND_COLORS | RETAIL_DISPLAY_SUPPRESS_BACKGROUND,
+                80,
+                [1; 3],
+                [2; 3],
+            )
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            RetailBackgroundFill::for_zone(RETAIL_DISPLAY_BACKGROUND_COLORS, 217, [1; 3], [2; 3],),
+            Err(RetailBackgroundFillError::SplitOutsideGameplay(217))
+        );
+    }
+
+    #[test]
+    fn retail_background_quads_cover_only_the_native_gameplay_region() {
+        let fill = RetailBackgroundFill::for_zone(
+            RETAIL_DISPLAY_BACKGROUND_COLORS,
+            80,
+            [10, 20, 30],
+            [40, 50, 60],
+        )
+        .unwrap()
+        .unwrap();
+        let [top, bottom] = retail_background_commands(fill);
+        let vertices = |primitive: PrimitiveCommand| match primitive {
+            PrimitiveCommand::ColoredQuad(quad) => quad.vertices,
+            _ => panic!("background must use an untextured opaque quad"),
+        };
+        assert_eq!(
+            vertices(top).map(|vertex| vertex.position),
+            [
+                ScreenPoint {
+                    x: -256,
+                    y: -108,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: 256,
+                    y: -108,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: -256,
+                    y: -28,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: 256,
+                    y: -28,
+                    z: -1
+                },
+            ]
+        );
+        assert_eq!(
+            vertices(bottom).map(|vertex| vertex.position),
+            [
+                ScreenPoint {
+                    x: -256,
+                    y: -28,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: 256,
+                    y: -28,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: -256,
+                    y: 108,
+                    z: -1
+                },
+                ScreenPoint {
+                    x: 256,
+                    y: 108,
+                    z: -1
+                },
+            ]
+        );
     }
 
     #[test]

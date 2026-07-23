@@ -2798,6 +2798,10 @@ pub struct RetailRuntime {
     death_count: u32,
     frame_index: u64,
     draw_count: u32,
+    /// Color consumed by native `GLClear` during the current source frame.
+    vram_fill_color: [u8; 3],
+    /// Color published by `LevelUpdateMisc` for the next `GLUpdate` latch.
+    next_vram_fill_color: [u8; 3],
     level_shader: RetailLevelShaderState,
     box_spawn: RetailBoxSpawnState,
     core_objects_initialized: bool,
@@ -2844,6 +2848,8 @@ impl RetailRuntime {
             death_count: 0,
             frame_index: 0,
             draw_count: 0,
+            vram_fill_color: [0; 3],
+            next_vram_fill_color: [0; 3],
             level_shader: RetailLevelShaderState::default(),
             box_spawn: RetailBoxSpawnState::default(),
             core_objects_initialized: false,
@@ -2983,6 +2989,8 @@ impl RetailRuntime {
 
     fn apply_stream_mount_globals(&mut self, level: LevelId) {
         self.level_shader.initialize(level);
+        self.vram_fill_color = [0; 3];
+        self.next_vram_fill_color = [0; 3];
         self.retained_doctor_pool_pointer = None;
         for index in POINTER_GLOBALS {
             self.set_mount_global(index, 0);
@@ -3472,6 +3480,21 @@ impl RetailRuntime {
             .unwrap_or(INITIAL_DISPLAY_MASK)
     }
 
+    /// Zone-transition color consumed by this frame's native background fill.
+    #[must_use]
+    pub const fn current_vram_fill_color(&self) -> [u8; 3] {
+        self.vram_fill_color
+    }
+
+    /// Publish the destination ZDAT transition color for the next GL boundary.
+    ///
+    /// This is the safe value equivalent of native `LevelUpdateMisc` writing
+    /// `next_vram_fill_color`; it deliberately does not alter the current
+    /// frame's already-snapshotted background.
+    pub const fn set_next_vram_fill_color(&mut self, color: [u8; 3]) {
+        self.next_vram_fill_color = color;
+    }
+
     /// Counter used by world textures and GOOL during the current frame.
     #[must_use]
     pub const fn draw_count(&self) -> u32 {
@@ -3492,6 +3515,7 @@ impl RetailRuntime {
         } else {
             INITIAL_DISPLAY_MASK
         };
+        self.vram_fill_color = self.next_vram_fill_color;
         if !paused && display_mask & 0x1000 != 0 {
             self.draw_count = self.draw_count.wrapping_add(1);
         }
@@ -10434,6 +10458,34 @@ mod tests {
         assert_eq!(runtime.current_display_mask(), ANIMATE_OBJECTS | 0x20);
         let animated = runtime.run_frame(&mut SnapshotHost, 1).unwrap();
         assert_eq!(animated.executions.len(), 1);
+    }
+
+    #[test]
+    fn vram_fill_color_latches_after_a_deferred_restart_transaction() {
+        let mut runtime =
+            RetailRuntime::new_for_level(CURRENT_DISPLAY_GLOBAL + 1, LevelId::new_const(0x03));
+        assert_eq!(runtime.current_vram_fill_color(), [0, 0, 0]);
+
+        runtime.set_next_vram_fill_color([10, 20, 30]);
+        assert_eq!(runtime.current_vram_fill_color(), [0, 0, 0]);
+        runtime.finish_display_frame(false).unwrap();
+        assert_eq!(runtime.current_vram_fill_color(), [10, 20, 30]);
+
+        runtime.set_next_vram_fill_color([40, 50, 60]);
+        runtime.machine.request_level_restart();
+        assert_eq!(runtime.finish_deferred_display_frame().unwrap(), None);
+        assert_eq!(
+            runtime.current_vram_fill_color(),
+            [10, 20, 30],
+            "the host must commit the synchronous restart before GLUpdate"
+        );
+        runtime.machine.clear_level_restart_request();
+        runtime.finish_deferred_display_frame().unwrap();
+        assert_eq!(
+            runtime.current_vram_fill_color(),
+            [40, 50, 60],
+            "the completed restart frame latches the restored zone color"
+        );
     }
 
     #[test]

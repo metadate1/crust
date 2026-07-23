@@ -583,17 +583,18 @@ local scan of all 44 retail pairs found zero authored occurrences of that nested
 
 | PlayStation input | Keyboard | Standard gamepad |
 |---|---:|---:|
-| D-pad | Arrow keys | D-pad / left stick |
-| Cross / jump | `Z` | A / Cross |
-| Square / spin | `X` | X / Square |
+| D-pad | Arrow keys / `W` `A` `S` `D` | D-pad / left stick |
+| Cross / jump | `Z` / `Space` | A / Cross |
+| Square / spin | `X` / main or auxiliary mouse click | X / Square |
 | Circle | `C` | B / Circle |
 | Triangle | `V` | Y / Triangle |
 | L1 / R1 | `A` / `S` | LB / RB |
 | L2 / R2 | `Q` / `W` | LT / RT |
 | L3 / R3 | `K` / `L` | Stick clicks |
-| Start / Select | `Enter` / `Space` | Start / Back |
+| Start / Select | `Enter` / `Space` (legacy; Space also jumps) | Start / Back |
 
 The complete pad is also available through multi-touch controls on coarse-pointer devices.
+The WASD aliases retain the original complete-pad shoulder bindings on `W`, `A`, and `S`.
 Fullscreen, pause, and mute are in the stage toolbar.
 
 ## Development

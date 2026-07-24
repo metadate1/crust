@@ -1266,9 +1266,16 @@ is 1,322,866 bytes with SHA-256
   executions, 33 lifecycle transitions, 60 camera ranges, and 59 path changes. Crash remains alive
   in state 32 at `[15683008, 4742989, 5396480]`; globals are `[0x500,15,15,13,1,14,0]`, RNG is
   `0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. There is no death, restart, below-zero or terminal
-  fall, VM fault, faulted object, execution error, or checked runtime issue. This is deterministic
-  native integration over user-supplied local data, not a browser playthrough or full-game parity
-  claim.
+  fall, VM fault, faulted object, execution error, or checked runtime issue. Temple's carried Level
+  Complete graph requests Title on frame 633 at draw 7,537; ordinary Map input selects Road to
+  Nowhere on frame 253 at draw 7,790. Road requests Level Complete `0x2d` on frame 2,449 after 193
+  successful spawns from 44,589 attempts, 71,778 executions, 26 lifecycle transitions, 50 camera
+  ranges, and 49 path changes. It activates checkpoints `0x4900` and `0xa400`, emits two save-state
+  effects and no load-state, and reaches `c7_kZ` with Crash alive in WarpC state 32 at
+  `[-16384,3720267,-40210336]`. Terminal globals are `[0x500,15,15,14,1,15,0]`, RNG is
+  `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. There is no death, restart, faulted object,
+  execution error, or checked issue. This is deterministic native integration over user-supplied
+  local data, not a browser playthrough or full-game parity claim.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
   requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
   terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
@@ -1349,11 +1356,12 @@ is 1,322,866 bytes with SHA-256
   requests the same authored transition on frame 5,041 after 168,087 executions, with zero deaths,
   restarts, below-zero or terminal falls, VM faults, faulted objects, execution errors, or checked
   runtime issues.
-- Road to Nowhere (`0x14`) has a no-death direct-boot route over the authored outside rope lanes.
-  It activates both checkpoints, crosses every collapsing span without a restart or load-state,
-  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,449.
-  Crash remains live in state 32 at `[-16384, 3720267, -40210336]`; the route performs 71,778
-  executions and has no VM fault, faulted object, or execution error.
+- Road to Nowhere (`0x14`) has matching fresh and uninterrupted carried no-death routes over the
+  authored outside rope lanes. Both activate both checkpoints, cross every collapsing span without
+  a restart or load-state, observe WarpC states zero through four, and request Level Complete
+  `0x2d` on frame 2,449. Crash remains live in state 32 at
+  `[-16384, 3720267, -40210336]`; the route performs 71,778 executions and has no VM fault, faulted
+  object, or execution error.
 - The High Road (`0x16`) has a separate direct-boot ordinary-pad completion. It pre-aligns to the
   authored right rope, centers across the physical `b2_mZ` seam, returns to the rope, and centers
   again on the `d0_mZ` end island. WarpC states zero through four execute and request Level Complete

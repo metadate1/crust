@@ -385,13 +385,12 @@ Temple Ruins now has complete fresh and uninterrupted carried ordinary-pad route
 requests Level Complete `0x2d` on frame 4,473. The carried route reaches the same authored handoff
 on frame 5,041 after 190 successful spawns, 168,087 executions, 33 lifecycle transitions, 60 camera
 ranges, and 59 path changes. Neither route records a death, restart, terminal fall, VM fault,
-faulted object, execution error, or checked runtime issue. Road to Nowhere has a no-death
-direct-boot route: it follows the authored outside rope lanes across every collapsing span, retains
-the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,449 without a restart
-or load-state effect. The High Road has its own clean ordinary-pad route: it follows the authored
-right rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives WarpC
-states zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming a
-life.
+faulted object, execution error, or checked runtime issue. Road to Nowhere has matching fresh and
+uninterrupted carried no-death routes: both follow the authored outside rope lanes across every
+collapsing span and request Level Complete `0x2d` from WarpC on frame 2,449 without a restart or
+load-state effect. The High Road has its own clean ordinary-pad route: it follows the authored right
+rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives WarpC states
+zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming a life.
 
 Cortex Power now has a complete fresh direct-boot ordinary-pad golden. It crosses 21 zone
 transitions, emits one authored save-state, drives WarpC through states zero to four, and requests
@@ -438,7 +437,13 @@ finishes alive in state 32 at `[15683008, 4742989, 5396480]`; globals are
 `0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. Temple has no death, restart, below-zero or terminal
 fall, VM fault, faulted object, execution error, or checked runtime issue. Every earlier completed
 gameplay leg through Ripper Roo records zero restarts; Lost City's six recoveries are asserted
-separately. This is deterministic native-engine characterization, not a browser playthrough.
+separately. Temple's carried Level Complete graph requests Title on frame 633 at draw 7,537. The
+next authored Map reaches Road to Nowhere on frame 253 at draw 7,790, and Road completes on frame
+2,449 after 193 successful spawns, 71,778 executions, 26 lifecycle transitions, 50 camera ranges,
+and 49 path changes. It activates both checkpoints and reaches `c7_kZ`'s WarpC with zero deaths,
+restarts, load-state effects, faults, or checked issues. Terminal globals are
+`[0x500,15,15,14,1,15,0]`, RNG is `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is
+deterministic native-engine characterization, not a browser playthrough.
 
 The current native schedule therefore includes deterministic normal-route completions for
 N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,

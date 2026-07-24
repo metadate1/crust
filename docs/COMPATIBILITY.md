@@ -625,8 +625,14 @@ gameplay path.
   Crash remains alive in state 32 at `[15683008, 4742989, 5396480]`; globals are
   `[0x500,15,15,13,1,14,0]`, RNG is `0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. The route has no
   death, restart, below-zero or terminal fall, VM fault, faulted object, execution error, or checked
-  runtime issue. This is deterministic native integration over user-supplied local data, not
-  browser execution or full-game parity.
+  runtime issue. Temple's carried Level Complete graph requests Title on frame 633 at draw 7,537.
+  Ordinary Map input selects Road to Nowhere on frame 253 at draw 7,790. Road then requests Level
+  Complete `0x2d` on frame 2,449 after 193 successful spawns, 71,778 executions, 26 lifecycle
+  transitions, 50 camera ranges, and 49 path changes. It activates both checkpoints, emits two
+  save-state effects and no load-state, and has no death, restart, fault, execution error, or
+  checked issue. Terminal globals are `[0x500,15,15,14,1,15,0]`, RNG is
+  `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is deterministic native integration over
+  user-supplied local data, not browser execution or full-game parity.
 
   A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
   avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
@@ -733,10 +739,10 @@ gameplay path.
   requests Level Complete `0x2d` on frame 4,473; the carried route requests the same authored
   handoff on frame 5,041 after 168,087 executions and 33 lifecycle transitions. Both remain free
   of deaths, restarts, terminal falls, VM faults, faulted objects, execution errors, and checked
-  runtime issues. Road to Nowhere follows both authored outside rope lanes across the collapsing
-  spans, reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame
-  2,449. The route activates both checkpoints, preserves the fresh life stock, performs 71,778
-  executions, and emits no load-state.
+  runtime issues. Road to Nowhere has matching fresh and uninterrupted carried routes. Both follow
+  the authored outside rope lanes across the collapsing spans, reach WarpC without a death or
+  restart, and request Level Complete `0x2d` on frame 2,449. The route activates both checkpoints,
+  performs 71,778 executions, and emits no load-state.
   The High Road separately follows its authored right rope, centers across the `b2_mZ` seam and on
   the `d0_mZ` end island, observes WarpC states zero through four, and requests Level Complete
   `0x2d` on frame 2,274 without a death, restart, load-state, VM fault, or execution error.
@@ -776,9 +782,11 @@ gameplay path.
   Stones, Hog Wild, Native Fortress, Up the Creek, and Ripper Roo across their authored completion
   and Map handoffs before completing The Lost City's carried route on frame 7,445, returning
   directly to Title, selecting Temple Ruins on Map frame 253, and completing Temple Ruins on
-  carried frame 5,041 through its authored Level Complete request. The independent Rolling Stones
-  direct boot reaches the same end on its own deterministic phase; the later uninterrupted
-  campaign remains unproved.
+  carried frame 5,041 through its authored Level Complete request. Temple's completion graph
+  requests Title on frame 633, the next Map selects Road to Nowhere on frame 253, and Road reaches
+  its authored Level Complete request on frame 2,449 with zero deaths or restarts. The independent
+  Rolling Stones direct boot reaches the same end on its own deterministic phase; the later
+  uninterrupted campaign remains unproved.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

@@ -109,6 +109,8 @@ use crate::{
     core_objects_pad_update, initial_retail_level_state, require_render_object_snapshot,
     retail_island_state_writeback,
 };
+#[cfg(feature = "browser-test-harness")]
+use crust_sim::gool::{INITIAL_LIFE_COUNT_GLOBAL, LIFE_COUNT_GLOBAL};
 
 // `web-sys` 0.3 exposes `Element::request_fullscreen` as a caught void
 // method, even though current browsers return a Promise. Read that return
@@ -5491,6 +5493,43 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
                 .map_or(JsValue::NULL, |eid| JsValue::from_f64(f64::from(eid.raw()))),
         )?;
     }
+    #[cfg(feature = "browser-test-harness")]
+    update_browser_test_globals(debug, runtime)?;
+    Ok(())
+}
+
+#[cfg(feature = "browser-test-harness")]
+fn update_browser_test_globals(debug: &Object, runtime: &Runtime) -> Result<(), JsValue> {
+    let globals = Object::new();
+    Reflect::set(
+        globals.as_ref(),
+        &JsValue::from_str("allLevels"),
+        &JsValue::from_bool(runtime.level_access.all_levels()),
+    )?;
+    let read = |index| {
+        runtime.retail_objects.global_word(index).map_err(|error| {
+            JsValue::from_str(&format!(
+                "browser-test global {index} is unavailable: {error:?}"
+            ))
+        })
+    };
+    for (name, index) in [
+        ("lifeCount", LIFE_COUNT_GLOBAL),
+        ("initialLifeCount", INITIAL_LIFE_COUNT_GLOBAL),
+        ("levelsUnlocked", LEVELS_UNLOCKED_GLOBAL),
+        ("itemPool2", ITEM_POOL_2_GLOBAL),
+    ] {
+        Reflect::set(
+            globals.as_ref(),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(f64::from(read(index)?)),
+        )?;
+    }
+    Reflect::set(
+        debug,
+        &JsValue::from_str("browserTestGlobals"),
+        globals.as_ref(),
+    )?;
     Ok(())
 }
 

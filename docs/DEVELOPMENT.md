@@ -55,6 +55,48 @@ The hook accepts only a 16-bit pad mask and exposes no GOOL-state mutation or fo
 operation. It is intended for an ignored, legally local browser campaign test; the normal
 `npm run build` artifact does not contain or expose `window.__crustTest`.
 
+Run the deterministic Chrome smoke with one raw image or enough extracted pairs for the selected
+boot stream:
+
+```bash
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/S0000019.NSD \
+  --asset /path/to/S0000019.NSF
+```
+
+The runner builds the isolated harness, starts its own loopback server, launches the system
+Chrome/Chromium with a temporary profile, clears the virtual-card and resume storage before boot,
+sets the real `#gameFiles` browser input to the local paths, and advances 120 zero-input frames at
+34 ms each. It fails on bootstrap/runtime/GOOL/WebGL/console/network errors, non-GET or cross-origin
+traffic, and missing simulation activity. Its screenshot is written under ignored
+`target/browser-test-artifacts/`; game bytes are read in place and are never copied or uploaded.
+Use repeated `--asset` arguments for a BIN/ISO or additional extracted pairs. `--chrome` overrides
+the browser executable. Add `--unlock-all` to assert in the feature-only read-only debug snapshot
+that both retail life globals equal `999 << 8`, the map access gate equals 99, and both key-path
+bits are present.
+
+Longer local traces use a run-length JSON file passed with `--replay`:
+
+```json
+{
+  "schema": 1,
+  "bootLid": 25,
+  "unlockAll": false,
+  "segments": [
+    { "frames": 90, "held": 0 },
+    { "frames": 1, "held": 2048 },
+    { "frames": 1, "held": 0, "expect": { "mountedLid": 25, "minFrame": 92 } }
+  ],
+  "expect": { "currentLid": 25, "minRetailExecutions": 1 }
+}
+```
+
+The runner already yields to asynchronous authored stream requests and checks the remounted
+destination before continuing. A complete campaign proof still needs a captured, reviewed pad-mask
+timeline plus level/checkpoint expectations for the whole retail route; the repository does not yet
+contain that controller oracle. The browser hook intentionally cannot force a transition or mutate
+GOOL state, so the missing trace cannot be replaced by test-only game-state shortcuts.
+
 ## Local-data verification
 
 Legally owned data may be placed under ignored `local-data/` or selected from anywhere on disk.

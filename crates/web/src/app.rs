@@ -1138,7 +1138,7 @@ impl Runtime {
         })?;
         if level_access.all_levels() {
             dom.log(
-                "Unlocked every island-map node and both key paths for this session; browser resume and memory-card writes remain untouched.",
+                "Unlocked every island-map node and both key paths with 999 starting lives for this session; browser resume and memory-card writes remain untouched.",
                 false,
             );
         }

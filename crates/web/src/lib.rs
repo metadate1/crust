@@ -7,7 +7,10 @@ use wasm_bindgen::prelude::*;
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::card::SaveData;
 #[cfg(any(target_arch = "wasm32", test))]
-use crust_sim::gool::{ITEM_POOL_2_GLOBAL, LEVELS_UNLOCKED_GLOBAL, VmError};
+use crust_sim::gool::{
+    INITIAL_LIFE_COUNT_GLOBAL, ITEM_POOL_2_GLOBAL, LEVELS_UNLOCKED_GLOBAL, LIFE_COUNT_GLOBAL,
+    VmError,
+};
 #[cfg(any(target_arch = "wasm32", test))]
 use crust_sim::retail_runtime::{RenderObjectsError, RetailRenderObject, RetailRuntime};
 
@@ -119,24 +122,38 @@ pub(crate) fn authoritative_save_or_last<E>(
 #[cfg(any(target_arch = "wasm32", test))]
 const ALL_LEVELS_UNLOCK_GATE: u32 = 99;
 
+/// The source project's native `GOD_MODE` initial-life value in retail 24.8
+/// fixed-point units.
+#[cfg(any(target_arch = "wasm32", test))]
+const ALL_LEVELS_MAX_LIVES: u32 = 999 << 8;
+
 /// The two native `item_pool2` flags that expose the key-gated secret paths.
 #[cfg(any(target_arch = "wasm32", test))]
 const ALL_LEVELS_SECRET_PATH_BITS: u32 = (1 << 10) | (1 << 20);
 
 /// Applies the source project's `GOD_MODE` access gates without moving the
-/// saved island-map cursor or fabricating gems, keys, lives, and options.
+/// saved island-map cursor or fabricating gems, keys, and options.
 ///
 /// The secret-path flags are `ORed` into the live pool so collected state is not
-/// discarded. The browser host keeps the resulting card/resume writes
-/// in-memory for this launch.
+/// discarded. The first application after boot or card restore also installs
+/// `GOD_MODE`'s 999-life starting count. Later applications recognize that the
+/// initial count is already armed and do not replenish lives lost in play. The
+/// browser host keeps the resulting card/resume writes in-memory for this
+/// launch.
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn apply_all_levels_override(runtime: &mut RetailRuntime) -> Result<(), VmError> {
     let item_pool_2 = runtime.global_word(ITEM_POOL_2_GLOBAL)?;
+    let initial_lives = runtime.global_word(INITIAL_LIFE_COUNT_GLOBAL)?;
     runtime.set_global_word(LEVELS_UNLOCKED_GLOBAL, ALL_LEVELS_UNLOCK_GATE)?;
     runtime.set_global_word(
         ITEM_POOL_2_GLOBAL,
         item_pool_2 | ALL_LEVELS_SECRET_PATH_BITS,
-    )
+    )?;
+    if initial_lives != ALL_LEVELS_MAX_LIVES {
+        runtime.set_global_word(INITIAL_LIFE_COUNT_GLOBAL, ALL_LEVELS_MAX_LIVES)?;
+        runtime.set_global_word(LIFE_COUNT_GLOBAL, ALL_LEVELS_MAX_LIVES)?;
+    }
+    Ok(())
 }
 
 /// Performs the `PadUpdate` that native calls at the start of
@@ -241,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn all_levels_override_preserves_progress_and_adds_secret_access() {
+    fn all_levels_override_preserves_progress_and_adds_secret_access_and_max_lives() {
         let original = SaveData {
             level_count: 7,
             initial_lives: 9 << 8,
@@ -276,11 +293,27 @@ mod tests {
         );
         assert_eq!(
             SaveData {
+                initial_lives: original.initial_lives,
                 item_pool_2: original.item_pool_2,
                 ..unlocked
             },
             original,
-            "the launcher option must preserve real progress, collectibles, lives, and options"
+            "the launcher option must preserve real progress, collectibles, and options"
+        );
+        assert_eq!(unlocked.initial_lives, ALL_LEVELS_MAX_LIVES);
+        assert_eq!(
+            runtime.global_word(LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES)
+        );
+
+        runtime
+            .set_global_word(LIFE_COUNT_GLOBAL, ALL_LEVELS_MAX_LIVES - (1 << 8))
+            .unwrap();
+        apply_all_levels_override(&mut runtime).unwrap();
+        assert_eq!(
+            runtime.global_word(LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES - (1 << 8)),
+            "reapplying the access gate must not replenish a life lost during play"
         );
 
         let loaded = SaveData {
@@ -300,6 +333,15 @@ mod tests {
             runtime.global_word(ITEM_POOL_2_GLOBAL),
             Ok(ALL_LEVELS_SECRET_PATH_BITS),
             "both key-gated paths must remain available after a card load"
+        );
+        assert_eq!(
+            runtime.global_word(INITIAL_LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES)
+        );
+        assert_eq!(
+            runtime.global_word(LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES),
+            "a card restore starts the temporary max-lives session again"
         );
 
         apply_all_levels_override(&mut runtime).unwrap();
@@ -322,6 +364,14 @@ mod tests {
             mounted.global_word(ITEM_POOL_2_GLOBAL),
             Ok(ALL_LEVELS_SECRET_PATH_BITS)
         );
+        assert_eq!(
+            mounted.global_word(INITIAL_LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES)
+        );
+        assert_eq!(
+            mounted.global_word(LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES)
+        );
 
         mounted.reset_level_globals().unwrap();
         let reset_level_count = mounted
@@ -343,6 +393,10 @@ mod tests {
         assert_eq!(
             mounted.global_word(ITEM_POOL_2_GLOBAL),
             Ok(ALL_LEVELS_SECRET_PATH_BITS)
+        );
+        assert_eq!(
+            mounted.global_word(LIFE_COUNT_GLOBAL),
+            Ok(ALL_LEVELS_MAX_LIVES)
         );
     }
 

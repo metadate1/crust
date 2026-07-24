@@ -38,6 +38,7 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   assert.match(html, /Insert BIN \/ ISO/);
   assert.match(html, />\s*Launch game\s*</);
   assert.match(html, /All levels unlocked/);
+  assert.match(html, /Includes 999 lives for this session/);
   assert.match(html, /resume and memory card stay untouched/);
   assert.match(html, /Leave on “full game” to begin at the opening/);
   assert.doesNotMatch(html, /Local-data bay|Runtime monitor|Launch Rust runtime/);

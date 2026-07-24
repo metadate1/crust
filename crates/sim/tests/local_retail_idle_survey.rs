@@ -50336,6 +50336,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             let up_the_creek = LevelId::new_const(0x18);
             let ripper_roo = LevelId::new_const(0x17);
             let lost_city = LevelId::new_const(0x20);
+            let temple_ruins = LevelId::new_const(0x1c);
+            let island_two = Eid::from_name("2a_pZ").expect("fixed Lost-City map EID is valid");
             let (completion_nsd, completion_nsf, completion_nsf_bytes) =
                 parse_local_pair(root, completion).expect("Level Complete pair must parse");
             let (title_nsd, title_nsf, title_nsf_bytes) =
@@ -51448,7 +51450,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             };
             let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
                 parse_local_pair(root, lost_city).expect("The Lost City pair must parse");
-            let (lost_city_mount_survey, lost_city_runtime) = survey_pair_with_runtime(
+            let (lost_city_survey, mut lost_city_runtime) = survey_pair_with_runtime(
                 known_name(lost_city),
                 lost_city,
                 &lost_city_nsd,
@@ -51457,29 +51459,74 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 RetailRuntime::new_from_session(GLOBAL_WORDS, lost_city, lost_city_carry)
                     .expect("The Lost City must import authentic Ripper Roo campaign carry"),
                 LevelContextSource::SessionGlobals,
-                SurveyInputProfile::Idle,
-                1,
+                SurveyInputProfile::LostCityCompletionRoute,
+                8_000,
             )
-            .expect("the authentic campaign must cross The Lost City's first runtime frame");
-            assert_eq!(lost_city_mount_survey.frames, 1);
-            assert!(lost_city_mount_survey.terminal.is_none());
-            assert!(lost_city_mount_survey.next_lid.is_none());
-            assert_eq!(lost_city_mount_survey.final_live_objects, 41);
-            assert_eq!(lost_city_mount_survey.max_live_objects, 41);
-            assert_eq!(lost_city_mount_survey.successful_spawns, 33);
-            assert_eq!(lost_city_mount_survey.spawn_attempts, 33);
-            assert_eq!(lost_city_mount_survey.expected_spawn_rejections, 0);
-            assert_eq!(lost_city_mount_survey.executions, 56);
-            assert_eq!(lost_city_mount_survey.zone_transitions, 0);
-            assert_eq!(lost_city_mount_survey.restarts, 0);
-            assert_eq!(lost_city_mount_survey.unexpected_spawn_errors, 0);
-            assert_eq!(lost_city_mount_survey.execution_errors, 0);
-            assert_eq!(lost_city_mount_survey.faulted_objects, 0);
-            assert!(
-                lost_city_mount_survey.is_clean(),
+            .expect("the authentic campaign must execute The Lost City's completion route");
+            assert_eq!(
+                lost_city_survey.frames,
+                7_445,
                 "{}",
-                lost_city_mount_survey.summary()
+                lost_city_survey.summary()
             );
+            assert_eq!(
+                lost_city_survey.terminal.as_deref(),
+                Some("frame 7445 requested level transition to 0x19")
+            );
+            assert_eq!(lost_city_survey.next_lid, Some((7_445, 0x19)));
+            assert_eq!(lost_city_survey.final_live_objects, 34);
+            assert_eq!(lost_city_survey.max_live_objects, 73);
+            assert_eq!(lost_city_survey.successful_spawns, 397);
+            assert_eq!(lost_city_survey.spawn_attempts, 119_398);
+            assert_eq!(lost_city_survey.expected_spawn_rejections, 119_001);
+            assert_eq!(lost_city_survey.executions, 222_312);
+            assert_eq!(lost_city_survey.zone_transitions, 58);
+            assert_eq!(lost_city_survey.restarts, 6);
+            assert_eq!(
+                lost_city_survey.restart_frames,
+                [296, 580, 925, 1_238, 1_518, 5_835]
+            );
+            assert_eq!(
+                lost_city_survey.checkpoint_samples,
+                [
+                    (1, -1, [2_048_000, 1_738_240, 19_455_744]),
+                    (5_681, 0x8000, [16_588_800, -3_072_768, 204_544]),
+                ]
+            );
+            assert_eq!(
+                lost_city_survey.box_count_samples,
+                [
+                    (1, 0),
+                    (5_681, 0x100),
+                    (5_836, 0),
+                    (5_837, 0x100),
+                    (6_759, 0x200),
+                    (6_917, 0x300),
+                    (7_274, 0x400),
+                    (7_280, 0x500),
+                ]
+            );
+            assert_eq!(lost_city_survey.effect_counts.get("save-state"), Some(&1));
+            assert_eq!(lost_city_survey.effect_counts.get("load-state"), Some(&6));
+            assert_eq!(
+                lost_city_survey.effect_counts.get("master-fade-reset"),
+                Some(&1)
+            );
+            assert_eq!(lost_city_survey.effect_counts.get("transition"), Some(&1));
+            assert_eq!(lost_city_survey.unexpected_spawn_errors, 0);
+            assert_eq!(lost_city_survey.execution_errors, 0);
+            assert_eq!(lost_city_survey.faulted_objects, 0);
+            assert!(
+                lost_city_survey.is_clean(),
+                "{}",
+                lost_city_survey.summary()
+            );
+            let lost_city_player = player_trace(&lost_city_runtime)
+                .expect("carried Lost City player trace must remain readable")
+                .expect("carried Lost City must retain Crash through the exit warp");
+            assert_eq!(lost_city_player.zone, Eid::from_name("h5_wZ").unwrap());
+            assert_eq!(lost_city_player.state, 32);
+            assert_eq!(lost_city_player.translation, [1_220_336, 650_576, 200_064]);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -51491,11 +51538,225 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     ISLAND_CAMERA_STATE_GLOBAL,
                 ]
                 .map(|index| lost_city_runtime.global_word(index).unwrap()),
-                [0x100, 15, 15, 12, 1, 12, 0]
+                [0x300, 15, 15, 12, 1, 13, 0]
             );
-            assert_eq!(lost_city_runtime.machine().random_seed(), 0xabc4_15c8);
-            assert_eq!(lost_city_runtime.draw_count(), 24_785);
+            assert_eq!(lost_city_runtime.machine().random_seed(), 0xba04_2128);
+            assert_eq!(lost_city_runtime.random_seed_b(), 0xc889_af19);
+            assert_eq!(lost_city_runtime.draw_count(), 1_610);
             assert_eq!(lost_city_runtime.faulted_object_count(), 0);
+
+            let lost_city_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&lost_city_nsd, &lost_city_nsf, &lost_city_nsf_bytes);
+                let report = lost_city_runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(title.get()).expect("Title LID fits i32"),
+                    )
+                    .expect("The Lost City LEVEL_END must export its authored direct-Title carry");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x300, 15, 15, 12, 1, 13, 0]
+                );
+                assert_eq!(report.carry.random_seed, 0xba04_2128);
+                assert_eq!(report.carry.random_seed_b(), 0xc889_af19);
+                assert_eq!(report.carry.draw_count, 1_610);
+                report.carry
+            };
+            let mut post_lost_city_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                lost_city_title_carry,
+            );
+            post_lost_city_map.wait_until_ready(64);
+            assert_eq!(post_lost_city_map.frame, 10);
+            assert_eq!(
+                post_lost_city_map.camera.location().path,
+                RetailPathId {
+                    zone: island_two,
+                    index: 1,
+                }
+            );
+            assert_eq!(post_lost_city_map.camera.location().progress.raw(), 0x0700);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_lost_city_map.runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 12, 1, 13, 1]
+            );
+            assert_eq!(
+                post_lost_city_map.runtime.machine().random_seed(),
+                0xba04_2128
+            );
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xc889_af19);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 1_620);
+            assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
+
+            for _ in 0..120 {
+                post_lost_city_map.step(0);
+            }
+            post_lost_city_map.tap(PAD_UP);
+            for _ in 0..120 {
+                post_lost_city_map.step(0);
+            }
+            post_lost_city_map.step(PAD_CROSS);
+            assert_eq!(post_lost_city_map.frame, 253);
+            assert_eq!(post_lost_city_map.transitions, [(253, 0x1c)]);
+            assert_eq!(
+                post_lost_city_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("2d_pZ")
+                        .expect("fixed Lost-City map successor EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(post_lost_city_map.camera.location().progress.raw(), 0x0900);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_lost_city_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 13, 1, 13, 1]
+            );
+            assert_eq!(
+                post_lost_city_map.runtime.machine().random_seed(),
+                0xa5a6_9d6c
+            );
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xc889_af19);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 1_863);
+            assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
+
+            let temple_ruins_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_lost_city_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(temple_ruins.get()).expect("Temple Ruins LID fits i32"),
+                    )
+                    .expect("post-Lost-City Map LEVEL_END must export Temple Ruins");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x1c);
+                assert_eq!(report.next_lid_after_event, 0x1c);
+                assert_eq!(report.resolved.level, temple_ruins);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0, 15, 15, 13, 1, 13, 1]
+                );
+                assert_eq!(report.carry.random_seed, 0xa5a6_9d6c);
+                assert_eq!(report.carry.random_seed_b(), 0xc889_af19);
+                assert_eq!(report.carry.draw_count, 1_863);
+                report.carry
+            };
+            let (temple_nsd, temple_nsf, temple_nsf_bytes) =
+                parse_local_pair(root, temple_ruins).expect("Temple Ruins pair must parse");
+            let (temple_mount_survey, temple_runtime) = survey_pair_with_runtime(
+                known_name(temple_ruins),
+                temple_ruins,
+                &temple_nsd,
+                &temple_nsf,
+                &temple_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, temple_ruins, temple_ruins_carry)
+                    .expect("Temple Ruins must import authored post-Lost-City Map carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::Idle,
+                1,
+            )
+            .expect("the authentic campaign must cross Temple Ruins' first runtime frame");
+            assert_eq!(temple_mount_survey.frames, 1);
+            assert!(temple_mount_survey.terminal.is_none());
+            assert!(temple_mount_survey.next_lid.is_none());
+            assert_eq!(temple_mount_survey.final_live_objects, 15);
+            assert_eq!(temple_mount_survey.max_live_objects, 15);
+            assert_eq!(temple_mount_survey.successful_spawns, 8);
+            assert_eq!(temple_mount_survey.spawn_attempts, 8);
+            assert_eq!(temple_mount_survey.expected_spawn_rejections, 0);
+            assert_eq!(temple_mount_survey.unexpected_spawn_errors, 0);
+            assert_eq!(temple_mount_survey.executions, 18);
+            assert_eq!(temple_mount_survey.execution_errors, 0);
+            assert_eq!(temple_mount_survey.zone_transitions, 0);
+            assert_eq!(temple_mount_survey.restarts, 0);
+            assert!(temple_mount_survey.restart_frames.is_empty());
+            assert_eq!(temple_mount_survey.death_camera_frames, 0);
+            assert_eq!(temple_mount_survey.faulted_objects, 0);
+            assert!(temple_mount_survey.issue_counts.is_empty());
+            let temple_camera = temple_mount_survey
+                .final_camera
+                .expect("Temple Ruins mount must retain its authored camera");
+            assert_eq!(
+                temple_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("a0_sZ").expect("fixed Temple Ruins spawn EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(temple_camera.progress.raw(), 0x0100);
+            let temple_player = player_trace(&temple_runtime)
+                .expect("Temple Ruins mount player trace must remain readable")
+                .expect("Temple Ruins mount must retain Crash");
+            assert_eq!(temple_player.translation, [10_342_144, 512_000, 27_852_288]);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| temple_runtime.global_word(index).unwrap()),
+                [0x100, 15, 15, 13, 1, 13, 0]
+            );
+            assert_eq!(temple_runtime.machine().random_seed(), 0x7b54_7a17);
+            assert_eq!(temple_runtime.random_seed_b(), 0x1c4f_5bde);
+            assert_eq!(temple_runtime.draw_count(), 1_864);
+            assert_eq!(temple_runtime.faulted_object_count(), 0);
+            assert!(
+                temple_mount_survey.is_clean(),
+                "Temple Ruins' carried mount must remain clean: {}",
+                temple_mount_survey.summary()
+            );
         }
 
         eprintln!(
@@ -51528,8 +51789,10 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "0x93e26958, draw 21989; eighth Level Complete -> Title at frame 225 (draw ",
                 "22214); Map -> Ripper Roo at frame 253 (draw 22467); Ripper Roo: 3 authentic ",
                 "hits -> Title at frame 2064, RNG 0xe2d784b2, draw 24531; Map -> The Lost City ",
-                "at frame 253 (draw 24784); The Lost City crossed its first carried frame ",
-                "(draw 24785)",
+                "at frame 253 (draw 24784); The Lost City carried route: 7445 frames -> Title, ",
+                "61 paths/101 changes, 58 zone transitions, RNG 0xba042128, draw 1610; Map -> ",
+                "Temple Ruins at frame 253 (RNG 0xa5a69d6c, draw 1863); Temple Ruins crossed ",
+                "its first carried frame (RNG 0x7b547a17, draw 1864)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

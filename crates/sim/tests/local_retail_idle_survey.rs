@@ -50892,6 +50892,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             let ripper_roo = LevelId::new_const(0x17);
             let lost_city = LevelId::new_const(0x20);
             let temple_ruins = LevelId::new_const(0x1c);
+            let road_to_nowhere = LevelId::new_const(0x14);
             let island_two = Eid::from_name("2a_pZ").expect("fixed Lost-City map EID is valid");
             let (completion_nsd, completion_nsf, completion_nsf_bytes) =
                 parse_local_pair(root, completion).expect("Level Complete pair must parse");
@@ -52245,7 +52246,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             };
             let (temple_nsd, temple_nsf, temple_nsf_bytes) =
                 parse_local_pair(root, temple_ruins).expect("Temple Ruins pair must parse");
-            let (temple_mount_survey, temple_runtime) = survey_pair_with_runtime(
+            let (temple_mount_survey, mut temple_runtime) = survey_pair_with_runtime(
                 known_name(temple_ruins),
                 temple_ruins,
                 &temple_nsd,
@@ -52326,6 +52327,464 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Temple Ruins' carried completion must remain clean: {}",
                 temple_mount_survey.summary()
             );
+
+            let temple_completion_carry = {
+                let mut host = NsfProgramHost::new(&temple_nsd, &temple_nsf, &temple_nsf_bytes);
+                let report = temple_runtime
+                    .finish_level_transition(&mut host, 0x2d)
+                    .expect("authentic Temple Ruins LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(report.carry.random_seed, 0x0cfc_7096);
+                assert_eq!(report.carry.draw_count, 6_904);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x500, 15, 15, 13, 1, 14, 0]
+                );
+                report.carry
+            };
+            let (temple_completion_survey, mut temple_completion_runtime) =
+                survey_pair_with_runtime(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        completion,
+                        temple_completion_carry,
+                    )
+                    .expect("Level Complete must import Temple Ruins' authentic carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    700,
+                )
+                .expect("Temple Ruins' authentic Level Complete screen must execute");
+            assert_eq!(temple_completion_survey.frames, 633);
+            assert_eq!(
+                temple_completion_survey.terminal.as_deref(),
+                Some("frame 633 requested level transition to 0x19")
+            );
+            assert_eq!(temple_completion_survey.next_lid, Some((633, 0x19)));
+            assert_eq!(temple_completion_survey.final_live_objects, 5);
+            assert_eq!(temple_completion_survey.max_live_objects, 8);
+            assert_eq!(temple_completion_survey.successful_spawns, 2);
+            assert_eq!(temple_completion_survey.spawn_attempts, 1_266);
+            assert_eq!(temple_completion_survey.expected_spawn_rejections, 1_264);
+            assert_eq!(temple_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(temple_completion_survey.executions, 4_226);
+            assert_eq!(temple_completion_survey.execution_errors, 0);
+            assert_eq!(temple_completion_survey.restarts, 0);
+            assert_eq!(temple_completion_survey.faulted_objects, 0);
+            assert_eq!(temple_completion_survey.box_count_samples.len(), 54);
+            assert_eq!(
+                temple_completion_survey.box_count_samples.first(),
+                Some(&(1, 0))
+            );
+            assert_eq!(
+                temple_completion_survey.box_count_samples.last(),
+                Some(&(530, 0x3500))
+            );
+            assert_eq!(
+                temple_completion_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| temple_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 13, 1, 14, 0]
+            );
+            assert_eq!(
+                temple_completion_runtime.machine().random_seed(),
+                0x7f0d_da49
+            );
+            assert_eq!(temple_completion_runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(temple_completion_runtime.draw_count(), 7_537);
+            assert!(
+                temple_completion_survey.is_clean(),
+                "{}",
+                temple_completion_survey.summary()
+            );
+
+            let post_temple_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = temple_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Temple Ruins' Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(report.carry.random_seed, 0x7f0d_da49);
+                assert_eq!(report.carry.draw_count, 7_537);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0x300, 15, 15, 13, 1, 14, 0]
+                );
+                report.carry
+            };
+            let mut post_temple_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_temple_title_carry,
+            );
+            post_temple_map.wait_until_ready(64);
+            assert_eq!(post_temple_map.frame, 10);
+            assert_eq!(
+                post_temple_map.camera.location().path,
+                RetailPathId {
+                    zone: island_two,
+                    index: 1,
+                }
+            );
+            assert_eq!(post_temple_map.camera.location().progress.raw(), 1_792);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 13, 1, 14, 1]
+            );
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x7f0d_da49);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(post_temple_map.runtime.draw_count(), 7_547);
+            for _ in 0..120 {
+                post_temple_map.step(0);
+            }
+            post_temple_map.tap(PAD_UP);
+            assert_eq!(post_temple_map.frame, 132);
+            assert_eq!(
+                post_temple_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("2c_pZ")
+                        .expect("fixed Road to Nowhere map-node EID is valid"),
+                    index: 1,
+                }
+            );
+            assert_eq!(post_temple_map.camera.location().progress.raw(), 256);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 13, 1, 14, 1]
+            );
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xba0c_886f);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(post_temple_map.runtime.draw_count(), 7_669);
+            for _ in 0..120 {
+                post_temple_map.step(0);
+            }
+            post_temple_map.step(PAD_CROSS);
+            assert_eq!(post_temple_map.frame, 253);
+            assert_eq!(post_temple_map.transitions, [(253, 0x14)]);
+            assert_eq!(
+                post_temple_map.camera.location().path,
+                RetailPathId {
+                    zone: Eid::from_name("2c_pZ")
+                        .expect("fixed Road to Nowhere map-node EID is valid"),
+                    index: 1,
+                }
+            );
+            assert_eq!(post_temple_map.camera.location().progress.raw(), 256);
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
+                [0, 15, 15, 14, 1, 14, 1]
+            );
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xcd83_3c8b);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(post_temple_map.runtime.draw_count(), 7_790);
+            assert_eq!(post_temple_map.runtime.faulted_object_count(), 0);
+
+            let road_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_temple_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(road_to_nowhere.get()).expect("Road to Nowhere LID fits i32"),
+                    )
+                    .expect("authentic post-Temple Map LEVEL_END must export Road to Nowhere");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x14);
+                assert_eq!(report.next_lid_after_event, 0x14);
+                assert_eq!(report.resolved.level, road_to_nowhere);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(report.carry.random_seed, 0xcd83_3c8b);
+                assert_eq!(report.carry.draw_count, 7_790);
+                assert_eq!(
+                    [
+                        GAME_STATE_GLOBAL,
+                        TITLE_STATE_GLOBAL,
+                        SAVED_TITLE_STATE_GLOBAL,
+                        CURRENT_MAP_LEVEL_GLOBAL,
+                        LEVEL_COUNT_GLOBAL,
+                        LEVELS_UNLOCKED_GLOBAL,
+                        ISLAND_CAMERA_STATE_GLOBAL,
+                    ]
+                    .map(|index| report.carry.globals[index]),
+                    [0, 15, 15, 14, 1, 14, 1]
+                );
+                report.carry
+            };
+            let (road_nsd, road_nsf, road_nsf_bytes) =
+                parse_local_pair(root, road_to_nowhere).expect("Road to Nowhere pair must parse");
+            let (road_mount_survey, road_mount_runtime) = survey_pair_with_runtime(
+                known_name(road_to_nowhere),
+                road_to_nowhere,
+                &road_nsd,
+                &road_nsf,
+                &road_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, road_to_nowhere, road_carry.clone())
+                    .expect("Road to Nowhere must import the authentic post-Temple carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::RoadToNowhereCompletionRoute,
+                1,
+            )
+            .expect("Road to Nowhere's carried first frame must execute");
+            assert_eq!(road_mount_survey.frames, 1);
+            assert!(road_mount_survey.terminal.is_none());
+            assert!(road_mount_survey.next_lid.is_none());
+            assert_eq!(road_mount_survey.final_live_objects, 28);
+            assert_eq!(road_mount_survey.max_live_objects, 28);
+            assert_eq!(road_mount_survey.successful_spawns, 19);
+            assert_eq!(road_mount_survey.spawn_attempts, 20);
+            assert_eq!(road_mount_survey.expected_spawn_rejections, 1);
+            assert_eq!(road_mount_survey.unexpected_spawn_errors, 0);
+            assert_eq!(road_mount_survey.executions, 34);
+            assert_eq!(road_mount_survey.execution_errors, 0);
+            assert_eq!(road_mount_survey.zone_transitions, 0);
+            assert_eq!(road_mount_survey.camera_ranges.len(), 1);
+            assert_eq!(road_mount_survey.camera_path_changes, 0);
+            let road_mount_camera = road_mount_survey
+                .final_camera
+                .expect("carried Road to Nowhere must mount its opening camera");
+            assert_eq!(
+                road_mount_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("a1_kZ")
+                        .expect("fixed Road to Nowhere opening-camera EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(road_mount_camera.progress.raw(), 256);
+            assert_eq!(road_mount_survey.restarts, 0);
+            assert_eq!(road_mount_survey.faulted_objects, 0);
+            assert_eq!(
+                road_mount_survey.initial_player_translation,
+                Some([0, 409_600, 307_200])
+            );
+            assert_eq!(
+                road_mount_survey.final_player_translation,
+                Some([0, 409_600, 307_200])
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| road_mount_runtime.global_word(index).unwrap()),
+                [0x100, 15, 15, 14, 1, 14, 0]
+            );
+            assert_eq!(road_mount_runtime.machine().random_seed(), 0x8e01_dc6b);
+            assert_eq!(road_mount_runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(road_mount_runtime.draw_count(), 7_791);
+            let road_mount_player = player_trace(&road_mount_runtime)
+                .expect("Road to Nowhere mount player trace must resolve")
+                .expect("Road to Nowhere mount must retain Crash");
+            assert_eq!(road_mount_player.state, 40);
+            assert_eq!(road_mount_player.translation, [0, 409_600, 307_200]);
+            assert!(
+                road_mount_survey.is_clean(),
+                "Road to Nowhere's carried first frame must remain clean: {}",
+                road_mount_survey.summary()
+            );
+
+            let (road_survey, road_runtime) = survey_pair_with_runtime(
+                known_name(road_to_nowhere),
+                road_to_nowhere,
+                &road_nsd,
+                &road_nsf,
+                &road_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, road_to_nowhere, road_carry)
+                    .expect("Road to Nowhere must import the authentic post-Temple carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::RoadToNowhereCompletionRoute,
+                2_800,
+            )
+            .expect("Road to Nowhere's authentic carried completion route must execute");
+            assert_eq!(road_survey.frames, 2_449);
+            assert_eq!(
+                road_survey.terminal.as_deref(),
+                Some("frame 2449 requested level transition to 0x2d")
+            );
+            assert_eq!(road_survey.next_lid, Some((2_449, 0x2d)));
+            assert_eq!(road_survey.final_live_objects, 29);
+            assert_eq!(road_survey.max_live_objects, 37);
+            assert_eq!(road_survey.successful_spawns, 193);
+            assert_eq!(road_survey.spawn_attempts, 44_589);
+            assert_eq!(road_survey.expected_spawn_rejections, 44_396);
+            assert_eq!(road_survey.unexpected_spawn_errors, 0);
+            assert_eq!(road_survey.executions, 71_778);
+            assert_eq!(road_survey.execution_errors, 0);
+            assert_eq!(road_survey.zone_transitions, 26);
+            assert_eq!(road_survey.camera_ranges.len(), 50);
+            assert_eq!(road_survey.camera_path_changes, 49);
+            assert_eq!(road_survey.last_camera_path_change, 2_336);
+            assert_eq!(road_survey.last_camera_progress_change, 2_360);
+            let road_final_camera = road_survey
+                .final_camera
+                .expect("Road to Nowhere must retain its end-zone camera path");
+            assert_eq!(
+                road_final_camera.path,
+                RetailPathId {
+                    zone: Eid::from_name("c7_kZ")
+                        .expect("fixed Road to Nowhere end-zone EID is valid"),
+                    index: 0,
+                }
+            );
+            assert_eq!(road_final_camera.progress.raw(), 10_700);
+            assert_eq!(road_survey.restarts, 0);
+            assert!(road_survey.restart_frames.is_empty());
+            assert_eq!(road_survey.death_camera_frames, 0);
+            assert!(road_survey.first_terminal_fall.is_none());
+            assert_eq!(
+                road_survey.checkpoint_samples,
+                [
+                    (1, -1, [13_414_144, 1_330_944, 13_311_488]),
+                    (1_119, 0x4_900, [0, 25_600, -18_662_400]),
+                    (1_402, 0xa4_00, [0, 25_600, -24_012_800]),
+                ]
+            );
+            assert_eq!(
+                road_survey.box_count_samples,
+                [
+                    (1, 0),
+                    (914, 0x100),
+                    (1_119, 0x200),
+                    (1_402, 0x300),
+                    (1_979, 0x400),
+                ]
+            );
+            assert_eq!(
+                road_survey.saved_box_count_samples,
+                [(1_119, 0x100), (1_402, 0x200)]
+            );
+            assert_eq!(road_survey.effect_counts.get("save-state"), Some(&2));
+            assert_eq!(road_survey.effect_counts.get("load-state"), None);
+            assert_eq!(road_survey.effect_counts.get("transition"), Some(&1));
+            let ordinary_pad_mask =
+                PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+            assert!(!road_survey.pad_change_samples.is_empty());
+            assert!(
+                road_survey
+                    .pad_change_samples
+                    .iter()
+                    .all(|(_, held)| held & !ordinary_pad_mask == 0),
+                "the carried route must use only ordinary directional, jump, and spin input"
+            );
+            assert_eq!(
+                road_survey.final_player_translation,
+                Some([-16_384, 3_720_267, -40_210_336])
+            );
+            let road_player = player_trace(&road_runtime)
+                .expect("Road to Nowhere completion player trace must resolve")
+                .expect("WarpC must retain Crash through the transition request");
+            assert_eq!(road_player.state, 32);
+            assert_eq!(road_player.translation, [-16_384, 3_720_267, -40_210_336]);
+            let road_warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+            for state in 0..=4 {
+                assert!(
+                    road_survey
+                        .observed_program_states
+                        .contains(&(road_warp, state)),
+                    "WarpC state {state} must execute before the authored transition"
+                );
+            }
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| road_runtime.global_word(index).unwrap()),
+                [0x500, 15, 15, 14, 1, 15, 0]
+            );
+            assert_eq!(road_runtime.machine().random_seed(), 0xa2cc_489a);
+            assert_eq!(road_runtime.random_seed_b(), 0x654c_b6a6);
+            assert_eq!(road_runtime.draw_count(), 10_239);
+            assert_eq!(road_runtime.faulted_object_count(), 0);
+            assert!(
+                road_survey.is_clean(),
+                "Road to Nowhere's carried completion must remain clean: {}",
+                road_survey.summary()
+            );
         }
 
         eprintln!(
@@ -52362,7 +52821,11 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "61 paths/101 changes, 58 zone transitions, RNG 0xba042128, draw 1610; Map -> ",
                 "Temple Ruins at frame 253 (RNG 0xa5a69d6c, draw 1863); Temple Ruins crossed ",
                 "its carried route in 5041 frames -> Level Complete, 60 paths/59 changes, 33 ",
-                "zone transitions, no deaths/restarts, RNG 0x0cfc7096, draw 6904",
+                "zone transitions, no deaths/restarts, RNG 0x0cfc7096, draw 6904; Temple Ruins ",
+                "Level Complete -> Title at frame 633 (RNG 0x7f0dda49, draw 7537); Map -> Road ",
+                "to Nowhere at frame 253 (RNG 0xcd833c8b, draw 7790); Road to Nowhere crossed ",
+                "its carried route in 2449 frames -> Level Complete, 50 paths/49 changes, 26 ",
+                "zone transitions, no deaths/restarts, RNG 0xa2cc489a, draw 10239",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

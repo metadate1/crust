@@ -303,19 +303,40 @@ export function expectationFailures(expectation, snapshot) {
   return failures;
 }
 
-export function allLevelsFailures(snapshot) {
+export function allLevelsFailures(
+  snapshot,
+  { requireStartingLives = false } = {},
+) {
   const globals = snapshot.debug?.browserTestGlobals;
   if (!globals) return ["browser-test all-level globals are unavailable"];
   const failures = [];
   if (globals.allLevels !== true) {
     failures.push(`all-level mode is ${JSON.stringify(globals.allLevels)}`);
   }
-  for (const name of ["lifeCount", "initialLifeCount"]) {
-    if (globals[name] !== ALL_LEVELS_MAX_LIVES) {
-      failures.push(
-        `${name}: expected ${ALL_LEVELS_MAX_LIVES}, received ${JSON.stringify(globals[name])}`,
-      );
-    }
+  if (globals.initialLifeCount !== ALL_LEVELS_MAX_LIVES) {
+    failures.push(
+      `initialLifeCount: expected ${ALL_LEVELS_MAX_LIVES}, received ` +
+        JSON.stringify(globals.initialLifeCount),
+    );
+  }
+  if (
+    !Number.isSafeInteger(globals.lifeCount) ||
+    globals.lifeCount < 0 ||
+    globals.lifeCount > ALL_LEVELS_MAX_LIVES ||
+    globals.lifeCount % 0x100 !== 0
+  ) {
+    failures.push(
+      `lifeCount: expected an aligned 24.8 value from 0 through ${ALL_LEVELS_MAX_LIVES}, received ` +
+        JSON.stringify(globals.lifeCount),
+    );
+  } else if (
+    requireStartingLives &&
+    globals.lifeCount !== ALL_LEVELS_MAX_LIVES
+  ) {
+    failures.push(
+      `lifeCount: expected ${ALL_LEVELS_MAX_LIVES} at launch, received ` +
+        JSON.stringify(globals.lifeCount),
+    );
   }
   if (globals.levelsUnlocked !== ALL_LEVELS_UNLOCK_GATE) {
     failures.push(
@@ -783,6 +804,10 @@ async function runBrowser(options, replay, chromeExecutable) {
     );
 
     let stepped = 0;
+    // Manual harness mode cannot publish runtime globals until its first
+    // cooperative step. Check that first result before the replay can
+    // continue far enough to spend a life legitimately.
+    let allLevelsLaunchChecked = !replay.unlockAll;
     let finalSnapshot;
     for (const [segmentIndex, segment] of replay.segments.entries()) {
       for (let frame = 0; frame < segment.frames; frame += 1) {
@@ -795,6 +820,17 @@ async function runBrowser(options, replay, chromeExecutable) {
           })()`,
         );
         stepped += 1;
+        if (!allLevelsLaunchChecked) {
+          const startupProblems = allLevelsFailures(finalSnapshot, {
+            requireStartingLives: true,
+          });
+          if (startupProblems.length > 0) {
+            throw new Error(
+              `all-level browser launch assertion failed:\n${startupProblems.join("\n")}`,
+            );
+          }
+          allLevelsLaunchChecked = true;
+        }
         const problems = [
           ...failures,
           ...snapshotFailures(finalSnapshot),

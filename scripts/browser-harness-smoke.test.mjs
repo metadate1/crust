@@ -124,7 +124,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
   );
 });
 
-test("all-level browser assertion checks max lives and both access gates", () => {
+test("all-level browser assertion permits spent lives after verifying launch", () => {
   const clean = {
     debug: {
       browserTestGlobals: {
@@ -137,16 +137,65 @@ test("all-level browser assertion checks max lives and both access gates", () =>
     },
   };
   assert.deepEqual(allLevelsFailures(clean), []);
+  assert.deepEqual(
+    allLevelsFailures(clean, { requireStartingLives: true }),
+    [],
+  );
+
+  const spentLife = {
+    debug: {
+      browserTestGlobals: {
+        ...clean.debug.browserTestGlobals,
+        lifeCount: 998 << 8,
+      },
+    },
+  };
+  assert.deepEqual(
+    allLevelsFailures(spentLife),
+    [],
+    "a legitimate life loss must remain valid after launch",
+  );
+  assert.match(
+    allLevelsFailures(spentLife, { requireStartingLives: true }).join("\n"),
+    /lifeCount.*at launch/,
+  );
+
+  const fractionalLife = {
+    debug: {
+      browserTestGlobals: {
+        ...clean.debug.browserTestGlobals,
+        lifeCount: (998 << 8) + 1,
+      },
+    },
+  };
+  assert.match(
+    allLevelsFailures(fractionalLife).join("\n"),
+    /lifeCount.*aligned 24\.8/,
+  );
 
   const failures = allLevelsFailures({
     debug: {
       browserTestGlobals: {
         ...clean.debug.browserTestGlobals,
-        lifeCount: 4 << 8,
+        lifeCount: (999 << 8) + 1,
+        initialLifeCount: 4 << 8,
         itemPool2: 0,
       },
     },
   });
   assert.match(failures.join("\n"), /lifeCount/);
+  assert.match(failures.join("\n"), /initialLifeCount/);
   assert.match(failures.join("\n"), /secret-path bits/);
+
+  const accessFailures = allLevelsFailures({
+    debug: {
+      browserTestGlobals: {
+        ...clean.debug.browserTestGlobals,
+        allLevels: false,
+        levelsUnlocked: 98,
+      },
+    },
+  });
+  assert.match(accessFailures.join("\n"), /all-level mode/);
+  assert.match(accessFailures.join("\n"), /levelsUnlocked/);
 });

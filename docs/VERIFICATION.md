@@ -1182,32 +1182,32 @@ is 1,322,866 bytes with SHA-256
   mid-level snapshot and commits neither recording bytes nor a derived pad trace. This prefix
   characterizes a phase-mismatched carried session rather than claiming authentic demo playback;
   the separate browser PBAK fixture installs the snapshot. It produces three deterministic
-  `LoadState` restarts at frames 104, 231, and 816. A state-driven continuation releases Cross
+  `LoadState` restarts at frames 154, 288, and 816. A state-driven continuation releases Cross
   between every action, boards the live entity-23 orbital leaf, crosses platform entities 47, 46,
   and 54, and uses fresh Square taps every 18 frames to suppress repeated lethal contact from
-  entity 55. BoxsC subtype-four entity 57 activates on frame 1,935. Its synchronous SaveState
+  entity 55. BoxsC subtype-four entity 57 activates on frame 1,945. Its synchronous SaveState
   captures checkpoint `0x3900`, translation `[2252800, 2350080, 15564288]`, and pre-increment box
   count zero; the live count then becomes `0x100` and spawn flags become nine. The same controller
   crosses the live RivOC chains through `0q`, `0x`, `0z`, and `0A`, including entities
   76/77/82/36/35/34, 96/108/109, and 113/112. It breaks two more counted boxes and requests the
-  authored normal-end `Transition(0x2d)` on frame 3,791. The complete carried leg performs 152
-  successful spawns, 52,371 attempts, 52,219 source-expected rejections, and 146,470 clean
+  authored normal-end `Transition(0x2d)` on frame 3,810. The complete carried leg performs 152
+  successful spawns, 52,669 attempts, 52,517 source-expected rejections, and 111,418 clean
   executions. It observes 24 lifecycle zone transitions, 35 camera ranges, and 40 path changes.
-  The final camera is `0A_fZ` path one/progress 8,352; Crash is
-  `[2228500, 6590796, -472100]`, live box count is `0x400`, RNG is `0xa7ef4deb`, and draw count is
-  2,975. There is no post-prefix restart, death camera, below-zero or terminal fall, VM fault,
+  The final camera is `0A_fZ` path one/progress 8,364; Crash is
+  `[2228980, 6590796, -472772]`, live box count is `0x400`, RNG is `0xc22ac3b6`, and draw count is
+  2,994. There is no post-prefix restart, death camera, below-zero or terminal fall, VM fault,
   execution error, unexpected spawn error, or checked issue.
 
   Upstream's checked `LEVEL_END` exports globals
   `game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
-  runtime requests Title `0x19` on frame 225 after two successful spawns, 450 attempts, 448
-  source-expected rejections, and 1,212 clean executions. Its terminal globals are
+  runtime requests Title `0x19` on frame 273 after two successful spawns, 546 attempts, 544
+  source-expected rejections, and 1,425 clean executions. Its terminal globals are
   `game=0x300, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`, with RNG
-  `0xbe5213fd` and draw 3,200. The Map becomes ready at frame 10, runs 120 idle frames, taps Up,
+  `0x1a612e69` and draw 3,267. The Map becomes ready at frame 10, runs 120 idle frames, taps Up,
   runs another 120 idle frames, and presses Cross. It requests Papu Papu `0x0a` at frame 253 on
   `1d_pZ` path zero/progress 1,024. Its exported carry has
-  `game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0xa984c5b5`, and
-  draw 3,453.
+  `game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0x318c2fc6`, and
+  draw 3,520.
 
   A state-gated ordinary-pad controller completes that carried Papu Papu fight. It approaches the
   arena center with bounded jump windows and retreats outward while ChefC is hurt; it does not
@@ -1215,27 +1215,44 @@ is 1,322,866 bytes with SHA-256
   pairs occur on frames 302/484/666. Entity eight enters ChefC state two on frames 303/485/667,
   recovers to state one on 382/564, and enters win state three on 668. The authored runtime requests
   Title `0x19` on frame 812. It records 6 successful spawns, 5,684 attempts, 5,678 source-expected
-  rejections, 16,377 clean executions, three camera ranges, two path changes, no restart or death
+  rejections, 16,391 clean executions, three camera ranges, two path changes, no restart or death
   camera, and no terminal fall (the only below-zero sample is an observed eight-unit grounded
   rounding). It has no VM fault, execution error, unexpected spawn error, or checked issue. The
   checked boss carry has
-  `game=0x300, title=15, saved-title=15, map=6, count=1, unlocked=7, island=0`, RNG `0xf3ab9165`,
-  and draw 4,265.
+  `game=0x300, title=15, saved-title=15, map=6, count=1, unlocked=7, island=0`, RNG `0x3823ffd7`,
+  and draw 4,332.
 
   The post-boss Map becomes ready on frame 10 at `1e_pZ` path zero/progress `0x1500`. It waits for
   the frame-52 current-node gate at `1d_pZ:0@0x0400`, taps Up on frame 53 and releases on 54, waits
   for `1d_pZ:1@0x0300` on frame 65, and presses Cross on 66. The authored transition requests
   Rolling Stones `0x15`; the clean `LEVEL_END` carry has map/unlocked seven, island one, and draw
-  4,331. Rolling Stones imports that exact carry and executes an ordinary-pad normal route through
+  4,398. Rolling Stones imports that exact carry and executes an ordinary-pad normal route through
   `0M_lZ -> 0O_lZ`, bypassing alternate `0N_lZ`. It enters end `WarpC` and requests Level Complete
-  `0x2d` on frame 2,449 with no restart, state-31 squash, death camera, terminal fall, VM fault,
-  execution error, or LoadState. It activates checkpoint `0x0800` on frame 1,160, retains saved
-  boxes `0x0a00`, advances live boxes to `0x0c00`, and records 117 successful spawns, 29,224
-  attempts, 29,107 source-expected rejections, and 54,526 clean executions across 32 lifecycle zone
-  transitions, 45 camera ranges, and 46 path changes. The final camera is `0O_lZ:0@10496`; Crash is
-  in warp state 32 at `[2219008, 9256242, -1833728]`. RNG is `0x9dbf3415` and draw is 6,780. This
-  is deterministic native integration over user-supplied local data, not a browser playthrough or
-  full-game parity claim. The complete carried chain has not been exercised in a browser.
+  `0x2d` on frame 2,465 with no restart, state-31 squash, death camera, terminal fall, VM fault,
+  execution error, or LoadState. It activates checkpoint `0x0800` on frame 1,159, retains saved
+  boxes `0x0900`, advances live boxes to `0x0b00`, and records 117 successful spawns, 29,372
+  attempts, 29,255 source-expected rejections, and 55,526 clean executions across 32 lifecycle zone
+  transitions, 45 camera ranges, and 46 path changes. The final camera is `0O_lZ:0@9424`; Crash is
+  in warp state 32 at `[2237184, 9256237, -1792768]`. RNG is `0xb40bac74` and draw is 6,863.
+
+  The same uninterrupted session continues through Rolling Stones' 425-frame Level Complete graph
+  (draw 7,288) and a 253-frame Map selection of Hog Wild (draw 7,541). Hog Wild requests Level
+  Complete on gameplay frame 1,949 at draw 9,490 without a restart; its completion takes 273 frames
+  (draw 9,763), and Map selects Native Fortress on frame 253 (draw 10,016). Native Fortress then
+  requests Level Complete on frame 6,949 after 333 successful spawns, 172,330 executions, 68 zone
+  transitions, 60 camera ranges, and 77 path changes. It has no death or restart and ends with RNG
+  `0x8e26e064` at draw 16,965. Its Level Complete graph takes 425 frames (draw 17,390), and Map
+  selects Up the Creek on frame 253 (draw 17,643).
+
+  In that carried phase, Up the Creek requests Level Complete on frame 4,346 after 192 successful
+  spawns, 126,071 executions, and 36 zone transitions. It has no restart and ends with RNG
+  `0x93e26958` at draw 21,989. Its completion takes 225 frames
+  (draw 22,214), and Map selects Ripper Roo on frame 253 (draw 22,467). Ripper Roo's three authored
+  activations lead to Title on frame 2,064 with no restart, RNG `0xe2d784b2`, and draw 24,531. The
+  final 253-frame Map handoff selects The Lost City at draw 24,784; The Lost City's first carried
+  runtime frame completes cleanly with 33 successful spawns, 56 executions, RNG `0xabc415c8`, and
+  draw 24,785. This is deterministic native integration over user-supplied local data, not a
+  browser playthrough, a carried Lost City completion, or full-game parity claim.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
   requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
   terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
@@ -1252,8 +1269,8 @@ is 1,322,866 bytes with SHA-256
   into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
   WarpC executes states zero through four before the transition. The final camera is
   `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]` in warp state 32, and RNG is
-  `0x6302af65` at draw 2,447. The post-Papu chain independently reaches the same authored end two
-  frames later.
+  `0x6302af65` at draw 2,447. The uninterrupted campaign carry independently reaches the same
+  authored end 18 frames later.
 - Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
   traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and
   30, advances live boxes to `0x700`, observes WarpC states zero through four, and requests Level
@@ -1335,14 +1352,15 @@ is 1,322,866 bytes with SHA-256
   normal route, not its bonus paths or a browser playthrough.
 - Up the Creek (`0x18`) has a complete normal-route direct-boot ordinary-pad golden. It crosses the
   opening moving logs, orbiters, sinking-platform handoff, and later `RivOC` chain. Checkpoint entity
-  76 executes `SaveState` on frame 1,246 with translation `[2048000, 1738240, 19455744]`, camera
+  76 executes `SaveState` on frame 1,245 with translation `[2048000, 1738240, 19455744]`, camera
   progress 1,171, and source-ordered saved box count `0x400`; the live count then becomes `0x500`.
   The controller continues through `0F_oZ` platforms 12 and 11, enters the authored `0G_oZ`
-  `WarpC`, observes states zero through four, and requests Level Complete `0x2d` on frame 4,184.
-  The complete run performs 196 successful spawns and 123,309 clean executions across 38 lifecycle
-  transitions, 53 camera ranges, and 60 path changes, with no restart, LoadState, death camera,
-  terminal fall, VM fault, faulted object, execution error, or checked issue. This proves the normal
-  native route, not its bonus paths or a browser-driven completion.
+  `WarpC`, observes states zero through four, and requests Level Complete `0x2d` on frame 4,183.
+  The complete run performs 196 successful spawns from 64,662 attempts with 64,466 expected
+  rejections and 123,277 clean executions across 38 lifecycle transitions, 53 camera ranges, and
+  60 path changes, with no restart, LoadState, death camera, terminal fall, VM fault, faulted
+  object, execution error, or checked issue. This proves the normal native route, not its bonus
+  paths or a browser-driven completion.
   A separate carried-session golden begins with a retail card at level count ten and the authored
   island-two map. Cross selects Up the Creek on map frame 131; the carried route requests Level
   Complete on gameplay frame 4,319; the completion graph returns to Title/Map on its frame 185;

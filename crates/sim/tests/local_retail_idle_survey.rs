@@ -60,7 +60,7 @@ use crust_sim::{
     object_arena::{NeighborZone, ObjectOrigin, SpawnError},
     paging::{PageInvalidations, Pager, PagerUpdateOutcome, PagingError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
-    retail_frame::RetailFrameState,
+    retail_frame::{PathProgress, RetailFrameState},
     retail_runtime::{
         CURRENT_ZONE_FLAGS_GLOBAL, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
         ISLAND_CAMERA_STATE_GLOBAL, NsfProgramError, NsfProgramHost, PagedNsfProgramHost,
@@ -1131,6 +1131,28 @@ enum LevelContextSource {
 impl SurveyInputProfile {
     const fn is_native_fortress_route(self) -> bool {
         matches!(self, Self::NativeFortressD6Route)
+    }
+
+    const fn is_up_the_creek_route(self) -> bool {
+        matches!(
+            self,
+            Self::UpTheCreekRoute
+                | Self::UpTheCreekExtendedRoute
+                | Self::UpTheCreekPostZeroYRoute
+                | Self::UpTheCreekPostZeroZRoute
+                | Self::UpTheCreekPostPlatform139Route
+                | Self::UpTheCreekPostZeroARoute
+                | Self::UpTheCreekPostPlatform38Route
+                | Self::UpTheCreekPostPlatform39Route
+                | Self::UpTheCreekPostPlatform156Route
+                | Self::UpTheCreekPostZeroCBankRoute
+                | Self::UpTheCreekPostPlatform161Route
+                | Self::UpTheCreekPostPlatform160Route
+                | Self::UpTheCreekPostPlatform8Route
+                | Self::UpTheCreekPostZeroFBankRoute
+                | Self::UpTheCreekPostPlatform12Route
+                | Self::UpTheCreekCompletionRoute
+        )
     }
 
     const fn label(self) -> &'static str {
@@ -4831,6 +4853,7 @@ struct UpTheCreekRouteController {
     route_end: UpTheCreekRouteEnd,
     session_globals: bool,
     collider_entity: Option<u16>,
+    zero_y_extra_runup_required: bool,
     stage: u8,
     tick: u16,
 }
@@ -6229,6 +6252,13 @@ impl UpTheCreekRouteController {
                 0
             }
             100 => {
+                if self.tick == 0 && self.zero_y_extra_runup_required {
+                    // A carried campaign can settle on entity 131 farther
+                    // from entity 136 than the fresh route. Build forward
+                    // speed with ordinary Up samples until the measured
+                    // geometry/velocity gate says the normal jump is safe.
+                    return PAD_UP;
+                }
                 let tick = self.tick;
                 self.tick = self.tick.saturating_add(1);
                 let side = if tick < 8 { PAD_LEFT } else { 0 };
@@ -6876,10 +6906,17 @@ impl UpTheCreekRouteController {
 struct NativeFortressRouteController {
     started: bool,
     session_carry: bool,
+    restart_pending: bool,
     stage: u8,
     jump_frames: u8,
     grounded_frames: u8,
     route_tick: u32,
+    // The carried campaign can inherit WalOC 38 in a different falling phase.
+    // Once its upper parked state has been observed, the a8 crossing is safe.
+    a8_platform_clear: bool,
+    // Do not resume the fixed route until Crash has crossed completely beyond
+    // WalOC 38's X bound; otherwise its next falling cycle can catch him.
+    a8_platform_crossed: bool,
     // Set from entity 45's observed b9 phase; this selects the downstream
     // timing branch independently of how the level runtime was constructed.
     phase_shifted_route: bool,
@@ -6889,23 +6926,72 @@ struct NativeFortressRouteController {
     d4_launch_prep: bool,
     d4_wait_jump: u8,
     d4_evaded_platform_cycle: bool,
+    d4_platform_previous_x: Option<i32>,
+    d4_platform_leftward: bool,
     d5_flame_extension_seen: bool,
     d8_flame_runup: bool,
     d8_launch: bool,
 }
 
 impl NativeFortressRouteController {
+    fn prepare_restart(&mut self) {
+        let session_carry = self.session_carry;
+        let phase_shifted_route = self.phase_shifted_route;
+        *self = Self {
+            session_carry,
+            restart_pending: true,
+            phase_shifted_route,
+            ..Self::default()
+        };
+    }
+
+    fn restart_stage(checkpoint_id: i32, camera: RetailCameraLocation) -> Option<u8> {
+        let (zone, index, stage) = match checkpoint_id {
+            27_136 => ("c1_qZ", 0, 44),
+            37_888 => ("d1_qZ", 1, 81),
+            48_128 => ("d8_qZ", 0, 92),
+            _ => return None,
+        };
+        let expected_zone =
+            Eid::from_name(zone).expect("fixed Native Fortress checkpoint EID is valid");
+        (camera.path.zone == expected_zone && camera.path.index == index).then_some(stage)
+    }
+
     fn held(
         &mut self,
         frame: u32,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         player_collider_entity: Option<u16>,
+        checkpoint_id: i32,
         route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         let Some(player) = player else {
             return 0;
         };
+        let grounded = player.status_a & 1 != 0;
+        if self.restart_pending {
+            if checkpoint_id < 0 {
+                // A death before the first checkpoint returns to the ordinary
+                // opening handshake.
+                self.restart_pending = false;
+            } else if let Some(stage) = Self::restart_stage(checkpoint_id, camera) {
+                // `apply_restart` restores the saved camera before the next
+                // input sample. Keep route clocks frozen through loading and
+                // resume from the stage observed at the matching retail save.
+                if !grounded || matches!(player.state, 0 | 40) {
+                    return 0;
+                }
+                self.started = true;
+                self.restart_pending = false;
+                self.stage = stage;
+            } else {
+                // The checkpoint global can become visible one sample before
+                // the restored camera path. Do not consume an opening-stage
+                // input against the checkpoint spawn while they disagree.
+                return 0;
+            }
+        }
         // WillC exposes the player before retail's level-start handshake has
         // finished. Do not let state 0/40 loading frames consume route
         // counters. State 1 is the settled idle and needs one ordinary
@@ -6918,7 +7004,6 @@ impl NativeFortressRouteController {
                 _ => return 0,
             }
         }
-        let grounded = player.status_a & 1 != 0;
         self.grounded_frames = if grounded {
             self.grounded_frames.saturating_add(1)
         } else {
@@ -6955,6 +7040,56 @@ impl NativeFortressRouteController {
                 return PAD_LEFT | PAD_CROSS;
             }
             if self.stage == 4 {
+                const HOLD_X: i32 = 4_280_000;
+                const POSITION_TOLERANCE: i32 = 24_000;
+                const VELOCITY_TOLERANCE: i32 = 80_000;
+                let a8_platform = route_objects.iter().find(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 38)
+                });
+                if self.session_carry
+                    && !self.a8_platform_clear
+                    && self.route_tick >= 130
+                    && grounded
+                    && player.translation[0] <= 4_350_000
+                {
+                    self.a8_platform_clear = a8_platform.is_some_and(|platform| {
+                        platform.state == 7
+                            && frame.saturating_sub(platform.state_stamp) <= 8
+                            && platform.bound.is_some_and(|bound| {
+                                bound.min.y >= player.translation[1].saturating_add(250_000)
+                            })
+                    });
+                    if !self.a8_platform_clear {
+                        // Stay outside the falling platform's X bound while
+                        // its inherited carried-session phase completes.
+                        self.route_tick = self.route_tick.saturating_sub(1);
+                        return if player.velocity[0] < -VELOCITY_TOLERANCE
+                            || player.translation[0] < HOLD_X - POSITION_TOLERANCE
+                        {
+                            PAD_RIGHT
+                        } else if player.velocity[0] > VELOCITY_TOLERANCE
+                            || player.translation[0] > HOLD_X + POSITION_TOLERANCE
+                        {
+                            PAD_LEFT
+                        } else {
+                            0
+                        };
+                    }
+                }
+                if self.session_carry && self.a8_platform_clear && !self.a8_platform_crossed {
+                    let crossed_x = a8_platform
+                        .and_then(|platform| platform.bound)
+                        .map_or(3_760_000, |bound| bound.min.x.saturating_sub(160_000));
+                    if player.translation[0] <= crossed_x {
+                        self.a8_platform_crossed = true;
+                    } else {
+                        // Keep the route clock at the safe launch point and
+                        // cross in one continuous movement before WalOC 38 can
+                        // begin its next falling cycle.
+                        self.route_tick = self.route_tick.saturating_sub(1);
+                        return PAD_LEFT;
+                    }
+                }
                 if self.route_tick >= 190 {
                     self.stage = 5;
                     self.route_tick = 0;
@@ -6997,26 +7132,51 @@ impl NativeFortressRouteController {
             }
             if self.stage == 6 {
                 if self.route_tick < 20 {
-                    return 0;
+                    let a9_enemy_attacking = self.session_carry
+                        && route_objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(entity) if entity.id == 71
+                            ) && object.state == 3
+                                && object.bound.is_some_and(|bound| {
+                                    bound.max.x >= player.translation[0].saturating_sub(400_000)
+                                        && bound.min.z
+                                            <= player.translation[2].saturating_add(180_000)
+                                        && bound.max.z
+                                            >= player.translation[2].saturating_sub(180_000)
+                                })
+                        });
+                    return if a9_enemy_attacking { PAD_SQUARE } else { 0 };
                 }
                 self.stage = 7;
                 self.route_tick = 0;
                 return PAD_LEFT;
             }
             if self.stage == 7 {
-                const TAP_TICK: u32 = 34;
-                if self.route_tick > TAP_TICK + 12 && grounded {
+                let (jump_tick, tap_tick, forward_end) = if self.session_carry {
+                    // The a8 phase wait shifts entity 70's b0 platform cycle.
+                    // Launch closer to its live X bound, preserving the
+                    // release edge before the follow-up jump-and-spin.
+                    (16, 46, 62)
+                } else {
+                    (4, 34, 50)
+                };
+                if self.route_tick > tap_tick + 12 && grounded {
                     self.stage = 8;
                     self.route_tick = 0;
                     return 0;
                 }
-                let mut held = if self.route_tick <= 50 { PAD_LEFT } else { 0 };
-                if (4..=26).contains(&self.route_tick)
-                    || (TAP_TICK..=TAP_TICK + 12).contains(&self.route_tick)
+                let mut held = if self.route_tick <= forward_end {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if (jump_tick..=tap_tick - 8).contains(&self.route_tick)
+                    || (tap_tick..=tap_tick + 12).contains(&self.route_tick)
                 {
                     held |= PAD_CROSS;
                 }
-                if (TAP_TICK..=TAP_TICK + 12).contains(&self.route_tick) {
+                if (tap_tick..=tap_tick + 12).contains(&self.route_tick) {
                     held |= PAD_SQUARE;
                 }
                 return held;
@@ -7071,7 +7231,7 @@ impl NativeFortressRouteController {
             if self.stage == 11 {
                 let b0 = Eid::from_name("b0_qZ")
                     .expect("fixed Native Fortress bounce-climb EID is valid");
-                let reached_handoff = self.route_tick > 30
+                let reached_handoff = (self.route_tick > 30 || self.session_carry)
                     && grounded
                     && camera.path.zone == b0
                     && camera.path.index == 1
@@ -7475,6 +7635,33 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
+                if self.session_carry && self.route_tick <= 1 {
+                    let platform_x = route_objects.iter().find_map(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 99)
+                            .then_some(object.translation[0])
+                    });
+                    let safe_phase = platform_x.is_some_and(|platform_x| {
+                        route_objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 33,
+                                    subtype: 6
+                                }
+                            ) && object.translation[0].abs_diff(platform_x) <= 16_000
+                                && object.state == 16
+                                && object.frame_bound.is_none()
+                        })
+                    });
+                    if !safe_phase {
+                        // The carried session can reach b6 while WalOC 99's
+                        // rotating child has an active crushing bound. Wait
+                        // on the checkpoint landing and begin the authored
+                        // launch only from its observed non-solid phase.
+                        self.route_tick = self.route_tick.saturating_sub(1);
+                        return 0;
+                    }
+                }
                 if self.route_tick <= 16 {
                     return PAD_RIGHT | PAD_CROSS;
                 }
@@ -7684,6 +7871,22 @@ impl NativeFortressRouteController {
                 // subtype-two falling WalOC entity 41, and subtype-three vertical
                 // WalOC entity 42. Brake on the solid ledge between entities 41 and
                 // 42 so this checkpoint does not depend on a moving collider.
+                if self.session_carry && self.route_tick <= 1 {
+                    let wall_cycle_ready = route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 42)
+                            && object.state == 5
+                            && frame.saturating_sub(object.state_stamp) <= 4
+                    });
+                    if !wall_cycle_ready {
+                        // Begin the complete c0 obstacle bank only at the
+                        // observed start of entity 42's long low cycle. The
+                        // fixed first-platform crossing then reaches the final
+                        // ledge during its following preparatory state rather
+                        // than stopping on falling entity 41 to wait.
+                        self.route_tick = self.route_tick.saturating_sub(1);
+                        return 0;
+                    }
+                }
                 if camera.path.zone == c0
                     && grounded
                     && player.translation[0] >= 11_300_000
@@ -7810,7 +8013,7 @@ impl NativeFortressRouteController {
                 {
                     self.stage = 48;
                     self.route_tick = 0;
-                    return if self.phase_shifted_route {
+                    return if self.session_carry {
                         PAD_LEFT
                     } else {
                         PAD_RIGHT
@@ -7834,16 +8037,17 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                if self.phase_shifted_route && !self.c5_launch {
-                    // Align the carried session with WalOC 114's authored
-                    // subtype-six flame idle window before the run-up.
-                    if player.translation[0] > 16_930_000 || player.velocity[0] > 100_000 {
+                if self.session_carry && !self.c5_launch {
+                    // Align with WalOC 114's observed subtype-six flame cycle
+                    // before the run-up. Session carry can shift this hazard
+                    // independently of the earlier b9 wall phase.
+                    if player.translation[0] > 16_950_000 {
                         return PAD_LEFT;
                     }
-                    if player.translation[0] < 16_880_000 || player.velocity[0] < -100_000 {
+                    if player.translation[0] < 16_900_000 {
                         return PAD_RIGHT;
                     }
-                    let flame_is_safe = route_objects.iter().any(|object| {
+                    let flame_cycle_ready = route_objects.iter().any(|object| {
                         matches!(
                             object.origin,
                             ObjectOrigin::Runtime {
@@ -7851,10 +8055,10 @@ impl NativeFortressRouteController {
                                 subtype: 6,
                             }
                         ) && object.translation[0].abs_diff(17_406_976) <= 16_000
-                            && object.state == 16
-                            && object.frame_bound.is_none()
+                            && object.state == 18
+                            && (14..=18).contains(&frame.saturating_sub(object.state_stamp))
                     });
-                    if grounded && flame_is_safe {
+                    if grounded && flame_cycle_ready {
                         self.c5_launch = true;
                         self.route_tick = 0;
                         return PAD_RIGHT;
@@ -7873,7 +8077,7 @@ impl NativeFortressRouteController {
                 // Take the rear lane used to catch WalOC 116's next raised
                 // face.
                 if player.translation[2] < 169_000 {
-                    return PAD_DOWN;
+                    return PAD_DOWN | if self.session_carry { PAD_LEFT } else { 0 };
                 }
                 let raised = route_objects.iter().any(|object| {
                     matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 116)
@@ -7884,6 +8088,19 @@ impl NativeFortressRouteController {
                     self.stage = 50;
                     self.route_tick = 0;
                     return PAD_RIGHT;
+                }
+                if self.session_carry {
+                    // The carried route reaches c6 while entity 116 is
+                    // descending. Stay left of its live X bound until the
+                    // next observed raised state instead of waiting beneath
+                    // the crushing face.
+                    return if player.translation[0] > 17_920_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 17_850_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
                 }
                 return 0;
             }
@@ -7973,6 +8190,14 @@ impl NativeFortressRouteController {
                     };
             }
             if self.stage == 53 {
+                if self.session_carry && self.route_tick <= 1 && !grounded {
+                    // Entity 123's carried phase can release stage 52 while
+                    // Crash is still descending. Keep the next route clock at
+                    // its first tick until the floor landing supplies a fresh
+                    // Cross edge for c8's gap sequence.
+                    self.route_tick = self.route_tick.saturating_sub(1);
+                    return PAD_RIGHT;
+                }
                 let c8 = Eid::from_name("c8_qZ")
                     .expect("fixed Native Fortress vertical-platform EID is valid");
                 if camera.path.zone == c8
@@ -8409,7 +8634,8 @@ impl NativeFortressRouteController {
                 return held;
             }
             if self.stage == 83 {
-                if self.phase_shifted_route && self.d4_launch && self.route_tick > 90 && grounded {
+                let carried_timing = self.phase_shifted_route || self.session_carry;
+                if carried_timing && self.d4_launch && self.route_tick > 90 && grounded {
                     // The carried route reaches the post-bumper floor with
                     // residual leftward velocity. Settle into the same narrow
                     // launch window as a fresh boot before beginning d5.
@@ -8426,11 +8652,11 @@ impl NativeFortressRouteController {
                         return PAD_LEFT;
                     }
                 }
-                if self.route_tick > if self.phase_shifted_route { 99 } else { 100 }
+                if self.route_tick > if carried_timing { 99 } else { 100 }
                     && grounded
-                    && (!self.phase_shifted_route || self.d4_launch)
+                    && (!carried_timing || self.d4_launch)
                 {
-                    if self.phase_shifted_route {
+                    if carried_timing {
                         // Wait through one visible flame extension, then
                         // launch late in the following idle state so Crash
                         // reaches ledge 162 after its flame retracts.
@@ -8456,17 +8682,17 @@ impl NativeFortressRouteController {
                     }
                     self.stage = 85;
                     self.route_tick = 0;
-                    return if self.phase_shifted_route {
+                    return if carried_timing {
                         PAD_LEFT | PAD_CROSS | PAD_SQUARE
                     } else {
                         PAD_LEFT | PAD_SQUARE
                     };
                 }
-                if self.phase_shifted_route && !self.d4_launch {
+                if carried_timing && !self.d4_launch {
                     // Stay on entity 174 until its authored moving state
                     // imparts the leftward velocity needed for the carried
                     // crossing, and launch while dart entity 167 is low.
-                    if grounded {
+                    if self.phase_shifted_route && grounded {
                         match self.route_tick {
                             115 if player.translation[2] > 168_000 => return PAD_LEFT,
                             116 => return PAD_UP,
@@ -8474,8 +8700,9 @@ impl NativeFortressRouteController {
                             _ => {}
                         }
                     }
-                    let dart_is_low = route_objects.iter().any(|object| {
+                    let dart_is_safe = route_objects.iter().any(|object| {
                         matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 167)
+                            && object.state == 4
                             && object.translation[1] <= -2_450_000
                     });
                     let platform = route_objects.iter().find_map(|object| {
@@ -8484,6 +8711,20 @@ impl NativeFortressRouteController {
                     });
                     let platform_state = platform.map(|(state, _, _)| state);
                     let platform_started_moving = platform_state == Some(2);
+                    if let Some((state, platform_x, _)) = platform {
+                        if state == 2 {
+                            self.d4_platform_leftward |=
+                                self.d4_platform_previous_x.is_some_and(|previous_x| {
+                                    previous_x.saturating_sub(platform_x) > 4_096
+                                });
+                        } else {
+                            self.d4_platform_leftward = false;
+                        }
+                        self.d4_platform_previous_x = Some(platform_x);
+                    } else {
+                        self.d4_platform_previous_x = None;
+                        self.d4_platform_leftward = false;
+                    }
                     if !platform_started_moving {
                         self.d4_evaded_platform_cycle = false;
                     }
@@ -8493,23 +8734,37 @@ impl NativeFortressRouteController {
                             return PAD_RIGHT | PAD_CROSS;
                         }
                         if platform_started_moving {
-                            if grounded
-                                && player_collider_entity == Some(174)
-                                && player.velocity[0] <= -900_000
-                                && dart_is_low
-                            {
-                                self.d4_launch = true;
-                                self.route_tick = 49;
-                                return PAD_CROSS;
-                            } else if grounded && !dart_is_low && !self.d4_evaded_platform_cycle {
+                            let platform_x = platform
+                                .map(|(_, translation_x, _)| translation_x)
+                                .expect("moving D4 platform trace must retain its translation");
+                            let ride_target = platform_x.saturating_sub(90_000);
+                            if self.d4_platform_leftward && dart_is_safe {
+                                if grounded
+                                    && player_collider_entity == Some(174)
+                                    && player.velocity[0] <= -900_000
+                                    && player.translation[0].abs_diff(ride_target) <= 32_000
+                                {
+                                    self.d4_launch = true;
+                                    self.route_tick = 49;
+                                    return PAD_CROSS;
+                                }
+                                if player.translation[0] > ride_target + 32_000 {
+                                    return PAD_LEFT;
+                                }
+                                if player.translation[0] < ride_target - 32_000 {
+                                    return PAD_RIGHT;
+                                }
+                                return PAD_LEFT;
+                            }
+                            if grounded && !dart_is_safe && !self.d4_evaded_platform_cycle {
                                 self.d4_evaded_platform_cycle = true;
                                 self.d4_launch_prep = true;
                                 self.d4_wait_jump = 10;
                                 return PAD_RIGHT | PAD_CROSS;
                             }
-                            return if dart_is_low && player.translation[0] > 18_750_000 {
+                            return if player.translation[0] > ride_target + 32_000 {
                                 PAD_LEFT
-                            } else if dart_is_low && player.translation[0] < 18_680_000 {
+                            } else if player.translation[0] < ride_target - 32_000 {
                                 PAD_RIGHT
                             } else {
                                 0
@@ -8517,7 +8772,7 @@ impl NativeFortressRouteController {
                         }
                         if self.d4_launch_prep && matches!(platform_state, Some(3 | 4)) {
                             if let Some((4, platform_x, state_stamp)) = platform
-                                && dart_is_low
+                                && dart_is_safe
                                 && frame.saturating_sub(state_stamp) >= 20
                             {
                                 if player.translation[0] < platform_x - 90_000 {
@@ -8549,15 +8804,12 @@ impl NativeFortressRouteController {
                     PAD_DOWN
                 } else if (49..=75).contains(&self.route_tick) {
                     PAD_CROSS
-                        | if self.phase_shifted_route && self.d4_launch {
+                        | if carried_timing && self.d4_launch {
                             PAD_LEFT
                         } else {
                             0
                         }
-                } else if self.phase_shifted_route
-                    && self.d4_launch
-                    && (76..=78).contains(&self.route_tick)
-                {
+                } else if carried_timing && self.d4_launch && (76..=78).contains(&self.route_tick) {
                     PAD_LEFT
                 } else {
                     0
@@ -8617,7 +8869,8 @@ impl NativeFortressRouteController {
                         && object.state == 4
                         && object.translation[1] <= -2_480_000
                 });
-                let third_launcher_will_be_safe = !self.phase_shifted_route
+                let adaptive_timing = self.phase_shifted_route || self.session_carry;
+                let third_launcher_will_be_safe = !adaptive_timing
                     || route_objects.iter().any(|object| {
                         if !matches!(
                             object.origin,
@@ -8653,7 +8906,8 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
                 }
-                let runup_start = if self.phase_shifted_route { 2 } else { 4 };
+                let adaptive_timing = self.phase_shifted_route || self.session_carry;
+                let runup_start = if adaptive_timing { 2 } else { 4 };
                 return PAD_CROSS
                     | if self.route_tick > runup_start {
                         PAD_LEFT
@@ -8700,7 +8954,8 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT | PAD_SQUARE;
                 }
-                if self.phase_shifted_route && self.route_tick > 8 && !self.d8_launch {
+                let adaptive_timing = self.phase_shifted_route || self.session_carry;
+                if adaptive_timing && self.route_tick > 8 && !self.d8_launch {
                     let target_flame = route_objects.iter().find(|object| {
                         matches!(
                             object.origin,
@@ -8900,7 +9155,8 @@ impl NativeFortressRouteController {
                     self.route_tick = 0;
                     return PAD_LEFT;
                 }
-                if self.phase_shifted_route && (39..=41).contains(&self.route_tick) {
+                let adaptive_timing = self.phase_shifted_route || self.session_carry;
+                if adaptive_timing && (39..=41).contains(&self.route_tick) {
                     // The carried route enters e2 slightly farther right.
                     // Preserve the jump edge but delay the distinct spin edge
                     // until entity 186 is reached in Crash's spin state.
@@ -9009,7 +9265,8 @@ impl NativeFortressRouteController {
                 // flame clock. The phase-shifted route reaches the safe e5
                 // launch at state 17, age 18; retain a small measured
                 // tolerance instead of accepting an entire nominal phase.
-                let downstream_flames_will_be_safe = !self.phase_shifted_route
+                let adaptive_timing = self.phase_shifted_route || self.session_carry;
+                let downstream_flames_will_be_safe = !adaptive_timing
                     || route_objects.iter().any(|object| {
                         matches!(
                             object.origin,
@@ -9596,6 +9853,103 @@ impl NativeFortressRouteController {
             self.jump_frames -= 1;
         }
         held
+    }
+}
+
+#[test]
+fn native_fortress_controller_rejoins_saved_checkpoints_after_restart() {
+    let camera = |zone, index| RetailCameraLocation {
+        path: RetailPathId {
+            zone: Eid::from_name(zone).expect("fixed Native Fortress checkpoint EID is valid"),
+            index,
+        },
+        progress: PathProgress::ZERO,
+    };
+    let player = |zone, translation| PlayerTrace {
+        program: None,
+        code_address: CodeAddress {
+            segment: CodeSegment::External,
+            pc: 0,
+        },
+        zone: Eid::from_name(zone).expect("fixed Native Fortress checkpoint EID is valid"),
+        translation,
+        velocity: [0; 3],
+        state: 1,
+        state_flags: 0,
+        status_a: 1,
+        status_b: 0,
+        cortex_counter: 0,
+        tawna_counter: 0,
+        event: 0,
+        animation_stamp: 0,
+        state_stamp: 0,
+        animation_counter: 0,
+        animation_sequence: 0,
+        animation_frame: 0,
+        stack_len: 0,
+        stack_top: None,
+        stack_tail: [None; 8],
+    };
+    let checkpoints = [
+        (
+            27_136,
+            "c1_qZ",
+            0,
+            [12_083_200, -7_680_256, 128_000],
+            44,
+            PAD_RIGHT | PAD_DOWN | PAD_SQUARE,
+        ),
+        (
+            37_888,
+            "d1_qZ",
+            1,
+            [20_888_832, -2_048_000, 128_000],
+            81,
+            PAD_LEFT | PAD_CROSS,
+        ),
+        (
+            48_128,
+            "d8_qZ",
+            0,
+            [13_106_432, -2_150_400, 128_000],
+            92,
+            PAD_LEFT | PAD_SQUARE,
+        ),
+    ];
+
+    for (checkpoint_id, zone, index, translation, expected_stage, expected_held) in checkpoints {
+        let mut controller = NativeFortressRouteController {
+            started: true,
+            session_carry: true,
+            stage: 151,
+            route_tick: 123,
+            phase_shifted_route: true,
+            c5_launch: true,
+            d4_launch: true,
+            d8_launch: true,
+            ..NativeFortressRouteController::default()
+        };
+
+        controller.prepare_restart();
+        let held = controller.held(
+            1,
+            camera(zone, index),
+            Some(player(zone, translation)),
+            None,
+            checkpoint_id,
+            &[],
+        );
+
+        assert_eq!(controller.stage, expected_stage);
+        assert_eq!(controller.route_tick, 1);
+        assert_eq!(held, expected_held);
+        assert!(controller.started);
+        assert!(!controller.restart_pending);
+        assert!(controller.session_carry);
+        assert!(controller.phase_shifted_route);
+        assert!(!controller.c5_launch);
+        assert!(!controller.d4_launch);
+        assert!(!controller.d8_launch);
     }
 }
 
@@ -33540,6 +33894,7 @@ impl SurveyInputController {
                 },
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 collider_entity: None,
+                zero_y_extra_runup_required: false,
                 stage: 0,
                 tick: 0,
             },
@@ -33590,10 +33945,13 @@ impl SurveyInputController {
             native_fortress: NativeFortressRouteController {
                 started: false,
                 session_carry: matches!(context_source, LevelContextSource::SessionGlobals),
+                restart_pending: false,
                 stage: 0,
                 jump_frames: 0,
                 grounded_frames: 0,
                 route_tick: 0,
+                a8_platform_clear: false,
+                a8_platform_crossed: false,
                 phase_shifted_route: false,
                 c5_launch: false,
                 d2_spin_released: false,
@@ -33601,6 +33959,8 @@ impl SurveyInputController {
                 d4_launch_prep: false,
                 d4_wait_jump: 0,
                 d4_evaded_platform_cycle: false,
+                d4_platform_previous_x: None,
+                d4_platform_leftward: false,
                 d5_flame_extension_seen: false,
                 d8_flame_runup: false,
                 d8_launch: false,
@@ -33700,6 +34060,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::CortexBonusCompletionRoute {
             self.cortex_bonus = CortexBonusCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::NativeFortressD6Route {
+            self.native_fortress.prepare_restart();
+        }
     }
 
     fn held(
@@ -33716,6 +34079,18 @@ impl SurveyInputController {
         route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         self.up_the_creek.collider_entity = player_collider_entity;
+        self.up_the_creek.zero_y_extra_runup_required = player_collider_entity == Some(131)
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.velocity[2] > -150_000
+                    && route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 136)
+                            && object.state == 11
+                            && object.bound.is_some_and(|bound| {
+                                player.translation[2].saturating_sub(bound.max.z) > 450_000
+                            })
+                    })
+            });
         match self.profile {
             SurveyInputProfile::Idle => 0,
             SurveyInputProfile::DirectionAndButtonSweep
@@ -33883,6 +34258,7 @@ impl SurveyInputController {
                 camera,
                 player,
                 player_collider_entity,
+                checkpoint_id,
                 route_objects,
             ),
             SurveyInputProfile::LostCityCompletionRoute => self.lost_city.held(
@@ -36295,6 +36671,10 @@ fn survey_pair_with_runtime(
             SurveyInputProfile::RipperRooCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("RRooC").expect("fixed Ripper Roo boss EID is valid")],
+            )?,
+            profile if profile.is_up_the_creek_route() => program_object_traces(
+                &runtime,
+                &[Eid::from_name("RivOC").expect("fixed Up the Creek river-object EID is valid")],
             )?,
             SurveyInputProfile::BrioCompletionRoute | SurveyInputProfile::CortexCompletionRoute => {
                 program_object_traces(&runtime, &[])?
@@ -38711,6 +39091,131 @@ fn native_fortress_ordinary_pad_route_reaches_level_complete_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn native_fortress_current_campaign_phase_reaches_level_complete_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x1a);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Native Fortress pair must parse");
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 9),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 9),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("current campaign carry global must exist");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = 0x2cdb_105a;
+    carry.draw_count = 10_016;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Native Fortress must import the current campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Native Fortress carried a8 phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::NativeFortressD6Route,
+        7_500,
+    )
+    .expect("Native Fortress's carried a8 route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((survey.frames, 0x2d)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        survey.terminal,
+        Some(format!(
+            "frame {} requested level transition to 0x2d",
+            survey.frames
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn up_the_creek_current_campaign_phase_reaches_level_complete_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x18);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Up the Creek pair must parse");
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 10),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 10),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("current campaign carry global must exist");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = 0x1ef7_2d25;
+    carry.draw_count = 17_643;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Up the Creek must import the current campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Up the Creek carried campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::UpTheCreekCompletionRoute,
+        5_000,
+    )
+    .expect("Up the Creek's carried campaign route must execute");
+    assert_eq!(
+        survey.next_lid,
+        Some((survey.frames, 0x2d)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        survey.terminal,
+        Some(format!(
+            "frame {} requested level transition to 0x2d",
+            survey.frames
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn hog_wild_completion_unlocks_native_fortress_through_authored_map() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -39052,13 +39557,13 @@ fn up_the_creek_direct_route_reaches_second_moving_log() {
 
     assert_eq!(survey.frames, 370);
     assert_eq!(survey.successful_spawns, 26);
-    assert_eq!(survey.spawn_attempts, 5_278);
-    assert_eq!(survey.expected_spawn_rejections, 5_252);
-    assert_eq!(survey.executions, 10_161);
+    assert_eq!(survey.spawn_attempts, 5_282);
+    assert_eq!(survey.expected_spawn_rejections, 5_256);
+    assert_eq!(survey.executions, 10_129);
     assert_eq!(survey.zone_transitions, 3);
     assert_eq!(survey.camera_ranges.len(), 7);
     assert_eq!(survey.camera_path_changes, 6);
-    assert_eq!(survey.last_camera_path_change, 364);
+    assert_eq!(survey.last_camera_path_change, 363);
     assert_eq!(survey.last_camera_progress_change, 370);
     let final_camera = survey
         .final_camera
@@ -39070,10 +39575,10 @@ fn up_the_creek_direct_route_reaches_second_moving_log() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 3_488);
+    assert_eq!(final_camera.progress.raw(), 3_840);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_044_168, 1_166_978, 27_617_840])
+        Some([2_046_172, 1_166_978, 27_601_368])
     );
     let player = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -39081,7 +39586,7 @@ fn up_the_creek_direct_route_reaches_second_moving_log() {
     assert_eq!(player.zone, final_camera.path.zone);
     assert!(matches!(player.state, 1 | 2));
     assert_ne!(player.status_a & 1, 0);
-    assert_eq!(survey.final_live_objects, 28);
+    assert_eq!(survey.final_live_objects, 27);
     assert_eq!(survey.max_live_objects, 35);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -39123,15 +39628,15 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
 
     assert_eq!(survey.frames, 509);
     assert_eq!(survey.successful_spawns, 42);
-    assert_eq!(survey.spawn_attempts, 7_216);
-    assert_eq!(survey.expected_spawn_rejections, 7_174);
+    assert_eq!(survey.spawn_attempts, 7_218);
+    assert_eq!(survey.expected_spawn_rejections, 7_176);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 13_794);
+    assert_eq!(survey.executions, 13_753);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 6);
     assert_eq!(survey.camera_ranges.len(), 9);
     assert_eq!(survey.camera_path_changes, 9);
-    assert_eq!(survey.last_camera_path_change, 497);
+    assert_eq!(survey.last_camera_path_change, 496);
     assert_eq!(survey.last_camera_progress_change, 509);
     let final_camera = survey
         .final_camera
@@ -39143,10 +39648,10 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 17_292);
+    assert_eq!(final_camera.progress.raw(), 17_625);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_197_776, 1_316_255, 26_328_744])
+        Some([2_197_640, 1_316_255, 26_326_120])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -39155,8 +39660,8 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
         trace.zone,
         Eid::from_name("0f_oZ").expect("fixed Up the Creek island-zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_197_776, 1_316_255, 26_328_744]);
-    assert_eq!(trace.velocity, [0, -136_000, -255_000]);
+    assert_eq!(trace.translation, [2_197_640, 1_316_255, 26_326_120]);
+    assert_eq!(trace.velocity, [0, -136_000, -340_000]);
     assert_eq!(trace.state, 2);
     assert_ne!(trace.status_a & 1, 0);
 
@@ -39184,7 +39689,7 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
     assert_eq!(survey.final_live_objects, 23);
     assert_eq!(survey.max_live_objects, 35);
     assert_eq!(survey.effect_counts.get("solid"), Some(&174));
-    assert!(survey.spawn_flag_samples.contains(&(493, 44, 5)));
+    assert!(survey.spawn_flag_samples.contains(&(492, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -39228,15 +39733,15 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
 
     assert_eq!(survey.frames, 581);
     assert_eq!(survey.successful_spawns, 50);
-    assert_eq!(survey.spawn_attempts, 8_296);
-    assert_eq!(survey.expected_spawn_rejections, 8_246);
+    assert_eq!(survey.spawn_attempts, 8_301);
+    assert_eq!(survey.expected_spawn_rejections, 8_251);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 15_659);
+    assert_eq!(survey.executions, 15_627);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 7);
     assert_eq!(survey.camera_ranges.len(), 9);
     assert_eq!(survey.camera_path_changes, 10);
-    assert_eq!(survey.last_camera_path_change, 533);
+    assert_eq!(survey.last_camera_path_change, 532);
     assert_eq!(survey.last_camera_progress_change, 581);
     let final_camera = survey
         .final_camera
@@ -39248,10 +39753,10 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 5_120);
+    assert_eq!(final_camera.progress.raw(), 5_376);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_191_656, 1_591_182, 25_880_936])
+        Some([2_191_520, 1_574_372, 25_880_360])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -39260,15 +39765,15 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
         trace.zone,
         Eid::from_name("0f_oZ").expect("fixed Up the Creek platform-zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_191_656, 1_591_182, 25_880_936]);
-    assert_eq!(trace.velocity, [0, -408_000, -170_000]);
+    assert_eq!(trace.translation, [2_191_520, 1_574_372, 25_880_360]);
+    assert_eq!(trace.velocity, [0, -544_000, -255_000]);
     assert_eq!(trace.state, 2);
     assert_eq!(trace.status_a & 1, 0);
     assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(11)));
-    assert_eq!(survey.final_live_objects, 30);
+    assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 35);
     assert_eq!(survey.effect_counts.get("solid"), Some(&174));
-    assert!(survey.spawn_flag_samples.contains(&(534, 44, 5)));
+    assert!(survey.spawn_flag_samples.contains(&(533, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -39312,15 +39817,15 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
 
     assert_eq!(survey.frames, 1_250);
     assert_eq!(survey.successful_spawns, 71);
-    assert_eq!(survey.spawn_attempts, 18_111);
-    assert_eq!(survey.expected_spawn_rejections, 18_040);
+    assert_eq!(survey.spawn_attempts, 18_114);
+    assert_eq!(survey.expected_spawn_rejections, 18_043);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 33_634);
+    assert_eq!(survey.executions, 33_620);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 12);
     assert_eq!(survey.camera_ranges.len(), 18);
     assert_eq!(survey.camera_path_changes, 19);
-    assert_eq!(survey.last_camera_path_change, 1_241);
+    assert_eq!(survey.last_camera_path_change, 1_240);
     assert_eq!(survey.last_camera_progress_change, 1_250);
     let final_camera = survey
         .final_camera
@@ -39332,18 +39837,18 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 3_782);
+    assert_eq!(final_camera.progress.raw(), 4_243);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_016_752, 2_002_498, 19_352_864])
+        Some([2_006_512, 2_020_339, 19_336_480])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the first checkpoint bounce must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_016_752, 2_002_498, 19_352_864]);
-    assert_eq!(trace.velocity, [-551_813, 444_636, -561_010]);
-    assert_eq!(trace.state, 14);
+    assert_eq!(trace.translation, [2_006_512, 2_020_339, 19_336_480]);
+    assert_eq!(trace.velocity, [-340_800, 401_354, -513_600]);
+    assert_eq!(trace.state, 10);
     assert_eq!(trace.status_a, 133_376);
     assert_eq!(survey.final_live_objects, 24);
     assert_eq!(survey.max_live_objects, 36);
@@ -39353,23 +39858,23 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (965, -1, [2_148_864, 1_818_624, 21_605_376]),
-            (1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+            (964, -1, [2_148_864, 1_818_624, 21_605_376]),
+            (1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
-    for boundary in [(921, 71, 5), (964, 49, 3), (982, 50, 3), (1_246, 76, 9)] {
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
+    for boundary in [(920, 71, 5), (963, 49, 3), (981, 50, 3), (1_245, 76, 9)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the route must retain authored spawn-flag boundary {boundary:?}: {}",
@@ -39377,7 +39882,7 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&59));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&60));
     assert_eq!(survey.effect_counts.get("solid"), Some(&410));
     assert!(!survey.effect_counts.contains_key("load-state"));
 
@@ -39450,15 +39955,15 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
 
     assert_eq!(survey.frames, 1_325);
     assert_eq!(survey.successful_spawns, 78);
-    assert_eq!(survey.spawn_attempts, 19_177);
-    assert_eq!(survey.expected_spawn_rejections, 19_099);
+    assert_eq!(survey.spawn_attempts, 19_182);
+    assert_eq!(survey.expected_spawn_rejections, 19_104);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 35_766);
+    assert_eq!(survey.executions, 35_761);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 13);
     assert_eq!(survey.camera_ranges.len(), 19);
     assert_eq!(survey.camera_path_changes, 20);
-    assert_eq!(survey.last_camera_path_change, 1_317);
+    assert_eq!(survey.last_camera_path_change, 1_316);
     assert_eq!(survey.last_camera_progress_change, 1_325);
     let final_camera = survey
         .final_camera
@@ -39471,16 +39976,16 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 1_971);
+    assert_eq!(final_camera.progress.raw(), 2_227);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_037_176, 1_779_842, 18_727_112])
+        Some([2_033_932, 1_779_842, 18_716_380])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("moving platform 75 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_037_176, 1_779_842, 18_727_112]);
+    assert_eq!(trace.translation, [2_033_932, 1_779_842, 18_716_380]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_ne!(trace.status_a & 1, 0);
@@ -39488,7 +39993,7 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
     assert_eq!(
         spawned_entity_trace(&runtime, 75),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_021_320, 1_738_240, 18_709_320],
+            translation: [2_017_756, 1_738_240, 18_699_420],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
@@ -39524,8 +40029,8 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&62));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&465));
-    for boundary in [(1_318, 86, 5), (1_318, 88, 5)] {
+    assert_eq!(survey.effect_counts.get("solid"), Some(&466));
+    for boundary in [(1_317, 86, 5), (1_317, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the 0l camera must expose authored neighboring-platform boundary {boundary:?}: {}",
@@ -39536,18 +40041,18 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -39591,15 +40096,15 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
 
     assert_eq!(survey.frames, 1_575);
     assert_eq!(survey.successful_spawns, 90);
-    assert_eq!(survey.spawn_attempts, 23_039);
-    assert_eq!(survey.expected_spawn_rejections, 22_949);
+    assert_eq!(survey.spawn_attempts, 23_044);
+    assert_eq!(survey.expected_spawn_rejections, 22_954);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 42_365);
+    assert_eq!(survey.executions, 42_353);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 15);
     assert_eq!(survey.camera_ranges.len(), 19);
     assert_eq!(survey.camera_path_changes, 22);
-    assert_eq!(survey.last_camera_path_change, 1_516);
+    assert_eq!(survey.last_camera_path_change, 1_515);
     assert_eq!(survey.last_camera_progress_change, 1_575);
     let final_camera = survey
         .final_camera
@@ -39611,10 +40116,10 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 14_220);
+    assert_eq!(final_camera.progress.raw(), 14_592);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_045_160, 1_967_235, 18_230_936])
+        Some([2_061_544, 1_983_639, 18_214_552])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -39623,9 +40128,9 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
         trace.zone,
         Eid::from_name("0l_oZ").expect("fixed Up the Creek post-platform zone EID is valid")
     );
-    assert_eq!(trace.translation, [2_045_160, 1_967_235, 18_230_936]);
-    assert_eq!(trace.velocity, [554_878, 401_354, -554_879]);
-    assert_eq!(trace.state, 3);
+    assert_eq!(trace.translation, [2_061_544, 1_983_639, 18_214_552]);
+    assert_eq!(trace.velocity, [554_878, 358_072, -554_879]);
+    assert_eq!(trace.state, 10);
     assert_eq!(trace.status_a, 133_376);
 
     assert_eq!(
@@ -39651,7 +40156,7 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     assert_eq!(referenced_entity_id(&runtime, collider_reference), Ok(None));
     assert_eq!(
         player_vm.register(process_register::FLOOR_IMPACT_STAMP),
-        Ok(1_567)
+        Ok(1_566)
     );
     assert_eq!(
         player_vm
@@ -39663,9 +40168,9 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     assert_eq!(survey.final_live_objects, 26);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&65));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&66));
     assert_eq!(survey.effect_counts.get("solid"), Some(&708));
-    for boundary in [(1_448, 71, 5), (1_517, 86, 5), (1_517, 88, 5)] {
+    for boundary in [(1_447, 71, 5), (1_516, 86, 5), (1_516, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the complete platform cycle must retain authored boundary {boundary:?}: {}",
@@ -39676,18 +40181,18 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -39731,16 +40236,16 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
 
     assert_eq!(survey.frames, 1_675);
     assert_eq!(survey.successful_spawns, 95);
-    assert_eq!(survey.spawn_attempts, 24_639);
-    assert_eq!(survey.expected_spawn_rejections, 24_544);
+    assert_eq!(survey.spawn_attempts, 24_644);
+    assert_eq!(survey.expected_spawn_rejections, 24_549);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 44_961);
+    assert_eq!(survey.executions, 44_949);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 16);
     assert_eq!(survey.camera_ranges.len(), 21);
     assert_eq!(survey.camera_path_changes, 24);
-    assert_eq!(survey.last_camera_path_change, 1_659);
-    assert_eq!(survey.last_camera_progress_change, 1_668);
+    assert_eq!(survey.last_camera_path_change, 1_658);
+    assert_eq!(survey.last_camera_progress_change, 1_667);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain entity 88's 0m camera bank");
@@ -39755,13 +40260,13 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     assert_eq!(final_camera.progress.raw(), 4_288);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_372_840, 1_666_710, 17_415_832])
+        Some([2_372_840, 1_665_834, 17_415_832])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("vertical platform 88 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_372_840, 1_666_710, 17_415_832]);
+    assert_eq!(trace.translation, [2_372_840, 1_665_834, 17_415_832]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 13);
     assert_eq!(trace.status_a, 2_099_201);
@@ -39769,7 +40274,7 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     assert_eq!(
         spawned_entity_trace(&runtime, 88),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_252_032, 1_630_420, 17_305_600],
+            translation: [2_252_032, 1_629_544, 17_305_600],
             state: 12,
             path_progress: 0,
             status_a: 131_072,
@@ -39804,9 +40309,9 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     assert_eq!(survey.final_live_objects, 26);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&69));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&759));
-    for boundary in [(1_448, 71, 5), (1_517, 86, 5), (1_517, 88, 5)] {
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&70));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&760));
+    for boundary in [(1_447, 71, 5), (1_516, 86, 5), (1_516, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
             "the 0m platform route must retain authored boundary {boundary:?}: {}",
@@ -39817,18 +40322,18 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -39872,15 +40377,15 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
 
     assert_eq!(survey.frames, 2_608);
     assert_eq!(survey.successful_spawns, 135);
-    assert_eq!(survey.spawn_attempts, 38_982);
-    assert_eq!(survey.expected_spawn_rejections, 38_847);
+    assert_eq!(survey.spawn_attempts, 38_988);
+    assert_eq!(survey.expected_spawn_rejections, 38_853);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 71_089);
+    assert_eq!(survey.executions, 71_039);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 24);
     assert_eq!(survey.camera_ranges.len(), 33);
     assert_eq!(survey.camera_path_changes, 38);
-    assert_eq!(survey.last_camera_path_change, 2_573);
+    assert_eq!(survey.last_camera_path_change, 2_572);
     assert_eq!(survey.last_camera_progress_change, 2_608);
     let final_camera = survey
         .final_camera
@@ -39892,16 +40397,16 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 8_108);
+    assert_eq!(final_camera.progress.raw(), 8_364);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_186_684, 2_391_170, 7_115_260])
+        Some([2_183_088, 2_391_170, 7_105_072])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("the 0u right bank must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_186_684, 2_391_170, 7_115_260]);
+    assert_eq!(trace.translation, [2_183_088, 2_391_170, 7_105_072]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_099_209);
@@ -39909,7 +40414,7 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
     assert_eq!(
         spawned_entity_trace(&runtime, 166),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_179_788, 2_349_568, 7_112_332],
+            translation: [2_176_224, 2_349_568, 7_102_432],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
@@ -39938,25 +40443,25 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
     assert_eq!(survey.final_live_objects, 30);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&108));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_153));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&109));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_154));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40000,16 +40505,16 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
 
     assert_eq!(survey.frames, 3_112);
     assert_eq!(survey.successful_spawns, 161);
-    assert_eq!(survey.spawn_attempts, 48_787);
-    assert_eq!(survey.expected_spawn_rejections, 48_626);
+    assert_eq!(survey.spawn_attempts, 48_791);
+    assert_eq!(survey.expected_spawn_rejections, 48_630);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 88_787);
+    assert_eq!(survey.executions, 88_788);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 30);
     assert_eq!(survey.camera_ranges.len(), 38);
     assert_eq!(survey.camera_path_changes, 45);
-    assert_eq!(survey.last_camera_path_change, 3_052);
-    assert_eq!(survey.last_camera_progress_change, 3_108);
+    assert_eq!(survey.last_camera_path_change, 3_051);
+    assert_eq!(survey.last_camera_progress_change, 3_107);
     let final_camera = survey
         .final_camera
         .expect("Up the Creek must retain its entity-136 camera");
@@ -40023,13 +40528,13 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
     assert_eq!(final_camera.progress.raw(), 16_895);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_336_640, 2_926_333, 2_380_776])
+        Some([2_336_640, 2_935_872, 2_380_776])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("entity 136 must keep Crash alive");
     assert_eq!(trace.zone, final_camera.path.zone);
-    assert_eq!(trace.translation, [2_336_640, 2_926_333, 2_380_776]);
+    assert_eq!(trace.translation, [2_336_640, 2_935_872, 2_380_776]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_273);
@@ -40039,24 +40544,24 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&129));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_221));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_223));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40100,16 +40605,16 @@ fn up_the_creek_direct_route_crosses_post_zero_y_bank_to_platform_140() {
 
     assert_eq!(survey.frames, 3_223);
     assert_eq!(survey.successful_spawns, 168);
-    assert_eq!(survey.spawn_attempts, 50_584);
-    assert_eq!(survey.expected_spawn_rejections, 50_416);
+    assert_eq!(survey.spawn_attempts, 50_590);
+    assert_eq!(survey.expected_spawn_rejections, 50_422);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 91_963);
+    assert_eq!(survey.executions, 91_959);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 31);
     assert_eq!(survey.camera_ranges.len(), 41);
     assert_eq!(survey.camera_path_changes, 48);
-    assert_eq!(survey.last_camera_path_change, 3_193);
-    assert_eq!(survey.last_camera_progress_change, 3_199);
+    assert_eq!(survey.last_camera_path_change, 3_192);
+    assert_eq!(survey.last_camera_progress_change, 3_198);
 
     let final_camera = survey
         .final_camera
@@ -40141,24 +40646,24 @@ fn up_the_creek_direct_route_crosses_post_zero_y_bank_to_platform_140() {
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&133));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_238));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_239));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40202,16 +40707,16 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
 
     assert_eq!(survey.frames, 3_255);
     assert_eq!(survey.successful_spawns, 168);
-    assert_eq!(survey.spawn_attempts, 51_128);
-    assert_eq!(survey.expected_spawn_rejections, 50_960);
+    assert_eq!(survey.spawn_attempts, 51_134);
+    assert_eq!(survey.expected_spawn_rejections, 50_966);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 93_051);
+    assert_eq!(survey.executions, 93_056);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 31);
     assert_eq!(survey.camera_ranges.len(), 41);
     assert_eq!(survey.camera_path_changes, 48);
-    assert_eq!(survey.last_camera_path_change, 3_193);
-    assert_eq!(survey.last_camera_progress_change, 3_231);
+    assert_eq!(survey.last_camera_path_change, 3_192);
+    assert_eq!(survey.last_camera_progress_change, 3_230);
 
     let final_camera = survey
         .final_camera
@@ -40252,24 +40757,24 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&135));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_247));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_248));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40313,16 +40818,16 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
 
     assert_eq!(survey.frames, 3_344);
     assert_eq!(survey.successful_spawns, 172);
-    assert_eq!(survey.spawn_attempts, 52_641);
-    assert_eq!(survey.expected_spawn_rejections, 52_469);
+    assert_eq!(survey.spawn_attempts, 52_647);
+    assert_eq!(survey.expected_spawn_rejections, 52_475);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 96_119);
+    assert_eq!(survey.executions, 96_129);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 32);
     assert_eq!(survey.camera_ranges.len(), 42);
     assert_eq!(survey.camera_path_changes, 49);
-    assert_eq!(survey.last_camera_path_change, 3_285);
-    assert_eq!(survey.last_camera_progress_change, 3_332);
+    assert_eq!(survey.last_camera_path_change, 3_284);
+    assert_eq!(survey.last_camera_progress_change, 3_331);
 
     let final_camera = survey
         .final_camera
@@ -40358,7 +40863,7 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 41);
+    assert_eq!(survey.final_live_objects, 42);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&137));
@@ -40367,19 +40872,19 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40453,15 +40958,15 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
 
     assert_eq!(survey.frames, 3_408);
     assert_eq!(survey.successful_spawns, 178);
-    assert_eq!(survey.spawn_attempts, 53_729);
-    assert_eq!(survey.expected_spawn_rejections, 53_551);
+    assert_eq!(survey.spawn_attempts, 53_735);
+    assert_eq!(survey.expected_spawn_rejections, 53_557);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 98_802);
+    assert_eq!(survey.executions, 98_810);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 33);
     assert_eq!(survey.camera_ranges.len(), 43);
     assert_eq!(survey.camera_path_changes, 50);
-    assert_eq!(survey.last_camera_path_change, 3_398);
+    assert_eq!(survey.last_camera_path_change, 3_397);
     assert_eq!(survey.last_camera_progress_change, 3_408);
 
     let final_camera = survey
@@ -40474,10 +40979,10 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 2_035);
+    assert_eq!(final_camera.progress.raw(), 2_265);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_047_060, 3_003_266, -832_756])
+        Some([2_051_952, 3_003_266, -842_128])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
@@ -40488,7 +40993,7 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
         trace.zone,
         Eid::from_name("0A_oZ").expect("fixed Up the Creek 0A EID is valid")
     );
-    assert_eq!(trace.translation, [2_047_060, 3_003_266, -832_756]);
+    assert_eq!(trace.translation, [2_051_952, 3_003_266, -842_128]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_099_201);
@@ -40496,35 +41001,35 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
     assert_eq!(
         spawned_entity_trace(&runtime, 38),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_076_196, 2_961_664, -858_724],
+            translation: [2_079_760, 2_961_664, -868_624],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
         }))
     );
 
-    assert_eq!(survey.final_live_objects, 39);
+    assert_eq!(survey.final_live_objects, 40);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&140));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_315));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_316));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40598,15 +41103,15 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
 
     assert_eq!(survey.frames, 3_502);
     assert_eq!(survey.successful_spawns, 178);
-    assert_eq!(survey.spawn_attempts, 55_327);
-    assert_eq!(survey.expected_spawn_rejections, 55_149);
+    assert_eq!(survey.spawn_attempts, 55_333);
+    assert_eq!(survey.expected_spawn_rejections, 55_155);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 102_599);
+    assert_eq!(survey.executions, 102_607);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 33);
     assert_eq!(survey.camera_ranges.len(), 44);
     assert_eq!(survey.camera_path_changes, 51);
-    assert_eq!(survey.last_camera_path_change, 3_468);
+    assert_eq!(survey.last_camera_path_change, 3_467);
     assert_eq!(survey.last_camera_progress_change, 3_502);
 
     let final_camera = survey
@@ -40619,16 +41124,16 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 11_520);
+    assert_eq!(final_camera.progress.raw(), 11_776);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_219_872, 3_003_266, -1_901_016])
+        Some([2_222_960, 3_003_266, -1_912_736])
     );
     let trace = player_trace(&runtime)
         .expect("Up the Creek player trace must resolve")
         .expect("shared platform 39 must keep Crash alive");
     assert_eq!(trace.zone, zero_b);
-    assert_eq!(trace.translation, [2_219_872, 3_003_266, -1_901_016]);
+    assert_eq!(trace.translation, [2_222_960, 3_003_266, -1_912_736]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
     assert_eq!(trace.state, 1);
     assert_eq!(trace.status_a, 2_230_281);
@@ -40636,7 +41141,7 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
     assert_eq!(
         spawned_entity_trace(&runtime, 39),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_159_072, 2_961_664, -1_928_824],
+            translation: [2_162_240, 2_961_664, -1_938_064],
             state: 9,
             path_progress: 3_072,
             status_a: 131_072,
@@ -40647,24 +41152,24 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&142));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_384));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_385));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40742,16 +41247,16 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
 
     assert_eq!(survey.frames, 3_598);
     assert_eq!(survey.successful_spawns, 183);
-    assert_eq!(survey.spawn_attempts, 56_959);
-    assert_eq!(survey.expected_spawn_rejections, 56_776);
+    assert_eq!(survey.spawn_attempts, 56_965);
+    assert_eq!(survey.expected_spawn_rejections, 56_782);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 105_855);
+    assert_eq!(survey.executions, 105_859);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 34);
     assert_eq!(survey.camera_ranges.len(), 46);
     assert_eq!(survey.camera_path_changes, 53);
-    assert_eq!(survey.last_camera_path_change, 3_569);
-    assert_eq!(survey.last_camera_progress_change, 3_578);
+    assert_eq!(survey.last_camera_path_change, 3_568);
+    assert_eq!(survey.last_camera_progress_change, 3_577);
 
     let final_camera = survey
         .final_camera
@@ -40791,24 +41296,24 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&145));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_453));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_454));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -40878,17 +41383,17 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
 
     assert_eq!(survey.frames, 3_639);
     assert_eq!(survey.successful_spawns, 188);
-    assert_eq!(survey.spawn_attempts, 57_635);
-    assert_eq!(survey.expected_spawn_rejections, 57_447);
+    assert_eq!(survey.spawn_attempts, 57_640);
+    assert_eq!(survey.expected_spawn_rejections, 57_452);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 107_110);
+    assert_eq!(survey.executions, 107_105);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 47);
     assert_eq!(survey.camera_path_changes, 54);
-    assert_eq!(survey.last_camera_path_change, 3_618);
-    assert_eq!(survey.last_camera_progress_change, 3_619);
-    assert_eq!(survey.last_player_movement, 3_618);
+    assert_eq!(survey.last_camera_path_change, 3_617);
+    assert_eq!(survey.last_camera_progress_change, 3_618);
+    assert_eq!(survey.last_player_movement, 3_617);
 
     let final_camera = survey
         .final_camera
@@ -40933,19 +41438,19 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41017,17 +41522,17 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
 
     assert_eq!(survey.frames, 3_714);
     assert_eq!(survey.successful_spawns, 188);
-    assert_eq!(survey.spawn_attempts, 58_835);
-    assert_eq!(survey.expected_spawn_rejections, 58_647);
+    assert_eq!(survey.spawn_attempts, 58_840);
+    assert_eq!(survey.expected_spawn_rejections, 58_652);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 109_362);
+    assert_eq!(survey.executions, 109_366);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 47);
     assert_eq!(survey.camera_path_changes, 54);
-    assert_eq!(survey.last_camera_path_change, 3_618);
-    assert_eq!(survey.last_camera_progress_change, 3_694);
-    assert_eq!(survey.last_player_movement, 3_709);
+    assert_eq!(survey.last_camera_path_change, 3_617);
+    assert_eq!(survey.last_camera_progress_change, 3_693);
+    assert_eq!(survey.last_player_movement, 3_708);
 
     let final_camera = survey
         .final_camera
@@ -41067,24 +41572,24 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&148));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_475));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_476));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41156,17 +41661,17 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
 
     assert_eq!(survey.frames, 3_800);
     assert_eq!(survey.successful_spawns, 188);
-    assert_eq!(survey.spawn_attempts, 60_211);
-    assert_eq!(survey.expected_spawn_rejections, 60_023);
+    assert_eq!(survey.spawn_attempts, 60_216);
+    assert_eq!(survey.expected_spawn_rejections, 60_028);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 112_167);
+    assert_eq!(survey.executions, 112_171);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 35);
     assert_eq!(survey.camera_ranges.len(), 48);
     assert_eq!(survey.camera_path_changes, 55);
-    assert_eq!(survey.last_camera_path_change, 3_762);
-    assert_eq!(survey.last_camera_progress_change, 3_780);
-    assert_eq!(survey.last_player_movement, 3_793);
+    assert_eq!(survey.last_camera_path_change, 3_761);
+    assert_eq!(survey.last_camera_progress_change, 3_779);
+    assert_eq!(survey.last_player_movement, 3_792);
 
     let final_camera = survey
         .final_camera
@@ -41206,24 +41711,24 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&151));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_539));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_540));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41322,17 +41827,17 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
 
     assert_eq!(survey.frames, 3_878);
     assert_eq!(survey.successful_spawns, 193);
-    assert_eq!(survey.spawn_attempts, 61_408);
-    assert_eq!(survey.expected_spawn_rejections, 61_215);
+    assert_eq!(survey.spawn_attempts, 61_412);
+    assert_eq!(survey.expected_spawn_rejections, 61_219);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 114_711);
+    assert_eq!(survey.executions, 114_708);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 36);
     assert_eq!(survey.camera_ranges.len(), 50);
     assert_eq!(survey.camera_path_changes, 57);
-    assert_eq!(survey.last_camera_path_change, 3_860);
-    assert_eq!(survey.last_camera_progress_change, 3_869);
-    assert_eq!(survey.last_player_movement, 3_868);
+    assert_eq!(survey.last_camera_path_change, 3_859);
+    assert_eq!(survey.last_camera_progress_change, 3_868);
+    assert_eq!(survey.last_player_movement, 3_867);
 
     let final_camera = survey
         .final_camera
@@ -41355,8 +41860,8 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
     assert_eq!(trace.zone, zero_e);
     assert_eq!(trace.translation, [2_205_612, 2_943_074, -5_415_008]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 13);
-    assert_eq!(trace.status_a, 2_099_209);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 2_230_281);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(8)));
     assert_eq!(
         spawned_entity_trace(&runtime, 8),
@@ -41372,25 +41877,25 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&154));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_572));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_573));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
-            (3_846, 0x700),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
+            (3_845, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41476,18 +41981,18 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
     eprintln!("{}", survey.summary());
 
     assert_eq!(survey.frames, 3_923);
-    assert_eq!(survey.successful_spawns, 196);
-    assert_eq!(survey.spawn_attempts, 62_055);
+    assert_eq!(survey.successful_spawns, 200);
+    assert_eq!(survey.spawn_attempts, 62_059);
     assert_eq!(survey.expected_spawn_rejections, 61_859);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 116_204);
+    assert_eq!(survey.executions, 116_205);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 38);
     assert_eq!(survey.camera_ranges.len(), 51);
     assert_eq!(survey.camera_path_changes, 59);
-    assert_eq!(survey.last_camera_path_change, 3_923);
+    assert_eq!(survey.last_camera_path_change, 3_922);
     assert_eq!(survey.last_camera_progress_change, 3_923);
-    assert_eq!(survey.last_player_movement, 3_913);
+    assert_eq!(survey.last_player_movement, 3_912);
 
     let final_camera = survey
         .final_camera
@@ -41499,7 +42004,7 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 15_359);
+    assert_eq!(final_camera.progress.raw(), 14_848);
     assert_eq!(
         survey.final_player_translation,
         Some([2_105_260, 3_002_869, -5_972_064])
@@ -41515,7 +42020,7 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
     assert_eq!(player_collider_entity(&runtime), Ok(None));
     assert_eq!(spawned_entity_trace(&runtime, 7), Ok(None));
 
-    assert_eq!(survey.final_live_objects, 29);
+    assert_eq!(survey.final_live_objects, 33);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&157));
@@ -41525,20 +42030,20 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
-            (3_846, 0x700),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
+            (3_845, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41664,17 +42169,17 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
 
     assert_eq!(survey.frames, 3_953);
     assert_eq!(survey.successful_spawns, 196);
-    assert_eq!(survey.spawn_attempts, 62_445);
-    assert_eq!(survey.expected_spawn_rejections, 62_249);
+    assert_eq!(survey.spawn_attempts, 62_447);
+    assert_eq!(survey.expected_spawn_rejections, 62_251);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 117_260);
+    assert_eq!(survey.executions, 117_257);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 37);
     assert_eq!(survey.camera_ranges.len(), 52);
     assert_eq!(survey.camera_path_changes, 59);
-    assert_eq!(survey.last_camera_path_change, 3_948);
+    assert_eq!(survey.last_camera_path_change, 3_947);
     assert_eq!(survey.last_camera_progress_change, 3_953);
-    assert_eq!(survey.last_player_movement, 3_951);
+    assert_eq!(survey.last_player_movement, 3_950);
 
     let final_camera = survey
         .final_camera
@@ -41686,7 +42191,7 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 1_280);
+    assert_eq!(final_camera.progress.raw(), 972);
     assert_eq!(
         survey.final_player_translation,
         Some([2_252_716, 2_943_074, -6_574_176])
@@ -41703,9 +42208,9 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
     assert_eq!(
         spawned_entity_trace(&runtime, 6),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_018_464, 3_050_048, -6_298_624],
+            translation: [2_026_352, 3_068_000, -6_298_624],
             state: 7,
-            path_progress: 1_092,
+            path_progress: 1_126,
             status_a: 0,
         }))
     );
@@ -41723,26 +42228,26 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&159));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_586));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_587));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
-            (3_846, 0x700),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
+            (3_845, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -41851,15 +42356,15 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
 
     assert_eq!(survey.frames, 3_986);
     assert_eq!(survey.successful_spawns, 196);
-    assert_eq!(survey.spawn_attempts, 62_874);
-    assert_eq!(survey.expected_spawn_rejections, 62_678);
+    assert_eq!(survey.spawn_attempts, 62_876);
+    assert_eq!(survey.expected_spawn_rejections, 62_680);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 118_266);
+    assert_eq!(survey.executions, 118_262);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 37);
     assert_eq!(survey.camera_ranges.len(), 52);
     assert_eq!(survey.camera_path_changes, 59);
-    assert_eq!(survey.last_camera_path_change, 3_948);
+    assert_eq!(survey.last_camera_path_change, 3_947);
     assert_eq!(survey.last_camera_progress_change, 3_986);
     assert_eq!(survey.last_player_movement, 3_986);
 
@@ -41873,14 +42378,14 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
             index: 1,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 13_004);
+    assert_eq!(final_camera.progress.raw(), 13_049);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_182_096, 3_003_522, -7_019_000])
+        Some([2_180_944, 3_003_522, -7_020_788])
     );
     assert_eq!(
         survey.player_minimum,
-        Some([1_919_376, 1_106_786, -7_019_000])
+        Some([1_919_376, 1_106_786, -7_020_788])
     );
     assert_eq!(
         survey.player_maximum,
@@ -41890,15 +42395,15 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
         .expect("Up the Creek player trace must resolve")
         .expect("0F platform 11 must keep Crash alive");
     assert_eq!(trace.zone, zero_f);
-    assert_eq!(trace.translation, [2_182_096, 3_003_522, -7_019_000]);
+    assert_eq!(trace.translation, [2_180_944, 3_003_522, -7_020_788]);
     assert_eq!(trace.velocity, [0, -136_000, 0]);
-    assert_eq!(trace.state, 13);
-    assert_eq!(trace.status_a, 2_099_209);
+    assert_eq!(trace.state, 1);
+    assert_eq!(trace.status_a, 2_230_281);
     assert_eq!(player_collider_entity(&runtime), Ok(Some(11)));
     assert_eq!(
         spawned_entity_trace(&runtime, 11),
         Ok(Some(SpawnedEntityTrace {
-            translation: [2_141_856, 2_961_920, -6_956_840],
+            translation: [2_143_440, 2_961_920, -6_958_292],
             state: 9,
             path_progress: 3_072,
             status_a: 131_076,
@@ -41918,26 +42423,26 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_596));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_597));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (69, 0x100),
-            (76, 0x200),
-            (964, 0x300),
-            (982, 0x400),
-            (1_246, 0x500),
-            (1_878, 0x600),
-            (3_846, 0x700),
+            (68, 0x100),
+            (75, 0x200),
+            (963, 0x300),
+            (981, 0x400),
+            (1_245, 0x500),
+            (1_877, 0x600),
+            (3_845, 0x700),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples.last(),
-        Some(&(1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
+        Some(&(1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]))
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_246, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_245, 0x400)]);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert!(!survey.effect_counts.contains_key("load-state"));
@@ -49607,34 +50112,35 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             let rolling_stones_survey = &rolling_stones_result.0;
             let rolling_stones_runtime = &mut rolling_stones_result.1;
+            // Pin the carried route to its current path-anchored phase.
             assert_eq!(
                 rolling_stones_survey.frames,
-                2_500,
+                2_465,
                 "{}",
                 rolling_stones_survey.summary()
             );
             assert_eq!(
                 rolling_stones_survey.terminal.as_deref(),
-                Some("frame 2500 requested level transition to 0x2d")
+                Some("frame 2465 requested level transition to 0x2d")
             );
             assert_eq!(rolling_stones_survey.final_live_objects, 22);
             assert_eq!(rolling_stones_survey.max_live_objects, 35);
             assert_eq!(rolling_stones_survey.successful_spawns, 117);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 29_692);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_575);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 29_372);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 29_255);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 56_023);
+            assert_eq!(rolling_stones_survey.executions, 55_526);
             assert_eq!(rolling_stones_survey.zone_transitions, 32);
             assert_eq!(rolling_stones_survey.camera_ranges.len(), 45);
             assert_eq!(rolling_stones_survey.camera_path_changes, 46);
-            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_377);
-            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_411);
+            assert_eq!(rolling_stones_survey.last_camera_path_change, 2_320);
+            assert_eq!(rolling_stones_survey.last_camera_progress_change, 2_376);
             assert_eq!(rolling_stones_survey.restarts, 0);
             assert!(rolling_stones_survey.restart_frames.is_empty());
             assert_eq!(rolling_stones_survey.death_camera_frames, 0);
             assert!(rolling_stones_survey.first_below_zero.is_none());
             assert!(rolling_stones_survey.first_terminal_fall.is_none());
-            assert_eq!(rolling_stones_survey.next_lid, Some((2_500, 0x2d)));
+            assert_eq!(rolling_stones_survey.next_lid, Some((2_465, 0x2d)));
             assert_eq!(rolling_stones_survey.faulted_objects, 0);
             assert_eq!(rolling_stones_survey.execution_errors, 0);
             assert!(rolling_stones_survey.issue_counts.is_empty());
@@ -49663,14 +50169,14 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     index: 0,
                 }
             );
-            assert_eq!(rolling_final_camera.progress.raw(), 7_424);
+            assert_eq!(rolling_final_camera.progress.raw(), 9_424);
             assert_eq!(
                 rolling_stones_survey.initial_player_translation,
                 Some([2_252_544, 1_023_744, 31_794_432])
             );
             assert_eq!(
                 rolling_stones_survey.final_player_translation,
-                Some([2_242_656, 9_250_924, -1_710_848])
+                Some([2_237_184, 9_256_237, -1_792_768])
             );
             assert_eq!(
                 player_trace(rolling_stones_runtime)
@@ -49681,15 +50187,15 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_stones_survey.checkpoint_samples.last(),
-                Some(&(1_160, 8 << 8, [2_815_232, 2_979_072, 17_458_688]))
+                Some(&(1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]))
             );
             assert_eq!(
                 rolling_stones_survey.saved_box_count_samples,
-                [(1_160, 0xa00)]
+                [(1_159, 0x900)]
             );
             assert_eq!(
                 rolling_stones_runtime.global_word(BOX_COUNT_GLOBAL),
-                Ok(0xc00_u32)
+                Ok(0xb00_u32)
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("save-state"),
@@ -49697,9 +50203,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("send-event"),
-                Some(&110)
+                Some(&95)
             );
-            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&228));
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&160));
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("master-fade-reset"),
                 Some(&1)
@@ -49729,7 +50235,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     0,
                 ]
             );
-            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0x2ecb_eaad);
+            assert_eq!(rolling_stones_runtime.machine().random_seed(), 0xb40b_ac74);
             let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
             for state in 0..=4 {
                 assert!(
@@ -49739,7 +50245,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     "carried WarpC state {state} must execute before the authored transition"
                 );
             }
-            assert_eq!(rolling_stones_runtime.draw_count(), 6_810);
+            assert_eq!(rolling_stones_runtime.draw_count(), 6_863);
             assert!(
                 rolling_stones_survey.is_clean(),
                 "Rolling Stones' carried ordinary-pad route must remain clean: {}",
@@ -49764,8 +50270,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
-            assert_eq!(report.carry.random_seed, 0x2ecb_eaad);
-            assert_eq!(report.carry.draw_count, 6_810);
+            assert_eq!(report.carry.random_seed, 0xb40b_ac74);
+            assert_eq!(report.carry.draw_count, 6_863);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -49865,18 +50371,18 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(rolling_completion_survey.spawn_attempts, 850);
             assert_eq!(rolling_completion_survey.expected_spawn_rejections, 848);
             assert_eq!(rolling_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_completion_survey.executions, 2_794);
+            assert_eq!(rolling_completion_survey.executions, 2_787);
             assert_eq!(rolling_completion_survey.execution_errors, 0);
             assert_eq!(rolling_completion_survey.restarts, 0);
             assert_eq!(rolling_completion_survey.faulted_objects, 0);
-            assert_eq!(rolling_completion_survey.box_count_samples.len(), 35);
+            assert_eq!(rolling_completion_survey.box_count_samples.len(), 36);
             assert_eq!(
                 rolling_completion_survey.box_count_samples.first(),
                 Some(&(1, 0))
             );
             assert_eq!(
                 rolling_completion_survey.box_count_samples.last(),
-                Some(&(344, 0x2200))
+                Some(&(368, 0x2300))
             );
             assert_eq!(
                 rolling_completion_survey.effect_counts.get("transition"),
@@ -49897,9 +50403,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 rolling_completion_runtime.machine().random_seed(),
-                0x6ed2_9d67
+                0x939e_36d7
             );
-            assert_eq!(rolling_completion_runtime.draw_count(), 7_235);
+            assert_eq!(rolling_completion_runtime.draw_count(), 7_288);
             assert!(
                 rolling_completion_survey.is_clean(),
                 "{}",
@@ -49917,8 +50423,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x6ed2_9d67);
-                assert_eq!(report.carry.draw_count, 7_235);
+                assert_eq!(report.carry.random_seed, 0x939e_36d7);
+                assert_eq!(report.carry.draw_count, 7_288);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -49974,8 +50480,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| pre_hog_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 8, 1, 8, 1]
             );
-            assert_eq!(pre_hog_map.runtime.machine().random_seed(), 0x66db_b4ac);
-            assert_eq!(pre_hog_map.runtime.draw_count(), 7_488);
+            assert_eq!(pre_hog_map.runtime.machine().random_seed(), 0x9a90_0f5c);
+            assert_eq!(pre_hog_map.runtime.draw_count(), 7_541);
             assert_eq!(pre_hog_map.runtime.faulted_object_count(), 0);
             let hog_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -49992,8 +50498,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, hog_wild);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x66db_b4ac);
-                assert_eq!(report.carry.draw_count, 7_488);
+                assert_eq!(report.carry.random_seed, 0x9a90_0f5c);
+                assert_eq!(report.carry.draw_count, 7_541);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -50025,25 +50531,25 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 2_200,
             )
             .expect("authentic carried Hog Wild route must execute");
-            assert_eq!(hog_survey.frames, 1_950);
+            assert_eq!(hog_survey.frames, 1_949);
             assert_eq!(
                 hog_survey.terminal.as_deref(),
-                Some("frame 1950 requested level transition to 0x2d")
+                Some("frame 1949 requested level transition to 0x2d")
             );
-            assert_eq!(hog_survey.next_lid, Some((1_950, 0x2d)));
+            assert_eq!(hog_survey.next_lid, Some((1_949, 0x2d)));
             assert_eq!(hog_survey.final_live_objects, 17);
             assert_eq!(hog_survey.max_live_objects, 18);
             assert_eq!(hog_survey.successful_spawns, 39);
-            assert_eq!(hog_survey.spawn_attempts, 5_857);
-            assert_eq!(hog_survey.expected_spawn_rejections, 5_818);
+            assert_eq!(hog_survey.spawn_attempts, 5_856);
+            assert_eq!(hog_survey.expected_spawn_rejections, 5_817);
             assert_eq!(hog_survey.unexpected_spawn_errors, 0);
-            assert_eq!(hog_survey.executions, 24_311);
+            assert_eq!(hog_survey.executions, 24_302);
             assert_eq!(hog_survey.execution_errors, 0);
             assert_eq!(hog_survey.zone_transitions, 57);
             assert_eq!(hog_survey.camera_ranges.len(), 67);
             assert_eq!(hog_survey.camera_path_changes, 66);
-            assert_eq!(hog_survey.last_camera_path_change, 1_813);
-            assert_eq!(hog_survey.last_camera_progress_change, 1_836);
+            assert_eq!(hog_survey.last_camera_path_change, 1_812);
+            assert_eq!(hog_survey.last_camera_progress_change, 1_835);
             assert_eq!(hog_survey.restarts, 0);
             assert_eq!(hog_survey.faulted_objects, 0);
             assert_eq!(
@@ -50058,26 +50564,26 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 hog_survey.box_count_samples,
                 [
                     (1, 0),
-                    (530, 0x100),
-                    (657, 0x200),
-                    (1_082, 0x300),
-                    (1_143, 0x400),
-                    (1_340, 0x500),
-                    (1_588, 0x600),
-                    (1_724, 0x700),
+                    (529, 0x100),
+                    (656, 0x200),
+                    (1_081, 0x300),
+                    (1_142, 0x400),
+                    (1_339, 0x500),
+                    (1_587, 0x600),
+                    (1_723, 0x700),
                 ]
             );
             assert_eq!(
                 hog_survey.checkpoint_samples,
                 [
                     (1, -1, [2_815_232, 2_979_072, 17_458_688]),
-                    (657, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
-                    (1_143, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
+                    (656, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
+                    (1_142, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
                 ]
             );
             assert_eq!(
                 hog_survey.saved_box_count_samples,
-                [(657, 0x100), (1_143, 0x300)]
+                [(656, 0x100), (1_142, 0x300)]
             );
             assert_eq!(hog_survey.effect_counts.get("save-state"), Some(&2));
             assert_eq!(hog_survey.effect_counts.get("master-fade-reset"), Some(&1));
@@ -50095,8 +50601,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| hog_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 8, 1, 9, 0]
             );
-            assert_eq!(hog_runtime.machine().random_seed(), 0x251c_8a47);
-            assert_eq!(hog_runtime.draw_count(), 9_438);
+            assert_eq!(hog_runtime.machine().random_seed(), 0x492b_6442);
+            assert_eq!(hog_runtime.draw_count(), 9_490);
             assert!(hog_survey.is_clean(), "{}", hog_survey.summary());
             let hog_completion_carry = {
                 let mut host = NsfProgramHost::new(&hog_nsd, &hog_nsf, &hog_nsf_bytes);
@@ -50109,8 +50615,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x251c_8a47);
-                assert_eq!(report.carry.draw_count, 9_438);
+                assert_eq!(report.carry.random_seed, 0x492b_6442);
+                assert_eq!(report.carry.draw_count, 9_490);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -50173,8 +50679,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| hog_completion_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 8, 1, 9, 0]
             );
-            assert_eq!(hog_completion_runtime.machine().random_seed(), 0x1f22_c22b);
-            assert_eq!(hog_completion_runtime.draw_count(), 9_711);
+            assert_eq!(hog_completion_runtime.machine().random_seed(), 0x7ecf_2576);
+            assert_eq!(hog_completion_runtime.draw_count(), 9_763);
             assert!(
                 hog_completion_survey.is_clean(),
                 "{}",
@@ -50192,8 +50698,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x1f22_c22b);
-                assert_eq!(report.carry.draw_count, 9_711);
+                assert_eq!(report.carry.random_seed, 0x7ecf_2576);
+                assert_eq!(report.carry.draw_count, 9_763);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -50250,8 +50756,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| post_hog_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 9, 1, 9, 1]
             );
-            assert_eq!(post_hog_map.runtime.machine().random_seed(), 0xb333_561e);
-            assert_eq!(post_hog_map.runtime.draw_count(), 9_964);
+            assert_eq!(post_hog_map.runtime.machine().random_seed(), 0x2cdb_105a);
+            assert_eq!(post_hog_map.runtime.draw_count(), 10_016);
             assert_eq!(post_hog_map.runtime.faulted_object_count(), 0);
             let native_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
@@ -50268,8 +50774,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, native_fortress);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xb333_561e);
-                assert_eq!(report.carry.draw_count, 9_964);
+                assert_eq!(report.carry.random_seed, 0x2cdb_105a);
+                assert_eq!(report.carry.draw_count, 10_016);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -50300,26 +50806,26 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 7_000,
             )
             .expect("the authentic carried Native Fortress route must execute");
-            assert_eq!(native_survey.frames, 6_641, "{}", native_survey.summary());
+            assert_eq!(native_survey.frames, 6_949, "{}", native_survey.summary());
             assert_eq!(
                 native_survey.terminal.as_deref(),
-                Some("frame 6641 requested level transition to 0x2d")
+                Some("frame 6949 requested level transition to 0x2d")
             );
-            assert_eq!(native_survey.next_lid, Some((6_641, 0x2d)));
+            assert_eq!(native_survey.next_lid, Some((6_949, 0x2d)));
             assert_eq!(native_survey.final_live_objects, 27);
             assert_eq!(native_survey.max_live_objects, 51);
-            assert_eq!(native_survey.successful_spawns, 319);
-            assert_eq!(native_survey.spawn_attempts, 91_318);
-            assert_eq!(native_survey.expected_spawn_rejections, 90_999);
+            assert_eq!(native_survey.successful_spawns, 333);
+            assert_eq!(native_survey.spawn_attempts, 94_520);
+            assert_eq!(native_survey.expected_spawn_rejections, 94_187);
             assert_eq!(native_survey.unexpected_spawn_errors, 0);
-            assert_eq!(native_survey.executions, 165_848);
+            assert_eq!(native_survey.executions, 172_330);
             assert_eq!(native_survey.execution_errors, 0);
-            assert_eq!(native_survey.zone_transitions, 64);
+            assert_eq!(native_survey.zone_transitions, 68);
             assert_eq!(native_survey.camera_ranges.len(), 60);
-            assert_eq!(native_survey.camera_path_changes, 75);
-            assert_eq!(native_survey.last_camera_path_change, 6_520);
-            assert_eq!(native_survey.last_camera_progress_change, 6_612);
-            assert_eq!(native_survey.last_player_movement, 6_637);
+            assert_eq!(native_survey.camera_path_changes, 77);
+            assert_eq!(native_survey.last_camera_path_change, 6_828);
+            assert_eq!(native_survey.last_camera_progress_change, 6_920);
+            assert_eq!(native_survey.last_player_movement, 6_945);
             assert_eq!(native_survey.restarts, 0, "{}", native_survey.summary());
             assert!(native_survey.restart_frames.is_empty());
             assert_eq!(native_survey.death_camera_frames, 0);
@@ -50330,16 +50836,16 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert!(native_survey.first_issue.is_none());
             assert!(!native_survey.observed_player_states.contains(&27));
             assert_eq!(native_survey.effect_counts.get("transition"), Some(&1));
-            assert_eq!(native_survey.effect_counts.get("solid"), Some(&722));
+            assert_eq!(native_survey.effect_counts.get("solid"), Some(&714));
             assert_eq!(native_survey.effect_counts.get("save-state"), Some(&3));
             assert_eq!(native_survey.effect_counts.get("load-state"), None);
             assert_eq!(
                 native_survey.box_count_samples.last(),
-                Some(&(5_381, 3_072))
+                Some(&(5_689, 3_072))
             );
             assert_eq!(
                 native_survey.checkpoint_samples.last(),
-                Some(&(4_694, 48_128, [13_106_432, -2_150_400, 128_000]))
+                Some(&(5_002, 48_128, [13_106_432, -2_150_400, 128_000]))
             );
             let native_camera = native_survey
                 .final_camera
@@ -50374,8 +50880,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| native_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 9, 1, 10, 0]
             );
-            assert_eq!(native_runtime.machine().random_seed(), 0x5acd_1365);
-            assert_eq!(native_runtime.draw_count(), 16_605);
+            assert_eq!(native_runtime.machine().random_seed(), 0x8e26_e064);
+            assert_eq!(native_runtime.draw_count(), 16_965);
             assert!(native_survey.is_clean(), "{}", native_survey.summary());
 
             let native_completion_carry = {
@@ -50389,8 +50895,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x5acd_1365);
-                assert_eq!(report.carry.draw_count, 16_605);
+                assert_eq!(report.carry.random_seed, 0x8e26_e064);
+                assert_eq!(report.carry.draw_count, 16_965);
                 report.carry
             };
 
@@ -50412,18 +50918,18 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                     600,
                 )
                 .expect("Native Fortress' authentic Level Complete screen must execute");
-            assert_eq!(native_completion_survey.frames, 393);
+            assert_eq!(native_completion_survey.frames, 425);
             assert_eq!(
                 native_completion_survey.terminal.as_deref(),
-                Some("frame 393 requested level transition to 0x19")
+                Some("frame 425 requested level transition to 0x19")
             );
-            assert_eq!(native_completion_survey.next_lid, Some((393, 0x19)));
+            assert_eq!(native_completion_survey.next_lid, Some((425, 0x19)));
             assert_eq!(native_completion_survey.final_live_objects, 5);
             assert_eq!(native_completion_survey.max_live_objects, 8);
             assert_eq!(native_completion_survey.successful_spawns, 2);
-            assert_eq!(native_completion_survey.spawn_attempts, 786);
-            assert_eq!(native_completion_survey.expected_spawn_rejections, 784);
-            assert_eq!(native_completion_survey.executions, 2_542);
+            assert_eq!(native_completion_survey.spawn_attempts, 850);
+            assert_eq!(native_completion_survey.expected_spawn_rejections, 848);
+            assert_eq!(native_completion_survey.executions, 2_642);
             assert_eq!(native_completion_survey.restarts, 0);
             assert_eq!(native_completion_survey.unexpected_spawn_errors, 0);
             assert_eq!(native_completion_survey.execution_errors, 0);
@@ -50444,9 +50950,9 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 native_completion_runtime.machine().random_seed(),
-                0xdce1_0c8b
+                0x2be6_bd6d
             );
-            assert_eq!(native_completion_runtime.draw_count(), 16_998);
+            assert_eq!(native_completion_runtime.draw_count(), 17_390);
             let post_native_title_carry = {
                 let mut host =
                     NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
@@ -50459,8 +50965,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xdce1_0c8b);
-                assert_eq!(report.carry.draw_count, 16_998);
+                assert_eq!(report.carry.random_seed, 0x2be6_bd6d);
+                assert_eq!(report.carry.draw_count, 17_390);
                 report.carry
             };
 
@@ -50496,8 +51002,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| post_native_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 10, 1, 10, 1]
             );
-            assert_eq!(post_native_map.runtime.machine().random_seed(), 0xb7cd_47fe);
-            assert_eq!(post_native_map.runtime.draw_count(), 17_251);
+            assert_eq!(post_native_map.runtime.machine().random_seed(), 0x1ef7_2d25);
+            assert_eq!(post_native_map.runtime.draw_count(), 17_643);
             let up_the_creek_carry = {
                 let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
                 let report = post_native_map
@@ -50513,8 +51019,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, up_the_creek);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xb7cd_47fe);
-                assert_eq!(report.carry.draw_count, 17_251);
+                assert_eq!(report.carry.random_seed, 0x1ef7_2d25);
+                assert_eq!(report.carry.draw_count, 17_643);
                 report.carry
             };
 
@@ -50533,19 +51039,19 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 4_700,
             )
             .expect("the authentic carried Up the Creek route must execute");
-            assert_eq!(up_survey.frames, 4_319, "{}", up_survey.summary());
+            assert_eq!(up_survey.frames, 4_346, "{}", up_survey.summary());
             assert_eq!(
                 up_survey.terminal.as_deref(),
-                Some("frame 4319 requested level transition to 0x2d")
+                Some("frame 4346 requested level transition to 0x2d")
             );
-            assert_eq!(up_survey.next_lid, Some((4_319, 0x2d)));
+            assert_eq!(up_survey.next_lid, Some((4_346, 0x2d)));
             assert_eq!(up_survey.final_live_objects, 22);
             assert_eq!(up_survey.max_live_objects, 46);
             assert_eq!(up_survey.successful_spawns, 192);
-            assert_eq!(up_survey.spawn_attempts, 66_656);
-            assert_eq!(up_survey.expected_spawn_rejections, 66_464);
+            assert_eq!(up_survey.spawn_attempts, 66_975);
+            assert_eq!(up_survey.expected_spawn_rejections, 66_783);
             assert_eq!(up_survey.unexpected_spawn_errors, 0);
-            assert_eq!(up_survey.executions, 125_373);
+            assert_eq!(up_survey.executions, 126_071);
             assert_eq!(up_survey.execution_errors, 0);
             assert_eq!(up_survey.zone_transitions, 36);
             assert_eq!(up_survey.restarts, 0);
@@ -50555,27 +51061,27 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 up_survey.box_count_samples,
                 [
                     (1, 0),
-                    (69, 0x100),
-                    (76, 0x200),
-                    (964, 0x300),
-                    (982, 0x400),
-                    (1_246, 0x500),
-                    (1_878, 0x600),
-                    (3_981, 0x700),
+                    (68, 0x100),
+                    (75, 0x200),
+                    (963, 0x300),
+                    (981, 0x400),
+                    (1_245, 0x500),
+                    (1_877, 0x600),
+                    (4_008, 0x700),
                 ]
             );
             assert_eq!(
                 up_survey.checkpoint_samples,
                 [
                     (1, -1, [13_106_432, -2_150_400, 128_000]),
-                    (965, -1, [2_148_864, 1_818_624, 21_605_376]),
-                    (1_246, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
+                    (964, -1, [2_148_864, 1_818_624, 21_605_376]),
+                    (1_245, 76 << 8, [2_048_000, 1_738_240, 19_455_744]),
                 ]
             );
-            assert_eq!(up_survey.saved_box_count_samples, [(1_246, 0x400)]);
+            assert_eq!(up_survey.saved_box_count_samples, [(1_245, 0x400)]);
             assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
-            assert_eq!(up_survey.effect_counts.get("send-event"), Some(&175));
-            assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_688));
+            assert_eq!(up_survey.effect_counts.get("send-event"), Some(&173));
+            assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_706));
             assert_eq!(up_survey.effect_counts.get("reparent"), Some(&44));
             assert_eq!(up_survey.effect_counts.get("master-fade-reset"), Some(&1));
             assert_eq!(up_survey.effect_counts.get("transition"), Some(&1));
@@ -50593,8 +51099,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| up_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 10, 1, 11, 0]
             );
-            assert_eq!(up_runtime.machine().random_seed(), 0xf824_b646);
-            assert_eq!(up_runtime.draw_count(), 21_570);
+            assert_eq!(up_runtime.machine().random_seed(), 0x93e2_6958);
+            assert_eq!(up_runtime.draw_count(), 21_989);
 
             let up_completion_carry = {
                 let mut host = NsfProgramHost::new(&up_nsd, &up_nsf, &up_nsf_bytes);
@@ -50607,8 +51113,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xf824_b646);
-                assert_eq!(report.carry.draw_count, 21_570);
+                assert_eq!(report.carry.random_seed, 0x93e2_6958);
+                assert_eq!(report.carry.draw_count, 21_989);
                 report.carry
             };
             let (up_completion_survey, mut up_completion_runtime) = survey_pair_with_runtime(
@@ -50624,18 +51130,18 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 600,
             )
             .expect("Up the Creek's authentic Level Complete screen must execute");
-            assert_eq!(up_completion_survey.frames, 185);
+            assert_eq!(up_completion_survey.frames, 225);
             assert_eq!(
                 up_completion_survey.terminal.as_deref(),
-                Some("frame 185 requested level transition to 0x19")
+                Some("frame 225 requested level transition to 0x19")
             );
-            assert_eq!(up_completion_survey.next_lid, Some((185, 0x19)));
+            assert_eq!(up_completion_survey.next_lid, Some((225, 0x19)));
             assert_eq!(up_completion_survey.final_live_objects, 5);
             assert_eq!(up_completion_survey.max_live_objects, 8);
             assert_eq!(up_completion_survey.successful_spawns, 2);
-            assert_eq!(up_completion_survey.spawn_attempts, 370);
-            assert_eq!(up_completion_survey.expected_spawn_rejections, 368);
-            assert_eq!(up_completion_survey.executions, 966);
+            assert_eq!(up_completion_survey.spawn_attempts, 450);
+            assert_eq!(up_completion_survey.expected_spawn_rejections, 448);
+            assert_eq!(up_completion_survey.executions, 1_124);
             assert_eq!(up_completion_survey.zone_transitions, 0);
             assert_eq!(up_completion_survey.restarts, 0);
             assert_eq!(up_completion_survey.unexpected_spawn_errors, 0);
@@ -50645,14 +51151,14 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 up_completion_survey.box_count_samples,
                 [
                     (1, 0),
-                    (62, 0x100),
-                    (71, 0x200),
-                    (80, 0x300),
-                    (89, 0x400),
-                    (98, 0x500),
-                    (107, 0x600),
-                    (116, 0x700),
-                    (125, 0x800),
+                    (68, 0x100),
+                    (77, 0x200),
+                    (86, 0x300),
+                    (95, 0x400),
+                    (104, 0x500),
+                    (113, 0x600),
+                    (122, 0x700),
+                    (131, 0x800),
                 ]
             );
             assert_eq!(
@@ -50690,8 +51196,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| up_completion_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 10, 1, 11, 0]
             );
-            assert_eq!(up_completion_runtime.machine().random_seed(), 0x93e1_3ae8);
-            assert_eq!(up_completion_runtime.draw_count(), 21_755);
+            assert_eq!(up_completion_runtime.machine().random_seed(), 0x0f38_361b);
+            assert_eq!(up_completion_runtime.draw_count(), 22_214);
 
             let post_up_title_carry = {
                 let mut host =
@@ -50705,8 +51211,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x93e1_3ae8);
-                assert_eq!(report.carry.draw_count, 21_755);
+                assert_eq!(report.carry.random_seed, 0x0f38_361b);
+                assert_eq!(report.carry.draw_count, 22_214);
                 report.carry
             };
 
@@ -50749,8 +51255,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| post_up_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 11, 1, 11, 1]
             );
-            assert_eq!(post_up_map.runtime.machine().random_seed(), 0x81be_7f00);
-            assert_eq!(post_up_map.runtime.draw_count(), 22_008);
+            assert_eq!(post_up_map.runtime.machine().random_seed(), 0x2bbf_01d0);
+            assert_eq!(post_up_map.runtime.draw_count(), 22_467);
             assert_eq!(post_up_map.runtime.faulted_object_count(), 0);
 
             let ripper_carry = {
@@ -50768,8 +51274,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, ripper_roo);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x81be_7f00);
-                assert_eq!(report.carry.draw_count, 22_008);
+                assert_eq!(report.carry.random_seed, 0x2bbf_01d0);
+                assert_eq!(report.carry.draw_count, 22_467);
                 report.carry
             };
 
@@ -50799,7 +51305,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             assert_eq!(ripper_survey.successful_spawns, 5);
             assert_eq!(ripper_survey.spawn_attempts, 10_320);
             assert_eq!(ripper_survey.expected_spawn_rejections, 10_315);
-            assert_eq!(ripper_survey.executions, 46_685);
+            assert_eq!(ripper_survey.executions, 46_692);
             assert_eq!(ripper_survey.zone_transitions, 0);
             assert_eq!(ripper_survey.save_handshakes, 2);
             assert_eq!(ripper_survey.restarts, 0);
@@ -50817,7 +51323,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             );
             assert_eq!(
                 ripper_survey.entity_counter_samples,
-                [(2, 8, 0), (1_001, 8, 1), (1_452, 8, 2), (1_868, 8, 3)]
+                [(2, 8, 0), (1_000, 8, 1), (1_452, 8, 2), (1_868, 8, 3)]
             );
             let crash = Eid::from_name("WillC").expect("fixed Crash program EID is valid");
             let roo = Eid::from_name("RooOC").expect("fixed RooOC EID is valid");
@@ -50832,7 +51338,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 })
                 .map(|sample| sample.frame)
                 .collect::<BTreeSet<_>>();
-            assert_eq!(activation_frames, [920, 1_371, 1_787].into_iter().collect());
+            assert_eq!(activation_frames, [919, 1_371, 1_787].into_iter().collect());
             let boss_event_frames = ripper_survey
                 .direct_send_program_samples
                 .iter()
@@ -50844,7 +51350,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             }
             assert_eq!(ripper_survey.effect_counts.get("transition"), Some(&1));
             assert_eq!(ripper_survey.effect_counts.get("send-event"), Some(&102));
-            assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&107));
+            assert_eq!(ripper_survey.effect_counts.get("solid"), Some(&105));
             assert!(ripper_survey.is_clean(), "{}", ripper_survey.summary());
             assert_eq!(
                 [
@@ -50859,8 +51365,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| ripper_runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 11, 1, 12, 0]
             );
-            assert_eq!(ripper_runtime.machine().random_seed(), 0xabc4_15c8);
-            assert_eq!(ripper_runtime.draw_count(), 24_072);
+            assert_eq!(ripper_runtime.machine().random_seed(), 0xe2d7_84b2);
+            assert_eq!(ripper_runtime.draw_count(), 24_531);
 
             let post_ripper_title_carry = {
                 let mut host = NsfProgramHost::new(&ripper_nsd, &ripper_nsf, &ripper_nsf_bytes);
@@ -50873,8 +51379,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0xabc4_15c8);
-                assert_eq!(report.carry.draw_count, 24_072);
+                assert_eq!(report.carry.random_seed, 0xe2d7_84b2);
+                assert_eq!(report.carry.draw_count, 24_531);
                 report.carry
             };
 
@@ -50917,8 +51423,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| post_ripper_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 12, 1, 12, 1]
             );
-            assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0x45fb_436a);
-            assert_eq!(post_ripper_map.runtime.draw_count(), 24_325);
+            assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xdc9a_def1);
+            assert_eq!(post_ripper_map.runtime.draw_count(), 24_784);
             assert_eq!(post_ripper_map.runtime.faulted_object_count(), 0);
 
             let lost_city_carry = {
@@ -50936,8 +51442,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 assert_eq!(report.resolved.level, lost_city);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x45fb_436a);
-                assert_eq!(report.carry.draw_count, 24_325);
+                assert_eq!(report.carry.random_seed, 0xdc9a_def1);
+                assert_eq!(report.carry.draw_count, 24_784);
                 report.carry
             };
             let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
@@ -50987,8 +51493,8 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 .map(|index| lost_city_runtime.global_word(index).unwrap()),
                 [0x100, 15, 15, 12, 1, 12, 0]
             );
-            assert_eq!(lost_city_runtime.machine().random_seed(), 0x34d5_75c5);
-            assert_eq!(lost_city_runtime.draw_count(), 24_326);
+            assert_eq!(lost_city_runtime.machine().random_seed(), 0xabc4_15c8);
+            assert_eq!(lost_city_runtime.draw_count(), 24_785);
             assert_eq!(lost_city_runtime.faulted_object_count(), 0);
         }
 
@@ -51007,18 +51513,23 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Complete -> Title at frame {} (draw {}); Map -> Upstream at frame 253 (draw {}); ",
                 "Upstream carried-spawn PBAK phase mismatch and recovery: {} frames, 3 prefix ",
                 "restarts, 0n checkpoint through the normal end transition, RNG {:#010x}, draw {}; ",
-                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4244); Map -> Rolling ",
-                "Stones at frame 66 (draw 4310); Rolling Stones carried route: 2500 frames -> ",
-                "Level Complete, 45 paths/46 changes, 32 zone transitions, 12 boxes, RNG ",
-                "0x2ecbeaad, draw 6810; Rolling Stones Level Complete -> Title at frame 425 ",
-                "(draw 7235); Map -> Hog Wild at frame 253 (draw 7488); Hog Wild -> Level ",
-                "Complete at frame 1950 (draw 9438); sixth Level Complete -> Title at frame ",
-                "273 (draw 9711); Map -> Native Fortress at frame 253 (draw 9964); Native ",
-                "Fortress carried route: 6641 frames -> Level Complete, 60 paths/75 changes, ",
-                "64 zone transitions, no deaths/restarts, RNG 0x5acd1365, draw 16605; seventh ",
-                "Level Complete -> Title at frame 393 (draw 16998); Map -> Up the Creek at ",
-                "frame 253 (draw 17251); Up the Creek crossed its first carried frame ",
-                "(draw 17252)",
+                "Papu Papu: 3 authentic hits -> Title at frame 812 (draw 4332); Map -> Rolling ",
+                "Stones at frame 66 (draw 4398); Rolling Stones carried route: 2465 frames -> ",
+                "Level Complete, 45 paths/46 changes, 32 zone transitions, 11 boxes, RNG ",
+                "0xb40bac74, draw 6863; Rolling Stones Level Complete -> Title at frame 425 ",
+                "(draw 7288); Map -> Hog Wild at frame 253 (draw 7541); Hog Wild -> Level ",
+                "Complete at frame 1949 (draw 9490); sixth Level Complete -> Title at frame ",
+                "273 (draw 9763); Map -> Native Fortress at frame 253 (draw 10016); Native ",
+                "Fortress carried route: 6949 frames -> Level Complete, 60 paths/77 changes, ",
+                "68 zone transitions, no deaths/restarts, RNG 0x8e26e064, draw 16965; seventh ",
+                "Level Complete -> Title at frame 425 (draw 17390); Map -> Up the Creek at ",
+                "frame 253 (draw 17643); Up the Creek carried route: 4346 frames -> Level ",
+                "Complete, 53 paths/58 changes, 36 zone transitions, no deaths/restarts, RNG ",
+                "0x93e26958, draw 21989; eighth Level Complete -> Title at frame 225 (draw ",
+                "22214); Map -> Ripper Roo at frame 253 (draw 22467); Ripper Roo: 3 authentic ",
+                "hits -> Title at frame 2064, RNG 0xe2d784b2, draw 24531; Map -> The Lost City ",
+                "at frame 253 (draw 24784); The Lost City crossed its first carried frame ",
+                "(draw 24785)",
             ),
             n_sanity_survey.next_lid.unwrap().0,
             n_sanity_draw_count,

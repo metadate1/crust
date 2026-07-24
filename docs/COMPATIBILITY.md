@@ -556,47 +556,63 @@ gameplay path.
   repository, and the runtime does not install the recording's mid-level snapshot. This
   characterizes a phase-mismatched carried session rather than claiming authentic demo playback;
   separate browser PBAK coverage installs the snapshot. The prefix produces deterministic
-  same-level `LoadState` restarts at frames 104, 231, and 816. A state-driven continuation then
+  same-level `LoadState` restarts at frames 154, 288, and 816. A state-driven continuation then
   crosses the live orbital/platform chain, defeats the repeatedly lethal entity-55 fish with fresh
-  18-frame Square edges, and activates BoxsC subtype-four entity 57 on frame 1,935. The native
+  18-frame Square edges, and activates BoxsC subtype-four entity 57 on frame 1,945. The native
   SaveState captures checkpoint `0x3900`, translation `[2252800, 2350080, 15564288]`, and box count
   zero before the live count becomes `0x100`; spawn flags become nine. The same controller crosses
   RivOC entities 76/77/82/36/35/34, 96/108/109, and 113/112 through the final `0A` route. It breaks
-  two more boxes and requests Level Complete `0x2d` on frame 3,791. The complete leg records 152
-  successful spawns from 52,371 attempts with 52,219 source-expected rejections, 146,470 clean
+  two more boxes and requests Level Complete `0x2d` on frame 3,810. The complete leg records 152
+  successful spawns from 52,669 attempts with 52,517 source-expected rejections, 111,418 clean
   executions, 24 lifecycle zone transitions, 35 camera ranges and 40 path changes. It ends on
-  `0A_fZ` path one/progress 8,352 at `[2228500, 6590796, -472100]`, box count `0x400`, RNG
-  `0xa7ef4deb`, and draw 2,975, with no post-prefix restart, death camera, terminal fall, VM fault,
+  `0A_fZ` path one/progress 8,364 at `[2228980, 6590796, -472772]`, box count `0x400`, RNG
+  `0xc22ac3b6`, and draw 2,994, with no post-prefix restart, death camera, terminal fall, VM fault,
   execution error, or checked issue.
 
   Upstream's checked `LEVEL_END` exports
   `game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
-  screen requests Title at frame 225 after 1,212 clean executions. The Map then uses the authored
+  screen requests Title at frame 273 after 1,425 clean executions. The Map then uses the authored
   120-idle/Up/120-idle/Cross sequence and selects Papu Papu `0x0a` on frame 253 at `1d_pZ` path
   zero/progress 1,024. The Papu carry has
-  `game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0xa984c5b5`, and
-  draw 3,453. A state-gated ordinary-pad route then completes the carried boss fight. Same-frame
+  `game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0x318c2fc6`, and
+  draw 3,520. A state-gated ordinary-pad route then completes the carried boss fight. Same-frame
   ChefC-contact/Crash-event-zero damage pairs occur on frames 302/484/666; ChefC enters hurt state
   two on frames 303/485/667, recovers on 382/564, and enters win state three on 668. Papu Papu
   requests Title `0x19` on frame 812 after 6 successful spawns, 5,684 attempts, 5,678 expected
-  rejections, and 16,377 clean executions, with no restart, terminal fall, VM fault, or execution
+  rejections, and 16,391 clean executions, with no restart, terminal fall, VM fault, or execution
   error. The resulting carry has
-  `game=0x300, title=15, saved-title=15, map=6, count=1, unlocked=7, island=0`, RNG `0xf3ab9165`,
-  and draw 4,265.
+  `game=0x300, title=15, saved-title=15, map=6, count=1, unlocked=7, island=0`, RNG `0x3823ffd7`,
+  and draw 4,332.
 
   The post-boss Map becomes ready on frame 10 at `1e_pZ` path zero/progress `0x1500`, reaches the
   current-node gate on frame 52, taps Up on 53, reaches the next-node gate on 65, and presses Cross
   on 66 to request Rolling Stones `0x15`. Its checked carry has map/unlocked seven, island one, and
-  draw 4,331. Rolling Stones imports that exact session and follows ordinary state/camera-gated pad
+  draw 4,398. Rolling Stones imports that exact session and follows ordinary state/camera-gated pad
   input through normal `0M_lZ -> 0O_lZ`, bypasses alternate `0N_lZ`, enters the end `WarpC`, and
-  requests Level Complete `0x2d` on frame 2,449. It activates checkpoint `0x0800` on frame 1,160,
-  retains saved boxes `0x0a00`, advances live boxes to `0x0c00`, and records 117 successful spawns,
-  54,526 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes.
-  The final camera is `0O_lZ:0@10496`; Crash is in warp state 32 at
-  `[2219008, 9256242, -1833728]`. It has no restart, state-31 squash, death camera, terminal fall,
-  fault, execution error, or LoadState; RNG is `0x9dbf3415` at draw 6,780. This is deterministic
-  native integration over user-supplied local data, not browser execution or full-game parity. A
-  browser exercise of the complete chain remains open.
+  requests Level Complete `0x2d` on frame 2,465. It activates checkpoint `0x0800` on frame 1,159,
+  retains saved boxes `0x0900`, advances live boxes to `0x0b00`, and records 117 successful spawns,
+  55,526 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes.
+  The final camera is `0O_lZ:0@9424`; Crash is in warp state 32 at
+  `[2237184, 9256237, -1792768]`. It has no restart, state-31 squash, death camera, terminal fall,
+  fault, execution error, or LoadState; RNG is `0xb40bac74` at draw 6,863.
+
+  That uninterrupted process session crosses Rolling Stones' 425-frame Level Complete graph at draw
+  7,288, selects Hog Wild on Map frame 253 at draw 7,541, and reaches Hog Wild's Level Complete on
+  gameplay frame 1,949 at draw 9,490. Hog Wild's completion takes 273 frames (draw 9,763), and Map
+  selects Native Fortress on frame 253 (draw 10,016). Native Fortress completes on frame 6,949
+  after 333 successful spawns, 172,330 executions, 68 zone transitions, 60 camera ranges, and 77
+  path changes, with no death or restart; RNG is `0x8e26e064` at draw 16,965. Its completion takes
+  425 frames (draw 17,390), and Map selects Up the Creek on frame 253 (draw 17,643).
+
+  The carried Up the Creek phase reaches Level Complete on frame 4,346 after 192 successful spawns,
+  126,071 executions, and 36 zone transitions. It has no restart; RNG is `0x93e26958` at draw
+  21,989. Its completion takes 225 frames (draw 22,214), and
+  Map selects Ripper Roo on frame 253 (draw 22,467). Ripper Roo returns to Title on frame 2,064
+  with no restart, RNG `0xe2d784b2`, and draw 24,531. The next 253-frame Map handoff selects The
+  Lost City at draw 24,784; its first carried runtime frame completes cleanly with 33 successful
+  spawns, 56 executions, RNG `0xabc415c8`, and draw 24,785. This is deterministic native
+  integration over user-supplied local data, not browser execution, a carried Lost City completion,
+  or full-game parity.
 
   A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
   avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
@@ -608,8 +624,7 @@ gameplay path.
   `[2815232, 2979072, 17458688]`, saved boxes `0x0a00`, and live boxes `0x0c00`. It has no restart,
   state-31 squash, fall, fault, execution error, or LoadState. Its final camera is
   `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65` at draw 2,447.
-  The independent carried route reaches the
-  same authored transition two frames later.
+  The uninterrupted campaign carry reaches the same authored transition 18 frames later.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19
   saves the source-ordered pre-increment count `0x900` before the live count reaches `0xa00`, and TurtC
@@ -711,18 +726,19 @@ gameplay path.
   `0x2d` on frame 2,274 without a death, restart, load-state, VM fault, or execution error.
 
   Up the Creek has a complete normal-route direct-boot ordinary-pad golden. Checkpoint entity 76
-  emits `SaveState` on frame 1,246 with translation `[2048000, 1738240, 19455744]` and saved box
+  emits `SaveState` on frame 1,245 with translation `[2048000, 1738240, 19455744]` and saved box
   count `0x400`; the live count then becomes `0x500`. The route crosses the remaining river chain,
   lands on `0F_oZ` platforms 12 and 11, enters `0G_oZ`, and drives the authored `WarpC` through
-  states zero through four. It requests Level Complete `0x2d` on frame 4,184 after 196 successful
-  spawns and 123,309 clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path
-  changes. There is no restart, LoadState, death camera, terminal fall, VM fault, faulted object,
-  execution error, or checked issue. This proves the normal native route, not its bonus paths or a
-  browser playthrough. A separate carried-session golden begins on island two, selects Up the
-  Creek through the authored map, completes it on gameplay frame 4,319, crosses the 185-frame Level
-  Complete graph, and selects and completes Ripper Roo (`0x17`) before selecting The Lost City
-  (`0x20`) with ordinary Up/Cross input. Exact primary/secondary RNG, draw-count, card, and tracked
-  map-global carry remain asserted across every `LEVEL_END` report.
+  states zero through four. It requests Level Complete `0x2d` on frame 4,183 after 196 successful
+  spawns from 64,662 attempts with 64,466 expected rejections and 123,277 clean executions across
+  38 lifecycle transitions, 53 camera ranges and 60 path changes. There is no restart, LoadState,
+  death camera, terminal fall, VM fault, faulted object, execution error, or checked issue. This
+  proves the normal native route, not its bonus paths or a browser playthrough. A separate
+  carried-session golden begins on island two, selects Up the Creek through the authored map,
+  completes it on gameplay frame 4,319, crosses the 185-frame Level Complete graph, and selects and
+  completes Ripper Roo (`0x17`) before selecting The Lost City (`0x20`) with ordinary Up/Cross
+  input. Exact primary/secondary RNG, draw-count, card, and tracked map-global carry remain asserted
+  across every `LEVEL_END` report.
 - With a complete retail title stream, password input and validation belong to the mounted
   `0e_pZ` GOOL object graph; the reference C host contains no separate password codec. If that
   authored graph cannot be spawned, the browser remains on its loading/error presentation rather
@@ -734,16 +750,17 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Twelve deterministic retail-authored levels now reach their real end warps and request Level
+- Thirteen deterministic retail-authored levels now reach their real end warps and request Level
   Complete, including the independent N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog,
   Boulder Dash, Native Fortress, and Rolling Stones routes. N. Sanity's fresh ordinary-pad golden
   activates checkpoint 19, reaches `0xa00` counted boxes, executes `WarpC` states zero through four,
   and resolves the checked Level Complete handoff at frame 1,900 without a restart or fault. The
-  carried chain executes the complete legally local
-  Upstream PBAK input,
-  completes Upstream's normal route, wins Papu Papu through its three authored damage cycles, and
-  carries Rolling Stones from the post-boss Map handoff through its normal end. The independent
-  Rolling Stones direct boot reaches the same end on its own deterministic phase.
+  carried chain executes the complete legally local Upstream PBAK input, completes Upstream's
+  normal route, wins Papu Papu through its three authored damage cycles, then completes Rolling
+  Stones, Hog Wild, Native Fortress, Up the Creek, and Ripper Roo across their authored completion
+  and Map handoffs before mounting The Lost City for one clean frame. The independent Rolling
+  Stones direct boot reaches the same end on its own deterministic phase; the carried Lost City
+  completion remains unproved.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

@@ -259,45 +259,45 @@ post-Boulders normal-spawn session, without installing the recording's mid-level
 committing recording bytes or a derived pad trace. This prefix is deliberately a carried-session
 stress run, not authentic demo playback; separate browser PBAK coverage installs the recording
 snapshot. Its phase-mismatched input produces deterministic same-level `LoadState` restarts at
-frames 104, 231, and 816. A state-driven controller then releases every Cross interval, boards the
+frames 154, 288, and 816. A state-driven controller then releases every Cross interval, boards the
 live entity-23 orbital leaf, crosses the entity-47/46/54 platform chain, and uses fresh Square edges
 every 18 frames to suppress the lethal entity-55 fish contact. It activates authentic BoxsC
-subtype-four entity 57 on frame 1,935: checkpoint `0x3900`, saved pre-increment box count zero,
+subtype-four entity 57 on frame 1,945: checkpoint `0x3900`, saved pre-increment box count zero,
 saved player translation `[2252800, 2350080, 15564288]`, then live box count `0x100` and native
 spawn flags nine. The controller then crosses the live RivOC leaf/platform sequence through `0q`
 to `0A`, including entities 76/77/82/36/35/34, 96/108/109, and the final 113/112 pair. It breaks
-two more counted boxes and reaches the authored normal-end `Transition(0x2d)` on frame 3,791.
-That complete Upstream leg performs 152 successful spawns from 52,371 attempts with 52,219
-source-expected rejections, 146,470 clean executions, 24 lifecycle zone transitions, 35 camera
-ranges and 40 path changes. It ends on `0A_fZ` path one/progress 8,352 with Crash at
-`[2228500, 6590796, -472100]`, box count `0x400`, RNG `0xa7ef4deb`, and draw count 2,975, with no
+two more counted boxes and reaches the authored normal-end `Transition(0x2d)` on frame 3,810.
+That complete Upstream leg performs 152 successful spawns from 52,669 attempts with 52,517
+source-expected rejections, 111,418 clean executions, 24 lifecycle zone transitions, 35 camera
+ranges and 40 path changes. It ends on `0A_fZ` path one/progress 8,364 with Crash at
+`[2228980, 6590796, -472772]`, box count `0x400`, RNG `0xc22ac3b6`, and draw count 2,994, with no
 post-prefix restart, death camera, terminal fall, VM fault, execution error, or checked issue.
 
 Upstream's checked `LEVEL_END` exports globals
 `game=0x500, title=15, saved-title=15, map=5, count=1, unlocked=6, island=0`. Its Level Complete
-screen requests Title `0x19` on frame 225 after two successful spawns, 450 attempts, 448 expected
-rejections, and 1,212 clean executions; the resulting RNG is `0xbe5213fd` at draw count 3,200.
+screen requests Title `0x19` on frame 273 after two successful spawns, 546 attempts, 544 expected
+rejections, and 1,425 clean executions; the resulting RNG is `0x1a612e69` at draw count 3,267.
 After the checked Title handoff, the Map follows 120-idle/Up/120-idle/Cross and selects Papu Papu
 `0x0a` on frame 253 at `1d_pZ` path zero/progress 1,024. Its carry has
-`game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0xa984c5b5`, and draw
-count 3,453. A state-gated ordinary-pad route completes the carried Papu Papu fight without a
+`game=0, title=15, saved-title=15, map=6, count=1, unlocked=6, island=1`, RNG `0x318c2fc6`, and draw
+count 3,520. A state-gated ordinary-pad route completes the carried Papu Papu fight without a
 restart or host-injected event. Crash and ChefC exchange the three authored damage collisions on
 frames 302, 484, and 666; ChefC enters hurt state two on frames 303, 485, and 667, recovers on
 frames 382 and 564, and enters win state three on frame 668. The boss requests Title `0x19` on
-frame 812 after 6 successful spawns, 5,684 attempts, 5,678 expected rejections, and 16,377 clean
-executions. The carry unlocks level seven with RNG `0xf3ab9165` and draw 4,265.
+frame 812 after 6 successful spawns, 5,684 attempts, 5,678 expected rejections, and 16,391 clean
+executions. The carry unlocks level seven with RNG `0x3823ffd7` and draw 4,332.
 
 The post-boss Map becomes ready on frame 10, waits for its authored current-node camera gate,
 taps Up on frame 53, waits for the next-node gate, and presses Cross on frame 66 to select Rolling
-Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,331. A session-gated
+Stones `0x15`. Its checked carry has `map=7, unlocked=7, island=1` at draw 4,398. A session-gated
 ordinary-pad continuation now completes carried Rolling Stones and requests Level Complete `0x2d`
-on frame 2,449. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
-the end `WarpC`, and ends at camera `0O_lZ:0@10496` with Crash in warp state 32 at
-`[2219008, 9256242, -1833728]`. It activates checkpoint `0x0800` on frame 1,160, retains saved box
-count `0x0a00`, and advances the live count to `0x0c00`. The route records 117 successful spawns
-from 29,224 attempts with 29,107 source-expected rejections, 54,526 clean executions, 32 lifecycle
+on frame 2,465. It follows the normal `0M_lZ -> 0O_lZ` leg, bypassing alternate `0N_lZ`, enters
+the end `WarpC`, and ends at camera `0O_lZ:0@9424` with Crash in warp state 32 at
+`[2237184, 9256237, -1792768]`. It activates checkpoint `0x0800` on frame 1,159, retains saved box
+count `0x0900`, and advances the live count to `0x0b00`. The route records 117 successful spawns
+from 29,372 attempts with 29,255 source-expected rejections, 55,526 clean executions, 32 lifecycle
 zone transitions, 45 camera ranges and 46 path changes. It has no restart, state-31 squash, death
-camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0x9dbf3415` at draw 6,780.
+camera, terminal fall, VM fault, execution error, or LoadState; RNG is `0xb40bac74` at draw 6,863.
 These are deterministic native integration goldens over user-supplied local data, not a browser
 playthrough or full-game parity claim; a browser exercise of this complete carried chain remains
 open.
@@ -316,7 +316,7 @@ route records 117 successful spawns from 29,190 attempts with 29,073 source-expe
 55,034 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
 final camera is `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65`
 at draw 2,447. It has no restart, state-31 squash, death camera, terminal fall, VM fault, execution
-error, or LoadState. The carried route above independently reaches the same authored end two
+error, or LoadState. The carried route above independently reaches the same authored end 18
 frames later.
 The same legal N. Sanity data now characterizes its first authored interaction sequence: the first
 CrabC defeat, nine ordinary counted crates, the checkpoint crate, the source-ordered pre-increment
@@ -398,24 +398,38 @@ object, unexpected spawn error, execution error, or checked issue. Bonus-path co
 browser-driven completion remain unproved.
 
 Up the Creek now has a complete normal-route direct-boot ordinary-pad golden. It activates
-checkpoint entity 76 on frame 1,246, preserving saved box count `0x400` before the live count
+checkpoint entity 76 on frame 1,245, preserving saved box count `0x400` before the live count
 advances, then traverses the complete authored `RivOC` chain through `0F_oZ` platforms 12 and 11.
 The final running jump enters `0G_oZ`'s authored `WarpC`; states zero through four execute and
-request Level Complete `0x2d` on frame 4,184. The route performs 196 successful spawns and 123,309
-clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path changes, with no
-restart, LoadState, death camera, terminal fall, VM fault, faulted object, execution error, or
-checked issue. Bonus-path coverage and a browser-driven completion remain separate gaps.
+request Level Complete `0x2d` on frame 4,183. The route performs 196 successful spawns from 64,662
+attempts and 123,277 clean executions across 38 lifecycle transitions, 53 camera ranges and 60 path
+changes, with no restart, LoadState, death camera, terminal fall, VM fault, faulted object,
+execution error, or checked issue. Bonus-path coverage and a browser-driven completion remain
+separate gaps.
 A separate carried-session golden starts from the authored island-two map, selects Up the Creek,
 completes it on gameplay frame 4,319, crosses the 185-frame Level Complete graph, and uses ordinary
 Up/Cross input to select and complete Ripper Roo (`0x17`) before selecting The Lost City (`0x20`).
 The exact primary/secondary RNG state, draw count, 128-byte card data, and tracked map globals remain
 preserved across every `LEVEL_END` handoff.
+The longer uninterrupted campaign-carry regression is a third, distinct fixture. Papu Papu returns
+to Title on frame 812 (draw 4,332); Map selects Rolling Stones on frame 66 (draw 4,398); Rolling
+Stones reaches Level Complete on frame 2,465 (draw 6,863); and its 425-frame completion plus
+253-frame Map handoffs lead to Hog Wild. Hog Wild reaches Level Complete on frame 1,949 (draw
+9,490), followed by its 273-frame completion and another 253-frame Map handoff. Native Fortress
+then reaches Level Complete on frame 6,949 (draw 16,965), its completion takes 425 frames, and Map
+selects Up the Creek on frame 253 (draw 17,643). Up the Creek reaches Level Complete on frame 4,346
+(draw 21,989), its completion takes 225 frames, and Map selects Ripper Roo on frame 253 (draw
+22,467). Ripper Roo returns to Title on frame 2,064 (draw 24,531); the final 253-frame Map handoff
+mounts The Lost City, whose first runtime frame ends at draw 24,785. Every completed gameplay leg
+from Papu Papu through Ripper Roo records zero restarts. This is deterministic native-engine
+characterization, not a browser playthrough or proof that The Lost City completes in this carried
+phase.
 
 The current native schedule therefore includes deterministic normal-route completions for
 N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
-Temple Ruins, Road to Nowhere, The High Road, Cortex Power, and Up the Creek, plus authored Papu
-Papu and later boss completions. These are not a full retail playthrough or a browser-playthrough
-claim.
+Native Fortress, Temple Ruins, Road to Nowhere, The High Road, Cortex Power, and Up the Creek,
+plus authored Papu Papu and later boss completions. These are not a full retail playthrough or a
+browser-playthrough claim.
 Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
 mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each

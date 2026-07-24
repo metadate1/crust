@@ -609,10 +609,22 @@ gameplay path.
   21,989. Its completion takes 225 frames (draw 22,214), and
   Map selects Ripper Roo on frame 253 (draw 22,467). Ripper Roo returns to Title on frame 2,064
   with no restart, RNG `0xe2d784b2`, and draw 24,531. The next 253-frame Map handoff selects The
-  Lost City at draw 24,784; its first carried runtime frame completes cleanly with 33 successful
-  spawns, 56 executions, RNG `0xabc415c8`, and draw 24,785. This is deterministic native
-  integration over user-supplied local data, not browser execution, a carried Lost City completion,
-  or full-game parity.
+  Lost City at draw 24,784. Its carried route requests direct Title `0x19` on frame 7,445 after 397
+  successful spawns from 119,398 attempts, 222,312 executions, and 58 zone transitions. Its six
+  deterministic recovery restarts are frames 296/580/925/1,238/1,518/5,835; checkpoint `0x8000`
+  activates on frame 5,681, and Crash reaches `h5_wZ` alive in state 32 at
+  `[1220336, 650576, 200064]`. The clean terminal carry has globals
+  `[0x300,15,15,12,1,13,0]`, RNG `0xba042128`/`0xc889af19`, and draw 1,610.
+
+  The direct-Title Map remount is ready on frame 10 at `2a_pZ:1@0x0700`, retaining that RNG and
+  reaching draw 1,620. Ordinary 120-idle/Up/120-idle/Cross input requests Temple Ruins `0x1c` on
+  frame 253 at `2d_pZ:0@0x0900`, with globals `[0,15,15,13,1,13,1]`, RNG
+  `0xa5a69d6c`/`0xc889af19`, and draw 1,863. Temple Ruins imports the checked carry and executes its
+  first runtime frame at `a0_sZ:0@0x0100` with 15 live objects, eight successful spawns, 18
+  executions, no restart or checked runtime error, globals `[0x100,15,15,13,1,13,0]`, RNG
+  `0x7b547a17`/`0x1c4f5bde`, and draw 1,864. This is deterministic native integration over
+  user-supplied local data, not browser execution, a carried Temple Ruins completion, or full-game
+  parity.
 
   A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
   avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
@@ -715,12 +727,12 @@ gameplay path.
   at `[3501824, -4780684, 132864]`. There is no death, restart, terminal fall, VM fault, faulted
   object, execution error, or checked issue.
 
-  Temple Ruins has a complete direct-boot ordinary-pad golden through 60 camera paths and 33 zone
-  transitions. Its `d3_sZ` WarpC requests Level Complete `0x2d` on frame 4,473 after 190 successful
-  spawns and 148,192 clean executions, with no restart, fall, VM fault, faulted object, or execution
-  error. Road to Nowhere now follows both authored outside rope lanes across the collapsing spans,
-  reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame 2,452.
-  The route activates both checkpoints, preserves the fresh life stock, and emits no load-state.
+  Temple Ruins retains a direct-route characterization target, but its current opt-in regression
+  does not establish a complete run; the checked uninterrupted boundary is the clean carried mount
+  described above. Road to Nowhere follows both authored outside rope lanes across the collapsing
+  spans, reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame
+  2,449. The route activates both checkpoints, preserves the fresh life stock, performs 71,778
+  executions, and emits no load-state.
   The High Road separately follows its authored right rope, centers across the `b2_mZ` seam and on
   the `d0_mZ` end island, observes WarpC states zero through four, and requests Level Complete
   `0x2d` on frame 2,274 without a death, restart, load-state, VM fault, or execution error.
@@ -758,9 +770,11 @@ gameplay path.
   carried chain executes the complete legally local Upstream PBAK input, completes Upstream's
   normal route, wins Papu Papu through its three authored damage cycles, then completes Rolling
   Stones, Hog Wild, Native Fortress, Up the Creek, and Ripper Roo across their authored completion
-  and Map handoffs before mounting The Lost City for one clean frame. The independent Rolling
-  Stones direct boot reaches the same end on its own deterministic phase; the carried Lost City
-  completion remains unproved.
+  and Map handoffs before completing The Lost City's carried route on frame 7,445, returning
+  directly to Title, selecting Temple Ruins on Map frame 253, and crossing Temple Ruins' first
+  carried runtime frame. The independent Rolling Stones direct boot reaches the same end on its own
+  deterministic phase; carried Temple Ruins completion and the later uninterrupted campaign remain
+  unproved.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

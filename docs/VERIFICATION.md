@@ -1249,10 +1249,24 @@ is 1,322,866 bytes with SHA-256
   `0x93e26958` at draw 21,989. Its completion takes 225 frames
   (draw 22,214), and Map selects Ripper Roo on frame 253 (draw 22,467). Ripper Roo's three authored
   activations lead to Title on frame 2,064 with no restart, RNG `0xe2d784b2`, and draw 24,531. The
-  final 253-frame Map handoff selects The Lost City at draw 24,784; The Lost City's first carried
-  runtime frame completes cleanly with 33 successful spawns, 56 executions, RNG `0xabc415c8`, and
-  draw 24,785. This is deterministic native integration over user-supplied local data, not a
-  browser playthrough, a carried Lost City completion, or full-game parity claim.
+  next 253-frame Map handoff selects The Lost City at draw 24,784. The carried Lost City route
+  requests authored direct Title `0x19` on frame 7,445 after 397 successful spawns from 119,398
+  attempts, 222,312 executions, and 58 zone transitions. Deterministic recovery restarts occur on
+  frames 296/580/925/1,238/1,518/5,835; checkpoint `0x8000` activates on frame 5,681, with its
+  checked translation `[16588800, -3072768, 204544]`. Crash reaches `h5_wZ` alive in state 32 at
+  `[1220336, 650576, 200064]`. Terminal globals are `[0x300,15,15,12,1,13,0]`, primary/secondary
+  RNG is `0xba042128`/`0xc889af19`, and draw is 1,610; the checked `LEVEL_END` carry preserves those
+  exact values.
+
+  The direct-Title Map becomes ready on frame 10 at `2a_pZ:1@0x0700`, with island state one and
+  draw 1,620. The standard 120-idle/Up/120-idle/Cross schedule requests Temple Ruins `0x1c` on
+  frame 253 at `2d_pZ:0@0x0900`; globals are `[0,15,15,13,1,13,1]`, RNG is
+  `0xa5a69d6c`/`0xc889af19`, and draw is 1,863. Temple Ruins imports that exact carry and crosses its
+  first runtime frame at `a0_sZ:0@0x0100`: 15 live objects, eight successful spawns, 18 executions,
+  no restart or checked runtime error, Crash at `[10342144, 512000, 27852288]`, globals
+  `[0x100,15,15,13,1,13,0]`, RNG `0x7b547a17`/`0x1c4f5bde`, and draw 1,864. This is deterministic
+  native integration over user-supplied local data, not a browser playthrough, a carried Temple
+  Ruins completion, or full-game parity claim.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
   requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
   terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
@@ -1328,17 +1342,14 @@ is 1,322,866 bytes with SHA-256
   Complete `0x2d` on frame 3,209; WarpC reaches state one and Crash reaches state 32 at
   `[3501824, -4780684, 132864]`. The raw-BIN route records one authored transition and no death,
   restart, terminal fall, VM fault, faulted object, execution error, or checked issue.
-- Temple Ruins (`0x1c`) now has a complete legally local direct-boot route using ordinary 30 Hz pad
-  words. It traverses 60 camera paths/59 changes and 33 zone transitions, then reaches `d3_sZ`'s
-  WarpC and requests Level Complete `0x2d` on frame 4,473. The run performs 190 successful spawns
-  and 148,192 clean executions with no restart, below-zero sample, terminal fall, VM fault, faulted
-  object, or execution error; Crash remains live in state 32 at
-  `[15666656, 4742996, 5402096]`.
+- Temple Ruins (`0x1c`) retains an opt-in ordinary-pad direct-route characterization, but it is not
+  counted as a current complete-route proof. The checked uninterrupted campaign boundary is the
+  carried first frame at `a0_sZ:0@0x0100` described above; Temple completion remains open.
 - Road to Nowhere (`0x14`) has a no-death direct-boot route over the authored outside rope lanes.
   It activates both checkpoints, crosses every collapsing span without a restart or load-state,
-  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,452.
-  Crash remains live in state 32 at `[-4096, 3720270, -40225400]`; the route has no VM fault,
-  faulted object, or execution error.
+  observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,449.
+  Crash remains live in state 32 at `[-16384, 3720267, -40210336]`; the route performs 71,778
+  executions and has no VM fault, faulted object, or execution error.
 - The High Road (`0x16`) has a separate direct-boot ordinary-pad completion. It pre-aligns to the
   authored right rope, centers across the physical `b2_mZ` seam, returns to the rope, and centers
   again on the `d0_mZ` end island. WarpC states zero through four execute and request Level Complete

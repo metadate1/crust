@@ -1261,12 +1261,14 @@ is 1,322,866 bytes with SHA-256
   The direct-Title Map becomes ready on frame 10 at `2a_pZ:1@0x0700`, with island state one and
   draw 1,620. The standard 120-idle/Up/120-idle/Cross schedule requests Temple Ruins `0x1c` on
   frame 253 at `2d_pZ:0@0x0900`; globals are `[0,15,15,13,1,13,1]`, RNG is
-  `0xa5a69d6c`/`0xc889af19`, and draw is 1,863. Temple Ruins imports that exact carry and crosses its
-  first runtime frame at `a0_sZ:0@0x0100`: 15 live objects, eight successful spawns, 18 executions,
-  no restart or checked runtime error, Crash at `[10342144, 512000, 27852288]`, globals
-  `[0x100,15,15,13,1,13,0]`, RNG `0x7b547a17`/`0x1c4f5bde`, and draw 1,864. This is deterministic
-  native integration over user-supplied local data, not a browser playthrough, a carried Temple
-  Ruins completion, or full-game parity claim.
+  `0xa5a69d6c`/`0xc889af19`, and draw is 1,863. Temple Ruins imports that exact carry and requests
+  Level Complete `0x2d` on frame 5,041 after 190 successful spawns from 87,919 attempts, 168,087
+  executions, 33 lifecycle transitions, 60 camera ranges, and 59 path changes. Crash remains alive
+  in state 32 at `[15683008, 4742989, 5396480]`; globals are `[0x500,15,15,13,1,14,0]`, RNG is
+  `0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. There is no death, restart, below-zero or terminal
+  fall, VM fault, faulted object, execution error, or checked runtime issue. This is deterministic
+  native integration over user-supplied local data, not a browser playthrough or full-game parity
+  claim.
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
   requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
   terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
@@ -1342,9 +1344,11 @@ is 1,322,866 bytes with SHA-256
   Complete `0x2d` on frame 3,209; WarpC reaches state one and Crash reaches state 32 at
   `[3501824, -4780684, 132864]`. The raw-BIN route records one authored transition and no death,
   restart, terminal fall, VM fault, faulted object, execution error, or checked issue.
-- Temple Ruins (`0x1c`) retains an opt-in ordinary-pad direct-route characterization, but it is not
-  counted as a current complete-route proof. The checked uninterrupted campaign boundary is the
-  carried first frame at `a0_sZ:0@0x0100` described above; Temple completion remains open.
+- Temple Ruins (`0x1c`) has complete fresh and uninterrupted carried ordinary-pad routes. The fresh
+  route requests Level Complete `0x2d` on frame 4,473 after 150,694 executions. The carried route
+  requests the same authored transition on frame 5,041 after 168,087 executions, with zero deaths,
+  restarts, below-zero or terminal falls, VM faults, faulted objects, execution errors, or checked
+  runtime issues.
 - Road to Nowhere (`0x14`) has a no-death direct-boot route over the authored outside rope lanes.
   It activates both checkpoints, crosses every collapsing span without a restart or load-state,
   observes WarpC states zero through four, and requests Level Complete `0x2d` on frame 2,449.

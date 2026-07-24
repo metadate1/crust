@@ -381,14 +381,17 @@ authored WarpC requests Level Complete `0x2d` on frame 3,209 with Crash in state
 `[3501824, -4780684, 132864]`. The route has no death, restart, terminal fall, VM fault, faulted
 object, execution error, or checked issue.
 
-Temple Ruins retains a direct-route characterization target, but a complete current-scheduler
-Temple run is not claimed; the uninterrupted carried proof below stops after its first clean
-runtime frame. Road to Nowhere has a no-death direct-boot route: it follows the authored outside
-rope lanes across every collapsing span, retains the fresh life stock, and requests Level Complete
-`0x2d` from WarpC on frame 2,449 without a restart or load-state effect. The High Road has its own
-clean ordinary-pad route: it follows the authored right rope, centers across the `b2_mZ` seam and
-again on the `d0_mZ` end island, then drives WarpC states zero through four and requests Level
-Complete `0x2d` on frame 2,274 without consuming a life.
+Temple Ruins now has complete fresh and uninterrupted carried ordinary-pad routes. The fresh route
+requests Level Complete `0x2d` on frame 4,473. The carried route reaches the same authored handoff
+on frame 5,041 after 190 successful spawns, 168,087 executions, 33 lifecycle transitions, 60 camera
+ranges, and 59 path changes. Neither route records a death, restart, terminal fall, VM fault,
+faulted object, execution error, or checked runtime issue. Road to Nowhere has a no-death
+direct-boot route: it follows the authored outside rope lanes across every collapsing span, retains
+the fresh life stock, and requests Level Complete `0x2d` from WarpC on frame 2,449 without a restart
+or load-state effect. The High Road has its own clean ordinary-pad route: it follows the authored
+right rope, centers across the `b2_mZ` seam and again on the `d0_mZ` end island, then drives WarpC
+states zero through four and requests Level Complete `0x2d` on frame 2,274 without consuming a
+life.
 
 Cortex Power now has a complete fresh direct-boot ordinary-pad golden. It crosses 21 zone
 transitions, emits one authored save-state, drives WarpC through states zero to four, and requests
@@ -428,18 +431,20 @@ transitions. Six deterministic recovery restarts occur on frames
 Title Map becomes ready on frame 10 at `2a_pZ:1@0x0700`; the usual
 120-idle/Up/120-idle/Cross sequence selects Temple Ruins on frame 253 at
 `2d_pZ:0@0x0900`, RNG `0xa5a69d6c`, and draw 1,863. Temple Ruins imports that exact session and
-crosses its first runtime frame cleanly at `a0_sZ:0@0x0100`, with 15 live objects, eight successful
-spawns, 18 executions, globals `[0x100,15,15,13,1,13,0]`, RNG
-`0x7b547a17`/`0x1c4f5bde`, and draw 1,864. Every completed gameplay leg through Ripper Roo records
-zero restarts; Lost City's six recoveries are asserted separately. This is deterministic
-native-engine characterization, not a browser playthrough or proof that Temple Ruins completes in
-this carried phase.
+completes its authored route on frame 5,041, requesting Level Complete `0x2d` with 190 successful
+spawns, 168,087 executions, 33 lifecycle transitions, 60 camera ranges, and 59 path changes. Crash
+finishes alive in state 32 at `[15683008, 4742989, 5396480]`; globals are
+`[0x500,15,15,13,1,14,0]`, primary/secondary RNG is
+`0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. Temple has no death, restart, below-zero or terminal
+fall, VM fault, faulted object, execution error, or checked runtime issue. Every earlier completed
+gameplay leg through Ripper Roo records zero restarts; Lost City's six recoveries are asserted
+separately. This is deterministic native-engine characterization, not a browser playthrough.
 
 The current native schedule therefore includes deterministic normal-route completions for
 N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
-Native Fortress, Road to Nowhere, The High Road, Cortex Power, and Up the Creek, plus authored Papu
-Papu and later boss completions. Temple Ruins is currently proven only through its carried mount.
-These are not a full retail playthrough or a browser-playthrough claim.
+Native Fortress, Temple Ruins, Road to Nowhere, The High Road, Cortex Power, and Up the Creek, plus
+authored Papu Papu and later boss completions. These are not a full retail playthrough or a
+browser-playthrough claim.
 Broader progression, several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
 mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each

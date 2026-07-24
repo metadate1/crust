@@ -620,11 +620,13 @@ gameplay path.
   reaching draw 1,620. Ordinary 120-idle/Up/120-idle/Cross input requests Temple Ruins `0x1c` on
   frame 253 at `2d_pZ:0@0x0900`, with globals `[0,15,15,13,1,13,1]`, RNG
   `0xa5a69d6c`/`0xc889af19`, and draw 1,863. Temple Ruins imports the checked carry and executes its
-  first runtime frame at `a0_sZ:0@0x0100` with 15 live objects, eight successful spawns, 18
-  executions, no restart or checked runtime error, globals `[0x100,15,15,13,1,13,0]`, RNG
-  `0x7b547a17`/`0x1c4f5bde`, and draw 1,864. This is deterministic native integration over
-  user-supplied local data, not browser execution, a carried Temple Ruins completion, or full-game
-  parity.
+  complete authored route and requests Level Complete `0x2d` on frame 5,041 after 190 successful
+  spawns, 168,087 executions, 33 lifecycle transitions, 60 camera ranges, and 59 path changes.
+  Crash remains alive in state 32 at `[15683008, 4742989, 5396480]`; globals are
+  `[0x500,15,15,13,1,14,0]`, RNG is `0x0cfc7096`/`0x654cb6a6`, and draw is 6,904. The route has no
+  death, restart, below-zero or terminal fall, VM fault, faulted object, execution error, or checked
+  runtime issue. This is deterministic native integration over user-supplied local data, not
+  browser execution or full-game parity.
 
   A separate legally local Rolling Stones direct-boot controller reaches the same normal end. It
   avoids the `0x1900` squash paths from JunOC entities 75/77/52 with ordinary neutral/run/jump
@@ -727,9 +729,11 @@ gameplay path.
   at `[3501824, -4780684, 132864]`. There is no death, restart, terminal fall, VM fault, faulted
   object, execution error, or checked issue.
 
-  Temple Ruins retains a direct-route characterization target, but its current opt-in regression
-  does not establish a complete run; the checked uninterrupted boundary is the clean carried mount
-  described above. Road to Nowhere follows both authored outside rope lanes across the collapsing
+  Temple Ruins has complete fresh and uninterrupted carried ordinary-pad routes. The fresh route
+  requests Level Complete `0x2d` on frame 4,473; the carried route requests the same authored
+  handoff on frame 5,041 after 168,087 executions and 33 lifecycle transitions. Both remain free
+  of deaths, restarts, terminal falls, VM faults, faulted objects, execution errors, and checked
+  runtime issues. Road to Nowhere follows both authored outside rope lanes across the collapsing
   spans, reaches its WarpC without a death or restart, and requests Level Complete `0x2d` on frame
   2,449. The route activates both checkpoints, preserves the fresh life stock, performs 71,778
   executions, and emits no load-state.
@@ -771,10 +775,10 @@ gameplay path.
   normal route, wins Papu Papu through its three authored damage cycles, then completes Rolling
   Stones, Hog Wild, Native Fortress, Up the Creek, and Ripper Roo across their authored completion
   and Map handoffs before completing The Lost City's carried route on frame 7,445, returning
-  directly to Title, selecting Temple Ruins on Map frame 253, and crossing Temple Ruins' first
-  carried runtime frame. The independent Rolling Stones direct boot reaches the same end on its own
-  deterministic phase; carried Temple Ruins completion and the later uninterrupted campaign remain
-  unproved.
+  directly to Title, selecting Temple Ruins on Map frame 253, and completing Temple Ruins on
+  carried frame 5,041 through its authored Level Complete request. The independent Rolling Stones
+  direct boot reaches the same end on its own deterministic phase; the later uninterrupted
+  campaign remains unproved.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

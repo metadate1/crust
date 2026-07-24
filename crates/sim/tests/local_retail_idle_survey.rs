@@ -31796,6 +31796,7 @@ struct TempleRuinsCompletionRouteController {
     opening_platform_jump_fired: bool,
     opening_platform_wait: u8,
     opening_gap_spin_fired: bool,
+    a2_launch_spin_fired: bool,
     a4_trap_attack_fired: bool,
     a4_corridor_phase: u8,
     a4_attack_release: u8,
@@ -31811,6 +31812,7 @@ struct TempleRuinsCompletionRouteController {
     b2_crossing_stage: u8,
     b4_crossing_stage: u8,
     b7_crossing_stage: u8,
+    b8_platform158_wait_stage: u8,
     b8_lift_stage: u8,
     b8_lift_runup_frames: u8,
     b9_crossing_stage: u8,
@@ -32091,6 +32093,96 @@ impl TempleRuinsCompletionRouteController {
         let spawn_zone =
             Eid::from_name("a0_sZ").expect("fixed Temple Ruins spawn-zone EID is valid");
         let mut held = Self::path_direction(camera);
+        if camera.path.zone
+            == Eid::from_name("a9_sZ").expect("fixed Temple Ruins corner-zone EID is valid")
+            && camera.path.index == 1
+            && !self.platform_is_completed(81)
+            && self.active_platform != Some(81)
+            && collider_entity != Some(81)
+            && let (Some(player), Some(target)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 81)
+                        .then_some(object.translation)
+                }),
+            )
+        {
+            if player.translation[2] > target[2] + 20_000 {
+                held |= PAD_UP;
+            } else if player.translation[2] + 20_000 < target[2] {
+                held |= PAD_DOWN;
+            }
+            held |= PAD_SQUARE;
+            if player.status_a & 1 != 0
+                && (0..=180_000).contains(&target[0].saturating_sub(player.translation[0]))
+            {
+                return held;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("b3_sZ").expect("fixed Temple Ruins bounce-zone EID is valid")
+            && camera.path.index == 1
+            && collider_entity != Some(106)
+            && let (Some(player), Some(target_x)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 106)
+                        .then_some(object.translation[0].saturating_add(50_000))
+                }),
+            )
+        {
+            if player.status_a & 1 != 0 {
+                if player.translation[0] > target_x + 100_000 {
+                    return PAD_LEFT;
+                }
+            } else if player.translation[0] > target_x + 20_000 {
+                held |= PAD_LEFT;
+            } else if player.translation[0] + 20_000 < target_x {
+                held |= PAD_RIGHT;
+            }
+        }
+        if camera.path.zone
+            == Eid::from_name("b3_sZ").expect("fixed Temple Ruins corner-zone EID is valid")
+            && camera.path.index == 0
+            && self.platform_is_completed(104)
+            && camera.progress.raw() >= 38_000
+        {
+            held = if player.is_some_and(|player| player.velocity[0] < 100_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if camera.path.zone
+            == Eid::from_name("b8_sZ").expect("fixed Temple Ruins first-lift EID is valid")
+            && camera.path.index == 0
+            && !self.platform_is_completed(158)
+            && collider_entity != Some(158)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            let lift_y = objects.iter().find_map(|object| match object.origin {
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 157 => {
+                    Some(object.translation[1])
+                }
+                _ => None,
+            });
+            // Platform 158 is a one-shot launch. Wait for lift 157 to complete
+            // its high turn and begin descending so Crash reaches its solid
+            // top instead of colliding with the rising underside.
+            if self.b8_platform158_wait_stage == 0 {
+                if lift_y.is_some_and(|lift_y| lift_y >= 1_400_000) {
+                    self.b8_platform158_wait_stage = 1;
+                }
+                return 0;
+            }
+            if self.b8_platform158_wait_stage == 1 {
+                if lift_y.is_some_and(|lift_y| lift_y <= 1_390_000) {
+                    self.b8_platform158_wait_stage = 2;
+                } else {
+                    return 0;
+                }
+            }
+        }
         let b9_zone = Eid::from_name("b9_sZ").expect("fixed Temple Ruins junction EID is valid");
         if camera.path.zone == b9_zone
             && camera.path.index == 0
@@ -32969,9 +33061,39 @@ impl TempleRuinsCompletionRouteController {
                 _ => false,
             })
         });
+        let a2_fire_is_close = camera.path.zone
+            == Eid::from_name("a2_sZ").expect("fixed Temple Ruins fire-zone EID is valid")
+            && camera.path.index == 1
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 18
+                        }
+                    ) && object.translation[0].abs_diff(player.translation[0]) <= 120_000
+                        && (0..=180_000)
+                            .contains(&player.translation[2].saturating_sub(object.translation[2]))
+                })
+            });
         let a4_corridor = camera.path.zone
             == Eid::from_name("a4_sZ").expect("fixed Temple Ruins junction EID is valid")
             && camera.path.index == 1;
+        let a4_fire_is_active = a4_corridor
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 18
+                        }
+                    ) && object.translation[0].abs_diff(player.translation[0]) <= 200_000
+                        && (0..=250_000)
+                            .contains(&player.translation[2].saturating_sub(object.translation[2]))
+                })
+            });
         if a4_corridor && let Some(player) = player {
             match self.a4_corridor_phase {
                 0 if player.status_a & 1 == 0 => {
@@ -33008,11 +33130,23 @@ impl TempleRuinsCompletionRouteController {
                 }
                 2 => {
                     self.a4_corridor_phase = 3;
-                    self.a4_attack_release = 2;
+                    self.a4_attack_release = 5;
                     return PAD_UP;
                 }
                 3 if self.a4_attack_release != 0 => {
                     self.a4_attack_release -= 1;
+                    return PAD_UP;
+                }
+                3 if a4_fire_is_active => {
+                    return if player.translation[2] < 25_220_000 || player.velocity[2] < -100_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 100_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                }
+                3 if player.status_a & 1 != 0 && player.velocity[2] > -500_000 => {
                     return PAD_UP;
                 }
                 3 if player.status_a & 1 != 0 => {
@@ -33351,6 +33485,12 @@ impl TempleRuinsCompletionRouteController {
                 if player.is_some_and(|player| player.translation[0] < 8_900_000) {
                     return PAD_RIGHT;
                 }
+                if player.is_some_and(|player| !matches!(player.state, 1 | 2)) {
+                    return 0;
+                }
+                if player.is_some_and(|player| player.velocity[0] < 500_000) {
+                    return PAD_RIGHT;
+                }
                 self.b2_crossing_stage = 4;
                 self.jump_frames = 45;
                 self.release_frames = 5;
@@ -33378,7 +33518,11 @@ impl TempleRuinsCompletionRouteController {
             };
             return jump_direction
                 | PAD_CROSS
-                | if a4_trap_is_close { PAD_SQUARE } else { 0 }
+                | if a4_trap_is_close || a2_fire_is_close {
+                    PAD_SQUARE
+                } else {
+                    0
+                }
                 | if self.lift_exit_jump { PAD_SQUARE } else { 0 }
                 | if camera.path.zone
                     == Eid::from_name("a7_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
@@ -33460,15 +33604,59 @@ impl TempleRuinsCompletionRouteController {
         }
         if self.opening_platform_jump_fired
             && !self.opening_gap_spin_fired
-            && camera.path.zone
-                == Eid::from_name("a1_sZ")
-                    .expect("fixed Temple Ruins opening-neighbor EID is valid")
-            && player.is_some_and(|player| player.state == 11 && player.velocity[1] <= -1_000_000)
+            && player.is_some_and(|player| {
+                player.velocity[1] <= -500_000
+                    && objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 51
+                                    && object.program
+                                        == Eid::from_name("PlanC")
+                                            .expect("fixed Temple Ruins plant EID is valid")
+                        ) && object.translation[0].abs_diff(player.translation[0]) <= 250_000
+                            && object.translation[2].abs_diff(player.translation[2]) <= 200_000
+                    })
+            })
         {
             self.opening_gap_spin_fired = true;
             return held | PAD_SQUARE;
         }
-        if self.tick >= 48 && self.tick.is_multiple_of(24) {
+        if camera.path.zone
+            == Eid::from_name("a2_sZ").expect("fixed Temple Ruins bounce-zone EID is valid")
+            && camera.path.index == 0
+            && !self.a2_launch_spin_fired
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+        {
+            // The spinning jump is the authored safe approach to entity 51's
+            // bounce. Tie it to the landing state instead of the historical
+            // 24-frame pulse, whose phase changed with atomic child execution.
+            self.a2_launch_spin_fired = true;
+            self.jump_frames = 10;
+            self.release_frames = 5;
+            return held | PAD_CROSS | PAD_SQUARE;
+        }
+        let b3_platform_approach = !self.platform_is_completed(104)
+            && ((camera.path.zone
+                == Eid::from_name("b2_sZ").expect("fixed Temple Ruins pre-platform EID is valid")
+                && camera.path.index == 1
+                && camera.progress.raw() >= 30_000)
+                || (camera.path.zone
+                    == Eid::from_name("b3_sZ")
+                        .expect("fixed Temple Ruins platform-zone EID is valid")
+                    && camera.path.index == 0
+                    && player.is_some_and(|player| player.translation[0] <= 9_700_000)));
+        let b8_first_landing_approach = !self.platform_is_completed(158)
+            && camera.path.zone
+                == Eid::from_name("b8_sZ")
+                    .expect("fixed Temple Ruins first-lift zone EID is valid")
+            && camera.path.index == 0
+            && camera.progress.raw() < 40_000;
+        if !b3_platform_approach
+            && !b8_first_landing_approach
+            && self.tick >= 48
+            && self.tick.is_multiple_of(24)
+        {
             held |= PAD_SQUARE;
         }
         if a4_trap_is_close
@@ -33493,11 +33681,27 @@ impl TempleRuinsCompletionRouteController {
             }
             return held;
         }
+        let a8_platform_distance = player.and_then(|player| {
+            objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 90)
+                    .then(|| player.translation[2].saturating_sub(object.translation[2]))
+                    .filter(|distance| {
+                        player.translation[0].abs_diff(object.translation[0]) <= 300_000
+                            && (0..=900_000).contains(distance)
+                    })
+            })
+        });
+        if player.is_some_and(|player| player.status_a & 1 != 0)
+            && a8_platform_distance.is_some_and(|distance| distance > 650_000)
+        {
+            return held;
+        }
         if player.is_some_and(|player| player.status_a & 1 != 0) {
             self.jump_frames = if camera.path.zone
                 == Eid::from_name("a7_sZ").expect("fixed Temple Ruins trap-zone EID is valid")
                 && camera.path.index == 1
                 && camera.progress.raw() >= 30_000
+                || a8_platform_distance.is_some()
             {
                 45
             } else {
@@ -33907,6 +34111,7 @@ impl SurveyInputController {
                 opening_platform_jump_fired: false,
                 opening_platform_wait: 0,
                 opening_gap_spin_fired: false,
+                a2_launch_spin_fired: false,
                 a4_trap_attack_fired: false,
                 a4_corridor_phase: 0,
                 a4_attack_release: 0,
@@ -33922,6 +34127,7 @@ impl SurveyInputController {
                 b2_crossing_stage: 0,
                 b4_crossing_stage: 0,
                 b7_crossing_stage: 0,
+                b8_platform158_wait_stage: 0,
                 b8_lift_stage: 0,
                 b8_lift_runup_frames: 0,
                 b9_crossing_stage: 0,
@@ -37349,10 +37555,12 @@ fn temple_ruins_direct_boot_reaches_level_complete() {
         5_000,
     )
     .expect("Temple Ruins' ordinary-pad completion route must execute");
-
-    let (transition_frame, requested_lid) = survey
-        .next_lid
-        .expect("the authored end WarpC must request a level transition");
+    let (transition_frame, requested_lid) = survey.next_lid.unwrap_or_else(|| {
+        panic!(
+            "the authored end WarpC must request a level transition: {}",
+            survey.summary()
+        )
+    });
     assert_eq!(requested_lid, 0x2d);
     assert_eq!(transition_frame, 4_473);
     assert_eq!(survey.frames, transition_frame);
@@ -37362,16 +37570,16 @@ fn temple_ruins_direct_boot_reaches_level_complete() {
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.save_handshakes, 0);
     assert_eq!(survey.successful_spawns, 190);
-    assert_eq!(survey.spawn_attempts, 77_787);
-    assert_eq!(survey.expected_spawn_rejections, 77_597);
+    assert_eq!(survey.spawn_attempts, 79_131);
+    assert_eq!(survey.expected_spawn_rejections, 78_941);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 148_192);
+    assert_eq!(survey.executions, 150_713);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 33);
     assert_eq!(survey.camera_ranges.len(), 60);
     assert_eq!(survey.camera_path_changes, 59);
     assert_eq!(survey.last_camera_path_change, 4_291);
-    assert_eq!(survey.last_camera_progress_change, 4_377);
+    assert_eq!(survey.last_camera_progress_change, 4_378);
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
     assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
@@ -37394,7 +37602,7 @@ fn temple_ruins_direct_boot_reaches_level_complete() {
     assert_eq!(player.zone, exit_zone);
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [15_666_656, 4_742_996, 5_402_096]);
+    assert_eq!(player.translation, [15_678_144, 4_742_996, 5_412_560]);
 }
 
 #[test]

@@ -15,6 +15,7 @@ const SOURCE_ROOTS = [
   "rust-toolchain.toml",
   "rustfmt.toml",
   "scripts/build-info.mjs",
+  "scripts/build-browser-harness.sh",
   "scripts/build-web.sh",
   "scripts/serve.mjs",
 ];
@@ -164,9 +165,14 @@ export async function writeBuildInfo(
   return info;
 }
 
-export async function verifyBuildInfo(rootPath, identity = undefined) {
+export async function verifyBuildInfo(
+  rootPath,
+  identity = undefined,
+  distPath = undefined,
+) {
   const root = resolve(rootPath);
-  const manifestPath = join(root, "dist", "build-info.json");
+  const dist = resolve(distPath ?? join(root, "dist"));
+  const manifestPath = join(dist, "build-info.json");
   let info;
   try {
     info = JSON.parse(await readFile(manifestPath, "utf8"));
@@ -192,7 +198,7 @@ export async function verifyBuildInfo(rootPath, identity = undefined) {
     );
   }
 
-  const artifacts = await artifactFingerprints(root);
+  const artifacts = await artifactFingerprints(root, dist);
   for (const [name, sha256] of Object.entries(artifacts)) {
     if (info.artifacts?.[name] !== sha256) {
       throw new Error(
@@ -225,7 +231,7 @@ async function main() {
     return;
   }
   if (command === "verify") {
-    const info = await verifyBuildInfo(root);
+    const info = await verifyBuildInfo(root, undefined, dist);
     process.stdout.write(`verified crust web build: ${info.build_id}\n`);
     return;
   }

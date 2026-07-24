@@ -45,6 +45,43 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
   assert.doesNotMatch(html, /standby-glyph|>◆</);
 });
 
+test("manual browser stepping stays behind an off-by-default Cargo feature", async () => {
+  const [manifest, packageJson, harnessBuild, app, bootstrap] = await Promise.all([
+    readFile(new URL("crates/web/Cargo.toml", root), "utf8"),
+    readFile(new URL("package.json", root), "utf8"),
+    readFile(new URL("scripts/build-browser-harness.sh", root), "utf8"),
+    readFile(new URL("crates/web/src/app.rs", root), "utf8"),
+    readFile(new URL("web/bootstrap.js", root), "utf8"),
+  ]);
+
+  assert.match(manifest, /\[features\]\s+default = \[\]/);
+  assert.match(manifest, /browser-test-harness = \[\]/);
+  assert.match(packageJson, /"build:browser-harness"/);
+  assert.match(packageJson, /"serve:browser-harness"/);
+  assert.match(harnessBuild, /--features browser-test-harness/);
+  assert.match(harnessBuild, /target\/browser-test-dist/);
+  assert.doesNotMatch(
+    harnessBuild,
+    /["']\$ROOT\/dist["']/,
+    "the harness builder must not replace the production distribution",
+  );
+  assert.match(
+    app,
+    /#\[cfg\(feature = "browser-test-harness"\)\]\s+install_browser_test_harness/,
+  );
+  assert.match(
+    app,
+    /#\[cfg\(not\(feature = "browser-test-harness"\)\)\]\s+start_animation_loop/,
+  );
+  assert.match(app, /app\.frame\(timestamp_ms\)/);
+  assert.match(app, /load_level_pair\(Rc::clone\(&app\), level\)/);
+  assert.doesNotMatch(
+    bootstrap,
+    /__crustTest|browser-test-harness/,
+    "the production bootstrap must not opt into or expose the harness",
+  );
+});
+
 test("browser runtime cannot restore the retired synthetic triangle game", async () => {
   const sources = (
     await Promise.all([

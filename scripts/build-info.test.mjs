@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -43,6 +43,29 @@ test("verified metadata binds source and generated artifacts", async (context) =
   const verified = await verifyBuildInfo(root, identity);
   assert.equal(verified.build_id, written.build_id);
   assert.match(verified.build_id, /^a{12}-[0-9a-f]{12}-[0-9a-f]{12}-clean$/);
+});
+
+test("verified metadata supports an isolated browser-harness distribution", async (context) => {
+  const root = await fixture();
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const harness = join(root, "target", "browser-test-dist");
+  await mkdir(join(harness, "pkg"), { recursive: true });
+  for (const artifact of [
+    "bootstrap.js",
+    "index.html",
+    "styles.css",
+    "pkg/crust_web.js",
+    "pkg/crust_web_bg.wasm",
+  ]) {
+    await copyFile(join(root, "dist", artifact), join(harness, artifact));
+  }
+  const identity = { commit: "9".repeat(40), dirty: true };
+
+  const written = await writeBuildInfo(root, identity, harness);
+  const verified = await verifyBuildInfo(root, identity, harness);
+
+  assert.equal(verified.build_id, written.build_id);
+  assert.match(verified.build_id, /^9{12}-[0-9a-f]{12}-[0-9a-f]{12}-dirty$/);
 });
 
 test("source changes make an existing distribution stale", async (context) => {

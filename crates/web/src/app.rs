@@ -82,6 +82,8 @@ use web_sys::{
     MouseEvent, PointerEvent,
 };
 
+#[cfg(feature = "browser-test-harness")]
+use crate::BrowserTestClock;
 use crate::assets::{AssetStore, ValidatedPair};
 use crate::card_persistence::CardPersistIntent;
 use crate::disc_import::discover_disc;
@@ -187,9 +189,14 @@ pub fn boot() -> Result<(), JsValue> {
         locked: false,
         muted: false,
         debug,
+        #[cfg(feature = "browser-test-harness")]
+        browser_test_held: 0,
     }));
     bind_events(&app)?;
     app.borrow_mut().refresh_assets()?;
+    #[cfg(feature = "browser-test-harness")]
+    install_browser_test_harness(&app, &browser_window)?;
+    #[cfg(not(feature = "browser-test-harness"))]
     start_animation_loop(&app)?;
     Ok(())
 }
@@ -207,6 +214,8 @@ struct App {
     locked: bool,
     muted: bool,
     debug: Object,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_held: u16,
 }
 
 impl App {
@@ -233,7 +242,10 @@ impl App {
     }
 
     fn frame(&mut self, timestamp_ms: f64) -> Result<Option<FormatLevelId>, JsValue> {
+        #[cfg(not(feature = "browser-test-harness"))]
         let held = self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
+        #[cfg(feature = "browser-test-harness")]
+        let held = self.browser_test_held;
         if let Some(runtime) = &mut self.runtime {
             runtime.frame(timestamp_ms, held, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
@@ -4905,8 +4917,101 @@ fn launch(app: Rc<RefCell<App>>) {
     });
 }
 
+#[cfg(feature = "browser-test-harness")]
+fn install_browser_test_harness(
+    app: &Rc<RefCell<App>>,
+    browser_window: &web_sys::Window,
+) -> Result<(), JsValue> {
+    let harness = Object::new();
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("mode"),
+        &JsValue::from_str("manual-34ms"),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("frameDurationMs"),
+        &JsValue::from_f64(BrowserTestClock::FRAME_DURATION_MS),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("stepCount"),
+        &JsValue::from_f64(0.0),
+    )?;
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("lastError"),
+        &JsValue::NULL,
+    )?;
+
+    let app = Rc::clone(app);
+    let harness_for_step = harness.clone();
+    let clock_and_count = Rc::new(RefCell::new((BrowserTestClock::default(), 0_u64)));
+    let clock_and_count_for_step = Rc::clone(&clock_and_count);
+    let step = Closure::<dyn FnMut(u32)>::new(move |raw_held| {
+        let Ok(held) = u16::try_from(raw_held) else {
+            let _ = Reflect::set(
+                harness_for_step.as_ref(),
+                &JsValue::from_str("lastError"),
+                &JsValue::from_str("held pad mask exceeds 16 bits"),
+            );
+            return;
+        };
+        let (timestamp_ms, step_count) = {
+            let mut state = clock_and_count_for_step.borrow_mut();
+            let timestamp_ms = state.0.take_timestamp_ms();
+            state.1 = state.1.wrapping_add(1);
+            (timestamp_ms, state.1)
+        };
+        let frame_result = {
+            let mut app = app.borrow_mut();
+            app.browser_test_held = held;
+            app.frame(timestamp_ms)
+        };
+        let requested_lid = match frame_result {
+            Ok(Some(level)) => {
+                load_level_pair(Rc::clone(&app), level);
+                JsValue::from_f64(f64::from(level.get()))
+            }
+            Ok(None) => JsValue::NULL,
+            Err(error) => {
+                let message = js_message(&error);
+                let _ = Reflect::set(
+                    harness_for_step.as_ref(),
+                    &JsValue::from_str("lastError"),
+                    &JsValue::from_str(&message),
+                );
+                app.borrow_mut().fail(&message);
+                JsValue::NULL
+            }
+        };
+        for (name, value) in [
+            ("lastHeld", JsValue::from_f64(f64::from(held))),
+            ("lastTimestampMs", JsValue::from_f64(timestamp_ms)),
+            ("stepCount", JsValue::from_f64(step_count as f64)),
+            ("lastRequestedLid", requested_lid),
+        ] {
+            let _ = Reflect::set(harness_for_step.as_ref(), &JsValue::from_str(name), &value);
+        }
+    });
+    Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("step"),
+        step.as_ref().unchecked_ref(),
+    )?;
+    Reflect::set(
+        browser_window.as_ref(),
+        &JsValue::from_str("__crustTest"),
+        harness.as_ref(),
+    )?;
+    step.forget();
+    Ok(())
+}
+
+#[cfg(not(feature = "browser-test-harness"))]
 type AnimationFrameCallback = Rc<RefCell<Option<Closure<dyn FnMut(f64)>>>>;
 
+#[cfg(not(feature = "browser-test-harness"))]
 fn start_animation_loop(app: &Rc<RefCell<App>>) -> Result<(), JsValue> {
     let callback_slot: AnimationFrameCallback = Rc::new(RefCell::new(None));
     let callback_slot_inner = Rc::clone(&callback_slot);

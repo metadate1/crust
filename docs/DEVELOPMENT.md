@@ -39,6 +39,22 @@ The development server repeats verification for every request and returns `503` 
 artifact or Git drift. Builds use a repository-local lock so concurrent publishers cannot nest or
 discard staged distributions.
 
+An off-by-default browser campaign harness can be built and served separately:
+
+```bash
+npm run build:browser-harness
+npm run verify:browser-harness
+npm run serve:browser-harness
+```
+
+It writes only to ignored `target/browser-test-dist/` and serves on
+`http://127.0.0.1:4175`; it never replaces production `dist/`. This feature build does not start
+the ordinary animation-frame loop. Instead, `window.__crustTest.step(heldMask)` advances exactly one
+34 ms sample through the same `App::frame` and asynchronous pair-remount path used by production.
+The hook accepts only a 16-bit pad mask and exposes no GOOL-state mutation or forced-transition
+operation. It is intended for an ignored, legally local browser campaign test; the normal
+`npm run build` artifact does not contain or expose `window.__crustTest`.
+
 ## Local-data verification
 
 Legally owned data may be placed under ignored `local-data/` or selected from anywhere on disk.

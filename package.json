@@ -8,10 +8,14 @@
   },
   "scripts": {
     "build": "./scripts/build-web.sh",
+    "build:browser-harness": "bash ./scripts/build-browser-harness.sh",
     "dev": "npm run build && npm run serve",
+    "dev:browser-harness": "npm run build:browser-harness && npm run serve:browser-harness",
     "serve": "node ./scripts/serve.mjs",
+    "serve:browser-harness": "CRUST_WEB_DIST=target/browser-test-dist PORT=4175 node ./scripts/serve.mjs",
     "start": "npm run dev",
     "verify:dist": "node ./scripts/build-info.mjs verify",
+    "verify:browser-harness": "node ./scripts/build-info.mjs verify . target/browser-test-dist",
     "test": "node --test scripts/*.test.mjs && PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo test --workspace --all-targets --locked",
     "lint": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo clippy --workspace --all-targets -- -D warnings",
     "fmt": "PATH=/opt/homebrew/opt/rustup/bin:$PATH cargo fmt --all -- --check"

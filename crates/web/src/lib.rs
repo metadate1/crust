@@ -42,6 +42,28 @@ mod webaudio;
 #[cfg(any(target_arch = "wasm32", test))]
 mod webgl;
 
+/// Deterministic clock used only by the opt-in browser test harness.
+///
+/// Thirty-four milliseconds matches the fixed timing used by the legally local
+/// native route characterizations. The ordinary browser build remains driven by
+/// `requestAnimationFrame` and never compiles this clock into its application.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct BrowserTestClock {
+    next_timestamp_ms: f64,
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+impl BrowserTestClock {
+    pub(crate) const FRAME_DURATION_MS: f64 = 34.0;
+
+    pub(crate) fn take_timestamp_ms(&mut self) -> f64 {
+        let timestamp = self.next_timestamp_ms;
+        self.next_timestamp_ms += Self::FRAME_DURATION_MS;
+        timestamp
+    }
+}
+
 #[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn initial_presented_path_point(
     point_count: core::num::NonZeroU16,
@@ -241,6 +263,15 @@ pub fn boot() -> Result<(), JsValue> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_test_clock_issues_one_fixed_step_per_request() {
+        let mut clock = BrowserTestClock::default();
+
+        assert_eq!(clock.take_timestamp_ms(), 0.0);
+        assert_eq!(clock.take_timestamp_ms(), 34.0);
+        assert_eq!(clock.take_timestamp_ms(), 68.0);
+    }
 
     #[test]
     fn initial_presentation_clamps_one_point_title_and_transition_paths() {

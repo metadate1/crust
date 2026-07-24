@@ -5,7 +5,11 @@ import { fileURLToPath } from "node:url";
 import { verifyBuildInfo } from "./build-info.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-const root = join(repositoryRoot, "dist");
+const distribution = process.env.CRUST_WEB_DIST || "dist";
+const root = resolve(repositoryRoot, distribution);
+if (!root.startsWith(`${repositoryRoot}/`)) {
+  throw new Error("CRUST_WEB_DIST must stay inside the crust repository");
+}
 const port = Number(process.env.PORT || 4174);
 const types = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -15,11 +19,11 @@ const types = new Map([
   [".wasm", "application/wasm"],
 ]);
 
-const build = await verifyBuildInfo(repositoryRoot);
+const build = await verifyBuildInfo(repositoryRoot, undefined, root);
 
 createServer(async (request, response) => {
   try {
-    await verifyBuildInfo(repositoryRoot);
+    await verifyBuildInfo(repositoryRoot, undefined, root);
   } catch (error) {
     response.writeHead(503, { "Content-Type": "text/plain; charset=utf-8" });
     response.end(`Web distribution changed after server start: ${error.message}\n`);

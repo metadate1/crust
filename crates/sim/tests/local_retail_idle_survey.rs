@@ -1747,6 +1747,7 @@ enum SurveyInputProfile {
     BrioCompletionRoute,
     CortexCompletionRoute,
     GreatHallCortexRoute,
+    GreatHallAllGemsRoute,
     CortexBonusCompletionRoute,
 }
 
@@ -1848,6 +1849,7 @@ impl SurveyInputProfile {
             Self::BrioCompletionRoute => "brio-completion-route",
             Self::CortexCompletionRoute => "cortex-completion-route",
             Self::GreatHallCortexRoute => "great-hall-cortex-route",
+            Self::GreatHallAllGemsRoute => "great-hall-all-gems-route",
             Self::CortexBonusCompletionRoute => "cortex-bonus-completion-route",
         }
     }
@@ -1913,6 +1915,7 @@ impl SurveyInputProfile {
                 | Self::BrioCompletionRoute
                 | Self::CortexCompletionRoute
                 | Self::GreatHallCortexRoute
+                | Self::GreatHallAllGemsRoute
                 | Self::CortexBonusCompletionRoute
         )
     }
@@ -41096,6 +41099,115 @@ impl TempleRuinsCompletionRouteController {
     }
 }
 
+/// Ordinary-pad route across The Great Hall's complete 100-percent bridge and
+/// into the authored `WinGC` epilogue. The decisions depend only on the live
+/// camera and player transform; no retail state or object is mutated.
+fn great_hall_all_gems_held(
+    frame: u32,
+    camera: RetailCameraLocation,
+    player: Option<PlayerTrace>,
+) -> u32 {
+    let Some(player) = player else {
+        return 0;
+    };
+    let a2 = Eid::from_name("a2_IZ").expect("fixed Great Hall a2 EID is valid");
+    let a3 = Eid::from_name("a3_IZ").expect("fixed Great Hall a3 EID is valid");
+    let a4 = Eid::from_name("a4_IZ").expect("fixed Great Hall a4 EID is valid");
+    let a5 = Eid::from_name("a5_IZ").expect("fixed Great Hall a5 EID is valid");
+    let a6 = Eid::from_name("a6_IZ").expect("fixed Great Hall a6 EID is valid");
+    let a7 = Eid::from_name("a7_IZ").expect("fixed Great Hall a7 EID is valid");
+    let a8 = Eid::from_name("a8_IZ").expect("fixed Great Hall a8 EID is valid");
+
+    if frame < 165 {
+        return if frame >= 162 { PAD_RIGHT } else { 0 };
+    }
+    if frame <= 172 {
+        return PAD_UP | PAD_CROSS;
+    }
+    if (173..=187).contains(&frame) {
+        return PAD_DOWN;
+    }
+
+    if frame >= 450
+        && ((camera.path.zone == a2 && matches!(camera.path.index, 1 | 2))
+            || (camera.path.zone == a3 && matches!(camera.path.index, 0 | 1))
+            || (camera.path.zone == a4 && camera.path.index == 0))
+    {
+        if player.translation[2] <= 28_900_000 {
+            return 0;
+        }
+        if frame <= 461 {
+            return PAD_LEFT;
+        }
+        return PAD_UP
+            | if frame <= 462 { PAD_RIGHT } else { 0 }
+            | if frame >= 478 && (frame - 478) % 28 < 8 {
+                PAD_CROSS
+            } else {
+                0
+            };
+    }
+
+    if frame >= 650
+        && ((camera.path.zone == a4 && camera.path.index == 1)
+            || (camera.path.zone == a5 && matches!(camera.path.index, 0 | 1))
+            || (camera.path.zone == a6 && matches!(camera.path.index, 0..=3)))
+    {
+        if frame >= 830 && camera.path.zone == a6 && matches!(camera.path.index, 1..=3) {
+            if player.translation[2] <= 25_000_000 {
+                return 0;
+            }
+            return PAD_UP
+                | if player.translation[0] < 8_250_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                }
+                | if frame >= 835 && (frame - 835) % 28 < 8 {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+        }
+        if player.translation[0] >= 7_980_000 {
+            return 0;
+        }
+        return PAD_RIGHT
+            | if frame >= 655 && (frame - 655) % 28 < 8 {
+                PAD_CROSS
+            } else {
+                0
+            };
+    }
+
+    if frame >= 960 && camera.path.zone == a7 {
+        return PAD_UP
+            | if frame >= 970 && (frame - 970) % 28 < 12 {
+                PAD_CROSS
+            } else {
+                0
+            }
+            | if frame == 980 { PAD_SQUARE } else { 0 };
+    }
+
+    if frame >= 1_050 && camera.path.zone == a8 {
+        return PAD_UP
+            | if frame >= 1_060 && (frame - 1_060) % 28 < 8 {
+                PAD_CROSS
+            } else {
+                0
+            };
+    }
+
+    if frame >= 260 {
+        if player.translation[0] >= 5_200_000 {
+            return 0;
+        }
+        return PAD_RIGHT | if (frame - 260) % 30 < 8 { PAD_CROSS } else { 0 };
+    }
+    0
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SurveyInputController {
     profile: SurveyInputProfile,
@@ -42150,6 +42262,9 @@ impl SurveyInputController {
             SurveyInputProfile::CortexCompletionRoute => {
                 self.cortex.held(frame, player, route_objects)
             }
+            SurveyInputProfile::GreatHallAllGemsRoute => {
+                great_hall_all_gems_held(frame, camera, player)
+            }
             SurveyInputProfile::GreatHallCortexRoute => {
                 if (47..=54).contains(&frame) || (104..=111).contains(&frame) {
                     PAD_UP | PAD_CROSS
@@ -42262,6 +42377,7 @@ struct LevelSurvey {
     final_live_objects: usize,
     faulted_objects: usize,
     effect_counts: BTreeMap<&'static str, u64>,
+    spawn_child_kinds: BTreeSet<(u8, u8)>,
     first_effect_samples: BTreeMap<&'static str, String>,
     paging_trace: Vec<PagingTraceEntry>,
     issue_counts: BTreeMap<&'static str, u64>,
@@ -42324,6 +42440,7 @@ impl LevelSurvey {
             final_live_objects: 0,
             faulted_objects: 0,
             effect_counts: BTreeMap::new(),
+            spawn_child_kinds: BTreeSet::new(),
             first_effect_samples: BTreeMap::new(),
             paging_trace: Vec::new(),
             issue_counts: BTreeMap::new(),
@@ -42464,6 +42581,14 @@ impl LevelSurvey {
     fn record_effect(&mut self, frame: u32, effect: &VmEffect) {
         let kind = effect_kind(effect);
         *self.effect_counts.entry(kind).or_default() += 1;
+        if let VmEffect::SpawnChildren {
+            executable,
+            subtype,
+            ..
+        } = effect
+        {
+            self.spawn_child_kinds.insert((*executable, *subtype));
+        }
         self.first_effect_samples
             .entry(kind)
             .or_insert_with(|| format!("{effect:?}"));
@@ -42487,7 +42612,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} pads={:?} player-0x700={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} entity-counters={:?} direct-program-sends={:?} effects={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} pads={:?} player-0x700={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} entity-counters={:?} direct-program-sends={:?} effects={:?} child-kinds={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -42536,6 +42661,7 @@ impl LevelSurvey {
             self.entity_counter_samples,
             self.direct_send_program_samples,
             self.effect_counts,
+            self.spawn_child_kinds,
             self.first_effect_samples,
             self.issue_counts,
             self.first_issue,
@@ -43555,7 +43681,11 @@ fn follow_input(
         held_buttons,
         level_id,
         frames_elapsed: runtime.machine().frames_elapsed(),
-        gem_stamp: 0,
+        // CamUpdate precedes GoolUpdate, so this observes the stamp installed
+        // by the previous retail object frame, exactly like the browser host.
+        gem_stamp: runtime
+            .gem_stamp()
+            .map_err(|error| format!("retail gem stamp: {error:?}"))?,
     }))
 }
 
@@ -44827,6 +44957,16 @@ fn survey_pair_with_runtime(
             SurveyInputProfile::HeavyMachineryCompletionRoute => {
                 program_object_traces(&runtime, &[])?
             }
+            SurveyInputProfile::GreatHallCortexRoute
+            | SurveyInputProfile::GreatHallAllGemsRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("GemsC").expect("fixed Great Hall gem-platform EID is valid"),
+                    Eid::from_name("WinGC").expect("fixed Great Hall ending-warp EID is valid"),
+                    Eid::from_name("WarpC").expect("fixed Great Hall ordinary warp EID is valid"),
+                    Eid::from_name("ShadC").expect("fixed retail shadow EID is valid"),
+                ],
+            )?,
             _ => Vec::new(),
         };
         if std::env::var_os("C1_SLIPPERY_PLATFORM_TRACE").is_some()
@@ -45449,6 +45589,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::BrioCompletionRoute
                 | SurveyInputProfile::CortexCompletionRoute
                 | SurveyInputProfile::GreatHallCortexRoute
+                | SurveyInputProfile::GreatHallAllGemsRoute
                 | SurveyInputProfile::NativeFortressD6Route
                 | SurveyInputProfile::TawnaBonusCompletionRoute
                 | SurveyInputProfile::TawnaBonusTwoCompletionRoute
@@ -63331,4 +63472,159 @@ fn rolling_stones_carry_traverses_brio_bonus_with_ordinary_pad_input() {
         return_transition.carry.saved_level_state.as_ref(),
         Some(&exact_parent_snapshot)
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn great_hall_all_gems_route_reaches_authored_epilogue_and_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x2c);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("The Great Hall pair must parse");
+    let (title_nsd, title_nsf, title_nsf_bytes) =
+        parse_local_pair(&root, LevelId::TITLE).expect("The Title pair must parse");
+    let save = SaveData {
+        level_count: 30,
+        gem_count: 26,
+        item_pool_1: u32::MAX,
+        item_pool_2: u32::MAX,
+        initial_lives: 4 << 8,
+        sfx_volume: 255,
+        music_volume: 255,
+        ..SaveData::default()
+    };
+    let title_runtime =
+        authored_completed_card_load_runtime(&title_nsd, &title_nsf, &title_nsf_bytes, save);
+    let mut map = AuthoredTitleMapHarness::from_runtime(
+        &title_nsd,
+        &title_nsf,
+        &title_nsf_bytes,
+        title_runtime,
+    );
+    map.wait_until_ready(64);
+    for _ in 0..120 {
+        map.step(0);
+    }
+    map.step(PAD_CROSS);
+    assert_eq!(map.transitions, [(131, 0x2c)]);
+    let carry = {
+        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+        map.runtime
+            .finish_level_transition(&mut host, 0x2c)
+            .expect("Title Map exports its Great Hall carry")
+            .carry
+    };
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("The Great Hall imports the completed-card carry");
+    let (survey, mut runtime) = survey_pair_with_runtime(
+        "The Great Hall all-gems branch",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::GreatHallAllGemsRoute,
+        8_000,
+    )
+    .expect("The Great Hall all-gems route executes");
+
+    assert_eq!(survey.frames, 6_944, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((6_944, 0x19)));
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 6944 requested level transition to 0x19")
+    );
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(survey.effect_counts.get("spawn-children"), Some(&195));
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    assert_eq!(survey.restarts, 0);
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0);
+    assert!(survey.first_below_zero.is_none());
+    assert!(survey.first_terminal_fall.is_none());
+    assert_eq!(survey.faulted_objects, 0);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert!(survey.is_clean(), "{}", survey.summary());
+
+    let path_first_frame = |zone: &str, index| {
+        let path = RetailPathId {
+            zone: Eid::from_name(zone).expect("fixed Great Hall route EID is valid"),
+            index,
+        };
+        survey
+            .camera_ranges
+            .get(&path)
+            .unwrap_or_else(|| panic!("Great Hall route must visit {path:?}: {}", survey.summary()))
+            .first_frame
+    };
+    assert_eq!(path_first_frame("a7_IZ", 0), 928);
+    assert_eq!(path_first_frame("a8_IZ", 0), 1_028);
+    assert_eq!(path_first_frame("x__IZ", 0), 1_122);
+    assert_eq!(path_first_frame("y__IZ", 0), 1_722);
+    assert_eq!(path_first_frame("x__IZ", 2), 4_149);
+    assert_eq!(survey.camera_ranges.len(), 24);
+    assert_eq!(survey.camera_path_changes, 23);
+    assert_eq!(survey.last_camera_path_change, 4_149);
+    assert_eq!(survey.zone_transitions, 11);
+    assert_eq!(survey.max_live_objects, 91);
+    assert_eq!(survey.successful_spawns, 25);
+    assert_eq!(survey.executions, 226_612);
+    assert_eq!(
+        survey.final_camera,
+        Some(RetailCameraLocation {
+            path: RetailPathId {
+                zone: Eid::from_name("x__IZ").expect("fixed Great Hall epilogue EID is valid"),
+                index: 2,
+            },
+            progress: PathProgress::ZERO,
+        })
+    );
+
+    let win = Eid::from_name("WinGC").expect("fixed Great Hall ending-controller EID is valid");
+    for state in [0, 2, 3, 5, 6, 7, 8, 9, 10, 35] {
+        assert!(
+            survey.observed_program_states.contains(&(win, state)),
+            "the authored WinGC epilogue must execute state {state}: {}",
+            survey.summary()
+        );
+    }
+    assert!(
+        survey.spawn_child_kinds.contains(&(61, 3)),
+        "WinGC must synchronously spawn its subtype-three dynamic epilogue text"
+    );
+    let shadow = Eid::from_name("ShadC").expect("fixed retail shadow EID is valid");
+    assert!(survey.observed_program_states.contains(&(shadow, 1)));
+
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0)
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([8_279_948, 1_031_154, 24_872_448])
+    );
+    let player = player_trace(&runtime)
+        .expect("Great Hall epilogue player trace must resolve")
+        .expect("Great Hall must retain Crash through the transition request");
+    assert_eq!(player.state, 33);
+    assert_eq!(player.translation, [8_279_948, 1_031_154, 24_872_448]);
+    assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(26));
+    assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(u32::MAX));
+    assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(u32::MAX));
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let transition = runtime
+        .finish_level_transition(&mut host, 0x19)
+        .expect("Great Hall epilogue LEVEL_END must export its Title carry");
+    assert!(transition.event_failures.is_empty());
+    assert_eq!(transition.resolved.level, LevelId::TITLE);
+    assert!(!transition.resolved.bonus_return);
 }

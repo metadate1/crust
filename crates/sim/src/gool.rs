@@ -1212,38 +1212,31 @@ struct RetailSolidRect {
 }
 
 impl RetailSolidRect {
-    fn from_zone(zone: &RetailSolidZone) -> Result<Self, VmError> {
+    fn from_zone(zone: &RetailSolidZone) -> Self {
         let mut origin = [0_i32; 3];
         let mut dimensions = [0_i32; 3];
         for axis in 0..3 {
-            origin[axis] = zone.origin[axis]
-                .checked_mul(0x100)
-                .ok_or(VmError::ArithmeticOverflow)?;
-            dimensions[axis] = i32::try_from(zone.dimensions[axis])
-                .ok()
-                .and_then(|value| value.checked_mul(0x100))
-                .ok_or(VmError::ArithmeticOverflow)?;
-            origin[axis]
-                .checked_add(dimensions[axis])
-                .ok_or(VmError::ArithmeticOverflow)?;
+            // The PSX executes both rectangle shifts as 32-bit SLL
+            // instructions. Great Hall's terminal `y__IZ` deliberately uses
+            // `[i32::MAX; 3] + [1; 3]` as an out-of-world sentinel, producing
+            // the wrapped inclusive interval `-256..=0`. Treating that
+            // authored rectangle as checked host arithmetic faults every
+            // active ShadC when the 100% ending reaches `x__IZ`.
+            origin[axis] = zone.origin[axis].wrapping_shl(8);
+            dimensions[axis] = zone.dimensions[axis].cast_signed().wrapping_shl(8);
         }
-        Ok(Self { origin, dimensions })
+        Self { origin, dimensions }
     }
 
-    fn contains_unscaled_zone_point(
-        zone: &RetailSolidZone,
-        point: [i32; 3],
-    ) -> Result<bool, VmError> {
-        let rect = Self::from_zone(zone)?;
+    fn contains_unscaled_zone_point(zone: &RetailSolidZone, point: [i32; 3]) -> bool {
+        let rect = Self::from_zone(zone);
         for (axis, coordinate) in point.into_iter().enumerate() {
-            let end = rect.origin[axis]
-                .checked_add(rect.dimensions[axis])
-                .ok_or(VmError::ArithmeticOverflow)?;
+            let end = rect.origin[axis].wrapping_add(rect.dimensions[axis]);
             if coordinate < rect.origin[axis] || coordinate > end {
-                return Ok(false);
+                return false;
             }
         }
-        Ok(true)
+        true
     }
 }
 
@@ -1343,7 +1336,7 @@ fn find_retail_solid_node(
     for _ in 0..MAX_SOLID_QUERY_STEPS {
         let mut containing = None;
         for zone in &environment.neighbors {
-            if RetailSolidRect::contains_unscaled_zone_point(zone, point)? {
+            if RetailSolidRect::contains_unscaled_zone_point(zone, point) {
                 containing = Some(zone);
                 break;
             }
@@ -1351,7 +1344,7 @@ fn find_retail_solid_node(
         let Some(zone) = containing else {
             return Ok((None, point));
         };
-        let mut rect = RetailSolidRect::from_zone(zone)?;
+        let mut rect = RetailSolidRect::from_zone(zone);
         let node = retail_solid_child(zone, zone.root, &mut rect, &mut point, 0, flags)?;
         if node != 0 {
             return Ok((Some(node), point));
@@ -1552,10 +1545,10 @@ fn retail_rebound_vector(
         return Ok((0, point, direction));
     }
     for zone in &environment.neighbors {
-        if !RetailSolidRect::contains_unscaled_zone_point(zone, point)? {
+        if !RetailSolidRect::contains_unscaled_zone_point(zone, point) {
             continue;
         }
-        let rect = RetailSolidRect::from_zone(zone)?;
+        let rect = RetailSolidRect::from_zone(zone);
         let node = retail_rebound_child(zone, zone.root, rect, &mut point, &mut direction, 0)?;
         if node != 0 {
             return Ok((node, point, direction));
@@ -15373,6 +15366,39 @@ mod tests {
                 object: h,
                 zone: object_zone,
             })
+        );
+    }
+
+    #[test]
+    fn solid_neighbor_sentinel_rect_uses_psx_wrapping_bounds() {
+        let sentinel = RetailSolidZone::new(
+            [i32::MAX; 3],
+            [1; 3],
+            0,
+            [0; 3],
+            vec![0; RETAIL_SOLID_RECT_BYTES],
+        )
+        .unwrap();
+        let rect = RetailSolidRect::from_zone(&sentinel);
+        assert_eq!(rect.origin, [-256; 3]);
+        assert_eq!(rect.dimensions, [256; 3]);
+        assert!(RetailSolidRect::contains_unscaled_zone_point(
+            &sentinel, [-256; 3]
+        ));
+        assert!(RetailSolidRect::contains_unscaled_zone_point(
+            &sentinel, [0; 3]
+        ));
+        assert!(!RetailSolidRect::contains_unscaled_zone_point(
+            &sentinel, [1; 3]
+        ));
+
+        let environment =
+            RetailSolidEnvironment::new(0, [0; COLOR_COUNT], [0; COLOR_COUNT], vec![sentinel]);
+        assert_eq!(
+            find_retail_solid_node(&environment, [8_279_948, 1_031_168, 24_872_448], 1, 25_000)
+                .unwrap(),
+            (None, [8_279_948, 1_056_168, 24_872_448]),
+            "Great Hall's out-of-world y__ sentinel must be skipped, not fault ShadC"
         );
     }
 

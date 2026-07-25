@@ -1004,6 +1004,26 @@ is 1,322,866 bytes with SHA-256
   BIN because the browser automation surface cannot populate the native file picker; the earlier
   foreground Chrome raw-BIN/direct-gameplay pass remains the current browser import evidence.
 
+### Dormant Bonus `0x26` selector audit (2026-07-26)
+
+- The legal NTSC-U pair `S0_26.NSD`/`S0_26.NSF` remains recognized and directly bootable. It is
+  retained retail data, but it has no authored parent transition in this corpus and is not counted
+  as a missing campaign round trip.
+- The opt-in regression materializes every LDAT executable and every parseable GOOL state in all
+  bootable pairs, then audits every misc-12/9 level-transition operand. No direct transition names
+  `0x26`. The only computed destinations are `DispC` register 78 and `IsldC` register 81.
+- All 23 authored `DispC` selector writes are immediate and partition exactly as ten writes to
+  Tawna Bonus `0x24`, four to Brio Bonus `0x25`, seven to Bonus 2 `0x33`, and two to Cortex Bonus
+  `0x34`. The older `DispC` version retained inside stream `0x26` has the same four-destination
+  set. The corpus token census covers Cortex-kind `0x67` in parents `0x1d`, `0x22`, and `0x23`;
+  Brio-kind `0x68` in `0x06`, `0x15`, `0x20`, and `0x2e`; and Tawna-kind `0x69` in all fifteen
+  authored parents. All 35 authored Island Map destination writes are likewise immediate and
+  exclude `0x26`. No stack, table, internal-data, or uncharacterized transition operand remains
+  outside those two audited selectors.
+- The correct parity behavior is therefore to preserve `0x26` for direct local-data inspection,
+  without fabricating a token parent or campaign edge. Physical exact-return coverage is attached
+  to the four bonus destinations that the retail selectors actually emit.
+
 ## 2026-07-15 retail browser and stale-build verification
 
 - A legally local NTSC-U raw BIN was supplied to a fresh Wasm page through an ephemeral
@@ -1566,6 +1586,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   jungle_rollers_three_tawna_crates_enter_the_authored_bonus \
+  -- --ignored --exact --nocapture
+C1_STREAM_DIR=/path/to/streams \
+  cargo test -p crust-sim --test local_retail_idle_survey --locked \
+  authored_transition_selectors_leave_bonus_0x26_dormant \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_gool --locked \

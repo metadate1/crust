@@ -35,8 +35,8 @@ use crust_formats::{
     disc::{DiscImage, SectorLayout},
     stream::{
         KNOWN_LEVELS, LevelId, Nsd, Nsf, PBAK_ENTRY_TYPE, RetailPathId, RetailZoneGraph,
-        StreamKind, StreamName, ZoneEntity, ZoneHeader, load_gool_state_program, load_pbak_entry,
-        load_title_mdat, parse_nsd, parse_nsf,
+        StreamKind, StreamName, ZoneEntity, ZoneHeader, load_gool_program, load_gool_state_program,
+        load_pbak_entry, load_title_mdat, parse_nsd, parse_nsf,
     },
 };
 use crust_sim::{
@@ -51,7 +51,7 @@ use crust_sim::{
         AnimationReference, CURRENT_MAP_LEVEL_GLOBAL, CardHostRequest, CodeAddress, CodeSegment,
         CollisionObjectReference, GAME_STATE_GLOBAL, GEM_COUNT_GLOBAL, GoolProgramIdentity,
         ITEM_POOL_1_GLOBAL, ITEM_POOL_2_GLOBAL, LEVEL_COUNT_GLOBAL, LEVELS_UNLOCKED_GLOBAL,
-        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, PagingHostOperation,
+        NEXT_DISPLAY_GLOBAL, ObjectHandle as VmObjectHandle, Operand, PagingHostOperation,
         PagingHostRequest, PagingHostResponse, RetailPadSnapshot, RetailTransformVectorsCamera,
         SAVED_TITLE_STATE_GLOBAL, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmObject,
         VmStateProgram, process_register,
@@ -56707,6 +56707,249 @@ fn temporary_authored_bonus_selector_census() {
             runtime.global_word(LEVELS_UNLOCKED_GLOBAL).unwrap(),
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_transition_selectors_leave_bonus_0x26_dormant() {
+    fn immediate_word(operand: u16) -> Option<u32> {
+        match Operand::decode(operand) {
+            Operand::Immediate(value) => Some(value.cast_unsigned()),
+            _ => None,
+        }
+    }
+
+    fn transition_operand(word: u32) -> Option<u16> {
+        let opcode = (word >> 24) as u8;
+        let primary = ((word >> 20) & 0x0f) as u8;
+        let secondary = (((word >> 15) & 0x1f) as i8) << 3 >> 3;
+        (opcode == 0x1c && primary == 12 && secondary == 9)
+            .then_some(u16::try_from(word & 0x0fff).expect("masked GOOL operand fits u16"))
+    }
+
+    fn scan_transitions(
+        program: Eid,
+        code: &[u32],
+        direct_targets: &mut BTreeSet<i32>,
+        computed_sources: &mut BTreeSet<(Eid, u16)>,
+    ) {
+        for (pc, word) in code.iter().copied().enumerate() {
+            let Some(operand) = transition_operand(word) else {
+                continue;
+            };
+            if let Some(value) = immediate_word(operand) {
+                direct_targets.insert((value >> 8).cast_signed());
+            } else if matches!(operand, 0xe00..=0xfff) && operand != 0xe1f {
+                computed_sources.insert((program, operand));
+            } else {
+                panic!("{program} transition PC {pc} uses uncharacterized operand {operand:#x}");
+            }
+        }
+    }
+
+    fn selector_writes(code: &[u32], register: u16) -> (Vec<(usize, i32)>, Vec<usize>) {
+        let mut writes = Vec::new();
+        let mut transitions = Vec::new();
+        for (pc, word) in code.iter().copied().enumerate() {
+            if u16::try_from(word & 0x0fff).expect("masked GOOL operand fits u16") != register {
+                continue;
+            }
+            if (word >> 24) as u8 == 0x11 {
+                let operand = ((word >> 12) & 0x0fff) as u16;
+                let value = immediate_word(operand).unwrap_or_else(|| {
+                    panic!(
+                        "selector register {register:#x} has non-immediate write at PC {pc}: {word:#010x}"
+                    )
+                });
+                writes.push((pc, (value >> 8).cast_signed()));
+            } else if transition_operand(word) == Some(register) {
+                transitions.push(pc);
+            } else {
+                panic!(
+                    "selector register {register:#x} has uncharacterized use at PC {pc}: {word:#010x}"
+                );
+            }
+        }
+        (writes, transitions)
+    }
+
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let dormant = LevelId::new_const(0x26);
+    let dormant_lid = i32::try_from(dormant.get()).expect("Bonus 0x26 LID fits i32");
+    let (dormant_nsd, _, _) =
+        parse_local_pair(&root, dormant).expect("the retained Bonus 0x26 pair must parse");
+    assert!(
+        dormant_nsd.is_bootable(),
+        "Bonus 0x26 remains a valid direct-boot stream despite having no authored parent selector"
+    );
+
+    let dispc = Eid::from_name("DispC").expect("fixed DispC EID is valid");
+    let isldc = Eid::from_name("IsldC").expect("fixed IsldC EID is valid");
+    let mut direct_targets = BTreeSet::new();
+    let mut computed_sources = BTreeSet::new();
+    let mut all_dispc_targets = BTreeSet::new();
+    let mut token_parents = BTreeSet::new();
+    for known in KNOWN_LEVELS {
+        if known.id == LevelId::CAVE {
+            continue;
+        }
+        let (nsd, nsf, nsf_bytes) = parse_local_pair(&root, known.id)
+            .unwrap_or_else(|error| panic!("{} ({}) must parse: {error}", known.name, known.id));
+        let ldat = nsd
+            .ldat()
+            .unwrap_or_else(|| panic!("{} ({}) must be bootable", known.name, known.id));
+        let graph = graph_for_pair(known.id, &nsd, &nsf, &nsf_bytes)
+            .unwrap_or_else(|error| panic!("{} ({}) graph: {error}", known.name, known.id));
+        let (zones, _) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, known.id)
+            .unwrap_or_else(|error| panic!("{} ({}) zones: {error}", known.name, known.id));
+        for entity in zones.values().flat_map(|zone| &zone.entities) {
+            if entity.executable == 0x22 && matches!(entity.initializer[0], 0x67..=0x69) {
+                token_parents.insert((entity.initializer[0], known.id));
+            }
+        }
+        let mut seen_globals = BTreeSet::new();
+        for global_eid in ldat.executable_map {
+            if !seen_globals.insert(global_eid) {
+                continue;
+            }
+            let Some(seed) = (0..=u16::from(u8::MAX)).find_map(|subtype| {
+                load_gool_program(&nsd, &nsf, &nsf_bytes, global_eid, subtype).ok()
+            }) else {
+                continue;
+            };
+            scan_transitions(
+                global_eid,
+                seed.global_code(),
+                &mut direct_targets,
+                &mut computed_sources,
+            );
+            if global_eid == dispc {
+                let (writes, transitions) = selector_writes(seed.global_code(), 0xe4e);
+                assert!(
+                    !writes.is_empty() && !transitions.is_empty(),
+                    "{} ({}) DispC must retain its selector and transition",
+                    known.name,
+                    known.id
+                );
+                all_dispc_targets.extend(writes.into_iter().map(|(_, target)| target));
+            }
+            for state_index in 0..seed.states().len() {
+                let Ok(program) = load_gool_state_program(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    global_eid,
+                    u16::try_from(state_index).expect("GOOL state index fits u16"),
+                ) else {
+                    continue;
+                };
+                scan_transitions(
+                    global_eid,
+                    program.code(),
+                    &mut direct_targets,
+                    &mut computed_sources,
+                );
+            }
+        }
+    }
+
+    assert_eq!(
+        computed_sources,
+        BTreeSet::from([(dispc, 0xe4e), (isldc, 0xe51)]),
+        "every computed retail transition must remain tied to its audited selector register"
+    );
+    assert_eq!(
+        all_dispc_targets,
+        BTreeSet::from([0x24, 0x25, 0x33, 0x34]),
+        "every embedded DispC selector version must exclude dormant Bonus 0x26"
+    );
+    assert!(
+        !direct_targets.contains(&dormant_lid),
+        "no direct authored GOOL transition may target dormant Bonus 0x26"
+    );
+    let expected_token_parents = [
+        (
+            0x67,
+            [0x1d, 0x22, 0x23]
+                .map(LevelId::new_const)
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+        ),
+        (
+            0x68,
+            [0x06, 0x15, 0x20, 0x2e]
+                .map(LevelId::new_const)
+                .into_iter()
+                .collect(),
+        ),
+        (
+            0x69,
+            [
+                0x05, 0x06, 0x07, 0x0c, 0x0f, 0x12, 0x14, 0x15, 0x16, 0x18, 0x1a, 0x1d, 0x20, 0x23,
+                0x29,
+            ]
+            .map(LevelId::new_const)
+            .into_iter()
+            .collect(),
+        ),
+    ]
+    .into_iter()
+    .flat_map(|(kind, parents)| parents.into_iter().map(move |parent| (kind, parent)))
+    .collect::<BTreeSet<_>>();
+    assert_eq!(
+        token_parents, expected_token_parents,
+        "all authored Cortex, Brio, and Tawna token parents must remain enumerated"
+    );
+
+    let (jungle_nsd, jungle_nsf, jungle_nsf_bytes) =
+        parse_local_pair(&root, LevelId::new_const(0x0c)).expect("Jungle pair must parse");
+    let dispc_program = (0..=u16::from(u8::MAX))
+        .find_map(|subtype| {
+            load_gool_program(&jungle_nsd, &jungle_nsf, &jungle_nsf_bytes, dispc, subtype).ok()
+        })
+        .expect("DispC must expose an authored subtype");
+    let (dispc_writes, dispc_transition_pcs) = selector_writes(dispc_program.global_code(), 0xe4e);
+    let mut dispc_target_counts = BTreeMap::new();
+    for (_, target) in dispc_writes {
+        *dispc_target_counts.entry(target).or_insert(0_usize) += 1;
+    }
+    assert_eq!(
+        dispc_target_counts,
+        BTreeMap::from([(0x24, 10), (0x25, 4), (0x33, 7), (0x34, 2)]),
+        "all 23 authored Tawna, Brio, and Cortex selector branches must remain enumerated"
+    );
+    assert_eq!(dispc_transition_pcs, [567]);
+
+    let (title_nsd, title_nsf, title_nsf_bytes) =
+        parse_local_pair(&root, LevelId::TITLE).expect("Title pair must parse");
+    let isldc_program = (0..=u16::from(u8::MAX))
+        .find_map(|subtype| {
+            load_gool_program(&title_nsd, &title_nsf, &title_nsf_bytes, isldc, subtype).ok()
+        })
+        .expect("IsldC must expose an authored subtype");
+    let (isldc_writes, isldc_transition_pcs) = selector_writes(isldc_program.global_code(), 0xe51);
+    assert_eq!(isldc_writes.len(), 35);
+    let isldc_targets = isldc_writes
+        .into_iter()
+        .map(|(_, target)| target)
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        isldc_targets,
+        BTreeSet::from([
+            0x03, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0c, 0x0e, 0x0f, 0x11, 0x12, 0x13, 0x14,
+            0x15, 0x16, 0x17, 0x18, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20, 0x21, 0x23, 0x28,
+            0x29, 0x2a, 0x2c, 0x2e, 0x37,
+        ]),
+        "all authored Island Map destinations must remain explicit"
+    );
+    assert_eq!(isldc_transition_pcs, [682]);
+    assert!(
+        !isldc_targets.contains(&dormant_lid),
+        "the Island Map selector must not invent a route to Bonus 0x26"
+    );
 }
 
 #[test]

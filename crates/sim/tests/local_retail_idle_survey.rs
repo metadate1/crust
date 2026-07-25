@@ -1692,6 +1692,7 @@ enum SurveyInputProfile {
     NSanityCompletionRoute,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
+    JungleTawnaBonusRoute,
     GreatGatePhaseRobust,
     GreatGateTawnaBonus,
     GreatGateYellowGemExactCarry,
@@ -1792,6 +1793,7 @@ impl SurveyInputProfile {
             Self::NSanityCompletionRoute => "n-sanity-completion-route",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
+            Self::JungleTawnaBonusRoute => "jungle-tawna-bonus-route",
             Self::GreatGatePhaseRobust => "great-gate-phase-robust",
             Self::GreatGateTawnaBonus => "great-gate-tawna-bonus",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
@@ -1857,6 +1859,7 @@ impl SurveyInputProfile {
                 | Self::JungleDeathAkuCompletionRoute
                 | Self::NSanityCompletionRoute
                 | Self::JunglePhaseRobust
+                | Self::JungleTawnaBonusRoute
                 | Self::GreatGatePhaseRobust
                 | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
@@ -3777,6 +3780,8 @@ impl RipperRooCompletionRouteController {
 
 /// Grounded, path-relative route for Jungle Rollers' authentic first-completion
 /// RNG phase. Square taps clear authored hazards; Cross actions traverse gaps.
+/// The Tawna variant detours to all three authored token crates and still uses
+/// only ordinary pad input.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 struct JungleRouteController {
@@ -3787,6 +3792,9 @@ struct JungleRouteController {
     plan_c_open_seen: bool,
     plan_c_cycle_complete: bool,
     roller_square_rearm: bool,
+    tawna_jump_hold: u8,
+    tawna_jump_release: u8,
+    tawna_waiting_for_counter: Option<u32>,
 }
 
 impl JungleRouteController {
@@ -3795,7 +3803,140 @@ impl JungleRouteController {
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
         objects: &[ProgramObjectTrace],
+        collect_tawna: bool,
     ) -> u32 {
+        if collect_tawna && let Some(player) = player {
+            if let Some(expected_counter) = self.tawna_waiting_for_counter {
+                if player.tawna_counter < expected_counter {
+                    return 0;
+                }
+                self.tawna_waiting_for_counter = None;
+                if expected_counter == 0x100 && self.stage == 4 {
+                    self.stage = 5;
+                }
+            }
+            // The retail descriptors identify Jungle Rollers' three Tawna
+            // crates as entities 22, 59, and 79. Their pickup handshake
+            // advances WillC's counter in one-byte fixed-point steps.
+            let target = match player.tawna_counter {
+                0 => Some((22, 0x100)),
+                0x100 => Some((59, 0x200)),
+                0x200 => Some((79, 0x300)),
+                _ => None,
+            };
+            if let Some((target_id, expected_counter)) = target
+                // Entity 59 pages in before the safe route reaches it. Keep
+                // following the baseline path until the moving-wall phase.
+                && (target_id != 59 || self.stage >= 18)
+                && let Some(token_crate) = objects.iter().find(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == target_id && descriptor.executable == 34
+                    )
+                })
+            {
+                if token_crate.state == 24 {
+                    // Stop attacking while FruiC and DispC cooperatively
+                    // deliver the pickup; moving can bat the token away.
+                    self.active = None;
+                    self.action_tick = 0;
+                    self.tawna_jump_hold = 0;
+                    self.tawna_jump_release = 0;
+                    self.tawna_waiting_for_counter = Some(expected_counter);
+                    return 0;
+                }
+
+                let delta_x = token_crate.translation[0].saturating_sub(player.translation[0]);
+                let delta_y = token_crate.translation[1].saturating_sub(player.translation[1]);
+                let delta_z = token_crate.translation[2].saturating_sub(player.translation[2]);
+                // Entity 79 bridges a narrow final gap. A shorter, forward-
+                // biased spin jump contacts its side; landing on its top takes
+                // the separate bounce branch and does not collect the token.
+                let steering_delta_z =
+                    if player.tawna_counter == 0x200 && self.tawna_jump_release < 2 {
+                        token_crate.translation[2]
+                            .saturating_sub(250_000)
+                            .saturating_sub(player.translation[2])
+                    } else {
+                        delta_z
+                    };
+                let approach_distance = 1_100_000;
+                if delta_x.abs() <= 900_000
+                    && delta_y.abs() <= 1_000_000
+                    && delta_z.abs() <= approach_distance
+                {
+                    self.active = None;
+                    self.action_tick = 0;
+                    if player.tawna_counter == 0x200
+                        && self.tawna_jump_release != 0
+                        && player.status_a & 1 != 0
+                    {
+                        if delta_x.abs() <= 200_000 && delta_z.abs() <= 300_000 {
+                            if self.tawna_jump_release == 1 {
+                                self.tawna_jump_release = 2;
+                                return 0;
+                            }
+                            let longitudinal = if delta_z < -60_000 {
+                                PAD_UP
+                            } else if delta_z > 60_000 {
+                                PAD_DOWN
+                            } else {
+                                0
+                            };
+                            let lateral = if delta_x < -60_000 {
+                                PAD_LEFT
+                            } else if delta_x > 60_000 {
+                                PAD_RIGHT
+                            } else {
+                                0
+                            };
+                            return longitudinal | lateral | PAD_SQUARE;
+                        }
+                        self.tawna_jump_hold = 0;
+                        self.tawna_jump_release = 0;
+                    }
+                    let mut held = if steering_delta_z < -80_000 {
+                        PAD_UP
+                    } else if steering_delta_z > 80_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+                    held |= if delta_x < -60_000 {
+                        PAD_LEFT
+                    } else if delta_x > 60_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    let jump_distance = if player.tawna_counter == 0 {
+                        650_000
+                    } else {
+                        1_000_000
+                    };
+                    if delta_z.abs() <= jump_distance {
+                        if self.tawna_jump_hold == 0 && player.status_a & 1 == 0 {
+                            return held;
+                        }
+                        let jump_hold_frames = if player.tawna_counter == 0x200 {
+                            10
+                        } else {
+                            13
+                        };
+                        if self.tawna_jump_hold < jump_hold_frames {
+                            self.tawna_jump_hold = self.tawna_jump_hold.saturating_add(1);
+                            held |= PAD_CROSS;
+                        } else if player.velocity[1] < -300_000 {
+                            self.tawna_jump_release = 1;
+                            held |= PAD_SQUARE;
+                        }
+                    }
+                    return held;
+                }
+            }
+        }
+
         if let Some(action) = self.active {
             let held = action.held(self.action_tick);
             self.action_tick = self.action_tick.saturating_add(1);
@@ -3842,6 +3983,7 @@ impl JungleRouteController {
         let grounded = player.is_some_and(|player| player.status_a & 1 != 0);
         let progress = camera.progress.raw();
         let pill_c = Eid::from_name("PillC").expect("fixed Jungle roller EID is valid");
+        let junoc = Eid::from_name("JunOC").expect("fixed Jungle wall EID is valid");
         let roller_is_close = |player: PlayerTrace| {
             objects.iter().any(|object| {
                 object.program == pill_c
@@ -3930,11 +4072,13 @@ impl JungleRouteController {
             // 0n's authored approach before stage six begins its normal jump.
             return PAD_UP | PAD_RIGHT;
         }
-        if matches!(self.stage, 27 | 28)
+        if ((collect_tawna && self.stage == 21) || matches!(self.stage, 27 | 28))
             && let Some(player) = player
-            && player.zone == zone_0f_upper
+            && (self.stage == 21 || player.zone == zone_0f_upper)
             && roller_is_close(player)
         {
+            // The Tawna detour meets this PillC one route stage earlier than
+            // the baseline traversal.
             return PAD_UP | PAD_SQUARE;
         }
         if self.stage == 7
@@ -3988,6 +4132,34 @@ impl JungleRouteController {
             && progress < 1_000
         {
             return PAD_UP | PAD_RIGHT;
+        }
+        if collect_tawna
+            && self.stage == 18
+            && camera.path.zone == zone_0x
+            && camera.path.index == 1
+            && progress >= 6_500
+            && let Some(player) = player
+        {
+            // Entities 61 and 62 sweep across the token lane. Their phase is
+            // RNG-derived, so wait on their live bounds instead of frame time.
+            let wall_lane_clear = objects
+                .iter()
+                .filter(|object| {
+                    object.program == junoc
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(descriptor.id, 61 | 62)
+                        )
+                })
+                .all(|object| {
+                    object
+                        .bound
+                        .is_none_or(|bound| bound.max.x < player.translation[0] - 80_000)
+                });
+            if !wall_lane_clear {
+                return 0;
+            }
         }
         if self.stage == 39
             && camera.path.zone == zone_0m_upper
@@ -4224,7 +4396,7 @@ impl JungleRouteController {
                 ..RouteAction::default()
             },
         });
-        self.held(camera, player, objects)
+        self.held(camera, player, objects, collect_tawna)
     }
 }
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40983,6 +41155,9 @@ impl SurveyInputController {
                 plan_c_open_seen: false,
                 plan_c_cycle_complete: false,
                 roller_square_rearm: false,
+                tawna_jump_hold: 0,
+                tawna_jump_release: 0,
+                tawna_waiting_for_counter: None,
             },
             jungle_restarted: false,
             jungle_restart_tick: 0,
@@ -41790,7 +41965,7 @@ impl SurveyInputController {
                     return PAD_UP | PAD_CROSS;
                 }
                 if restart_tick >= REJOIN_TICK + 3 * ACTION_FRAMES {
-                    return self.jungle.held(camera, player, route_objects);
+                    return self.jungle.held(camera, player, route_objects, false);
                 }
                 let Some(player) = player else {
                     return 0;
@@ -41821,7 +41996,10 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::JunglePhaseRobust => {
-                self.jungle.held(camera, player, route_objects)
+                self.jungle.held(camera, player, route_objects, false)
+            }
+            SurveyInputProfile::JungleTawnaBonusRoute => {
+                self.jungle.held(camera, player, route_objects, true)
             }
             SurveyInputProfile::GreatGatePhaseRobust
             | SurveyInputProfile::GreatGateYellowGemExactCarry => {
@@ -44528,6 +44706,15 @@ fn survey_pair_with_runtime(
                 &[
                     Eid::from_name("PlanC").expect("fixed Jungle plant EID is valid"),
                     Eid::from_name("PillC").expect("fixed Jungle roller EID is valid"),
+                ],
+            )?,
+            SurveyInputProfile::JungleTawnaBonusRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("PlanC").expect("fixed Jungle plant EID is valid"),
+                    Eid::from_name("PillC").expect("fixed Jungle roller EID is valid"),
+                    Eid::from_name("BoxsC").expect("fixed Jungle crate EID is valid"),
+                    Eid::from_name("JunOC").expect("fixed Jungle wall EID is valid"),
                 ],
             )?,
             SurveyInputProfile::CortexPowerCompletionRoute => program_object_traces(
@@ -56070,7 +56257,7 @@ fn bonus_zone_flags_and_warp_program_layout_match_the_legal_corpus() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
+fn jungle_rollers_tawna_tokens_round_trip_the_exact_parent_snapshot() {
     // This is a deliberately cross-stream characterization, not a synthetic
     // save-state unit test.
     let root = PathBuf::from(
@@ -56089,7 +56276,7 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
 
     let (parent_nsd, parent_nsf, parent_nsf_bytes) =
         parse_local_pair(&root, parent).expect("Jungle Rollers pair must parse");
-    let (_, mut parent_runtime) = survey_pair_with_runtime(
+    let (parent_survey, mut parent_runtime) = survey_pair_with_runtime(
         known_name(parent),
         parent,
         &parent_nsd,
@@ -56097,20 +56284,70 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
         &parent_nsf_bytes,
         RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
         LevelContextSource::FreshBoot,
-        SurveyInputProfile::Idle,
-        1,
+        SurveyInputProfile::JungleTawnaBonusRoute,
+        4_000,
     )
-    .expect("Jungle Rollers must establish its initial retail save snapshot");
+    .expect("ordinary pad input must collect all three Tawna tokens in Jungle Rollers");
+    assert_eq!(parent_survey.frames, 2_432, "{}", parent_survey.summary());
+    assert_eq!(
+        parent_survey.next_lid,
+        Some((
+            2_432,
+            i32::try_from(bonus.get()).expect("bonus LID fits i32"),
+        )),
+        "{}",
+        parent_survey.summary()
+    );
+    assert_eq!(
+        parent_survey.terminal.as_deref(),
+        Some("frame 2432 requested level transition to 0x24")
+    );
+    assert_eq!(parent_survey.restarts, 0, "{}", parent_survey.summary());
+    assert!(parent_survey.restart_frames.is_empty());
+    assert_eq!(parent_survey.effect_counts.get("transition"), Some(&1));
+    for entity_id in [22_u16, 59] {
+        assert!(
+            parent_survey
+                .spawn_flag_samples
+                .iter()
+                .any(|(_, id, flags)| *id == entity_id && *flags == 7),
+            "token crate {entity_id} must publish its physical break flags"
+        );
+        assert!(
+            parent_survey
+                .spawn_flag_samples
+                .iter()
+                .any(|(_, id, flags)| *id == entity_id && *flags == 14),
+            "token crate {entity_id} must publish its physical collection flags"
+        );
+    }
+    assert!(
+        parent_survey
+            .spawn_flag_samples
+            .iter()
+            .any(|(_, id, flags)| *id == 79 && *flags == 10),
+        "the third token must publish its save-state handshake flags"
+    );
+    let parent_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        parent_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !parent_pad_mask == 0),
+        "the physical parent route must use ordinary player input only"
+    );
+    assert!(parent_survey.is_clean(), "{}", parent_survey.summary());
     assert_eq!(
         parent_runtime
             .saved_level_state()
             .map(|snapshot| snapshot.level),
         Some(parent)
     );
-    let original_parent_snapshot = parent_runtime
+    let token_parent_snapshot = parent_runtime
         .saved_level_state()
         .cloned()
-        .expect("Jungle Rollers must retain the complete parent snapshot");
+        .expect("the third Tawna token must retain the complete parent snapshot");
+    assert_eq!(token_parent_snapshot.box_count, 0x0d00);
     let parent_transition = {
         let mut host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
         parent_runtime
@@ -56128,8 +56365,8 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
             .carry
             .saved_level_state
             .as_ref()
-            .map(|snapshot| snapshot.level),
-        Some(parent)
+            .map(|snapshot| (snapshot.level, snapshot.box_count)),
+        Some((parent, 0x0d00))
     );
 
     let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
@@ -56182,13 +56419,13 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
         800,
     )
     .expect("ordinary pad input must traverse the carried Tawna bonus and request its return");
-    assert_eq!(bonus_survey.frames, 488, "{}", bonus_survey.summary());
+    assert_eq!(bonus_survey.frames, 487, "{}", bonus_survey.summary());
     assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
     assert!(bonus_survey.restart_frames.is_empty());
     assert_eq!(bonus_survey.zone_transitions, 1);
     assert_eq!(
         bonus_survey.box_count_samples,
-        [(1, 0), (149, 0x100), (151, 0x200)]
+        [(1, 0), (148, 0x100), (151, 0x200)]
     );
     assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
     assert_eq!(bonus_survey.effect_counts.get("transition"), None);
@@ -56199,14 +56436,14 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
     );
     assert_eq!(
         bonus_survey.final_player_translation,
-        Some([2_400_256, 4_561_997, -185_344])
+        Some([2_390_016, 4_562_009, -185_344])
     );
     let warp_event = bonus_survey
         .direct_send_program_samples
         .iter()
         .find(|sample| sample.event == 22 << 8)
         .expect("the physical route must make WarpC send WillC the authored WARP event");
-    assert_eq!(warp_event.frame, 187);
+    assert_eq!(warp_event.frame, 186);
     assert_eq!(
         warp_event.sender,
         Some(Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid"))
@@ -56226,7 +56463,7 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
     assert!(bonus_survey.is_clean(), "{}", bonus_survey.summary());
     assert_eq!(
         bonus_runtime.saved_level_state(),
-        Some(&original_parent_snapshot),
+        Some(&token_parent_snapshot),
         "the save-restricted traversal must not overwrite the parent return"
     );
     let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
@@ -56247,7 +56484,7 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
         .clone()
         .expect("the resolved parent mount must retain its complete snapshot");
     assert_eq!(
-        expected_snapshot, original_parent_snapshot,
+        expected_snapshot, token_parent_snapshot,
         "the complete parent snapshot must survive bonus execution and LEVEL_END"
     );
     let parent_graph = graph_for_pair(parent, &parent_nsd, &parent_nsf, &parent_nsf_bytes)
@@ -56336,7 +56573,11 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
             .iter()
             .all(|(_, report)| report.event_failures.is_empty())
     );
-    assert_eq!(restart.restored_box_count, expected_snapshot.box_count);
+    assert_eq!(
+        restart.restored_box_count,
+        expected_snapshot.box_count - 0x100,
+        "first-spawn restoration discounts the carried checkpoint crate"
+    );
     assert_eq!(
         returned_runtime
             .level_state_context()
@@ -56344,10 +56585,12 @@ fn jungle_rollers_tawna_bonus_warp_loads_the_carried_parent_snapshot() {
             .location,
         expected_snapshot.location
     );
+    let mut expected_spawn_words = expected_snapshot.spawn_words.map(|word| word & !1);
+    expected_spawn_words[79] = (expected_spawn_words[79] & !2) | 8;
     assert_eq!(
         returned_runtime.arena().spawn_table().snapshot(),
-        expected_snapshot.spawn_words.map(|word| word & !1),
-        "first-spawn restoration keeps all 304 saved words and clears only the active bit"
+        expected_spawn_words,
+        "first-spawn restoration preserves the carried table, marks token checkpoint 79 seen, and clears transient active/blocked bits"
     );
     let returned_player = returned_runtime
         .arena()

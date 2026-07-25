@@ -56,7 +56,7 @@ use crust_sim::{
         SAVED_TITLE_STATE_GLOBAL, SendEventTarget, TITLE_STATE_GLOBAL, VmEffect, VmObject,
         VmStateProgram, process_register,
     },
-    math::Bounds3,
+    math::{Bounds3, Vec3},
     object_arena::{NeighborZone, ObjectOrigin, SpawnError},
     paging::{PageInvalidations, Pager, PagerUpdateOutcome, PagingError},
     player::{PAD_CROSS, PAD_DOWN, PAD_LEFT, PAD_RIGHT, PAD_SQUARE, PAD_UP},
@@ -64,9 +64,9 @@ use crust_sim::{
     retail_runtime::{
         CURRENT_ZONE_FLAGS_GLOBAL, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
         ISLAND_CAMERA_STATE_GLOBAL, NsfProgramError, NsfProgramHost, PagedNsfProgramHost,
-        ProgramBinding, ProgramHost, RetailLevelStateContext, RetailRestartOutcome, RetailRuntime,
-        RetailSessionCarry, RetailTitleAction, RuntimeError, RuntimeObjectHandle,
-        StateProgramBinding, ZoneTerminationMode,
+        ProgramBinding, ProgramHost, RetailLevelSnapshot, RetailLevelStateContext,
+        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RetailTitleAction, RuntimeError,
+        RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
@@ -78,6 +78,7 @@ const HEALTH_GLOBAL: usize = 25;
 const FRUIT_COUNT_GLOBAL: usize = 26;
 const BOX_COUNT_GLOBAL: usize = 62;
 const CHECKPOINT_ID_GLOBAL: usize = 69;
+const PBAK_STATE_GLOBAL: usize = 105;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const PROCESS_LINK_COLLIDER: usize = 6;
 const INSTRUCTION_BUDGET: usize = 67;
@@ -86,9 +87,278 @@ const DEFAULT_PROGRESSION_FRAMES: u32 = 18_000;
 const MAX_SURVEY_FRAMES: u32 = 108_000;
 const EMPTY_TERMINAL_WINDOW: u32 = 8;
 const TITLE_MAP_DISPLAY_MASK: u32 = 0x20_ffff;
+const ISLAND_SELECTED_MAP_LEVEL_REGISTER: usize = 80;
+const ISLAND_SELECTED_LID_REGISTER: usize = 81;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
 ];
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jungle_rollers_pbak_hard_restart_preserves_crash() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x0c);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == level)
+        .expect("the retail level catalog contains Jungle Rollers");
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Jungle Rollers pair must parse");
+    let pbak_entry = nsf
+        .entries()
+        .find(|entry| entry.entry_type == PBAK_ENTRY_TYPE)
+        .expect("Jungle Rollers has an authored attract recording");
+    let pbak =
+        load_pbak_entry(pbak_entry, &nsf_bytes).expect("the authored Jungle Rollers PBAK is valid");
+    let graph =
+        graph_for_pair(level, &nsd, &nsf, &nsf_bytes).expect("Jungle Rollers graph must parse");
+    let recorded_path = RetailPathId {
+        zone: pbak.save_state.zone,
+        index: pbak.save_state.path_index,
+    };
+    let recorded_camera = RetailCameraRuntime::at_path(
+        &graph,
+        recorded_path,
+        pbak.save_state.progress.cast_signed(),
+        0x600,
+    )
+    .expect("the PBAK camera path is present");
+    assert_eq!(
+        pbak.save_state.spawn_words.len(),
+        crust_sim::object_arena::SPAWN_TABLE_CAPACITY
+    );
+    let mut spawn_words = [0_u32; crust_sim::object_arena::SPAWN_TABLE_CAPACITY];
+    spawn_words.copy_from_slice(&pbak.save_state.spawn_words);
+    let snapshot = RetailLevelSnapshot {
+        player_translation: pbak.save_state.player_translation,
+        player_rotation_yxz: [
+            pbak.save_state.player_rotation[1],
+            pbak.save_state.player_rotation[0],
+            pbak.save_state.player_rotation[2],
+        ],
+        player_scale: pbak.save_state.player_scale,
+        location: recorded_camera.location(),
+        level: pbak.save_state.level,
+        death_resets_counter: pbak.save_state.flag != 0,
+        spawn_words,
+        box_count: pbak.save_state.box_count,
+    };
+    let crash_bound = Bounds3 {
+        min: Vec3 {
+            x: pbak.crash_bound.min[0],
+            y: pbak.crash_bound.min[1],
+            z: pbak.crash_bound.min[2],
+        },
+        max: Vec3 {
+            x: pbak.crash_bound.max[0],
+            y: pbak.crash_bound.max[1],
+            z: pbak.crash_bound.max[2],
+        },
+    };
+    let mut destination_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, level);
+    destination_runtime
+        .set_global_word(GAME_STATE_GLOBAL, 0x600)
+        .expect("title attract mode is writable");
+    destination_runtime
+        .set_global_word(PBAK_STATE_GLOBAL, 3)
+        .expect("the armed PBAK state is writable");
+    let (_, mut runtime) = survey_pair_with_runtime(
+        known.name,
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        destination_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::Idle,
+        1,
+    )
+    .expect("Jungle Rollers must mount and spawn Crash");
+    let crash_before = runtime
+        .arena()
+        .main_object()
+        .and_then(|arena| runtime.object_for_arena(arena))
+        .expect("fresh Jungle Rollers has a dedicated Crash object");
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let caption = runtime
+        .create_retail_demo_caption(recorded_path.zone, &mut host)
+        .expect("the authored caption controller materializes");
+    runtime
+        .install_retail_demo_start(snapshot, pbak.seed, crash_bound)
+        .expect("the authored PBAK snapshot installs");
+
+    let outcome = runtime
+        .restart_saved_level(&mut host)
+        .expect("PbakStart LevelRestart must preserve the dedicated Crash object");
+
+    assert!(matches!(outcome, RetailRestartOutcome::Restarted(_)));
+    assert_eq!(
+        runtime
+            .arena()
+            .main_object()
+            .and_then(|arena| runtime.object_for_arena(arena)),
+        Some(crash_before)
+    );
+    assert_eq!(
+        runtime.object_for_arena(caption.arena()),
+        Some(caption),
+        "the process-lifetime caption must survive the same-level restart"
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn synthetic_post_castle_session_reaches_ending_and_returns_to_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let brio = CampaignPair::parse(&root, LevelId::new_const(0x1b));
+    let lab = CampaignPair::parse(&root, LevelId::new_const(0x29));
+    let great_hall = CampaignPair::parse(&root, LevelId::new_const(0x2c));
+    let cortex = CampaignPair::parse(&root, LevelId::new_const(0x1f));
+    let ending = CampaignPair::parse(&root, LevelId::ENDING);
+
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0x300),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 27),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 28),
+        (ISLAND_CAMERA_STATE_GLOBAL, 0),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("synthetic post-Castle progression global is writable");
+    }
+    let mut post_castle_title = title_runtime.export_session_carry();
+    post_castle_title.random_seed = 0x1357_9bdf;
+    post_castle_title.draw_count = 12_345;
+    post_castle_title.set_random_seed_b(0x2468_ace0);
+
+    let brio_carry = carry_map_to_next_level(
+        &title,
+        post_castle_title,
+        brio.level,
+        [0, 15, 15, 28, 1, 28, 1],
+    );
+    let (brio_survey, brio_runtime) =
+        brio.run_carried(brio_carry, SurveyInputProfile::BrioCompletionRoute, 3_000);
+    assert_eq!(
+        brio_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        brio_survey.summary()
+    );
+    assert_eq!(brio_survey.restarts, 0, "{}", brio_survey.summary());
+    assert!(brio_survey.is_clean(), "{}", brio_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&brio_runtime),
+        [0x300, 15, 15, 28, 1, 29, 0]
+    );
+    let post_brio_title = brio.finish_checked(brio_runtime, LevelId::TITLE);
+
+    let lab_carry = carry_map_to_next_level(
+        &title,
+        post_brio_title,
+        lab.level,
+        [0, 15, 15, 29, 1, 29, 1],
+    );
+    let (lab_survey, lab_runtime) =
+        lab.run_carried(lab_carry, SurveyInputProfile::LabCompletionRoute, 3_500);
+    assert_eq!(
+        lab_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        lab_survey.summary()
+    );
+    assert_eq!(lab_survey.restarts, 0, "{}", lab_survey.summary());
+    assert!(lab_survey.is_clean(), "{}", lab_survey.summary());
+    let lab_completion_carry = lab.finish_checked(lab_runtime, LevelId::LEVEL_COMPLETE);
+    let post_lab_title = carry_completion_to_title(
+        &completion,
+        lab_completion_carry,
+        [0x300, 15, 15, 29, 1, 30, 0],
+    );
+
+    let great_hall_carry = carry_map_to_next_level(
+        &title,
+        post_lab_title,
+        great_hall.level,
+        [0, 15, 15, 30, 1, 30, 1],
+    );
+    let (great_hall_survey, great_hall_runtime) = great_hall.run_carried(
+        great_hall_carry,
+        SurveyInputProfile::GreatHallCortexRoute,
+        1_200,
+    );
+    assert_eq!(
+        great_hall_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        great_hall_survey.summary()
+    );
+    assert_eq!(
+        great_hall_survey.restarts,
+        0,
+        "{}",
+        great_hall_survey.summary()
+    );
+    assert!(
+        great_hall_survey.is_clean(),
+        "{}",
+        great_hall_survey.summary()
+    );
+    let post_great_hall_title = great_hall.finish_checked(great_hall_runtime, LevelId::TITLE);
+
+    let cortex_carry = carry_map_to_next_level(
+        &title,
+        post_great_hall_title,
+        cortex.level,
+        [0, 15, 15, 31, 1, 31, 1],
+    );
+    let (cortex_survey, cortex_runtime) = cortex.run_carried(
+        cortex_carry,
+        SurveyInputProfile::CortexCompletionRoute,
+        4_500,
+    );
+    assert_eq!(
+        cortex_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::ENDING.get()).unwrap()),
+        "{}",
+        cortex_survey.summary()
+    );
+    assert_eq!(cortex_survey.restarts, 0, "{}", cortex_survey.summary());
+    assert!(cortex_survey.is_clean(), "{}", cortex_survey.summary());
+    let ending_carry = cortex.finish_checked(cortex_runtime, LevelId::ENDING);
+
+    let (ending_survey, ending_runtime) =
+        ending.run_carried(ending_carry, SurveyInputProfile::Idle, 3_600);
+    assert_eq!(
+        ending_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        ending_survey.summary()
+    );
+    assert_eq!(ending_survey.restarts, 0, "{}", ending_survey.summary());
+    assert!(ending_survey.is_clean(), "{}", ending_survey.summary());
+    let final_title_carry = ending.finish_checked(ending_runtime, LevelId::TITLE);
+    let final_title =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, final_title_carry)
+            .expect("Title must import the uninterrupted synthetic Ending carry");
+    assert_eq!(final_title.faulted_object_count(), 0);
+    assert_eq!(
+        campaign_progression_globals(&final_title),
+        [0, 15, 15, 31, 1, 32, 0]
+    );
+}
 
 fn survey_frame_count() -> u32 {
     std::env::var("C1_SURVEY_FRAMES")
@@ -125,17 +395,17 @@ fn slippery_climb_direct_boot_reaches_authored_end_warp() {
     )
     .expect("Slippery Climb's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 5_575, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((5_575, 0x2d)));
+    assert_eq!(survey.frames, 5_414, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((5_414, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 5575 requested level transition to 0x2d")
+        Some("frame 5414 requested level transition to 0x2d")
     );
-    assert_eq!(survey.zone_transitions, 60);
+    assert_eq!(survey.zone_transitions, 58);
     assert_eq!(survey.camera_ranges.len(), 48);
-    assert_eq!(survey.camera_path_changes, 61);
-    assert_eq!(survey.last_camera_path_change, 5_382);
-    assert_eq!(survey.last_camera_progress_change, 5_460);
+    assert_eq!(survey.camera_path_changes, 59);
+    assert_eq!(survey.last_camera_path_change, 5_221);
+    assert_eq!(survey.last_camera_progress_change, 5_299);
     let final_camera = survey
         .final_camera
         .expect("Slippery Climb must retain the end-zone camera path");
@@ -172,14 +442,14 @@ fn slippery_climb_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(
         survey.final_player_translation,
-        Some([28_624_000, 752_728, 171_776])
+        Some([28_624_076, 752_722, 171_776])
     );
     let player = player_trace(&runtime)
         .expect("Slippery Climb completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [28_624_000, 752_728, 171_776]);
-    assert_eq!(runtime.draw_count(), 5_575);
+    assert_eq!(player.translation, [28_624_076, 752_722, 171_776]);
+    assert_eq!(runtime.draw_count(), 5_414);
     assert_eq!(survey.unexpected_spawn_errors, 0);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.faulted_objects, 0);
@@ -188,6 +458,64 @@ fn slippery_climb_direct_boot_reaches_authored_end_warp() {
         "Slippery Climb end-warp route must remain clean: {}",
         survey.summary()
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn slippery_climb_authentic_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x2e);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Slippery Climb pair must parse");
+    let mut title = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 24),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 24),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title
+            .set_global_word(index, value)
+            .expect("authentic campaign global must exist");
+    }
+    let mut carry = title.export_session_carry();
+    carry.random_seed = 0xf99a_7625;
+    carry.draw_count = 49_935;
+    carry.set_random_seed_b(0x37c2_19e0);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Slippery Climb must import the authentic campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Slippery Climb authentic campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        8_000,
+    )
+    .expect("Slippery Climb's authentic carried route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((
+            survey.frames,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
 }
 
 #[test]
@@ -386,7 +714,7 @@ fn boulder_dash_direct_boot_reaches_authored_end_warp() {
         [
             (1, -1, [0, 0, 0]),
             (734, 20_224, [2_303_232, 6_861_568, -5_171_968]),
-            (1_637, 26_112, [2_201_600, 4_095_488, 11_007_232]),
+            (1_628, 26_112, [2_201_600, 4_095_488, 11_007_232]),
         ]
     );
     assert_eq!(
@@ -395,16 +723,13 @@ fn boulder_dash_direct_boot_reaches_authored_end_warp() {
             (1, 0),
             (717, 0x100),
             (734, 0x200),
-            (749, 0x300),
-            (757, 0x400),
-            (766, 0x500),
-            (1_637, 0x600),
-            (1_659, 0x700),
+            (1_628, 0x300),
+            (1_649, 0x400),
         ]
     );
     assert_eq!(
         survey.saved_box_count_samples,
-        [(734, 0x100), (1_637, 0x500)]
+        [(734, 0x100), (1_628, 0x200)]
     );
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
     assert_eq!(survey.effect_counts.get("load-state"), None);
@@ -434,13 +759,13 @@ fn boulder_dash_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(
         survey.final_player_translation,
-        Some([2_242_624, 4_753_692, 32_124_160])
+        Some([2_272_800, 4_753_700, 32_124_160])
     );
     let player = player_trace(&runtime)
         .expect("Boulder Dash completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [2_242_624, 4_753_692, 32_124_160]);
+    assert_eq!(player.translation, [2_272_800, 4_753_700, 32_124_160]);
     assert_eq!(runtime.draw_count(), 3_085);
     assert!(
         survey.is_clean(),
@@ -577,19 +902,80 @@ fn castle_machinery_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.faulted_objects, 0);
     assert_eq!(
         survey.final_player_translation,
-        Some([12_186_198, 3_717_863, 146_588])
+        Some([12_185_852, 3_717_863, 146_588])
     );
     let player = player_trace(&runtime)
         .expect("Castle Machinery completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [12_186_198, 3_717_863, 146_588]);
+    assert_eq!(player.translation, [12_185_852, 3_717_863, 146_588]);
     assert_eq!(runtime.draw_count(), 6_306);
     assert!(
         survey.is_clean(),
         "Castle Machinery end-warp route must remain clean: {}",
         survey.summary()
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn castle_machinery_carried_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x37);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Castle Machinery pair must parse");
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 28),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 28),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("Castle Machinery carried-phase global must exist");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.draw_count = 1;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Castle Machinery must import the perturbed campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Castle Machinery carried campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::CastleMachineryCompletionRoute,
+        7_500,
+    )
+    .expect("Castle Machinery's carried-phase ordinary-pad route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((survey.frames, 0x2d)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        survey.terminal,
+        Some(format!(
+            "frame {} requested level transition to 0x2d",
+            survey.frames
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
 }
 
 #[test]
@@ -716,28 +1102,28 @@ fn high_road_direct_boot_reaches_authored_end_warp() {
     // crossing the b2 seam on the bridge proper before rejoining the rope.
     // Crash then returns to the center of d0 to trigger the normal WarpC
     // Level Complete handoff without consuming a life.
-    assert_eq!(survey.frames, 2_274);
-    assert_eq!(survey.next_lid, Some((2_274, 0x2d)));
+    assert_eq!(survey.frames, 2_292);
+    assert_eq!(survey.next_lid, Some((2_292, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2274 requested level transition to 0x2d")
+        Some("frame 2292 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.checkpoint_samples, [(1, -1, [0, 0, 0])]);
-    assert_eq!(survey.box_count_samples, [(1, 0), (949, 0x100)]);
+    assert_eq!(survey.box_count_samples, [(1, 0)]);
     assert_eq!(survey.effect_counts.get("save-state"), None);
     assert_eq!(survey.effect_counts.get("load-state"), None);
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(
         survey.final_player_translation,
-        Some([-6_144, 3_722_328, -45_838_336])
+        Some([-16_384, 3_722_330, -45_858_816])
     );
     let player = player_trace(&runtime)
         .expect("High Road completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [-6_144, 3_722_328, -45_838_336]);
+    assert_eq!(player.translation, [-16_384, 3_722_330, -45_858_816]);
     let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
     for state in 0..=4 {
         assert!(
@@ -745,7 +1131,7 @@ fn high_road_direct_boot_reaches_authored_end_warp() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.draw_count(), 2_274);
+    assert_eq!(runtime.draw_count(), 2_292);
     assert_eq!(survey.unexpected_spawn_errors, 0);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.faulted_objects, 0);
@@ -894,6 +1280,64 @@ fn sunset_vista_direct_boot_reaches_authored_end_warp() {
     assert_eq!(report.next_lid_after_event, 0x2d);
     assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
     assert!(!report.resolved.bonus_return);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn sunset_vista_authentic_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x23);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Sunset Vista pair must parse");
+    let mut title = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 16),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 16),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title
+            .set_global_word(index, value)
+            .expect("authentic campaign global must exist");
+    }
+    let mut carry = title.export_session_carry();
+    carry.random_seed = 0xd075_86d1;
+    carry.draw_count = 14_688;
+    carry.set_random_seed_b(0x654c_b6a6);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Sunset Vista must import the authentic campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Sunset Vista authentic campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::SunsetVistaCompletionRoute,
+        9_500,
+    )
+    .expect("Sunset Vista's authentic carried route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((
+            survey.frames,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
 }
 
 #[test]
@@ -1087,6 +1531,7 @@ enum SurveyInputProfile {
     SlipperyClimbCompletionRoute,
     UpstreamCarriedRecovery,
     RollingStonesCheckpoint,
+    RollingStonesBrioBonus,
     HogWildCompletionRoute,
     WholeHogCompletionRoute,
     UpTheCreekRoute,
@@ -1126,6 +1571,7 @@ enum SurveyInputProfile {
 enum LevelContextSource {
     FreshBoot,
     SessionGlobals,
+    BonusReturn,
 }
 
 impl SurveyInputProfile {
@@ -1184,6 +1630,7 @@ impl SurveyInputProfile {
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
+            Self::RollingStonesBrioBonus => "rolling-stones-brio-bonus",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
             Self::WholeHogCompletionRoute => "whole-hog-completion-route",
             Self::UpTheCreekRoute => "up-the-creek-route",
@@ -1246,6 +1693,7 @@ impl SurveyInputProfile {
                 | Self::SlipperyClimbCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::RollingStonesCheckpoint
+                | Self::RollingStonesBrioBonus
                 | Self::HogWildCompletionRoute
                 | Self::WholeHogCompletionRoute
                 | Self::UpTheCreekRoute
@@ -2176,23 +2624,12 @@ impl CortexCompletionRouteController {
                                 subtype: 3,
                             }
                         ) && object.state == 3
-                            && if frame >= 2_600 {
-                                object.translation[1] < 800_000
-                                    || object.animation_counter == 256
-                                        && object.translation[1] < 950_000
-                            } else {
-                                object.translation[1] < 800_000
-                            }
+                            && object.translation[1] < 800_000
                             && object.translation[2].abs_diff(player.translation[2]) <= 80_000
                             && object.translation[0].abs_diff(player.translation[0])
                                 <= if frame >= 2_600 { 350_000 } else { 100_000 }
                     })
-                    .min_by_key(|object| {
-                        (
-                            frame >= 2_600 && object.animation_counter != 256,
-                            object.translation[0].abs_diff(player.translation[0]),
-                        )
-                    })
+                    .min_by_key(|object| object.translation[0].abs_diff(player.translation[0]))
             })
             .flatten()
             .filter(|_| !phase_two_reflected_core || frame >= 2_600);
@@ -2792,7 +3229,6 @@ impl BrioCompletionRouteController {
                         | PAD_CROSS;
                 }
                 if boss.state == 6
-                    && boss.register_72 != 0
                     && let Some(boost) = objects.iter().find(|object| {
                         matches!(
                             object.origin,
@@ -9879,6 +10315,7 @@ fn native_fortress_controller_rejoins_saved_checkpoints_after_restart() {
         status_a: 1,
         status_b: 0,
         cortex_counter: 0,
+        brio_counter: 0,
         tawna_counter: 0,
         event: 0,
         animation_stamp: 0,
@@ -10735,6 +11172,94 @@ impl RollingStonesRouteController {
         };
         self.post_tick = self.post_tick.saturating_add(1);
         held
+    }
+}
+
+/// Ordinary-pad variant of the established Rolling Stones route that breaks
+/// the three authored Brio-token crates as Crash reaches their live bounds.
+///
+/// Entity 25 is suspended above the path and needs a jumping spin. Entities
+/// 59 and 120 are on the route itself and need only the normal spin button.
+/// The wrapper observes geometry solely to choose pad input; it never mutates
+/// a VM register, object transform, spawn flag, or level global.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct RollingStonesBrioBonusRouteController {
+    route: RollingStonesRouteController,
+    attempted_tokens: u8,
+    first_token_jump_tick: Option<u8>,
+}
+
+impl RollingStonesBrioBonusRouteController {
+    fn held(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        checkpoint_id: i32,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let mut held = self.route.held(camera, player, checkpoint_id, objects);
+        let Some(player) = player else {
+            return held;
+        };
+        if let Some(tick) = self.first_token_jump_tick {
+            self.first_token_jump_tick = (tick < 7).then_some(tick + 1);
+            held |= PAD_CROSS;
+            if tick == 2 {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        let nearby_token = objects.iter().find_map(|object| {
+            let ObjectOrigin::Entity(descriptor) = object.origin else {
+                return None;
+            };
+            if descriptor.executable != 34
+                || !matches!(descriptor.id, 25 | 59 | 120)
+                || self.attempted_tokens & Self::token_bit(descriptor.id) != 0
+                || object.state != if descriptor.id == 25 { 21 } else { 0 }
+            {
+                return None;
+            }
+            let bound = object.bound?;
+            let x_reach = if descriptor.id == 25 { 80_000 } else { 320_000 };
+            let z_reach = if descriptor.id == 25 {
+                220_000
+            } else {
+                320_000
+            };
+            (player.translation[0] >= bound.min.x - x_reach
+                && player.translation[0] <= bound.max.x + x_reach
+                && player.translation[2] >= bound.min.z - z_reach
+                && player.translation[2] <= bound.max.z + z_reach
+                && player.translation[1] >= bound.min.y - 480_000
+                && player.translation[1] <= bound.max.y + 320_000)
+                .then_some(descriptor.id)
+        });
+        if let Some(entity) = nearby_token {
+            self.attempted_tokens |= Self::token_bit(entity);
+            if entity == 25 {
+                self.first_token_jump_tick = Some(1);
+                held |= PAD_CROSS;
+            } else {
+                held |= PAD_SQUARE;
+            }
+        }
+        held
+    }
+
+    const fn token_bit(entity: u16) -> u8 {
+        match entity {
+            25 => 1,
+            59 => 2,
+            120 => 4,
+            _ => 0,
+        }
+    }
+
+    fn restart_from_checkpoint(&mut self) {
+        self.route.restart_from_checkpoint();
+        self.attempted_tokens = 0;
+        self.first_token_jump_tick = None;
     }
 }
 
@@ -13482,10 +14007,37 @@ impl BouldersCompletionRouteController {
 /// level boot through its normal `WarpC` transition. The route contains no
 /// state injection or proprietary recording data: each entry is an inclusive
 /// frame window and the retail pad bits held during that window.
-struct BoulderDashCompletionRouteController;
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BoulderDashCompletionRouteController {
+    zero_c_recentered: bool,
+    zero_c_recenter_hold: u8,
+    zero_c_first_jump: bool,
+    zero_c_second_jump: bool,
+    suffix_jump_stage: u8,
+    zero_a_path0_tick: u8,
+    zero_a_zero_entry: bool,
+    zero_r_first_spin: bool,
+    zero_r_second_spin: bool,
+    zero_m_jump: bool,
+    zero_m_jump_hold: u8,
+    zero_m_exit_jump: bool,
+    zero_l_exit_jump: bool,
+    zero_i_lane_tap: bool,
+    zero_lower_c_exit_jump: bool,
+    zero_lower_b_exit_jump: bool,
+    zero_lower_b_second_jump: bool,
+}
 
 impl BoulderDashCompletionRouteController {
-    fn held(frame: u32) -> u32 {
+    #[allow(clippy::collapsible_if, clippy::items_after_statements)]
+    fn held(
+        &mut self,
+        frame: u32,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
         const ALTERNATING_STEERING: &[(u32, u32, u32, u32)] = &[
             (1_050, 1_130, 6, 0),
             (1_150, 1_200, 12, 0),
@@ -13596,6 +14148,899 @@ impl BoulderDashCompletionRouteController {
                 held |= buttons;
             }
         }
+        let zero_c = Eid::from_name("0C_jZ").expect("fixed Boulder Dash gap-zone EID is valid");
+        if camera.path.zone == zero_c {
+            // Camera/state milestones below own the three-shelf jump cadence.
+            held &= !PAD_CROSS;
+        }
+        if self.zero_c_recenter_hold > 0 {
+            self.zero_c_recenter_hold -= 1;
+            return held | PAD_LEFT;
+        }
+        if camera.path.zone == zero_c
+            && camera.path.index == 0
+            && camera.progress.raw() < 8_000
+            && !self.zero_c_recentered
+        {
+            if let Some(player) = player {
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                if predicted_x > 2_180_000 {
+                    // The live chase dodge can leave Crash one lane right of
+                    // the authored three-shelf route. Recenter before its
+                    // first takeoff while preserving the cadence buttons.
+                    self.zero_c_recentered = true;
+                    self.zero_c_recenter_hold = 5;
+                    return held | PAD_LEFT;
+                }
+            }
+        }
+        if camera.path.zone == zero_c {
+            if let Some(player) = player {
+                let grounded = player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19);
+                if grounded
+                    && camera.path.index == 0
+                    && (12_000..=14_500).contains(&camera.progress.raw())
+                    && !self.zero_c_first_jump
+                {
+                    self.zero_c_first_jump = true;
+                    return held | PAD_CROSS;
+                }
+                if grounded
+                    && camera.path.index == 1
+                    && (10_000..=12_500).contains(&camera.progress.raw())
+                    && !self.zero_c_second_jump
+                {
+                    self.zero_c_second_jump = true;
+                    return held | PAD_CROSS;
+                }
+            }
+        }
+        const SUFFIX_JUMPS: &[(&str, u32, i32, i32)] = &[
+            ("0B_jZ", 0, 7_500, 9_000),
+            ("0B_jZ", 1, 6_500, 9_500),
+            ("0A_jZ", 0, 4_500, 6_500),
+            ("0A_jZ", 0, 16_300, 18_100),
+            ("0A_jZ", 1, 9_100, 11_000),
+            ("0z_jZ", 0, 4_800, 6_500),
+            ("0z_jZ", 0, 12_400, 14_200),
+            ("0z_jZ", 1, 5_800, 7_600),
+            ("0y_jZ", 0, 800, 2_100),
+            ("0y_jZ", 0, 15_700, 17_500),
+            ("0y_jZ", 1, 8_500, 10_300),
+            ("0x_jZ", 0, 5_000, 6_800),
+            ("0x_jZ", 0, 18_800, 20_700),
+            ("0x_jZ", 1, 13_000, 14_800),
+            ("0w_jZ", 0, 11_000, 12_300),
+            ("0w_jZ", 1, 6_700, 8_000),
+            ("0v_jZ", 0, 4_500, 6_300),
+            ("0v_jZ", 0, 18_800, 19_400),
+            ("0v_jZ", 1, 10_300, 12_100),
+            ("0u_jZ", 0, 8_800, 10_600),
+            ("0u_jZ", 1, 6_300, 8_100),
+            ("0t_jZ", 0, 3_500, 4_900),
+            ("0t_jZ", 1, 200, 1_500),
+            ("0t_jZ", 1, 10_000, 11_800),
+            ("0s_jZ", 1, 10_200, 12_000),
+        ];
+        if SUFFIX_JUMPS.iter().any(|&(zone_name, _, _, _)| {
+            Eid::from_name(zone_name).is_ok_and(|zone| camera.path.zone == zone)
+        }) {
+            // Once the route is camera-anchored, every Cross edge belongs to
+            // the ordered live marker table. Suppress stale absolute-frame
+            // cadence even when the previous marker has already advanced the
+            // table to the next zone.
+            held &= !PAD_CROSS;
+        }
+        if ["0y_jZ", "0w_jZ", "0v_jZ", "0t_jZ"]
+            .iter()
+            .any(|zone_name| Eid::from_name(zone_name).is_ok_and(|zone| camera.path.zone == zone))
+        {
+            // These shelf sequences are phase-sensitive enough that their
+            // ordered markers must also own the takeoff lanes. The old
+            // alternating absolute-frame steering can flip one frame after a
+            // live marker and turn a valid jump into a pit fall.
+            held &= !(PAD_LEFT | PAD_RIGHT);
+        }
+        let zero_w = Eid::from_name("0w_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        let zero_x = Eid::from_name("0x_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        let zero_z = Eid::from_name("0z_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_z
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 8
+            && (12_000..16_700).contains(&camera.progress.raw())
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 87
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+        {
+            // The carried route meets this JunOC one lateral step to the
+            // right of a fresh boot. Join the live approach lane, then release
+            // it before the authored exit impulse; otherwise the next corner
+            // absorbs forward speed and lets the chasing boulder close.
+            let target_x = bound.min.x.saturating_sub(120_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_x
+            && camera.path.index == 1
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 55
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(240_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Take the live right-hand gap around JunOC 55. The carried route
+            // otherwise clips its edge immediately after the final jump.
+            let target_x = bound.max.x.saturating_add(80_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_x
+            && camera.path.index == 0
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 65
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(120_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Match the live left-hand gap around JunOC 65. A few thousand
+            // fixed-point units of carried-session drift are enough for this
+            // corner to absorb forward velocity and let the chase catch up.
+            let target_x = bound.min.x.saturating_sub(72_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else {
+                0
+            };
+            // Never counter-steer here: one opposite pulse rotates the
+            // forward run into lateral velocity and gives the boulder back
+            // the separation gained by clearing JunOC.
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if camera.path.zone == zero_w {
+            let progress = camera.progress.raw();
+            if camera.path.index == 0 && self.suffix_jump_stage <= 14 {
+                if let Some(player) = player {
+                    let target_x = if progress <= 9_000 {
+                        2_130_000_i32.saturating_sub(120_000_i32.saturating_mul(progress) / 9_000)
+                    } else if progress <= 11_000 {
+                        2_010_000_i32.saturating_sub(
+                            20_000_i32.saturating_mul(progress.saturating_sub(9_000)) / 2_000,
+                        )
+                    } else {
+                        1_990_000_i32.saturating_add(
+                            40_000_i32.saturating_mul(progress.saturating_sub(11_000)) / 8_000,
+                        )
+                    };
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                    if predicted_x < target_x.saturating_sub(20_000) {
+                        held |= PAD_RIGHT;
+                    } else if predicted_x > target_x.saturating_add(20_000) {
+                        held |= PAD_LEFT;
+                    }
+                }
+            } else if camera.path.index == 1
+                && self.suffix_jump_stage == 15
+                && (5_700..6_700).contains(&progress)
+            {
+                held |= PAD_RIGHT;
+            } else if camera.path.index == 1 && self.suffix_jump_stage >= 16 {
+                held |= if progress < 10_000 {
+                    PAD_LEFT
+                } else if progress < 13_700 {
+                    PAD_RIGHT
+                } else if progress < 16_700 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+        }
+        let zero_v = Eid::from_name("0v_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_v
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 18
+            && camera.progress.raw() >= 18_800
+        {
+            // Carry the second shelf jump into its right-hand landing lane.
+            // The atomic child schedule reaches this shelf a few substeps
+            // earlier than the old frame recording, so a live path phase owns
+            // the short diagonal instead of an absolute frame.
+            held |= PAD_RIGHT;
+        } else if camera.path.zone == zero_v
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 18
+            && (8_800..9_800).contains(&camera.progress.raw())
+        {
+            // Settle back onto the narrow final shelf before its jump edge.
+            held |= PAD_LEFT;
+        } else if camera.path.zone == zero_v
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 19
+            && (12_000..12_500).contains(&camera.progress.raw())
+        {
+            // The next zone opens a half-lane to the right of the final
+            // shelf. Give that transition one ordinary steering frame.
+            held |= PAD_RIGHT;
+        }
+        let zero_u = Eid::from_name("0u_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_u
+            && self.suffix_jump_stage == 20
+            && player.is_some_and(|player| player.status_a & 1 == 0)
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 37
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(280_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Rejoin the live left edge of the first 0u moving shelf. The
+            // carried approach is only a fraction of a player width left of
+            // the direct route, but that is enough to miss object-floor
+            // overlap when the platform is at this phase.
+            let target_x = bound.min.x.saturating_add(16_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_u
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 21
+            && camera.progress.raw() >= 7_600
+        {
+            // The live platform landing already supplied the required lane
+            // change. Preserve full forward speed into 0t instead of leaking
+            // the old alternating lateral phase into this short exit.
+            held &= !(PAD_LEFT | PAD_RIGHT);
+        } else if camera.path.zone == zero_u
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 21
+            && (camera.progress.raw() < 7_600 || (8_000..8_400).contains(&camera.progress.raw()))
+        {
+            // Complete the lane change begun by the final 0u shelf jump. The
+            // landing absorbs this short diagonal before 0t's narrow cadence.
+            held |= PAD_RIGHT;
+        }
+        let zero_t = Eid::from_name("0t_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_t {
+            let progress = camera.progress.raw();
+            if camera.path.index == 0 && progress >= 3_500 {
+                held |= if progress < 5_500 {
+                    0
+                } else if progress < 10_000 {
+                    PAD_RIGHT
+                } else if progress < 11_500 {
+                    PAD_LEFT
+                } else if progress < 14_700 {
+                    PAD_RIGHT
+                } else if progress < 17_600 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            } else if camera.path.index == 1 && self.suffix_jump_stage == 23 {
+                if progress < 6_800 {
+                    held |= PAD_LEFT;
+                } else if progress < 8_900 {
+                    held |= PAD_RIGHT;
+                }
+            } else if camera.path.index == 1 && self.suffix_jump_stage == 22 && progress < 200 {
+                // Preserve the path-0 rightward landing velocity for the
+                // boundary frame; the following Cross+Left edge then reverses
+                // gradually instead of snapping Crash off the shelf.
+                held |= PAD_RIGHT;
+            }
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_t
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 22
+            && player.is_some_and(|player| player.status_a & 1 == 0)
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 93
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(280_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Settle inside the live right edge of 0t's first moving shelf.
+            // Absolute alternating steering leaves the carried phase just
+            // outside object-floor overlap at the landing frame.
+            let target_x = bound.max.x.saturating_sub(24_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_t
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 22
+            && camera.progress.raw() >= 14_000
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 50
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 12
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && player.translation[2].saturating_sub(bound.max.z) < 90_000
+        {
+            // Do not spend the narrow live lead on the old lateral phase after
+            // landing. Full forward input preserves separation until path 1
+            // owns the next Cross edge.
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_DOWN;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_t
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 23
+            && player.is_some_and(|player| player.status_a & 1 == 0)
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 94
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(340_000)..=bound.max.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // Follow the live center-right lane of PoPlC 94. Full Left loses
+            // the chase lead, while neutral input rides its moving right edge;
+            // this bound-relative lane preserves both the landing and speed.
+            let target_x = bound.max.x.saturating_sub(80_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        let zero_b = Eid::from_name("0B_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_b
+            && camera.path.index == 0
+            && self.suffix_jump_stage == 0
+            && (2_500..=7_500).contains(&camera.progress.raw())
+            && let Some(player) = player
+        {
+            // The first carried-session shelf can resolve its landing support
+            // one substep to the left of a fresh boot. Follow the successful
+            // live lane until takeoff instead of relying on the accumulated
+            // hazard phase to push Crash into it.
+            let target_x = 2_480_000_i32.saturating_add(
+                camera
+                    .progress
+                    .raw()
+                    .saturating_sub(2_500)
+                    .saturating_mul(10),
+            );
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            if predicted_x < target_x.saturating_sub(10_000) {
+                held = (held & !PAD_LEFT) | PAD_RIGHT;
+            }
+        }
+        if camera.path.zone == zero_b && camera.path.index == 1 && self.suffix_jump_stage >= 2 {
+            let progress = camera.progress.raw();
+            // The absolute-frame tail starts several path steps too early
+            // after a carried session. Own this exit lane by live progress so
+            // both fresh and carried boots begin the final diagonal together.
+            held &= !(PAD_LEFT | PAD_RIGHT);
+            if (13_700..14_200).contains(&progress)
+                && player.is_some_and(|player| player.translation[0] > 2_560_000)
+            {
+                held |= PAD_LEFT;
+            } else if progress >= 15_200 {
+                held |= PAD_RIGHT;
+            }
+        }
+        let zero_a = Eid::from_name("0A_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_a && camera.path.index == 0 {
+            self.zero_a_path0_tick = self.zero_a_path0_tick.saturating_add(1);
+            let tick = self.zero_a_path0_tick;
+            if tick == 1 {
+                self.zero_a_zero_entry = camera.progress.raw() < 128;
+            }
+            let phase_offset = u8::from(self.zero_a_zero_entry);
+            let cross_tick = 10_u8.saturating_add(phase_offset);
+            if self.suffix_jump_stage == 2 && tick <= cross_tick {
+                held &= !(PAD_LEFT | PAD_RIGHT | PAD_SQUARE | PAD_CROSS);
+                if matches!(tick, 1..=4) {
+                    held |= PAD_RIGHT;
+                }
+                if tick == 6 && player.is_some_and(|player| player.translation[0] < 2_700_000) {
+                    held |= PAD_RIGHT;
+                }
+                if tick == 8 && player.is_some_and(|player| player.translation[0] < 2_710_000) {
+                    held |= PAD_RIGHT;
+                }
+                if tick == 4 {
+                    held |= PAD_SQUARE;
+                }
+                if tick == cross_tick
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                    })
+                {
+                    held |= PAD_RIGHT;
+                    self.suffix_jump_stage = 3;
+                    return held | PAD_CROSS;
+                }
+            } else if self.suffix_jump_stage == 3 {
+                held &= !PAD_SQUARE;
+                if tick == 11_u8.saturating_add(phase_offset) {
+                    held = (held & !PAD_LEFT) | PAD_RIGHT;
+                }
+                if self.zero_a_zero_entry
+                    && (23..=28).contains(&tick)
+                    && let Some(player) = player
+                    && player.status_a & 1 == 0
+                    && let Some(platform_bound) = objects.iter().find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 88
+                                    && descriptor.executable == 11
+                                    && descriptor.subtype == 2
+                        )
+                        .then_some(object.bound)
+                        .flatten()
+                    })
+                {
+                    // Session carry meets this PoPlC on a different live
+                    // lateral cycle. Track its collision center during the
+                    // descent instead of replaying direct-boot steering.
+                    let target_x =
+                        platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                    let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                        PAD_LEFT
+                    } else if predicted_x < target_x.saturating_sub(16_000) {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+                }
+                if tick == 16_u8.saturating_add(phase_offset)
+                    || tick == 28_u8.saturating_add(phase_offset)
+                {
+                    held |= PAD_SQUARE;
+                }
+            }
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 3
+            && camera.progress.raw() < 1_024
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+            })
+        {
+            // The live-platform landing consumes two more carried samples
+            // than a fresh boot. Take the next jump on the path boundary so
+            // its forward lane, rather than an absolute frame, owns takeoff.
+            self.suffix_jump_stage = 4;
+            return held | PAD_CROSS;
+        }
+        if self.zero_a_zero_entry
+            && camera.path.zone == zero_a
+            && camera.path.index == 1
+            && self.suffix_jump_stage == 4
+            && camera.progress.raw() < 9_100
+            && let Some(player) = player
+            && player.status_a & 1 == 0
+        {
+            // The next support is the authored static ledge, not the moving
+            // PoPlC just crossed. Rejoin its live world-space landing lane.
+            let target_x = 2_672_000_i32;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(16_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(16_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if camera.path.zone == zero_a
+            && camera.path.index == 1
+            && self.suffix_jump_stage >= 5
+            && camera.progress.raw() < 13_000
+        {
+            held = (held & !PAD_RIGHT) | PAD_LEFT;
+        }
+        let zero_r = Eid::from_name("0r_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_r {
+            // This hazard has two authored spin launches. Once camera-anchored,
+            // no stale absolute-frame steering or spin may leak into either
+            // path, including the long path-1 traverse.
+            held &= !(PAD_LEFT | PAD_RIGHT | PAD_SQUARE);
+        }
+        if camera.path.zone == zero_r && camera.path.index == 0 {
+            let progress = camera.progress.raw();
+            if !self.zero_r_first_spin
+                && (4_000..=5_500).contains(&progress)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_r_first_spin = true;
+                return held | PAD_SQUARE;
+            }
+            if self.zero_r_first_spin && progress < 18_800 {
+                held |= PAD_RIGHT;
+            }
+            if self.zero_r_first_spin
+                && !self.zero_r_second_spin
+                && (11_500..=12_500).contains(&progress)
+                && player.is_some_and(|player| {
+                    player.state == 19 && frame.saturating_sub(player.state_stamp) >= 5
+                })
+            {
+                // State 19 begins before Crash accepts another spin edge. A
+                // carried session reaches this recovery a few samples ahead
+                // of a fresh boot; wait for the live five-frame input window
+                // instead of consuming the one-shot marker too early.
+                self.zero_r_second_spin = true;
+                return held | PAD_RIGHT | PAD_SQUARE;
+            }
+        }
+        let zero_m = Eid::from_name("0m_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if camera.path.zone == zero_m && camera.path.index == 0 {
+            held &= !PAD_CROSS;
+            if self.zero_m_jump_hold > 0 {
+                let steer = if self.zero_m_jump_hold >= 10 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                self.zero_m_jump_hold -= 1;
+                return held | PAD_CROSS | steer;
+            }
+            if !self.zero_m_jump
+                && (5_200..=5_900).contains(&camera.progress.raw())
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_m_jump = true;
+                self.zero_m_jump_hold = 12;
+                return held | PAD_CROSS;
+            }
+        }
+        if self.zero_a_zero_entry
+            && self.zero_m_jump
+            && camera.path.zone == zero_m
+            && let Some(player) = player
+            && player.status_a & 1 == 0
+            && let Some(bound) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 132
+                            && descriptor.executable == 11
+                            && descriptor.subtype == 2
+                )
+                .then_some(object.frame_bound.or(object.bound))
+                .flatten()
+            })
+            && (bound.min.z.saturating_sub(320_000)..=bound.min.z.saturating_add(32_000))
+                .contains(&player.translation[2])
+        {
+            // In the carried moving-platform phase, approaching through the
+            // center catches entity 132's high front face and slides beneath
+            // it. The successful fresh route skims its left edge and lands on
+            // the top once the platform descends into the jump arc.
+            let target_x = bound.min.x.saturating_sub(24_000);
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let lateral = if predicted_x > target_x.saturating_add(8_000) {
+                PAD_LEFT
+            } else if predicted_x < target_x.saturating_sub(8_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+        }
+        if self.zero_a_zero_entry && camera.path.zone == zero_m && camera.path.index == 1 {
+            // Own the exit jump by live progress. Session carry lands on
+            // entity 132 three frames ahead of the fresh route, so the old
+            // absolute Cross arrives only after Crash has left its support.
+            held &= !PAD_CROSS;
+            if !self.zero_m_exit_jump
+                && (14_800..=15_700).contains(&camera.progress.raw())
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_m_exit_jump = true;
+                return held | PAD_CROSS;
+            }
+        }
+        let zero_l = Eid::from_name("0l_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry && camera.path.zone == zero_l && camera.path.index == 0 {
+            // Entity 133's carried phase advances the camera about two input
+            // samples ahead of the absolute route. Jump while state 2 still
+            // owns the platform edge instead of replaying the late frame.
+            held &= !PAD_CROSS;
+            if !self.zero_l_exit_jump
+                && (13_300..=14_100).contains(&camera.progress.raw())
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_l_exit_jump = true;
+                return held | PAD_CROSS;
+            }
+        }
+        let zero_i = Eid::from_name("0i_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry
+            && !self.zero_i_lane_tap
+            && camera.path.zone == zero_i
+            && camera.path.index == 1
+            && let (Some(player), Some(bound)) = (
+                player,
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 145
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 13
+                    )
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+                }),
+            )
+            && (bound.min.z.saturating_sub(160_000)..=bound.min.z.saturating_sub(120_000))
+                .contains(&player.translation[2])
+            && player.translation[0] > bound.min.x.saturating_sub(55_000)
+        {
+            // The carried route reaches JunOC 145 one lateral step to the
+            // right. Clipping its front-left corner consumes enough forward
+            // speed for the chasing boulder to crush Crash a few frames
+            // later. One live left pulse joins the successful fresh lane;
+            // repeating it would rotate too much forward velocity sideways.
+            self.zero_i_lane_tap = true;
+            return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
+        }
+        let zero_lower_c = Eid::from_name("0c_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry && camera.path.zone == zero_lower_c && camera.path.index == 1 {
+            // Session carry reaches this final shelf two input samples ahead
+            // of the direct characterization. Replace the stale absolute
+            // Cross with the first live grounded sample on path 1.
+            held &= !PAD_CROSS;
+            if !self.zero_lower_c_exit_jump
+                && camera.progress.raw() <= 800
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_lower_c_exit_jump = true;
+                return held | PAD_CROSS;
+            }
+        }
+        let zero_lower_b = Eid::from_name("0b_jZ").expect("fixed Boulder Dash suffix EID is valid");
+        if self.zero_a_zero_entry && camera.path.zone == zero_lower_b && camera.path.index == 1 {
+            // The same two-sample carried-session lead reaches the next shelf
+            // before its absolute Cross. Fire on the live path boundary while
+            // the ledge still owns Crash's grounded state.
+            held &= !PAD_CROSS;
+            if !self.zero_lower_b_exit_jump
+                && camera.progress.raw() <= 600
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                self.zero_lower_b_exit_jump = true;
+                return held | PAD_CROSS;
+            }
+            if self.zero_lower_b_exit_jump
+                && !self.zero_lower_b_second_jump
+                && (14_000..=14_600).contains(&camera.progress.raw())
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                // The carried moving-platform phase also ends the next
+                // support before the direct route's absolute second jump.
+                // Use its final live grounded sample instead.
+                self.zero_lower_b_second_jump = true;
+                return held | PAD_CROSS;
+            }
+        }
+        let delay_carried_zero_u_jump = self.zero_a_zero_entry
+            && self.suffix_jump_stage == 20
+            && camera.path.zone == zero_u
+            && camera.path.index == 1
+            && player.is_some_and(|player| {
+                objects
+                    .iter()
+                    .find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 37
+                                    && descriptor.executable == 11
+                                    && descriptor.subtype == 2
+                        )
+                        .then_some(object.frame_bound.or(object.bound))
+                        .flatten()
+                    })
+                    .is_some_and(|bound| player.translation[2] < bound.max.z.saturating_sub(40_000))
+            });
+        if let Some(&(zone_name, path_index, start, end)) =
+            SUFFIX_JUMPS.get(usize::from(self.suffix_jump_stage))
+        {
+            let zone = Eid::from_name(zone_name).expect("fixed Boulder Dash suffix EID is valid");
+            if camera.path.zone == zone {
+                held &= !PAD_CROSS;
+                if camera.path.index == path_index
+                    && (start..=end).contains(&camera.progress.raw())
+                    && !delay_carried_zero_u_jump
+                    && (self.suffix_jump_stage != 3 || !self.zero_a_zero_entry)
+                    && player.is_some_and(|player| {
+                        (player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19))
+                            && (self.suffix_jump_stage != 2 || player.velocity[0] <= 50_000)
+                    })
+                {
+                    let stage = self.suffix_jump_stage;
+                    self.suffix_jump_stage = self.suffix_jump_stage.saturating_add(1);
+                    let steered = match stage {
+                        // Each live marker owns its takeoff lane as well as
+                        // its Cross edge. Absolute-frame steering from the
+                        // original characterization can otherwise leak into
+                        // a phase-shifted jump and miss the authored shelf.
+                        2 | 4 | 7 | 9 | 17 | 20 => (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_RIGHT,
+                        8 | 10 | 11 | 15 | 22 | 24 => (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT,
+                        5..=24 => held & !(PAD_LEFT | PAD_RIGHT),
+                        _ => held,
+                    };
+                    return steered | PAD_CROSS;
+                }
+            }
+        }
+        let chasing_boulder = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor)
+                if descriptor.id == 17
+                    && descriptor.executable == 22
+                    && descriptor.subtype == 12)
+        });
+        if let (Some(player), Some(bound)) =
+            (player, chasing_boulder.and_then(|object| object.bound))
+        {
+            let lead = player.translation[2].saturating_sub(bound.max.z);
+            let zero_f =
+                Eid::from_name("0F_jZ").expect("fixed Boulder Dash chase-zone EID is valid");
+            if camera.path.zone == zero_f
+                && camera.path.index == 1
+                && camera.progress.raw() >= 8_500
+                && player.translation[0] < 1_970_000
+                && (-100_000..=250_000).contains(&lead)
+            {
+                // A diagonal ordinary-pad run restores separation from the
+                // authored chasing boulder when its live bound catches this
+                // runtime phase. Do not sacrifice speed to the old
+                // absolute-frame jump tap until the lead is safe again.
+                return PAD_DOWN | PAD_RIGHT;
+            }
+        }
         held
     }
 }
@@ -13608,6 +15053,7 @@ impl BoulderDashCompletionRouteController {
 // one enum would erase valid overlaps such as a platform departure during a jump.
 #[allow(clippy::struct_excessive_bools)]
 struct GeneratorRoomCompletionRouteController {
+    session_globals: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
@@ -13643,9 +15089,14 @@ struct GeneratorRoomCompletionRouteController {
     b2_depart_runup: bool,
     b2_depart_runup_frames: u8,
     b2_second_platform_landed: bool,
+    b2_hazard_previous_z: Option<i32>,
+    b2_third_target_previous_y: Option<i32>,
     b2_third_platform_landed: bool,
     b3_source_landed: bool,
     b4_turn_started: bool,
+    b4_fresh_phase_stance: Option<bool>,
+    b6_target_previous_y: Option<i32>,
+    b7_depart_runup: bool,
     b7_brake_airborne_seen: bool,
     b7_wall_airborne_seen: bool,
     b8_platform_wait_frames: u8,
@@ -13654,6 +15105,9 @@ struct GeneratorRoomCompletionRouteController {
     c3_gap_airborne_seen: bool,
     bridge_hit: bool,
     bridge_returned: bool,
+    a4_landing_brake_done: bool,
+    a6_landing_brake_done: bool,
+    a6_landing_brake_frames: u8,
 }
 
 impl GeneratorRoomCompletionRouteController {
@@ -13707,6 +15161,50 @@ impl GeneratorRoomCompletionRouteController {
                 3 if player.translation[0] <= 600_000 => self.route_stage = 4,
                 _ => {}
             }
+        }
+        if self.route_stage == 0
+            && player.is_none_or(|player| {
+                matches!(player.state, 0 | 40) || player.translation[2] > -370_000
+            })
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
+        }
+        if self.route_stage == 1
+            && !self.bridge_hit
+            && !self.a4_landing_brake_done
+            && player.is_some_and(|player| {
+                player.status_a & 1 == 0
+                    && (2_700_000..=2_900_000).contains(&player.translation[0])
+                    && player.translation[1] <= -80_000
+                    && player.translation[2] >= -3_100_000
+            })
+        {
+            self.a4_landing_brake_done = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT | PAD_DOWN;
+        }
+        if self.route_stage == 2 && self.a6_landing_brake_frames > 0 {
+            self.a6_landing_brake_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_DOWN;
+        }
+        if self.route_stage == 2
+            && !self.a6_landing_brake_done
+            && player.is_some_and(|player| {
+                player.status_a & 1 == 0
+                    && player.translation[1] <= 100_000
+                    && (-3_400_000..=-3_150_000).contains(&player.translation[2])
+            })
+        {
+            self.a6_landing_brake_done = true;
+            self.a6_landing_brake_frames = 4;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_DOWN;
         }
         if self.a8_hazard_waiting {
             let hazard_y = objects.iter().find_map(|object| {
@@ -13792,7 +15290,7 @@ impl GeneratorRoomCompletionRouteController {
             }
             if self.a9_target_high_seen
                 && player.is_some_and(|player| {
-                    player.translation[0] <= 1_050_000
+                    player.translation[0] <= 1_080_000
                         && player.translation[2] <= -5_690_000
                         && player.status_a & 1 != 0
                 })
@@ -13867,6 +15365,25 @@ impl GeneratorRoomCompletionRouteController {
         }
         if self.route_stage == 6 && player_collider_entity == Some(72) {
             self.b1_platform_landed = true;
+            if !self.session_globals {
+                self.route_stage = 7;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 73)
+                    .then_some(object.translation[1])
+            });
+            if target_y.is_none_or(|y| y > -390_000) {
+                // A carried campaign session can reach this platform roughly
+                // half a moving-platform cycle earlier than a fresh boot.
+                // Stay aboard until the next platform is at the bottom of its
+                // travel; launching while it is descending crosses beneath it.
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
             self.route_stage = 7;
             self.jump_frames = jump_hold;
             self.release_frames = 5;
@@ -13882,6 +15399,10 @@ impl GeneratorRoomCompletionRouteController {
             let target_y = objects.iter().find_map(|object| {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 75)
                     .then_some(object.translation[1])
+            });
+            let first_hazard_z = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 74)
+                    .then_some(object.translation[2])
             });
             if target_y.is_some_and(|y| y >= 190_000) {
                 self.b2_target_high_seen = true;
@@ -13899,7 +15420,15 @@ impl GeneratorRoomCompletionRouteController {
             if player.is_some_and(|player| player.translation[0] < 1_680_000) {
                 return PAD_RIGHT;
             }
-            if self.b2_target_high_seen && target_y.is_some_and(|y| y <= 150_000) {
+            if self.b2_target_high_seen
+                && target_y.is_some_and(|y| y <= 150_000)
+                && (!self.session_globals || first_hazard_z.is_some_and(|z| z <= -9_020_000))
+            {
+                // Entity 74 sweeps across the approach independently of the
+                // destination platform.  A carried campaign reaches this
+                // crossing in a different hazard phase than a fresh boot, so
+                // wait until it has moved behind the lane before starting the
+                // six-frame run-up.
                 self.b2_depart_runup = true;
                 self.b2_depart_runup_frames = 0;
                 return PAD_RIGHT;
@@ -13925,12 +15454,48 @@ impl GeneratorRoomCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 77)
                     .then_some(object.translation[1])
             });
-            if hazard_z.is_some_and(|z| z <= -9_000_000 || z >= -8_600_000)
-                && target_y.is_some_and(|y| y <= 200_000)
-            {
-                if player.is_some_and(|player| player.translation[0] < 2_210_000) {
-                    return PAD_RIGHT;
+            if !self.session_globals {
+                if hazard_z.is_some_and(|z| z <= -9_000_000 || z >= -8_600_000)
+                    && target_y.is_some_and(|y| y <= 200_000)
+                {
+                    if player.is_some_and(|player| player.translation[0] < 2_210_000) {
+                        return PAD_RIGHT;
+                    }
+                    self.route_stage = 9;
+                    self.jump_frames = jump_hold;
+                    self.release_frames = 5;
+                    return PAD_RIGHT | PAD_CROSS;
                 }
+                return 0;
+            }
+            let hazard_moving_away =
+                self.b2_hazard_previous_z
+                    .zip(hazard_z)
+                    .is_some_and(|(previous, current)| {
+                        (current <= -9_000_000 && current < previous)
+                            || (current >= -8_600_000 && current > previous)
+                    });
+            self.b2_hazard_previous_z = hazard_z;
+            let target_descending = self
+                .b2_third_target_previous_y
+                .zip(target_y)
+                .is_some_and(|(previous, current)| current < previous);
+            self.b2_third_target_previous_y = target_y;
+            if player.is_some_and(|player| player.translation[0] < 2_150_000) {
+                // Set up at the right edge while the platform cycles.  The
+                // carried route lands farther left than a fresh boot; limiting
+                // this movement to the narrow departure window only advances
+                // a few pixels per cycle and can never reach the jump point.
+                // Release early enough for Crash's horizontal momentum to
+                // coast into the 2.21M departure stance without leaving the
+                // moving platform.
+                return PAD_RIGHT;
+            }
+            if hazard_moving_away
+                && target_y.is_some_and(|y| (175_000..=205_000).contains(&y))
+                && target_descending
+                && player.is_some_and(|player| player.translation[0] >= 2_210_000)
+            {
                 self.route_stage = 9;
                 self.jump_frames = jump_hold;
                 self.release_frames = 5;
@@ -13939,6 +15504,24 @@ impl GeneratorRoomCompletionRouteController {
             return 0;
         }
         if self.route_stage == 9 && player_collider_entity == Some(77) {
+            if self.session_globals {
+                let source_y = objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 77)
+                        .then_some(object.translation[1])
+                });
+                if player.is_none_or(|player| player.status_a & 1 == 0)
+                    || source_y.is_none_or(|y| y < 35_000)
+                {
+                    // A collider hit can precede the grounded flag when this
+                    // platform is rising into Crash. The carried route also
+                    // reaches its top one platform tick before the passing fresh
+                    // route. Wait for the same rising departure surface before
+                    // committing to the jump toward entity 78.
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return 0;
+                }
+            }
             self.b2_third_platform_landed = true;
         }
         if self.route_stage == 9 && player_collider_entity == Some(78) {
@@ -13976,23 +15559,81 @@ impl GeneratorRoomCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 86)
                     .then_some(object.translation[0])
             });
-            if player.is_some_and(|player| player.translation[0] > 3_960_000) {
+            // Fresh and carried sessions board platform 87 at distinct live
+            // phases of entity 86. Preserve the original fresh-boot stance and
+            // departure threshold when that phase is observed; the carried
+            // phase needs the narrower left stance below for landing margin.
+            let fresh_phase_stance = *self
+                .b4_fresh_phase_stance
+                .get_or_insert_with(|| target_x.is_some_and(|x| x < 3_520_000));
+            if fresh_phase_stance {
+                if player.is_some_and(|player| player.translation[0] > 3_960_000) {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_LEFT;
+                }
+                if player.is_some_and(|player| player.translation[0] < 3_920_000) {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_RIGHT;
+                }
+                if player.is_some_and(|player| player.translation[2] >= -6_900_000)
+                    && target_x.is_some_and(|x| x >= 3_500_000)
+                {
+                    self.route_stage = 12;
+                    self.jump_frames = jump_hold;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                }
                 self.jump_frames = 0;
                 self.release_frames = 0;
+                return 0;
+            }
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                if self.release_frames == 0 {
+                    self.route_stage = 12;
+                    self.jump_frames = jump_hold;
+                    return PAD_LEFT | PAD_CROSS;
+                }
                 return PAD_LEFT;
             }
-            if player.is_some_and(|player| player.translation[0] < 3_920_000) {
-                self.jump_frames = 0;
-                self.release_frames = 0;
-                return PAD_RIGHT;
+            // Settle toward the left side of platform 87 while waiting. Entity 86
+            // can be several ticks farther through its cycle in a carried session,
+            // so the old 3.92m stance left no x margin at landing. Brake the
+            // approach explicitly to avoid oscillating off the moving platform.
+            if let Some(player) = player {
+                let x = player.translation[0];
+                let velocity_x = player.velocity[0];
+                if x > 3_900_000 {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return if velocity_x < -100_000 { 0 } else { PAD_LEFT };
+                }
+                if x < 3_880_000 {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return if velocity_x > 100_000 { 0 } else { PAD_RIGHT };
+                }
+                if velocity_x < -100_000 {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_RIGHT;
+                }
+                if velocity_x > 100_000 {
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_LEFT;
+                }
             }
-            if player.is_some_and(|player| player.translation[2] >= -6_860_000)
+            if player.is_some_and(|player| player.translation[2] >= -6_900_000)
                 && target_x.is_some_and(|x| x >= 3_500_000)
             {
-                self.route_stage = 12;
-                self.jump_frames = jump_hold;
-                self.release_frames = 5;
-                return PAD_LEFT | PAD_DOWN | PAD_CROSS;
+                // In the carried phase entity 86 is already sweeping left.
+                // Build a small amount of leftward velocity while platform 87
+                // still supports Crash, then jump on the next input edge.
+                self.release_frames = 2;
+                return PAD_LEFT;
             }
             self.jump_frames = 0;
             self.release_frames = 0;
@@ -14009,7 +15650,7 @@ impl GeneratorRoomCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 93)
                     .then_some(object.translation[1])
             });
-            if player.is_some_and(|player| player.translation[0] <= 3_200_000)
+            if player.is_some_and(|player| player.translation[0] <= 3_300_000)
                 && hazard_y.is_some_and(|y| y <= -700_000)
             {
                 self.route_stage = 14;
@@ -14028,7 +15669,39 @@ impl GeneratorRoomCompletionRouteController {
             return 0;
         }
         if self.route_stage == 15 {
-            if player.is_some_and(|player| player.translation[0] <= 1_820_000) {
+            let source = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 91)
+                    .then_some(object.translation)
+            });
+            let target_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 102)
+                    .then_some(object.translation[1])
+            });
+            let target_descending = self
+                .b6_target_previous_y
+                .zip(target_y)
+                .is_some_and(|(previous, current)| current < previous);
+            self.b6_target_previous_y = target_y;
+            let relative = player.zip(source).map(|(player, source)| {
+                (
+                    player.translation[0] - source[0],
+                    player.translation[2] - source[2],
+                )
+            });
+            let target_phase_ready = if self.b4_fresh_phase_stance == Some(true) {
+                target_y.is_some_and(|y| (-750_000..=-690_000).contains(&y))
+            } else {
+                target_y.is_some_and(|y| (-750_000..=-620_000).contains(&y))
+            };
+            if player.is_some_and(|player| {
+                player.translation[0] <= 1_710_000
+                    && (-6_560_000..=-6_530_000).contains(&player.translation[2])
+                    && player.status_a & 1 != 0
+            }) && relative.is_some_and(|(x, z)| {
+                (-85_000..=-60_000).contains(&x) && (-100_000..=-70_000).contains(&z)
+            }) && target_phase_ready
+                && target_descending
+            {
                 self.route_stage = 16;
                 self.jump_frames = jump_hold;
                 self.release_frames = 5;
@@ -14036,26 +15709,64 @@ impl GeneratorRoomCompletionRouteController {
             }
             self.jump_frames = 0;
             self.release_frames = 0;
-            return 0;
+            if self.b4_fresh_phase_stance == Some(true) {
+                // The fresh phase is the original deterministic route: Crash
+                // remains parented at the landing offset until entity 102
+                // reaches the characterized departure window.
+                return 0;
+            }
+            let velocity = player.map_or([0; 3], |player| player.velocity);
+            let mut held = match relative.map(|(x, _)| x) {
+                Some(x) if x > -60_000 && velocity[0] >= -100_000 => PAD_LEFT,
+                Some(x) if x < -85_000 && velocity[0] <= 100_000 => PAD_RIGHT,
+                Some(_) if velocity[0] < -100_000 => PAD_RIGHT,
+                Some(_) if velocity[0] > 100_000 => PAD_LEFT,
+                _ => 0,
+            };
+            held |= match relative.map(|(_, z)| z) {
+                Some(z) if z > -70_000 && velocity[2] >= -100_000 => PAD_UP,
+                Some(z) if z < -100_000 && velocity[2] <= 100_000 => PAD_DOWN,
+                Some(_) if velocity[2] < -100_000 => PAD_DOWN,
+                Some(_) if velocity[2] > 100_000 => PAD_UP,
+                _ => 0,
+            };
+            return held;
         }
-        if self.route_stage == 16
-            && player.is_some_and(|player| {
-                player.translation[0] <= 1_500_000 && player.status_a & 1 != 0
-            })
-        {
+        if self.route_stage == 16 && player_collider_entity == Some(102) {
             self.route_stage = 17;
             self.jump_frames = 0;
             self.release_frames = 0;
             return 0;
         }
         if self.route_stage == 17 {
+            if player.is_none_or(|player| player.status_a & 1 == 0) {
+                // Collider contact is reported one frame before the grounded
+                // flag on this moving platform. Latch the transfer, then avoid
+                // steering back off the platform until the landing settles.
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
             let target_y = objects.iter().find_map(|object| {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 100)
                     .then_some(object.translation[1])
             });
+            let wall_target_x = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 120)
+                    .then_some(object.translation[0])
+            });
+            let wall_phase_ready = self.b4_fresh_phase_stance != Some(false)
+                || wall_target_x.is_some_and(|x| x >= 1_180_000);
             if target_y.is_some_and(|y| y <= -900_000)
+                && wall_phase_ready
                 && player.is_some_and(|player| player.status_a & 1 != 0)
             {
+                if self.b4_fresh_phase_stance == Some(false) && !self.b7_depart_runup {
+                    self.b7_depart_runup = true;
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return PAD_UP;
+                }
                 self.route_stage = 18;
                 self.jump_frames = jump_hold;
                 self.release_frames = 5;
@@ -14063,22 +15774,87 @@ impl GeneratorRoomCompletionRouteController {
             }
             self.jump_frames = 0;
             self.release_frames = 0;
-            return match player.map(|player| player.translation[0]) {
-                Some(x) if x > 1_270_000 => PAD_LEFT,
-                Some(x) if x < 1_190_000 => PAD_RIGHT,
+            let mut held = match player.map(|player| player.translation[0]) {
+                Some(x) if x > 1_250_000 => PAD_LEFT,
+                Some(x) if x < 1_238_000 => PAD_RIGHT,
                 _ => 0,
             };
+            held |= match player.map(|player| player.translation[2]) {
+                Some(z) if z < -6_525_000 => PAD_DOWN,
+                Some(z) if z > -6_505_000 => PAD_UP,
+                _ => 0,
+            };
+            return held;
         }
         if self.route_stage == 18
-            && matches!(player_collider_entity, Some(94..=99 | 103 | 104 | 117))
+            && player_collider_entity == Some(90)
+            && player.is_some_and(|player| player.status_a & 1 != 0)
+            && self.b4_fresh_phase_stance != Some(true)
         {
+            // A carried save-state handshake can consume the generic
+            // grounded auto-jump on the checkpoint platform. Make this
+            // authored departure explicit for both fresh and carried runs.
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.route_stage == 18
+            && self.b4_fresh_phase_stance != Some(true)
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (-8_900_000..=-8_860_000).contains(&player.translation[2])
+            })
+        {
+            // The carried checkpoint handshake reaches this last floor tile
+            // two frames later in the auto-jump release cycle. Jump from the
+            // live floor position so the authored upper box, rather than the
+            // bottom of the stack, receives the landing.
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.route_stage == 18 && player_collider_entity == Some(99) {
             self.route_stage = 19;
         }
+        if self.route_stage == 18 && matches!(player_collider_entity, Some(117 | 121)) {
+            self.route_stage = 20;
+        }
+        if self.route_stage == 18 && matches!(player_collider_entity, Some(103 | 104)) {
+            self.route_stage = 20;
+            return PAD_RIGHT | PAD_UP;
+        }
         if self.route_stage == 19 && player_collider_entity == Some(117) {
-            self.route_stage = 22;
+            if player.is_some_and(|player| player.translation[2] <= -9_000_000) {
+                self.route_stage = 22;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_DOWN;
+            }
+            self.route_stage = 20;
+        }
+        if self.route_stage == 20 && player_collider_entity == Some(103) {
+            self.route_stage = 23;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.route_stage == 20 && player_collider_entity == Some(104) {
+            // Entity 104 is the upper half of the right-hand box column.
+            // Finish crossing that column before centering on platform 121:
+            // steering left here lands on entity 99 and triggers its short
+            // crate bounce, which cannot span the remaining gap.
+            self.route_stage = 23;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.route_stage == 20 && player_collider_entity == Some(121) {
+            // The carried trajectory can clear the wall entirely and land on
+            // the authored moving platform used by stage 26.
+            self.route_stage = 26;
             self.jump_frames = 0;
             self.release_frames = 0;
-            return PAD_DOWN;
+            return 0;
         }
         if self.route_stage == 22 {
             if player.is_some_and(|player| player.status_a & 1 == 0) {
@@ -14105,10 +15881,40 @@ impl GeneratorRoomCompletionRouteController {
                 self.b7_wall_airborne_seen = true;
             }
             if self.b7_wall_airborne_seen
+                && player_collider_entity.is_none()
                 && player.is_some_and(|player| {
                     player.status_a & 1 != 0 && player.translation[2] <= -8_930_000
                 })
             {
+                let platform = objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 121)
+                        .then_some(object.bound)
+                        .flatten()
+                });
+                let takeoff = (self.b4_fresh_phase_stance == Some(false))
+                    .then_some(())
+                    .and(player.zip(platform))
+                    .filter(|(player, platform)| {
+                        let gap = player.translation[2] - platform.max.z;
+                        let x_margin = 51_200;
+                        player.translation[0] >= platform.min.x - x_margin
+                            && player.translation[0] <= platform.max.x + x_margin
+                            && (350_000..=525_000).contains(&gap)
+                    });
+                if let Some((player, platform)) = takeoff {
+                    let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+                    let horizontal = if player.translation[0] < target_x - 20_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > target_x + 20_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    self.route_stage = 25;
+                    self.jump_frames = jump_hold;
+                    self.release_frames = 5;
+                    return horizontal | PAD_UP | PAD_CROSS;
+                }
                 self.route_stage = 24;
                 self.jump_frames = 0;
                 self.release_frames = 0;
@@ -14272,8 +16078,8 @@ impl GeneratorRoomCompletionRouteController {
             if self.b8_platform_wait_frames < 8 {
                 self.b8_platform_wait_frames += 1;
                 let mut held = match player.map(|player| player.translation[0]) {
-                    Some(x) if x > 2_390_000 => PAD_LEFT,
-                    Some(x) if x < 2_310_000 => PAD_RIGHT,
+                    Some(x) if x > 2_410_000 => PAD_LEFT,
+                    Some(x) if x < 2_370_000 => PAD_RIGHT,
                     _ => 0,
                 };
                 held |= match player.map(|player| player.translation[2]) {
@@ -14319,23 +16125,11 @@ impl GeneratorRoomCompletionRouteController {
                 self.release_frames = 5;
                 return PAD_UP | PAD_CROSS;
             }
-            return match (player.map(|player| player.translation), target) {
-                (Some([x, _, z]), Some([target_x, _, target_z])) => {
-                    let mut held = 0;
-                    if x < target_x - 35_000 {
-                        held |= PAD_RIGHT;
-                    } else if x > target_x + 35_000 {
-                        held |= PAD_LEFT;
-                    }
-                    if z < target_z - 35_000 {
-                        held |= PAD_DOWN;
-                    } else if z > target_z + 35_000 {
-                        held |= PAD_UP;
-                    }
-                    held
-                }
-                _ => 0,
-            };
+            // Entity 125 carries Crash with its own transform. Chasing its
+            // center during a one-frame collider flicker makes the carried
+            // route walk off the platform; neutral input lets the authored
+            // parenting keep the relative landing position stable.
+            return 0;
         }
         if self.route_stage == 37
             && player_collider_entity.is_none()
@@ -14520,15 +16314,15 @@ impl GeneratorRoomCompletionRouteController {
             }
             return match (player.map(|player| player.translation), target) {
                 (Some([x, _, z]), Some([target_x, _, target_z])) => {
-                    (if x < target_x - 35_000 {
+                    (if x < target_x - 15_000 {
                         PAD_RIGHT
-                    } else if x > target_x + 35_000 {
+                    } else if x > target_x - 5_000 {
                         PAD_LEFT
                     } else {
                         0
-                    }) | if z < target_z - 35_000 {
+                    }) | if z < target_z + 10_000 {
                         PAD_DOWN
-                    } else if z > target_z + 35_000 {
+                    } else if z > target_z + 30_000 {
                         PAD_UP
                     } else {
                         0
@@ -14541,10 +16335,7 @@ impl GeneratorRoomCompletionRouteController {
             if player.is_some_and(|player| player.status_a & 1 == 0) {
                 self.c0_depart_airborne_seen = true;
             }
-            if self.c0_depart_airborne_seen
-                && player_collider_entity == Some(45)
-                && player.is_some_and(|player| player.status_a & 1 != 0)
-            {
+            if self.c0_depart_airborne_seen && player_collider_entity == Some(45) {
                 self.route_stage = 48;
                 self.jump_frames = 0;
                 self.release_frames = 0;
@@ -14831,12 +16622,33 @@ impl GeneratorRoomCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 86)
                     .then_some(object.translation)
             });
-            match (player.map(|player| player.translation), target) {
-                (Some([x, _, _]), Some([target_x, _, _])) if x > target_x + 400_000 => PAD_LEFT,
-                _ => PAD_LEFT | PAD_DOWN,
+            if self.b4_fresh_phase_stance == Some(false) {
+                // Entity 86 is moving left faster than the source platform
+                // approaches it in this phase.  Alternate digital axes to
+                // produce the shallower, roughly 2:1 left/depth trajectory
+                // needed to meet its live bounds.
+                if self.jump_frames > 6 {
+                    PAD_LEFT
+                } else {
+                    PAD_LEFT | PAD_DOWN
+                }
+            } else {
+                match (player.map(|player| player.translation), target) {
+                    (Some([x, _, _]), Some([target_x, _, _])) if x > target_x + 400_000 => PAD_LEFT,
+                    _ => PAD_LEFT | PAD_DOWN,
+                }
             }
         } else if self.route_stage == 14 {
+            let target_z = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 91)
+                    .then_some(object.translation[2])
+            });
             PAD_LEFT
+                | match (player.map(|player| player.translation[2]), target_z) {
+                    (Some(z), Some(target)) if z <= target && z > target - 70_000 => PAD_UP,
+                    (Some(z), Some(target)) if z < target - 105_000 => PAD_DOWN,
+                    _ => 0,
+                }
                 | if self.tick.is_multiple_of(7) {
                     PAD_SQUARE
                 } else {
@@ -14860,6 +16672,20 @@ impl GeneratorRoomCompletionRouteController {
                 | match (player.map(|player| player.translation[0]), target_x) {
                     (Some(x), Some(target)) if x < target - 180_000 => PAD_RIGHT,
                     (Some(x), Some(target)) if x > target - 140_000 => PAD_LEFT,
+                    _ => 0,
+                }
+        } else if self.route_stage == 20 && self.b4_fresh_phase_stance != Some(true) {
+            let target_x = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(entity) if matches!(entity.id, 103 | 104 | 117)
+                )
+                .then_some(object.translation[0])
+            });
+            PAD_UP
+                | match (player.map(|player| player.translation[0]), target_x) {
+                    (Some(x), Some(target)) if x < target + 10_000 => PAD_RIGHT,
+                    (Some(x), Some(target)) if x > target + 30_000 => PAD_LEFT,
                     _ => 0,
                 }
         } else if self.route_stage == 23 {
@@ -15171,16 +16997,42 @@ impl GeneratorRoomCompletionRouteController {
 /// level boot through its normal `WarpC` transition.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ToxicWasteCompletionRouteController {
+    session_globals: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
+    started: bool,
+    a6_barrel_stage: u8,
+    a8_checkpoint_hold_frames: u8,
+    b6_stage: u8,
+    b6_hold_frames: u8,
+    c0_stage: u8,
+    c0_wait_frames: u8,
+    c2_stage: u8,
+    c2_wait_frames: u8,
+    c3_stage: u8,
+    c3_frames: u8,
+    c4_stage: u8,
+    c4_frames: u8,
+    c5_stage: u8,
+    c5_frames: u8,
+    c6_steer_stage: u8,
+    c6_steer_frames: u8,
 }
 
 impl ToxicWasteCompletionRouteController {
     fn held(&mut self, player: Option<PlayerTrace>, objects: &[ProgramObjectTrace]) -> u32 {
+        if !self.started {
+            if !player.is_some_and(|player| matches!(player.state, 1 | 2)) {
+                return PAD_UP;
+            }
+            self.started = true;
+            self.tick = 54;
+        }
         self.tick = self.tick.saturating_add(1);
         let mut held = PAD_UP;
         let fat = Eid::from_name("FatsC").expect("fixed Toxic Waste enemy EID is valid");
+        let barrel = Eid::from_name("BaraC").expect("fixed Toxic Waste barrel EID is valid");
         if self.tick % 6 == 5
             && player.is_some_and(|player| {
                 objects.iter().any(|object| {
@@ -15194,6 +17046,74 @@ impl ToxicWasteCompletionRouteController {
             held |= PAD_SQUARE;
         }
 
+        // The carried campaign can enter a6 a few pixels lower than a fresh
+        // boot after landing on the preceding barrel.  Starting the next
+        // cadence jump immediately then catches the following barrel in its
+        // side instead of landing on it.  Walk until the live collision bound
+        // is within the characterized stomp takeoff window.
+        let a6 = Eid::from_name("a6_7Z").expect("fixed Toxic Waste a6 EID is valid");
+        if self.session_globals
+            && self.a6_barrel_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == a6
+                    && player.translation[2] <= 24_350_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            self.a6_barrel_stage = 1;
+        }
+        if self.a6_barrel_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let barrel_gap = player.and_then(|player| {
+                objects
+                    .iter()
+                    .filter(|object| {
+                        object.program == barrel
+                            && matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 16,
+                                    subtype: 1
+                                }
+                            )
+                    })
+                    .filter_map(|object| {
+                        object
+                            .bound
+                            .map(|bound| player.translation[2] - bound.max.z)
+                    })
+                    .filter(|gap| *gap >= 0)
+                    .min()
+            });
+            if barrel_gap.is_some_and(|gap| gap <= 450_000) {
+                self.a6_barrel_stage = 2;
+                self.jump_frames = 18;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return PAD_UP;
+        }
+
+        // The checkpoint bounce can occur one frame after the historical
+        // absolute hold window in a carried campaign.  Latch the authored
+        // bounce state and sustain Cross until the full-width waste channel
+        // has been crossed.
+        let a8 = Eid::from_name("a8_7Z").expect("fixed Toxic Waste a8 EID is valid");
+        if self.session_globals
+            && self.a8_checkpoint_hold_frames == 0
+            && player.is_some_and(|player| {
+                player.zone == a8 && player.state == 14 && player.translation[2] <= 20_500_000
+            })
+        {
+            self.a8_checkpoint_hold_frames = 20;
+        }
+        if self.a8_checkpoint_hold_frames != 0 {
+            self.a8_checkpoint_hold_frames -= 1;
+            held |= PAD_CROSS;
+        }
+
         // The opening barrel pair shares Crash's center lane. Cross the right
         // shoulder while airborne, then return to center after it passes.
         if (61..=78).contains(&self.tick) {
@@ -15204,10 +17124,89 @@ impl ToxicWasteCompletionRouteController {
         // c6's low bouncing barrel occupies the center line even at Crash's
         // maximum jump height. Briefly use the left shoulder, then recenter
         // before the following waste channel.
-        if (1_988..=1_996).contains(&self.tick) {
+        let c5 = Eid::from_name("c5_7Z").expect("fixed Toxic Waste c5 EID is valid");
+        let c6 = Eid::from_name("c6_7Z").expect("fixed Toxic Waste c6 EID is valid");
+        if self.c6_steer_stage == 0
+            && player.is_some_and(|player| {
+                (player.zone == c5 || player.zone == c6) && player.translation[2] <= -3_240_000
+            })
+        {
+            self.c6_steer_stage = 1;
+            self.c6_steer_frames = 9;
+        }
+        if self.c6_steer_stage == 1 && self.c6_steer_frames != 0 {
             held |= PAD_LEFT;
-        } else if (1_997..=2_009).contains(&self.tick) {
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 2;
+                self.c6_steer_frames = 13;
+            }
+        } else if self.c6_steer_stage == 2 && self.c6_steer_frames != 0 {
             held |= PAD_RIGHT;
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 3;
+            }
+        }
+        if self.c6_steer_stage == 3
+            && player.is_some_and(|player| player.zone == c6 && player.translation[2] <= -4_050_000)
+        {
+            self.c6_steer_stage = 4;
+            self.c6_steer_frames = 9;
+        }
+        if self.c6_steer_stage == 4 && self.c6_steer_frames != 0 {
+            held |= PAD_LEFT;
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 5;
+                self.c6_steer_frames = 13;
+            }
+        } else if self.c6_steer_stage == 5 && self.c6_steer_frames != 0 {
+            held |= PAD_RIGHT;
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 6;
+            }
+        }
+
+        let b5 = Eid::from_name("b5_7Z").expect("fixed Toxic Waste b5 EID is valid");
+        let b6 = Eid::from_name("b6_7Z").expect("fixed Toxic Waste b6 EID is valid");
+        if self.b6_stage == 0
+            && player.is_some_and(|player| player.zone == b5 && player.translation[2] <= 11_875_584)
+        {
+            self.b6_stage = 1;
+        }
+        if self.b6_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if !player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+            {
+                return PAD_UP;
+            }
+            // Give Cross one grounded release frame so the trench takeoff is
+            // a fresh tap even when the preceding cadence reached the lip
+            // with jump still held.
+            self.b6_stage = 2;
+            return PAD_UP;
+        }
+        if self.b6_stage == 2 {
+            self.b6_stage = 3;
+            self.b6_hold_frames = 23;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.b6_stage == 3 {
+            if self.b6_hold_frames != 0 {
+                self.b6_hold_frames -= 1;
+                return PAD_UP | PAD_CROSS;
+            }
+            if player.is_some_and(|player| {
+                player.zone == b6 && player.translation[2] <= 11_200_000 && player.status_a & 1 != 0
+            }) {
+                self.b6_stage = 4;
+            } else {
+                return PAD_UP;
+            }
         }
 
         // Hold through the checkpoint bounce to cross the type-four waste
@@ -15222,21 +17221,21 @@ impl ToxicWasteCompletionRouteController {
         }
         // Sustain the delayed b6 takeoff long enough to clear its full-width
         // type-four waste trench.
-        if (1_157..=1_179).contains(&self.tick) {
+        if self.b6_stage == 0 && (1_157..=1_179).contains(&self.tick) {
             held |= PAD_CROSS;
         }
         // Delay the c3 takeoff to the trench lip, then sustain the jump over
         // the final full-width waste channel.
-        if (1_739..=1_763).contains(&self.tick) {
+        if self.c3_stage == 0 && (1_739..=1_763).contains(&self.tick) {
             held |= PAD_CROSS;
         }
         // Re-phase c4's first jump so the opening bouncing barrel is below
         // Crash when their paths cross.
-        if (1_857..=1_881).contains(&self.tick) {
+        if self.c4_stage == 0 && (1_857..=1_881).contains(&self.tick) {
             held |= PAD_CROSS;
         }
         // Apply the same low-barrel timing to c5's center lane.
-        if (1_939..=1_963).contains(&self.tick) {
+        if self.c5_stage == 0 && (1_939..=1_963).contains(&self.tick) {
             held |= PAD_CROSS;
         }
 
@@ -15258,25 +17257,25 @@ impl ToxicWasteCompletionRouteController {
         }
         // Approach the b6 trench on foot so the following full jump starts at
         // its lip instead of descending into Toxic Waste's drowning surface.
-        if (1_148..=1_156).contains(&self.tick) {
+        if self.b6_stage == 0 && (1_148..=1_156).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return held & !PAD_CROSS;
         }
         // Walk the last few c3 frames before taking the sustained trench jump.
-        if (1_736..=1_738).contains(&self.tick) {
+        if self.c3_stage == 0 && (1_736..=1_738).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return held & !PAD_CROSS;
         }
         // Re-phase c4's first low barrel from the preceding landing.
-        if (1_848..=1_856).contains(&self.tick) {
+        if self.c4_stage == 0 && (1_848..=1_856).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return held & !PAD_CROSS;
         }
         // Re-phase the corresponding c5 barrel from its preceding landing.
-        if (1_930..=1_938).contains(&self.tick) {
+        if self.c5_stage == 0 && (1_930..=1_938).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return held & !PAD_CROSS;
@@ -15291,17 +17290,173 @@ impl ToxicWasteCompletionRouteController {
         }
         // Stop in b8's solid center lane while the final fast barrel rolls
         // past. Sidestepping here enters the adjacent waste channels.
-        if (1_350..=1_360).contains(&self.tick) {
+        if (1_350..=1_366).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return 0;
         }
         // Give c0's last center barrel the same solid-lane right of way before
         // resuming the final ascent.
+        let b9 = Eid::from_name("b9_7Z").expect("fixed Toxic Waste b9 EID is valid");
         if (1_470..=1_480).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return 0;
+        }
+        // Recover the distance shed by b8's longer live wait before entering
+        // c0's narrow safe surface. Walk three grounded frames after the first
+        // post-barrel arc, then take a fresh full jump.
+        if self.c0_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == b9
+                    && player.translation[2] <= 5_800_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            self.c0_stage = 1;
+            self.c0_wait_frames = 3;
+        }
+        if self.c0_stage == 1 && self.c0_wait_frames != 0 {
+            self.c0_wait_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.c0_stage == 1 {
+            self.c0_stage = 2;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return held | PAD_CROSS;
+        }
+        let c1 = Eid::from_name("c1_7Z").expect("fixed Toxic Waste c1 EID is valid");
+        if self.c2_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == c1
+                    && player.translation[2] <= 3_100_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            self.c2_stage = 1;
+            self.c2_wait_frames = 3;
+        }
+        if self.c2_stage == 1 && self.c2_wait_frames != 0 {
+            self.c2_wait_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.c2_stage == 1 {
+            self.c2_stage = 2;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return held | PAD_CROSS;
+        }
+        let c2 = Eid::from_name("c2_7Z").expect("fixed Toxic Waste c2 EID is valid");
+        if self.c3_stage == 0
+            && player.is_some_and(|player| player.zone == c2 && player.translation[2] <= 1_500_000)
+        {
+            self.c3_stage = 1;
+        }
+        if self.c3_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if !player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+            {
+                return held & !PAD_CROSS;
+            }
+            self.c3_stage = 2;
+            self.c3_frames = 3;
+        }
+        if self.c3_stage == 2 && self.c3_frames != 0 {
+            self.c3_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.c3_stage == 2 {
+            self.c3_stage = 3;
+            self.c3_frames = 25;
+        }
+        if self.c3_stage == 3 && self.c3_frames != 0 {
+            self.c3_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held | PAD_CROSS;
+        }
+        if self.c3_stage == 3 {
+            self.c3_stage = 4;
+        }
+        let c4 = Eid::from_name("c4_7Z").expect("fixed Toxic Waste c4 EID is valid");
+        if self.c4_stage == 0
+            && player.is_some_and(|player| player.zone == c4 && player.translation[2] <= -600_000)
+        {
+            self.c4_stage = 1;
+        }
+        if self.c4_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if !player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+            {
+                return held & !PAD_CROSS;
+            }
+            self.c4_stage = 2;
+            self.c4_frames = 8;
+        }
+        if self.c4_stage == 2 && self.c4_frames != 0 {
+            self.c4_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.c4_stage == 2 {
+            self.c4_stage = 3;
+            self.c4_frames = 12;
+        }
+        if self.c4_stage == 3 && self.c4_frames != 0 {
+            self.c4_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held | PAD_CROSS;
+        }
+        if self.c4_stage == 3 {
+            self.c4_stage = 4;
+        }
+        if self.c5_stage == 0
+            && player.is_some_and(|player| player.zone == c5 && player.translation[2] <= -2_100_000)
+        {
+            self.c5_stage = 1;
+        }
+        if self.c5_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if !player
+                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
+            {
+                return held & !PAD_CROSS;
+            }
+            self.c5_stage = 2;
+            self.c5_frames = 8;
+        }
+        if self.c5_stage == 2 && self.c5_frames != 0 {
+            self.c5_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.c5_stage == 2 {
+            self.c5_stage = 3;
+            self.c5_frames = 25;
+        }
+        if self.c5_stage == 3 && self.c5_frames != 0 {
+            self.c5_frames -= 1;
+            held |= PAD_CROSS;
+            if self.c5_frames == 0 {
+                self.c5_stage = 4;
+            }
         }
 
         // The opening section's final lane has a rolling barrel that meets the
@@ -15339,6 +17494,7 @@ impl ToxicWasteCompletionRouteController {
 /// level boot through its normal `WarpC` transition. It reacts only to retail
 /// camera, player, door, reactor-rod, and moving-platform state; it neither
 /// injects runtime state nor embeds proprietary recording data.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CortexPowerCompletionRouteController {
     tick: u32,
@@ -15346,6 +17502,17 @@ struct CortexPowerCompletionRouteController {
     release_frames: u8,
     hazard_stage: u8,
     hazard_tick: u8,
+    a4_entry_seen: bool,
+    a4_recovery_required: bool,
+    lower_barrier_previous_x: Option<i32>,
+    lower_barrier_waiting: bool,
+    lower_barrier_phase_cleared: bool,
+    lower_barrier_runup_frames: u8,
+    second_barrier_previous_x: Option<i32>,
+    six_b_middle_phase_cleared: bool,
+    six_b_middle_runup_frames: u8,
+    final_reactor_previous_x: Option<i32>,
+    final_reactor_phase_cleared: bool,
 }
 
 impl CortexPowerCompletionRouteController {
@@ -15522,6 +17689,39 @@ impl CortexPowerCompletionRouteController {
         route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         self.tick = self.tick.saturating_add(1);
+        let lower_barrier_x = route_objects.iter().find_map(|object| {
+            (matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 53)
+                && object.program
+                    == Eid::from_name("PoREC")
+                        .expect("fixed Cortex Power electrical-barrier EID is valid"))
+            .then_some(object.translation[0])
+        });
+        let lower_barrier_moving_right = lower_barrier_x
+            .zip(self.lower_barrier_previous_x)
+            .is_some_and(|(current, previous)| current > previous);
+        self.lower_barrier_previous_x = lower_barrier_x;
+        let second_barrier_x = route_objects.iter().find_map(|object| {
+            (matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 57)
+                && object.program
+                    == Eid::from_name("PoREC")
+                        .expect("fixed Cortex Power electrical-barrier EID is valid"))
+            .then_some(object.translation[0])
+        });
+        let second_barrier_moving_right = second_barrier_x
+            .zip(self.second_barrier_previous_x)
+            .is_some_and(|(current, previous)| current > previous);
+        self.second_barrier_previous_x = second_barrier_x;
+        let final_reactor_x = route_objects.iter().find_map(|object| {
+            (matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 199)
+                && object.program
+                    == Eid::from_name("PoRoC")
+                        .expect("fixed Cortex Power reactor-rod EID is valid"))
+            .then_some(object.translation[0])
+        });
+        let final_reactor_moving_right = final_reactor_x
+            .zip(self.final_reactor_previous_x)
+            .is_some_and(|(current, previous)| current > previous);
+        self.final_reactor_previous_x = final_reactor_x;
         let mut held = if self.tick >= 150 { PAD_UP } else { PAD_RIGHT };
         if let Some(player) = player
             && let Some(target_x) = Self::centerline_x(camera, player.translation[2])
@@ -15546,6 +17746,18 @@ impl CortexPowerCompletionRouteController {
             && camera.progress.raw() >= 18_000
         {
             held |= PAD_SQUARE;
+        }
+        if self.a4_recovery_required
+            && camera.path.zone
+                == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+            && player.is_some_and(|player| player.translation[2] <= 11_100_000)
+        {
+            // The long barrier waits phase-shift a later generic 24-frame spin
+            // pulse into the middle of the second 6b jump. Spinning there
+            // selects the steeper state-18 fall and lands on the powered
+            // strip. Keep the index-0 pulse: that one supplies the bounce from
+            // which the earlier carried-route launch is characterized.
+            held &= !PAD_SQUARE;
         }
         if (276..=320).contains(&self.tick) {
             self.jump_frames = 0;
@@ -15624,9 +17836,33 @@ impl CortexPowerCompletionRouteController {
             }
             self.hazard_stage = 5;
         }
-        let at_a4_exit = camera.path.zone
-            == Eid::from_name("a4_3Z").expect("fixed Cortex Power camera EID is valid")
-            && camera.progress.raw() >= 14_000;
+        let on_a4_reactor_approach = camera.path.zone
+            == Eid::from_name("a4_3Z").expect("fixed Cortex Power camera EID is valid");
+        if self.hazard_stage == 5 && on_a4_reactor_approach && !self.a4_entry_seen {
+            self.a4_entry_seen = true;
+            self.a4_recovery_required = player.is_some_and(|player| player.status_a & 1 == 0);
+        }
+        if self.hazard_stage == 5 && on_a4_reactor_approach && self.a4_recovery_required {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let Some(player) = player else {
+                return 0;
+            };
+            let approach = held & !PAD_CROSS;
+            // The carried campaign enters a4 one frame later than a fresh
+            // boot, so an absolute camera-progress jump can land on powered
+            // floor entity 33 instead of clearing it. Walk to the last safe
+            // authored floor section and wait for a grounded boundary before
+            // beginning the same sustained jump. This keys the route to live
+            // collision state and remains valid for either object phase.
+            if player.translation[2] > 26_420_000 || player.status_a & 1 == 0 {
+                return approach;
+            }
+            self.hazard_stage = 6;
+            self.hazard_tick = 0;
+            return approach | PAD_CROSS;
+        }
+        let at_a4_exit = on_a4_reactor_approach && camera.progress.raw() >= 14_000;
         if self.hazard_stage == 5
             && at_a4_exit
             && player.is_some_and(|player| player.status_a & 1 != 0)
@@ -15762,8 +17998,22 @@ impl CortexPowerCompletionRouteController {
                 && camera.path.zone
                     == Eid::from_name("a7_3Z").expect("fixed Cortex Power camera EID is valid")
                 && camera.path.index == 1
-                && player.is_some_and(|player| player.status_a & 1 != 0);
+                && player.is_some_and(|player| player.status_a & 1 != 0 && player.event == 0xff);
             if !landed_beyond_beam && self.hazard_tick <= 32 {
+                // Crash's spin-to-jump collision response supplies the extra
+                // forward speed needed to clear a7's narrow static burn-floor
+                // seam. Key its initial Square edge to this live jump stage:
+                // a carried session reaches the beam at a different absolute
+                // frame, so the generic 24-frame spin pulse otherwise arrives
+                // one frame late and drops the same jump onto that seam.
+                if self.hazard_tick <= 3 {
+                    let leap = (held & !PAD_SQUARE) | PAD_CROSS;
+                    return if self.hazard_tick == 2 {
+                        leap | PAD_SQUARE
+                    } else {
+                        leap
+                    };
+                }
                 return held | PAD_CROSS;
             }
             self.hazard_stage = 15;
@@ -15786,8 +18036,22 @@ impl CortexPowerCompletionRouteController {
             let Some(player) = player else {
                 return 0;
             };
-            if player.translation[2] > 20_950_000 {
+            // Enter the continuous power-floor jump before the last safe
+            // landing can begin a spin. The carried route is one 4,096-unit
+            // movement quantum behind the fresh boot here; both positions
+            // are on the same authored safe strip.
+            if player.translation[2] > 20_960_000 {
                 return held;
+            }
+            if self.a4_recovery_required && matches!(player.state, 17 | 19) {
+                // A carried session can reach this boundary on the generic
+                // spin pulse, entering the powered strip in its spin-bounce
+                // state one stride before the ordinary grounded launch. Join
+                // the same sustained-jump stage from that live bounce instead
+                // of waiting for a state-1/2 landing on the powered surface.
+                self.hazard_stage = 17;
+                self.hazard_tick = 0;
+                return held | PAD_CROSS;
             }
             if player.status_a & 1 == 0 || !matches!(player.state, 1 | 2) {
                 return held;
@@ -15842,8 +18106,7 @@ impl CortexPowerCompletionRouteController {
         }
         if self.hazard_stage == 19 {
             let on_lower_turn = camera.path.zone
-                == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid")
-                && matches!(camera.path.index, 0 | 2);
+                == Eid::from_name("a9_3Z").expect("fixed Cortex Power camera EID is valid");
             if on_lower_turn {
                 return held;
             }
@@ -15899,6 +18162,55 @@ impl CortexPowerCompletionRouteController {
             let in_second_lower_corridor = camera.path.zone
                 == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
                 && camera.path.index == 1;
+            if self.lower_barrier_runup_frames != 0 {
+                self.lower_barrier_runup_frames -= 1;
+                if self.lower_barrier_runup_frames == 0 {
+                    self.hazard_stage = 23;
+                    self.hazard_tick = 0;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return PAD_UP;
+            }
+            let reached_lower_barrier_runup = in_second_lower_corridor
+                && player.is_some_and(|player| player.translation[2] <= 16_985_000);
+            if !self.lower_barrier_phase_cleared
+                && self.a4_recovery_required
+                && (self.lower_barrier_waiting || reached_lower_barrier_runup)
+            {
+                self.lower_barrier_waiting = true;
+                let ready_for_phase_safe_jump = lower_barrier_moving_right
+                    && lower_barrier_x.is_some_and(|x| (1_930_000..=1_970_000).contains(&x))
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0 && matches!(player.state, 1 | 2)
+                    });
+                if !ready_for_phase_safe_jump {
+                    // Hold Crash on the safe run-up while the carried
+                    // campaign's electrical barrier finishes this cycle.
+                    // Launching as entity 53 begins travelling right from its
+                    // left extreme leaves it on the far side when both the
+                    // ordinary jump and checkpoint-crate bounce reach it.
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return player.map_or(0, |player| {
+                        if player.translation[2] < 17_000_000 {
+                            PAD_DOWN
+                        } else if player.translation[2] > 17_200_000 {
+                            PAD_UP
+                        } else {
+                            0
+                        }
+                    });
+                }
+                self.lower_barrier_waiting = false;
+                self.lower_barrier_phase_cleared = true;
+                // The checkpoint-bounce spin reaches the barrier one frame
+                // earlier than the ordinary bounce. Keep one additional
+                // grounded run-up frame so entity 53's left edge has moved
+                // beyond Crash's authored collision bound before the bounce
+                // enters its z slab.
+                self.lower_barrier_runup_frames = 9;
+                return PAD_UP;
+            }
             if in_second_lower_corridor
                 && player.is_some_and(|player| player.translation[2] > 16_985_000)
             {
@@ -15919,7 +18231,11 @@ impl CortexPowerCompletionRouteController {
                     (15_000_000..15_750_000).contains(&player.translation[2])
                 });
             if riding_third_corridor_platform
-                && moving_platform_z.is_some_and(|platform_z| platform_z > 15_100_000)
+                && (moving_platform_z.is_some_and(|platform_z| platform_z > 15_100_000)
+                    || (self.a4_recovery_required
+                        && !(second_barrier_moving_right
+                            && second_barrier_x
+                                .is_some_and(|x| (2_040_000..=2_070_000).contains(&x)))))
             {
                 let Some(player) = player else {
                     return 0;
@@ -15947,6 +18263,73 @@ impl CortexPowerCompletionRouteController {
                         0
                     };
             }
+            let six_b_middle_rod_x = route_objects.iter().find_map(|object| {
+                (object.program
+                    == Eid::from_name("PoRoC")
+                        .expect("fixed Cortex Power reactor-rod EID is valid")
+                    && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 200))
+                .then_some(object.translation[0])
+            });
+            if self.six_b_middle_runup_frames != 0 {
+                self.six_b_middle_runup_frames -= 1;
+                if self.six_b_middle_runup_frames == 0 {
+                    self.hazard_stage = 23;
+                    self.hazard_tick = 0;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return PAD_UP;
+            }
+            let at_six_b_middle_support = self.a4_recovery_required
+                && camera.path.zone
+                    == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && player.is_some_and(|player| {
+                    (10_850_000..=11_050_000).contains(&player.translation[2])
+                        && player.status_a & 1 != 0
+                });
+            if at_six_b_middle_support && !self.six_b_middle_phase_cleared {
+                // A carried session reaches entity 200 while its reactor rod
+                // is crossing the center lane. Settle on the safe support
+                // immediately before it and launch once the rod reaches its
+                // right extreme, matching the phase observed by a fresh boot.
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                if six_b_middle_rod_x.is_some_and(|x| x >= 2_250_000) {
+                    self.six_b_middle_phase_cleared = true;
+                    self.six_b_middle_runup_frames = 6;
+                    return PAD_UP;
+                }
+                return player.map_or(0, |player| {
+                    if player.translation[2] < 10_930_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 11_010_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                });
+            }
+            let waiting_before_second_six_b_rod = self.a4_recovery_required
+                && self.six_b_middle_phase_cleared
+                && !self.final_reactor_phase_cleared
+                && camera.path.zone
+                    == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && player.is_some_and(|player| {
+                    (10_300_000..=10_500_000).contains(&player.translation[2])
+                        && player.status_a & 1 != 0
+                });
+            if waiting_before_second_six_b_rod {
+                if final_reactor_moving_right && final_reactor_x.is_some_and(|x| x >= 2_250_000) {
+                    // Launch only after entity 199 has crossed the lane from
+                    // left to right. At its identical right-hand position on
+                    // the preceding half-cycle it is about to sweep back
+                    // through Crash's jump arc.
+                    self.final_reactor_phase_cleared = true;
+                    self.hazard_stage = 23;
+                    self.hazard_tick = 0;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return 0;
+            }
             let approaching_six_b_power_strip = camera.path.zone
                 == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
                 && camera.path.index == 0
@@ -15954,6 +18337,20 @@ impl CortexPowerCompletionRouteController {
                     (11_350_000..=11_750_000).contains(&player.translation[2])
                 });
             if approaching_six_b_power_strip {
+                let carried_route_ready_to_jump = self.a4_recovery_required
+                    && player.is_some_and(|player| {
+                        player.translation[2] <= 11_480_000 && player.status_a & 1 != 0
+                    });
+                if carried_route_ready_to_jump {
+                    // The checkpoint-bounce path reaches 6b in state 17 and
+                    // crosses into the powered floor's state-19 edge before
+                    // the fresh-boot launch point. Start this jump one grounded
+                    // stride earlier; direct boots retain their characterized
+                    // 11.35 m launch.
+                    self.hazard_stage = 23;
+                    self.hazard_tick = 0;
+                    return held | PAD_CROSS;
+                }
                 return held;
             }
             let probing_eight_b_gap = camera.path.zone
@@ -15972,7 +18369,17 @@ impl CortexPowerCompletionRouteController {
             }
             self.hazard_stage = 23;
             self.hazard_tick = 0;
-            return held | PAD_CROSS;
+            let accelerating_checkpoint_bounce = self.a4_recovery_required
+                && player.is_some_and(|player| {
+                    player.state == 14 && (16_300_000..=16_700_000).contains(&player.translation[2])
+                });
+            return held
+                | PAD_CROSS
+                | if accelerating_checkpoint_bounce {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
         }
         if self.hazard_stage == 23 {
             self.hazard_tick = self.hazard_tick.saturating_add(1);
@@ -15982,6 +18389,21 @@ impl CortexPowerCompletionRouteController {
                 self.hazard_stage = 22;
                 self.hazard_tick = 0;
                 return held;
+            }
+            if self.a4_recovery_required
+                && self.six_b_middle_phase_cleared
+                && !self.final_reactor_phase_cleared
+                && camera.path.zone
+                    == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && player.is_some_and(|player| {
+                    (10_300_000..=10_500_000).contains(&player.translation[2])
+                })
+            {
+                // The phase-safe run-up clears the first powered surface but
+                // carries slightly more speed than the fresh-boot jump. Brake
+                // only during its final descending strides so Crash settles
+                // onto the narrow support before entity 199.
+                return PAD_DOWN | PAD_CROSS;
             }
             if camera.path.zone
                 == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
@@ -16003,11 +18425,22 @@ impl CortexPowerCompletionRouteController {
                     }
                     | PAD_CROSS;
             }
-            if player.is_some_and(|player| {
-                (15_900_000..=16_300_000).contains(&player.translation[2])
-                    && player.translation[0] < 2_100_000
-            }) {
-                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            if let Some(player) =
+                player.filter(|player| (15_900_000..=16_300_000).contains(&player.translation[2]))
+            {
+                // Fresh boots need the rightward nudge to align the next
+                // support. The carried, phase-gated crossing is timed against
+                // entity 53's right extreme, so preserve the centerline while
+                // its accelerated bounce clears the floor seam.
+                return PAD_UP
+                    | if self.a4_recovery_required {
+                        0
+                    } else if player.translation[0] < 2_100_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    }
+                    | PAD_CROSS;
             }
             if let Some(player) =
                 player.filter(|player| (14_500_000..=15_200_000).contains(&player.translation[2]))
@@ -16046,10 +18479,56 @@ impl CortexPowerCompletionRouteController {
 /// fresh level boot through its normal `WarpC` transition. The route contains
 /// no state injection or proprietary recording data: each entry is an
 /// inclusive frame window and the retail pad bits held during that window.
-struct HeavyMachineryCompletionRouteController;
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct HeavyMachineryCompletionRouteController {
+    opening_previous_roller_y: Option<i32>,
+    opening_crossing_frame: Option<u32>,
+    f1_previous_roller_x: Option<i32>,
+    f1_crossing_frame: Option<u32>,
+    h1_active_seen: bool,
+    h1_crossing_tick: u8,
+    h1_complete: bool,
+    g8_crossing_frame: Option<u32>,
+    h3_active_seen: bool,
+    h3_crossing_tick: u8,
+    h3_crossing_frame: Option<u32>,
+    h3_complete: bool,
+    i5_previous_target_x: Option<i32>,
+    i5_crossing_frame: Option<u32>,
+    i5_zone_entry_frame: Option<u32>,
+    i5_wait_for_zone_entry: bool,
+    i5_target_reanchor_done: bool,
+    i6_crossing_frame: Option<u32>,
+    i8_bounce_frame: Option<u32>,
+    j3_zero_entry_frame: Option<u32>,
+    j3_marker_contact_frame: Option<u32>,
+    j3_one_entry_frame: Option<u32>,
+    j3_corner_frame: Option<u32>,
+    j3_portal_stabilizing: bool,
+}
 
 impl HeavyMachineryCompletionRouteController {
-    fn held(frame: u32) -> u32 {
+    /// Authored route frame at the first confirmed contact with entity 236.
+    ///
+    /// The source-platform jump begins at route frame `4_558` and takes 32
+    /// simulation ticks to reach the target in the direct-boot golden trace.
+    const I5_TARGET_CONTACT_ROUTE_FRAME: u32 = 4_590;
+    const I5_TARGET_CONTACT_TICKS_AFTER_LAUNCH: u32 = Self::I5_TARGET_CONTACT_ROUTE_FRAME - 4_558;
+    /// Authored route frame at the camera transition into `i5_6Z`.
+    const I5_ZONE_ENTRY_ROUTE_FRAME: u32 = 4_563;
+    /// Target-platform position at which the phase-aware source jump begins.
+    const I5_TARGET_LAUNCH_X_MAX: i32 = 16_700_000;
+    /// A larger live player-to-target gap needs the buffered i5-entry jump.
+    const I5_SECOND_JUMP_GAP_MIN: i32 = 700_000;
+    fn held(
+        &mut self,
+        frame: u32,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        player_collider_entity: Option<u16>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
         // Windows are ordered because later overlays intentionally add to or
         // replace broad movement spans. The final Down/Up cornering pulse
         // enters WarpC's authored lane beyond the top machinery shaft.
@@ -16181,20 +18660,612 @@ impl HeavyMachineryCompletionRouteController {
             (4_972, 5_005, false, PAD_RIGHT),
             (5_006, 5_040, false, PAD_LEFT),
             (5_041, 5_041, false, PAD_RIGHT | PAD_DOWN),
-            (5_042, 5_300, false, PAD_RIGHT),
+            (5_042, 6_000, false, PAD_RIGHT),
             (5_071, 5_087, false, PAD_CROSS),
             (5_071, 5_072, false, PAD_DOWN),
             (5_073, 5_076, false, PAD_UP),
         ];
 
+        let f0 = Eid::from_name("f0_6Z").expect("fixed Heavy Machinery opening EID is valid");
+        let f1 = Eid::from_name("f1_6Z").expect("fixed Heavy Machinery roller-row EID is valid");
+        let h1 = Eid::from_name("h1_6Z").expect("fixed Heavy Machinery lower burner EID is valid");
+        let g7 =
+            Eid::from_name("g7_6Z").expect("fixed Heavy Machinery piston staging EID is valid");
+        let h3 = Eid::from_name("h3_6Z").expect("fixed Heavy Machinery upper burner EID is valid");
+        let i5 = Eid::from_name("i5_6Z").expect("fixed Heavy Machinery platform EID is valid");
+        let j3 = Eid::from_name("j3_6Z").expect("fixed Heavy Machinery warp-lane EID is valid");
+
+        // The opening PoRoC rollers keep their scheduler phase across a
+        // carried campaign session.  Stage before entity 29 and begin the
+        // recorded crossing only while it is descending below the floor.
+        // This reproduces the fresh-boot approach geometry without assuming
+        // that the level was entered on a particular global frame.
+        let opening_roller = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 29)
+        });
+        let opening_roller_y = opening_roller.map(|roller| roller.translation[1]);
+        let opening_roller_descending = opening_roller_y
+            .zip(self.opening_previous_roller_y)
+            .is_some_and(|(current, previous)| current < previous);
+        self.opening_previous_roller_y = opening_roller_y;
+        if self.opening_crossing_frame.is_none()
+            && camera.path.zone == f0
+            && camera.path.index == 0
+            && camera.progress.raw() >= 14_400
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (1_270_000..=1_300_000).contains(&player.translation[0])
+                    && player.translation[1] <= 120_000
+                    && player.velocity[0].abs() <= 100_000
+            })
+        {
+            if opening_roller_descending
+                && opening_roller
+                    .is_some_and(|roller| roller.state == 12 && roller.translation[1] <= -90_000)
+            {
+                self.opening_crossing_frame = Some(frame);
+            } else {
+                return 0;
+            }
+        }
+        let opening_route_frame = self
+            .opening_crossing_frame
+            .map_or(frame, |start| 124 + frame.saturating_sub(start));
+
+        // The horizontal PoRoC pair (entities 32 and 33) starts on a separate
+        // phase from the opening vertical bank.  Wait on f1's safe shelf until
+        // entity 32 is moving left through the fresh-boot launch position,
+        // then resume at the authored first-row frame.
+        let f1_roller_x = objects.iter().find_map(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 32)
+                .then_some(object.translation[0])
+        });
+        let f1_roller_moving_left = f1_roller_x
+            .zip(self.f1_previous_roller_x)
+            .is_some_and(|(current, previous)| current < previous);
+        self.f1_previous_roller_x = f1_roller_x;
+        if self.f1_crossing_frame.is_none()
+            && opening_route_frame >= 198
+            && camera.path.zone == f1
+            && camera.path.index == 0
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (1_630_000..=1_680_000).contains(&player.translation[0])
+                    && player.translation[1] <= 120_000
+                    && player.velocity[0].abs() <= 100_000
+            })
+        {
+            if f1_roller_moving_left && f1_roller_x.is_some_and(|x| x <= 2_470_000) {
+                self.f1_crossing_frame = Some(frame);
+            } else {
+                return 0;
+            }
+        }
+        let f1_route_frame = self.f1_crossing_frame.map_or(opening_route_frame, |start| {
+            198 + frame.saturating_sub(start)
+        });
+
+        // Entity 169 is a timed burner.  Wait on h1's authored staging shelf
+        // until its live active bound has switched off, then perform only the
+        // local crossing sequence.  Keeping this pause local is important:
+        // shifting every later input also shifts the independently timed h3
+        // burner into Crash's path.
+        if !self.h1_complete {
+            if self.h1_crossing_tick != 0 {
+                let tick = self.h1_crossing_tick;
+                self.h1_crossing_tick = self.h1_crossing_tick.saturating_add(1);
+                if tick <= 14 {
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                if tick <= 20 {
+                    return PAD_CROSS;
+                }
+                if camera.path.zone == h3
+                    && camera.path.index == 0
+                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                {
+                    self.h1_complete = true;
+                } else {
+                    return 0;
+                }
+            } else if camera.path.zone == h1
+                && camera.path.index == 4
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (3_650_000..=3_850_000).contains(&player.translation[0])
+                })
+            {
+                let hazard = objects.iter().find(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 169
+                    )
+                });
+                if hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 16) {
+                    self.h1_active_seen = true;
+                }
+                if self.h1_active_seen
+                    && hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 0)
+                {
+                    self.h1_crossing_tick = 2;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
+        }
+
+        // Entity 159 controls the piston spanning the g7 -> g8 doorway.  Its
+        // cycle also survives a carried session, so hold on the authored
+        // ledge and re-anchor the jump at the start of its retracted state.
+        // State 6 has a point bound; state 7 expands to the lethal doorway
+        // volume.
+        if self.g8_crossing_frame.is_none()
+            && f1_route_frame >= 1_798
+            && camera.path.zone == g7
+            && camera.path.index == 0
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (10_450_000..=10_520_000).contains(&player.translation[0])
+                    && (-1_900_000..=-1_780_000).contains(&player.translation[1])
+            })
+        {
+            let piston = objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 159
+                )
+            });
+            if piston.is_some_and(|piston| piston.state == 6) {
+                self.g8_crossing_frame = Some(frame);
+            } else {
+                return 0;
+            }
+        }
+
+        // Entity 190 uses the same burner program but has its own phase.  Let
+        // the h3 lift settle at the staging height, observe the active phase,
+        // and launch on the active-to-cooldown edge.  This creates a complete
+        // safe window regardless of scheduler or carried-session phase.
+        if !self.h3_complete && camera.path.zone == h3 {
+            if self.h3_crossing_tick != 0 {
+                let tick = self.h3_crossing_tick;
+                self.h3_crossing_tick = self.h3_crossing_tick.saturating_add(1);
+                if tick <= 21 {
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if camera.path.index == 1
+                    || player.is_some_and(|player| player.translation[0] >= 4_250_000)
+                {
+                    self.h3_complete = true;
+                } else {
+                    return PAD_RIGHT;
+                }
+            } else if camera.path.index == 0 {
+                let staged = camera.progress.raw() >= 22_000
+                    || player.is_some_and(|player| player.translation[1] <= -3_450_000);
+                if staged {
+                    let hazard = objects.iter().find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 190
+                        )
+                    });
+                    if hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 16) {
+                        self.h3_active_seen = true;
+                    }
+                    if self.h3_active_seen
+                        && hazard.is_some_and(|hazard| hazard.state == 7 && hazard.status_b == 0)
+                    {
+                        self.h3_crossing_tick = 2;
+                        self.h3_crossing_frame = Some(frame);
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
+                }
+                return 0;
+            }
+        }
+
+        let g8_route_frame = self
+            .g8_crossing_frame
+            .map_or(f1_route_frame, |start| 1_798 + frame.saturating_sub(start));
+        let mut route_frame = self
+            .h3_crossing_frame
+            .map_or(g8_route_frame, |start| 3_620 + frame.saturating_sub(start));
+
+        // Crash reaches i5 while riding entity 228. Entity 236 is the target
+        // platform across the gap. Start the local transfer only while the
+        // target is sweeping left into reach. If that launch begins before
+        // the camera has entered i5, the later camera transition is an
+        // independent live signal for the buffered second jump; a direct boot
+        // can begin the transfer after that transition and needs only the
+        // first jump. Confirmed target contact anchors the common remainder.
+        let target = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 236)
+        });
+        let target_x = target.map(|object| object.translation[0]);
+        if !self.i5_target_reanchor_done && player_collider_entity == Some(236) {
+            self.i5_crossing_frame =
+                Some(frame.saturating_sub(Self::I5_TARGET_CONTACT_TICKS_AFTER_LAUNCH));
+            self.i5_zone_entry_frame = None;
+            self.i5_wait_for_zone_entry = false;
+            self.i5_target_reanchor_done = true;
+            if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                eprintln!(
+                    "HEAVY_ANCHOR kind=target-contact frame={frame} route_frame={}",
+                    Self::I5_TARGET_CONTACT_ROUTE_FRAME
+                );
+            }
+        }
+        if self.i5_crossing_frame.is_none()
+            && player_collider_entity == Some(228)
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 15_700_000
+            })
+        {
+            let target_moving_left = target_x
+                .zip(self.i5_previous_target_x)
+                .is_some_and(|(x, previous)| x < previous);
+            if target_moving_left
+                && target_x.is_some_and(|target| target <= Self::I5_TARGET_LAUNCH_X_MAX)
+            {
+                self.i5_crossing_frame = Some(frame);
+                let launch_gap = target_x
+                    .zip(player.map(|player| player.translation[0]))
+                    .map(|(target, player)| target.saturating_sub(player));
+                self.i5_wait_for_zone_entry = camera.path.zone != i5
+                    && launch_gap.is_some_and(|gap| gap >= Self::I5_SECOND_JUMP_GAP_MIN);
+                if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                    eprintln!(
+                        "HEAVY_ANCHOR kind=source-launch frame={frame} route_frame=4558 launch_gap={launch_gap:?} wait_for_i5={}",
+                        self.i5_wait_for_zone_entry,
+                    );
+                }
+            } else {
+                self.i5_previous_target_x = target_x;
+                return 0;
+            }
+        }
+        self.i5_previous_target_x = target_x;
+        if self.i5_wait_for_zone_entry
+            && self.i5_zone_entry_frame.is_none()
+            && camera.path.zone == i5
+        {
+            self.i5_zone_entry_frame = Some(frame);
+            self.i5_wait_for_zone_entry = false;
+            if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                eprintln!(
+                    "HEAVY_ANCHOR kind=i5-entry frame={frame} route_frame={}",
+                    Self::I5_ZONE_ENTRY_ROUTE_FRAME
+                );
+            }
+        }
+        if let Some(start) = self.i5_crossing_frame {
+            route_frame = 4_558 + frame.saturating_sub(start);
+        }
+        if let Some(start) = self.i5_zone_entry_frame {
+            route_frame = Self::I5_ZONE_ENTRY_ROUTE_FRAME + frame.saturating_sub(start);
+        }
+
+        // Entity 238 is the descending lift immediately after the horizontal
+        // handoff.  Its neighbor, entity 239, is another vertical platform,
+        // not the landing target: the authored route rides 238 to its lower
+        // stop and jumps right onto the fixed floor.  The handoff above can
+        // land Crash at the extreme left edge of 238, where his bound overlaps
+        // the adjacent furnace during descent.  Keep him over the lift's safe
+        // interior, then launch the original 25-frame jump only at the lower
+        // stop.
+        let lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 238)
+        });
+        let adjacent_lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 239)
+        });
+        if self.i5_target_reanchor_done
+            && self.i6_crossing_frame.is_none()
+            && player_collider_entity == Some(239)
+        {
+            let lifts_are_aligned = lift.zip(adjacent_lift).is_some_and(|(lift, adjacent)| {
+                lift.translation[1].abs_diff(adjacent.translation[1]) <= 100_000
+            });
+            return if lifts_are_aligned { PAD_LEFT } else { 0 };
+        }
+        if self.i6_crossing_frame.is_none()
+            && let (Some(player), Some(lift)) = (player, lift)
+            && player_collider_entity == Some(238)
+        {
+            if lift.translation[1] <= -6_220_000 {
+                self.i6_crossing_frame = Some(frame);
+            } else {
+                let safe_x = lift.translation[0] - 50_000;
+                let error = safe_x - player.translation[0];
+                return if error > 10_000 {
+                    if player.velocity[0] > 100_000 {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    }
+                } else if error < -10_000 {
+                    if player.velocity[0] < -100_000 {
+                        PAD_RIGHT
+                    } else {
+                        PAD_LEFT
+                    }
+                } else if player.velocity[0] > 42_500 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -42_500 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+        }
+        if let Some(start) = self.i6_crossing_frame {
+            route_frame = 4_704 + frame.saturating_sub(start);
+        }
+
+        // The i8 floor launches Crash upward on contact.  Small horizontal
+        // differences at the preceding lift can make that contact occur a few
+        // route ticks early, which in turn leaves the old absolute left/right
+        // pulses out of phase.  Re-anchor at the grounded contact immediately
+        // before the authored bounce so its cornering sequence starts from the
+        // retail state rather than from elapsed time.
+        let i8 = Eid::from_name("i8_6Z").expect("fixed Heavy Machinery bounce-floor EID is valid");
+        if self.i8_bounce_frame.is_none()
+            && self.i6_crossing_frame.is_some()
+            && camera.path.zone == i8
+            && camera.path.index == 0
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && player.translation[0] >= 19_050_000
+                    && player.translation[1] <= -6_240_000
+            })
+        {
+            self.i8_bounce_frame = Some(frame);
+            if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                eprintln!("HEAVY_ANCHOR kind=i8-bounce frame={frame} route_frame=4842");
+            }
+        }
+        if let Some(start) = self.i8_bounce_frame {
+            route_frame = 4_842 + frame.saturating_sub(start);
+        }
+
+        // Anchor the final turn to the camera's live path transition. A
+        // carried session can reach j3 a few route ticks after a direct boot;
+        // cap the index-zero approach until the camera confirms index one so
+        // the later corner pulse cannot run ahead of the authored portal.
+        let entering_j3_zero =
+            self.j3_zero_entry_frame.is_none() && camera.path.zone == j3 && camera.path.index == 0;
+        if entering_j3_zero {
+            self.j3_zero_entry_frame = Some(frame);
+            if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                eprintln!("HEAVY_ANCHOR kind=j3-zero frame={frame} route_frame=5046");
+            }
+        }
+        if self.j3_portal_stabilizing
+            && self.j3_marker_contact_frame.is_none()
+            && player_collider_entity == Some(246)
+        {
+            self.j3_marker_contact_frame = Some(frame);
+            if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                eprintln!("HEAVY_ANCHOR kind=j3-marker frame={frame} route_frame=5053");
+            }
+        }
+        if let Some(start) = self.j3_zero_entry_frame {
+            route_frame = (5_046 + frame.saturating_sub(start)).min(5_061);
+            if self.j3_one_entry_frame.is_none()
+                && camera.path.zone == j3
+                && camera.path.index == 1
+                && (!self.j3_portal_stabilizing || self.j3_marker_contact_frame.is_some())
+            {
+                self.j3_one_entry_frame = Some(frame);
+                if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                    eprintln!("HEAVY_ANCHOR kind=j3-one frame={frame} route_frame=5062");
+                }
+            }
+        }
+        if let Some(start) = self.j3_marker_contact_frame {
+            route_frame = 5_053 + frame.saturating_sub(start);
+        }
+        if let Some(start) = self.j3_one_entry_frame {
+            route_frame = if self.j3_portal_stabilizing {
+                self.j3_corner_frame.map_or_else(
+                    || (5_062 + frame.saturating_sub(start)).min(5_070),
+                    |corner| 5_071 + frame.saturating_sub(corner),
+                )
+            } else {
+                5_062 + frame.saturating_sub(start)
+            };
+        }
+
         let mut held = PAD_RIGHT;
         for &(start, end, clear, buttons) in ROUTE_INPUTS {
-            if (start..=end).contains(&frame) {
+            if (start..=end).contains(&route_frame) {
                 if clear {
                     held = 0;
                 }
                 held |= buttons;
             }
+        }
+
+        // Entity 65 is the fixed PoObC forming j3's index-zero portal bank.
+        // A carried session can enter that bank beyond the direct route's
+        // safe overlap. When that happens, use the fruit stack immediately
+        // above it as a live lane marker and release on actual contact.
+        if self.j3_zero_entry_frame.is_some()
+            && self.j3_one_entry_frame.is_none()
+            && let Some(player) = player
+            && let Some(player_bound) = objects
+                .iter()
+                .find(|object| {
+                    object.program.name().as_deref() == Some("WillC")
+                        && object.translation == player.translation
+                })
+                .and_then(|object| object.frame_bound.or(object.bound))
+            && let Some(portal_bound) = objects
+                .iter()
+                .find(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 65
+                    )
+                })
+                .and_then(|object| object.frame_bound.or(object.bound))
+        {
+            let player_half_width = player.translation[0]
+                .saturating_sub(player_bound.min.x)
+                .max(player_bound.max.x.saturating_sub(player.translation[0]));
+            let player_half_depth = player.translation[2]
+                .saturating_sub(player_bound.min.z)
+                .max(player_bound.max.z.saturating_sub(player.translation[2]));
+            let predicted_min_x = player_bound
+                .min
+                .x
+                .saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            let predicted_min_z = player_bound
+                .min
+                .z
+                .saturating_add(player.velocity[2].saturating_mul(2) / 34);
+            // Retain one player half-extent of overlap. That reserve covers
+            // the next cooperative tick even when the entry velocity is
+            // already aimed out of the bank.
+            let safe_min_x = portal_bound.max.x.saturating_sub(player_half_width);
+            let safe_min_z = portal_bound.max.z.saturating_sub(player_half_depth);
+            if entering_j3_zero && (predicted_min_x > safe_min_x || predicted_min_z > safe_min_z) {
+                self.j3_portal_stabilizing = true;
+                if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                    eprintln!(
+                        "HEAVY_ANCHOR kind=j3-stabilize frame={frame} predicted_min=[{predicted_min_x},{predicted_min_z}] safe_min=[{safe_min_x},{safe_min_z}]"
+                    );
+                }
+            }
+            if self.j3_portal_stabilizing && self.j3_marker_contact_frame.is_none() {
+                // The top fruit in the authored j3 stack is the live lane
+                // marker used by the direct route immediately before camera
+                // promotion. Aim the player's projected center through that
+                // bound, then release the ordinary suffix on actual contact.
+                let marker_bound = objects
+                    .iter()
+                    .find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 246
+                        )
+                    })
+                    .and_then(|object| object.frame_bound.or(object.bound));
+                let target_x = marker_bound.map_or(portal_bound.max.x, |bound| bound.max.x);
+                let target_z = marker_bound.map_or(portal_bound.max.z, |bound| {
+                    bound.max.z.saturating_add(player_half_depth)
+                });
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                let predicted_z =
+                    player.translation[2].saturating_add(player.velocity[2].saturating_mul(2) / 34);
+                let lateral = if predicted_x > target_x.saturating_add(8_192) {
+                    PAD_LEFT
+                } else if predicted_x < target_x.saturating_sub(8_192) {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let depth = if predicted_z > target_z.saturating_add(8_192) {
+                    PAD_UP
+                } else if predicted_z < target_z.saturating_sub(8_192) {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN)) | lateral | depth;
+            }
+        }
+
+        // The stabilised index-zero route can promote to j3:index-one while
+        // Crash is grounded in the shallow side of the final corridor. The
+        // direct route instead lands with its rear bound overlapping WarpC's
+        // depth lane before reaching the crate column at the turn. Recreate
+        // those two live geometric conditions, then resume the ordinary
+        // jump-and-corner suffix. Entity 67 is the lowest crate in that
+        // column; WarpC subtype 3 is its live collision volume.
+        if self.j3_portal_stabilizing
+            && self.j3_one_entry_frame.is_some()
+            && self.j3_corner_frame.is_none()
+            && route_frame >= 5_070
+            && camera.path.zone == j3
+            && camera.path.index == 1
+            && let Some(player) = player
+            && let Some(player_bound) = objects
+                .iter()
+                .find(|object| {
+                    object.program.name().as_deref() == Some("WillC")
+                        && object.translation == player.translation
+                })
+                .and_then(|object| object.frame_bound.or(object.bound))
+            && let Some(corner_bound) = objects
+                .iter()
+                .find(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 67
+                    )
+                })
+                .and_then(|object| object.frame_bound.or(object.bound))
+            && let Some(warp_bound) = objects
+                .iter()
+                .find(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 32,
+                            subtype: 3,
+                        }
+                    ) && object.program.name().as_deref() == Some("WarpC")
+                })
+                .and_then(|object| object.frame_bound.or(object.bound))
+        {
+            let player_half_depth = player.translation[2]
+                .saturating_sub(player_bound.min.z)
+                .max(player_bound.max.z.saturating_sub(player.translation[2]));
+            let target_z = warp_bound.max.z.saturating_add(player_half_depth / 2);
+            let predicted_z =
+                player.translation[2].saturating_add(player.velocity[2].saturating_mul(2) / 34);
+            let at_corner_x = player.translation[0] >= corner_bound.min.x;
+            let at_warp_depth = player.translation[2] >= target_z.saturating_sub(4_096)
+                && player.translation[2] <= target_z.saturating_add(4_096);
+            if at_corner_x && at_warp_depth && player.status_a & 1 != 0 {
+                self.j3_corner_frame = Some(frame);
+                held = PAD_RIGHT | PAD_DOWN | PAD_CROSS;
+                if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
+                    eprintln!(
+                        "HEAVY_ANCHOR kind=j3-corner frame={frame} route_frame=5071 player_xz=[{},{}] target_xz=[{},{}]",
+                        player.translation[0], player.translation[2], corner_bound.min.x, target_z,
+                    );
+                }
+            } else {
+                let depth = if predicted_z < target_z.saturating_sub(4_096) {
+                    PAD_DOWN
+                } else if predicted_z > target_z.saturating_add(4_096) {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let jump = if player.translation[2] < target_z.saturating_sub(4_096) {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS))
+                    | PAD_RIGHT
+                    | depth
+                    | jump;
+            }
+        }
+
+        if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() && route_frame >= 4_900 {
+            eprintln!(
+                "HEAVY_ROUTE frame={frame} route_frame={route_frame} zone={:?}:{} held={held:#06x} player_xz={:?}",
+                camera.path.zone.name(),
+                camera.path.index,
+                player.map(|player| [player.translation[0], player.translation[2]]),
+            );
         }
         held
     }
@@ -16204,13 +19275,125 @@ impl HeavyMachineryCompletionRouteController {
 ///
 /// Directional, jump, and spin input opens each laboratory door, crosses the
 /// final collapsing bridge, and enters the retail `WarpC` without a restart.
-struct LabCompletionRouteController;
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LabCompletionRouteController {
+    route_delay: u32,
+    first_rods_waiting: bool,
+    first_rods_active_seen: bool,
+    first_rods_cleared: bool,
+    first_rods_brake_frames: u8,
+    b9_door_waiting: bool,
+    b9_door_cleared: bool,
+    b9_door_brake_frames: u8,
+}
 
 impl LabCompletionRouteController {
+    fn held(
+        &mut self,
+        frame: u32,
+        player: Option<PlayerTrace>,
+        route_objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let route_frame = frame.saturating_sub(self.route_delay);
+        if !self.first_rods_cleared {
+            let rods = route_objects.iter().filter(|object| {
+                object.program.name().as_deref() == Some("PoRoC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if matches!(descriptor.id, 26 | 28)
+                    )
+            });
+            let rods = rods.collect::<Vec<_>>();
+            let at_rod_approach = player.is_some_and(|player| {
+                (26_250_000..=26_350_000).contains(&player.translation[2])
+                    && (1_900_000..=2_200_000).contains(&player.translation[0])
+            });
+            if at_rod_approach
+                && rods
+                    .iter()
+                    .any(|object| object.state == 7 || object.status_b == 256)
+            {
+                self.first_rods_waiting = true;
+            }
+            if self.first_rods_waiting {
+                self.first_rods_active_seen |= rods.iter().any(|object| object.state == 7);
+                let cycle_finished = self.first_rods_active_seen
+                    && rods.len() == 2
+                    && rods.iter().all(|object| object.state == 6);
+                if cycle_finished {
+                    self.first_rods_cleared = true;
+                    // Restart the complete characterized leap after braking:
+                    // resuming at the warning frame leaves Cross held for only
+                    // a handful of ticks and drops Crash between the rods.
+                    self.route_delay = frame.saturating_sub(486);
+                    return Self::route_held(486);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                self.first_rods_brake_frames = self.first_rods_brake_frames.saturating_add(1);
+                return if self.first_rods_brake_frames <= 12 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+            }
+        }
+        if !self.b9_door_cleared {
+            let door = route_objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 14
+                ) && object.program.name().as_deref() == Some("CasOC")
+            });
+            let barrier = route_objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 250
+                ) && object.program.name().as_deref() == Some("CasOC")
+            });
+            let fresh_open_pair = door.is_some_and(|door| {
+                door.state == 3 && frame.saturating_sub(door.state_stamp) <= 10
+            }) && barrier.is_some_and(|barrier| {
+                barrier.state == 6 && frame.saturating_sub(barrier.state_stamp) <= 12
+            });
+            let at_door_approach = player.is_some_and(|player| {
+                route_frame >= 1_670
+                    && (8_550_000..=8_950_000).contains(&player.translation[2])
+                    && (2_200_000..=2_450_000).contains(&player.translation[0])
+            });
+            if at_door_approach {
+                if fresh_open_pair {
+                    self.b9_door_cleared = true;
+                    self.route_delay = frame.saturating_sub(1_676);
+                    return Self::route_held(1_676);
+                } else if route_frame >= 1_676 {
+                    self.b9_door_waiting = true;
+                }
+            }
+            if self.b9_door_waiting {
+                if fresh_open_pair {
+                    self.b9_door_cleared = true;
+                    self.route_delay = frame.saturating_sub(1_676);
+                    return Self::route_held(1_676);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                self.b9_door_brake_frames = self.b9_door_brake_frames.saturating_add(1);
+                return if self.b9_door_brake_frames <= 12 {
+                    PAD_DOWN
+                } else if barrier.is_some_and(|barrier| barrier.state == 5) && frame % 16 < 4 {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+            }
+        }
+        Self::route_held(route_frame)
+    }
+
     // Preserve the discovery trace's chronological stages: equal actions at
     // distant hazards remain separate so failures map back to exact frames.
     #[allow(clippy::match_same_arms)]
-    fn held(frame: u32) -> u32 {
+    fn route_held(frame: u32) -> u32 {
         match frame {
             1..=120 => PAD_UP | PAD_RIGHT | if frame % 16 < 4 { PAD_SQUARE } else { 0 },
             121..=142 => PAD_UP | PAD_LEFT,
@@ -16235,6 +19418,7 @@ impl LabCompletionRouteController {
             }
             190..=192 | 978..=986 => PAD_UP | PAD_LEFT | PAD_CROSS,
             193..=215
+            | 221..=250
             | 401..=430
             | 486..=520
             | 546..=580
@@ -16349,16 +19533,93 @@ impl LabCompletionRouteController {
 /// level boot through its normal `WarpC` transition. The route uses only
 /// directional, jump, and spin pad bits; it never injects runtime state or
 /// embeds proprietary recording data.
-struct LightsOutCompletionRouteController;
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct LightsOutCompletionRouteController {
+    session_globals: bool,
+    route_frame: u32,
+    first_platform_previous_z: Option<i32>,
+    first_platform_released: bool,
+    first_platform_runup_remaining: u8,
+    first_platform_dismount_released: bool,
+}
 
 impl LightsOutCompletionRouteController {
-    fn held(frame: u32) -> u32 {
+    fn held(&mut self, objects: &[ProgramObjectTrace]) -> u32 {
+        let next_frame = self.route_frame.saturating_add(1);
+        let first_platform = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 24)
+                && object.program
+                    == Eid::from_name("PoPlC").expect("fixed Lights Out platform EID is valid")
+        });
+        let first_platform_approaching = first_platform.is_some_and(|platform| {
+            self.first_platform_previous_z
+                .is_some_and(|previous_z| platform.translation[2] > previous_z)
+        });
+        let first_platform_retreating = first_platform.is_some_and(|platform| {
+            self.first_platform_previous_z
+                .is_some_and(|previous_z| platform.translation[2] < previous_z)
+        });
+        if let Some(platform) = first_platform {
+            self.first_platform_previous_z = Some(platform.translation[2]);
+        }
+        if self.session_globals && next_frame == 798 && !self.first_platform_released {
+            if self.first_platform_runup_remaining != 0 {
+                self.first_platform_runup_remaining -= 1;
+                if self.first_platform_runup_remaining == 0 {
+                    self.first_platform_released = true;
+                }
+                return PAD_UP;
+            }
+            let first_platform_ready = first_platform.is_some_and(|platform| {
+                (18_450_000..=18_700_000).contains(&platform.translation[2])
+                    && first_platform_approaching
+            });
+            if !first_platform_ready {
+                return 0;
+            }
+            self.first_platform_runup_remaining = 1;
+            return PAD_UP;
+        }
+        if self.session_globals && next_frame == 854 && !self.first_platform_dismount_released {
+            let first_platform_ready = first_platform.is_some_and(|platform| {
+                (18_430_000..=18_445_000).contains(&platform.translation[2])
+                    && first_platform_retreating
+            });
+            if !first_platform_ready {
+                return PAD_UP;
+            }
+            self.first_platform_dismount_released = true;
+        }
+        self.route_frame = next_frame;
+        let mut held = Self::held_at(next_frame);
+        if self.session_globals {
+            // Carried sessions preserve live projectile and platform clocks.
+            // These ordinary-pad corrections avoid relying on the fresh-boot
+            // phases that the original absolute route happened to encounter.
+            if matches!(
+                next_frame,
+                1_900..=1_907 | 3_965..=3_979 | 4_024..=4_031
+            ) {
+                held |= PAD_CROSS;
+            }
+            if (4_050..=4_051).contains(&next_frame) {
+                held |= PAD_UP;
+            }
+        }
+        held
+    }
+
+    fn held_at(frame: u32) -> u32 {
         // Each tuple is (inclusive start, inclusive end, clear base, buttons).
         // The opening retains the characterized forward + 2/22 Cross cadence;
         // later windows clear that base explicitly before applying their bits.
         const ROUTE_INPUTS: &[(u32, u32, bool, u32)] = &[
             (198, 209, false, PAD_CROSS),
             (225, 232, false, PAD_CROSS),
+            // Atomic child-spawn configuration makes the a2 obstacle active
+            // at its native phase. Clear it with an authored spin so its
+            // collision cannot suppress the following jump edge.
+            (228, 260, false, PAD_SQUARE),
             (245, 256, false, PAD_CROSS),
             (273, 284, false, PAD_CROSS),
             (306, 317, false, PAD_CROSS),
@@ -18523,6 +21784,21 @@ impl CastleMachineryCompletionRouteController {
             "d9_TZ" | "e0_TZ" | "e1_TZ" | "e2_TZ" => PAD_LEFT,
             _ => 0,
         };
+        if matches!(name.as_str(), "C7_TZ" | "c7_TZ")
+            && index == 0
+            && self.b7_platform_stage == 13
+            && self.c1_electric_stage >= 12
+        {
+            let player = player.expect("Castle Machinery vertical bounce shaft keeps Crash live");
+            let predicted_x = player.translation[0] + player.velocity[0] * 3 / 34;
+            movement = if predicted_x < 5_125_000 {
+                PAD_RIGHT
+            } else if predicted_x > 5_150_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
         if name == "d0_TZ" {
             movement |= player.map_or(0, |player| {
                 if player.translation[2] > 120_000 {
@@ -19404,8 +22680,9 @@ impl CastleMachineryCompletionRouteController {
             };
             if depth == 0 && player.status_a & 1 != 0 {
                 self.a8_reactors_centered = true;
-                self.jump_frames = 20;
-                return PAD_LEFT | PAD_CROSS;
+                self.jump_frames = 0;
+                self.release_frames = 3;
+                return 0;
             }
             return horizontal | depth;
         }
@@ -19414,7 +22691,14 @@ impl CastleMachineryCompletionRouteController {
             && player.is_some_and(|player| player.translation[0] > 6_350_000)
         {
             self.jump_frames = 0;
-            self.release_frames = 0;
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                if self.release_frames == 0 {
+                    self.jump_frames = 20;
+                    return PAD_LEFT | PAD_CROSS;
+                }
+                return 0;
+            }
             return PAD_LEFT;
         }
         if matches!(name.as_str(), "a8_TZ" | "a9_TZ") && !self.a9_platform_departed {
@@ -19780,7 +23064,7 @@ impl CastleMachineryCompletionRouteController {
             self.jump_frames = 0;
             let piston_is_descending =
                 self.b3_piston_high_seen && piston_y.is_some_and(|y| y <= -3_650_000);
-            if player.translation[0] >= 4_650_000
+            if player.translation[0] >= 4_645_000
                 && player.status_a & 1 != 0
                 && piston_is_descending
             {
@@ -19827,9 +23111,16 @@ impl CastleMachineryCompletionRouteController {
                     0
                 };
             }
-            return if player.translation[0] < 7_700_000 || player.velocity[0] < -80_000 {
+            let predicted_x =
+                i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+            let (minimum_x, maximum_x) = if self.b5_rod_left_seen {
+                (7_900_000, 7_940_000)
+            } else {
+                (7_620_000, 7_680_000)
+            };
+            return if predicted_x < minimum_x {
                 PAD_RIGHT
-            } else if player.translation[0] > 7_780_000 || player.velocity[0] > 80_000 {
+            } else if predicted_x > maximum_x {
                 PAD_LEFT
             } else {
                 0
@@ -20032,18 +23323,19 @@ impl CastleMachineryCompletionRouteController {
                     matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 119)
                         .then_some(object.translation[1])
                 });
-                if player.status_a & 1 != 0 && platform_y.is_some_and(|y| y >= -4_980_000) {
+                if player_collider_entity == Some(119)
+                    && player.status_a & 1 != 0
+                    && platform_y.is_some_and(|y| y >= -4_980_000)
+                {
                     self.b7_platform_stage = 4;
                     self.jump_frames = 29;
                     return PAD_RIGHT | PAD_CROSS;
                 }
-                return if player.translation[0] < 10_440_000 {
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                return if predicted_x < 10_440_000 {
                     PAD_RIGHT
-                } else if player.translation[0] > 10_460_000 {
-                    PAD_LEFT
-                } else if player.velocity[0] < -80_000 {
-                    PAD_RIGHT
-                } else if player.velocity[0] > 80_000 {
+                } else if predicted_x > 10_460_000 {
                     PAD_LEFT
                 } else {
                     0
@@ -20188,7 +23480,7 @@ impl CastleMachineryCompletionRouteController {
             if self.b7_platform_stage == 12 {
                 if player.status_a & 1 != 0 && player.translation[2] <= 180_000 {
                     self.b7_platform_stage = 13;
-                    return PAD_LEFT;
+                    return 0;
                 }
                 return PAD_UP | PAD_CROSS | PAD_SQUARE;
             }
@@ -20220,6 +23512,20 @@ impl CastleMachineryCompletionRouteController {
                 0
             };
             return depth | lateral;
+        }
+        if matches!(name.as_str(), "C0_TZ" | "c0_TZ") && index == 2 && self.b7_platform_stage == 13
+        {
+            let player = player.expect("Castle Machinery upper exit keeps Crash live");
+            if self.jump_frames != 0 {
+                self.jump_frames -= 1;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            if player.status_a & 1 != 0 && player.translation[0] <= 10_360_000 {
+                self.jump_frames = 10;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_LEFT;
         }
         if name == "c1_TZ" && index == 1 && self.b7_platform_stage == 13 {
             let player = player.expect("Castle Machinery upper electric corridor keeps Crash live");
@@ -20655,7 +23961,17 @@ impl CastleMachineryCompletionRouteController {
             } else {
                 (230_000, 245_000)
             };
-            let depth = if player.translation[2] < min_depth {
+            let depth = if !self.c9_bounce_released {
+                let predicted_depth =
+                    i64::from(player.translation[2]) + i64::from(player.velocity[2]) * 3 / 34;
+                if predicted_depth < 228_000 {
+                    PAD_DOWN
+                } else if predicted_depth > 230_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            } else if player.translation[2] < min_depth {
                 PAD_DOWN
             } else if player.translation[2] > max_depth {
                 PAD_UP
@@ -20873,6 +24189,20 @@ impl CastleMachineryCompletionRouteController {
             }
             return PAD_RIGHT | depth;
         }
+        if name == "b5_TZ"
+            && index == 2
+            && !self.b5_first_lower_landed
+            && player.is_some_and(|player| player.translation[0] >= 7_960_000)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return movement
+                | if self.tick.is_multiple_of(24) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
         if matches!(name.as_str(), "a1_TZ" | "a2_TZ" | "a3_TZ" | "a4_TZ") {
             return movement;
         }
@@ -20929,7 +24259,9 @@ impl CastleMachineryCompletionRouteController {
             self.jump_frames = 0;
             self.release_frames = 0;
             return movement
-                | if player.is_some_and(|player| player.status_a & 1 != 0) {
+                | if player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2 | 10 | 13) && player.status_a & 1 != 0
+                }) {
                     PAD_SQUARE
                 } else {
                     0
@@ -20975,6 +24307,16 @@ impl CastleMachineryCompletionRouteController {
             && player.is_some_and(|player| (7_400_000..7_700_000).contains(&player.translation[0]))
         {
             held |= PAD_SQUARE;
+        } else if name == "C0_TZ"
+            && index == 1
+            && self.b7_platform_stage == 13
+            && player.is_some_and(|player| (9_680_000..=9_690_000).contains(&player.translation[0]))
+        {
+            held |= PAD_SQUARE;
+        } else if name == "a9_TZ" && self.a9_platform_departed && self.a9_side_route_stage == 0 {
+            if self.jump_frames == 5 {
+                held |= PAD_SQUARE;
+            }
         } else if !matches!(name.as_str(), "a7_TZ" | "a8_TZ") && self.tick.is_multiple_of(24) {
             held |= PAD_SQUARE;
         }
@@ -21005,28 +24347,53 @@ impl CastleMachineryCompletionRouteController {
 }
 
 /// Ordinary-pad completion route for Slippery Climb.
+///
+/// Moving-platform handoffs use observed position and direction rather than a
+/// frame schedule so small changes in earlier landing timing do not compound.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 struct SlipperyClimbCompletionRouteController {
+    session_globals: bool,
+    first_lift_corrected: bool,
+    first_lift_correction_frames: u8,
     jump_hold: u8,
+    first_lift_recovered: bool,
     second_lift_spin: bool,
     second_lift_wait: u8,
     second_lift_square_released: bool,
     third_lift_spin: bool,
+    third_lift_nudge_applied: bool,
+    third_lift_lane_restored: bool,
     rotating_block_staged: bool,
     rotating_block_wait: u8,
+    rotating_block_centered: bool,
+    second_rotating_launch_staged: bool,
+    rotating_target_lowered: bool,
     second_rotating_block_staged: bool,
     second_rotating_block_wait: u8,
     barrier_jump_released: bool,
+    lower_d1_runup_stage: u8,
+    lower_d1_phase_last_y: Option<i32>,
+    lower_d1_phase_ready: bool,
+    lower_corner_runup_stage: u8,
+    lower_e4_brake_applied: bool,
+    lower_e4_brake_frames: u8,
     lift_brake_complete: bool,
     corner_staged: bool,
     corner_wait: u8,
+    corner_phase_ready: bool,
+    corner_launch_ready: bool,
     vertical_jump_released: bool,
+    vertical_entry_braked: bool,
+    vertical_entry_brake_frames: u8,
     vertical_lift_staged: bool,
     vertical_rightward: bool,
+    vertical_lift_returning: bool,
+    vertical_lift_return_complete: bool,
     tower_staged: bool,
     tower_wait: u8,
     tower_leftward: bool,
+    tower_first_landing_jump_armed: bool,
     tower_bounce_staged: bool,
     tower_second_lift_staged: bool,
     tower_second_lift_rightward: bool,
@@ -21035,6 +24402,7 @@ struct SlipperyClimbCompletionRouteController {
     tower_third_spin_tick: u8,
     tower_wall_step: u8,
     tower_wall_wait: u8,
+    tower_depth_lane_ready: bool,
     tower_platform_launch_released: bool,
     tower_top_lift_staged: bool,
     tower_top_lift_leftward: bool,
@@ -21043,6 +24411,9 @@ struct SlipperyClimbCompletionRouteController {
     tower_b1_rightward: bool,
     tower_b1_launch_staged: bool,
     tower_b1_launch_wait: u8,
+    tower_b1_wall_lift_last_y: Option<i32>,
+    tower_b1_wall_lift_phase_ready: bool,
+    tower_b1_wall_runup_ready: bool,
     tower_b1_wall_crossed: bool,
     tower_b1_step_reached: bool,
     tower_b2_exit_leftward: bool,
@@ -21057,8 +24428,16 @@ struct SlipperyClimbCompletionRouteController {
     tower_b2_row_stage: u8,
     tower_b2_row_tick: u8,
     upper_m2_flip_bounced: bool,
+    upper_m1_lift_last_y: Option<i32>,
+    upper_m1_lift_phase_ready: bool,
     upper_l4_wait_started: bool,
-    upper_l4_wait: u8,
+    upper_l4_phase_target: Option<VmObjectHandle>,
+    upper_l4_phase_last_y: Option<i32>,
+    upper_l4_phase_ready: bool,
+    upper_l4_second_jump_armed: bool,
+    upper_h3_ledge_last_y: Option<i32>,
+    upper_h3_ledge_phase_ready: bool,
+    upper_h3_second_jump_armed: bool,
     upper_i2_waited: bool,
 }
 
@@ -21079,6 +24458,27 @@ impl SlipperyClimbCompletionRouteController {
 
         let c3 = Eid::from_name("c3_KZ").expect("fixed Slippery Climb corner EID is valid");
         let zone_name = camera.path.zone.name();
+        if self.session_globals
+            && !self.first_lift_corrected
+            && player.status_a & 1 != 0
+            && (16_200_000..16_500_000).contains(&player.translation[0])
+            && (-13_500_000..-13_200_000).contains(&player.translation[1])
+        {
+            self.first_lift_corrected = true;
+            self.first_lift_correction_frames = 4;
+            self.jump_hold = 15;
+        }
+        if self.first_lift_correction_frames > 0 {
+            self.first_lift_correction_frames -= 1;
+            self.jump_hold = self.jump_hold.saturating_sub(1);
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if zone_name.as_deref() == Some("f1_KZ")
+            && player.status_a & 1 != 0
+            && (16_500_000..16_850_000).contains(&player.translation[0])
+        {
+            self.first_lift_recovered = true;
+        }
         let lower = zone_name.as_ref().is_some_and(|name| {
             matches!(
                 name.as_str(),
@@ -21137,12 +24537,82 @@ impl SlipperyClimbCompletionRouteController {
         if !(lower || vertical || upper) {
             return 0;
         }
+        if self.session_globals
+            && !self.lower_e4_brake_applied
+            && self.lower_e4_brake_frames == 0
+            && self.second_lift_spin
+            && !self.third_lift_spin
+            && player.status_a & 1 == 0
+            && player.velocity[1] < 0
+            && (15_150_000..15_350_000).contains(&player.translation[0])
+            && (-13_250_000..-12_900_000).contains(&player.translation[1])
+        {
+            self.lower_e4_brake_applied = true;
+            self.lower_e4_brake_frames = 5;
+        }
+        if self.lower_e4_brake_frames > 0 {
+            self.lower_e4_brake_frames -= 1;
+            self.jump_hold = 0;
+            return PAD_RIGHT | PAD_SQUARE;
+        }
+        if self.session_globals
+            && !self.lower_d1_phase_ready
+            && player.status_a & 1 != 0
+            && (8_150_000..8_450_000).contains(&player.translation[0])
+            && let Some(lift) = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 47)
+            })
+        {
+            let descending = self
+                .lower_d1_phase_last_y
+                .is_some_and(|last_y| lift.translation[1] < last_y);
+            self.lower_d1_phase_last_y = Some(lift.translation[1]);
+            if descending && (-13_200_000..=-13_100_000).contains(&lift.translation[1]) {
+                self.lower_d1_phase_ready = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 8_270_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 8_340_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
         if !self.corner_staged
             && player.status_a & 1 != 0
             && (4_800_000..5_100_000).contains(&player.translation[0])
         {
             self.corner_staged = true;
-            self.corner_wait = 28;
+            self.corner_wait = if self.session_globals { 24 } else { 28 };
+        }
+        if self.session_globals
+            && self.corner_staged
+            && !self.corner_phase_ready
+            && player.status_a & 1 != 0
+            && (4_700_000..5_300_000).contains(&player.translation[0])
+        {
+            self.corner_wait = 0;
+            let fresh_safe_phase = [69_u16, 87_u16].into_iter().all(|id| {
+                objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == id)
+                        && object.state == 13
+                        && player.animation_stamp.saturating_sub(object.state_stamp) <= 8
+                })
+            });
+            if fresh_safe_phase && (5_000_000..5_150_000).contains(&player.translation[0]) {
+                self.corner_phase_ready = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 5_020_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 5_100_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
         }
         if self.corner_wait > 0
             && player.status_a & 1 != 0
@@ -21151,6 +24621,19 @@ impl SlipperyClimbCompletionRouteController {
             self.corner_wait -= 1;
             self.jump_hold = 0;
             return PAD_RIGHT;
+        }
+        if self.session_globals
+            && self.corner_staged
+            && self.corner_wait == 0
+            && !self.corner_launch_ready
+            && player.status_a & 1 != 0
+            && (5_000_000..5_250_000).contains(&player.translation[0])
+        {
+            self.jump_hold = 0;
+            if player.velocity[0] > -500_000 {
+                return PAD_LEFT;
+            }
+            self.corner_launch_ready = true;
         }
         let vertical_lift = objects.iter().find(|object| {
             matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 66)
@@ -21161,8 +24644,39 @@ impl SlipperyClimbCompletionRouteController {
         let tower_top_lift = objects.iter().find(|object| {
             matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 59)
         });
-        if vertical && self.vertical_rightward && !self.tower_leftward && player.state == 7 {
+        let tower_orbit = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 80)
+        });
+        if vertical
+            && self.vertical_rightward
+            && !self.tower_leftward
+            && !self.vertical_lift_return_complete
+            && (player.state == 7
+                || (player.status_a & 1 != 0
+                    && (4_300_000..4_600_000).contains(&player.translation[0])
+                    && (-12_300_000..-12_000_000).contains(&player.translation[1])))
+        {
             self.vertical_rightward = false;
+            self.vertical_lift_returning = true;
+            self.jump_hold = 30;
+        }
+        if self.vertical_lift_returning {
+            if player.status_a & 1 != 0 && player.translation[0] <= 4_050_000 {
+                self.vertical_lift_returning = false;
+                self.vertical_lift_return_complete = true;
+                self.jump_hold = 0;
+            } else {
+                let held = PAD_LEFT;
+                if self.jump_hold > 0 {
+                    self.jump_hold -= 1;
+                    return held | PAD_CROSS;
+                }
+                if player.status_a & 1 != 0 {
+                    self.jump_hold = 30;
+                    return held | PAD_CROSS;
+                }
+                return held;
+            }
         }
         if vertical
             && !self.vertical_lift_staged
@@ -21173,6 +24687,29 @@ impl SlipperyClimbCompletionRouteController {
             self.vertical_lift_staged = true;
         }
         if self.vertical_lift_staged && !self.vertical_rightward {
+            let collapsing_steps_ready = !self.session_globals
+                || [69_u16, 87_u16].into_iter().all(|id| {
+                    objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                        ) && object.program.name().as_deref() == Some("CasOC")
+                            && (4_100_000..=4_700_000).contains(&object.translation[0])
+                            && (-13_500_000..=-12_000_000).contains(&object.translation[1])
+                            && object.state == 14
+                            && player.animation_stamp.saturating_sub(object.state_stamp) >= 55
+                    })
+                });
+            if !collapsing_steps_ready {
+                self.jump_hold = 0;
+                return if player.translation[0] < 3_920_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 3_950_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
             if vertical_lift.is_some_and(|lift| lift.translation[1] >= -12_340_000)
                 && player.status_a & 1 != 0
                 && player.translation[0] >= 4_040_000
@@ -21203,10 +24740,12 @@ impl SlipperyClimbCompletionRouteController {
             self.tower_wait = 38;
         }
         if self.tower_staged && !self.tower_leftward {
-            if self.tower_wait == 0 {
+            let second_lift_ready = !self.session_globals
+                || tower_second_lift.is_some_and(|lift| lift.translation[1] >= -11_180_000);
+            if self.tower_wait == 0 && second_lift_ready {
                 self.tower_leftward = true;
             } else {
-                self.tower_wait -= 1;
+                self.tower_wait = self.tower_wait.saturating_sub(1);
                 self.jump_hold = 0;
                 return if player.translation[0] > 5_180_000 {
                     PAD_LEFT
@@ -21216,6 +24755,25 @@ impl SlipperyClimbCompletionRouteController {
                     0
                 };
             }
+        }
+        if self.tower_leftward
+            && !self.tower_bounce_staged
+            && !self.tower_first_landing_jump_armed
+            && player.status_a & 1 == 0
+            && player.velocity[1] < 0
+            && (4_700_000..4_950_000).contains(&player.translation[0])
+            && (-11_500_000..-11_200_000).contains(&player.translation[1])
+        {
+            self.tower_first_landing_jump_armed = true;
+            self.jump_hold = 0;
+        }
+        if self.tower_first_landing_jump_armed {
+            if player.status_a & 1 != 0 {
+                self.tower_first_landing_jump_armed = false;
+                self.jump_hold = 29;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT;
         }
         if self.tower_leftward
             && !self.tower_bounce_staged
@@ -21244,8 +24802,14 @@ impl SlipperyClimbCompletionRouteController {
             }
         }
         if self.tower_second_lift_staged && !self.tower_second_lift_rightward {
+            let orbit_phase_ready = !self.session_globals
+                || tower_orbit.is_some_and(|orbit| {
+                    orbit.state == 14
+                        && player.animation_stamp.saturating_sub(orbit.state_stamp) >= 32
+                });
             if player.status_a & 1 != 0
                 && tower_second_lift.is_some_and(|lift| lift.translation[1] >= -10_570_000)
+                && orbit_phase_ready
             {
                 self.tower_second_lift_rightward = true;
             } else {
@@ -21267,6 +24831,18 @@ impl SlipperyClimbCompletionRouteController {
         {
             self.tower_third_leftward = true;
         }
+        if self.session_globals
+            && self.tower_third_leftward
+            && self.tower_wall_step == 0
+            && player.status_a & 1 == 0
+            && player.velocity[1] < 0
+            && (4_650_000..4_900_000).contains(&player.translation[0])
+            && player.translation[1] <= -9_415_000
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_LEFT | PAD_SQUARE;
+        }
         if self.tower_third_leftward && player.status_a & 1 != 0 {
             let landed_step = [
                 (4_812_800, -9_428_736),
@@ -21283,45 +24859,37 @@ impl SlipperyClimbCompletionRouteController {
             if let Some(step) = landed_step {
                 let tower_wall_landed = step > self.tower_wall_step;
                 self.tower_wall_step = self.tower_wall_step.max(step);
+                if self.session_globals && tower_wall_landed && step == 1 {
+                    self.jump_hold = 30;
+                    return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
                 if tower_wall_landed && step >= 2 {
                     self.tower_wall_wait = 4;
                 }
             }
         }
-        let tower_wall_direction = [4_812_800, 4_580_000, 4_275_000, 4_070_000]
-            .get(usize::from(self.tower_wall_step))
-            .map_or(
-                if self.tower_b2_row_stage >= 5 {
-                    PAD_RIGHT
-                } else if self.tower_b2_row_stage >= 2 {
-                    PAD_LEFT
-                } else if self.tower_b2_checkpoint_rightward {
-                    PAD_RIGHT
-                } else if self.tower_b2_exit_leftward {
-                    PAD_LEFT
-                } else if self.tower_b1_rightward {
-                    PAD_RIGHT
-                } else if zone_name.as_deref() == Some("b1_KZ") || self.tower_top_lift_leftward {
-                    PAD_LEFT
-                } else {
-                    PAD_RIGHT
-                },
-                |&target_x| {
-                    if player.translation[0] > target_x + 24_000 {
-                        PAD_LEFT
-                    } else if player.translation[0] < target_x - 24_000 {
-                        PAD_RIGHT
-                    } else {
-                        0
-                    }
-                },
-            );
         if !self.tower_b2_exit_leftward
             && zone_name.as_deref() == Some("b2_KZ")
             && player.status_a & 1 != 0
             && player.translation[1] >= -6_120_000
         {
             self.tower_b2_exit_leftward = true;
+        }
+        if self.tower_b2_exit_leftward
+            && !self.tower_b2_checkpoint_rightward
+            && zone_name.as_deref() == Some("b2_KZ")
+            && player.status_a & 1 != 0
+            && player.translation[0] <= 4_350_000
+            && player.translation[1] >= -6_160_000
+            && (player.translation[0] > 4_150_000 || player.translation[1] < -6_120_000)
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return if player.translation[0] > 4_150_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
         }
         if self.tower_b2_exit_leftward
             && !self.tower_b2_checkpoint_rightward
@@ -21362,7 +24930,7 @@ impl SlipperyClimbCompletionRouteController {
             && player.translation[1] >= -5_700_000
         {
             self.tower_b2_second_step_staged = true;
-            self.tower_b2_second_step_wait = 0;
+            self.tower_b2_second_step_wait = 1;
             let rwaoc = Eid::from_name("RWaOC").expect("fixed Slippery Climb platform EID");
             self.tower_b2_row_target = objects
                 .iter()
@@ -21386,7 +24954,7 @@ impl SlipperyClimbCompletionRouteController {
         {
             if self.tower_b2_row_launched
                 && player.status_a & 1 != 0
-                && player.translation[0].abs_diff(target.translation[0]) <= 180_000
+                && player.translation[0].abs_diff(target.translation[0]) <= 220_000
             {
                 self.tower_b2_row_landed = true;
                 self.tower_b2_row_stage = 1;
@@ -21410,6 +24978,15 @@ impl SlipperyClimbCompletionRouteController {
                 return direction | PAD_CROSS;
             }
             return direction;
+        }
+        if self.tower_b2_row_stage == 1
+            && player.status_a & 1 != 0
+            && player.translation[0] < 4_800_000
+            && player.translation[1] >= -5_550_000
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
         }
         if self.tower_b2_row_stage == 1
             && player.status_a & 1 != 0
@@ -21507,7 +25084,7 @@ impl SlipperyClimbCompletionRouteController {
             } | PAD_UP;
             self.jump_hold = 0;
             self.vertical_jump_released = true;
-            if target.translation[1] < -4_080_000 {
+            if target.translation[1] < -4_060_000 {
                 return direction;
             }
             self.tower_b2_row_stage = 5;
@@ -21556,6 +25133,9 @@ impl SlipperyClimbCompletionRouteController {
             }
             return direction | depth;
         }
+        let upper_slide = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 22)
+        });
         if self.tower_b2_row_stage == 7
             && let Some(lift) = objects.iter().find(|object| {
                 matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 21)
@@ -21563,7 +25143,13 @@ impl SlipperyClimbCompletionRouteController {
         {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
-            if lift.translation[1] < -3_320_000 {
+            let slide_phase_ready = !self.session_globals
+                || upper_slide.is_some_and(|slide| {
+                    slide.state == 14
+                        && (18..=22)
+                            .contains(&player.animation_stamp.saturating_sub(slide.state_stamp))
+                });
+            if lift.translation[1] < -3_320_000 || !slide_phase_ready {
                 return if player.translation[0] < 3_960_000 {
                     PAD_RIGHT
                 } else if player.translation[0] > 4_030_000 {
@@ -21576,9 +25162,6 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 30;
             return PAD_RIGHT | PAD_CROSS;
         }
-        let upper_slide = objects.iter().find(|object| {
-            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 22)
-        });
         if self.tower_b2_row_stage == 8
             && player.status_a & 1 != 0
             && upper_slide.is_some_and(|slide| {
@@ -21599,7 +25182,15 @@ impl SlipperyClimbCompletionRouteController {
             if self.tower_b2_row_tick > 5 && player.status_a & 1 != 0 {
                 self.tower_b2_row_stage = 10;
                 self.tower_b2_row_tick = 0;
+                if player.translation[1] > -3_070_000 {
+                    self.jump_hold = 30;
+                    self.vertical_jump_released = false;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
                 return 0;
+            }
+            if self.tower_b2_row_tick <= 11 {
+                return PAD_LEFT | PAD_CROSS;
             }
             return PAD_CROSS;
         }
@@ -21628,7 +25219,7 @@ impl SlipperyClimbCompletionRouteController {
         if self.tower_b2_row_stage == 12
             && upper
             && player.status_a & 1 != 0
-            && player.translation[0] >= 6_250_000
+            && player.translation[0] >= 6_240_000
         {
             self.tower_b2_row_stage = 13;
             self.tower_b2_row_tick = 0;
@@ -21639,10 +25230,37 @@ impl SlipperyClimbCompletionRouteController {
         if self.tower_b2_row_stage == 12 && upper {
             let tick = self.tower_b2_row_tick;
             self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
-            if tick < 90 {
+            let transfer_ready = !self.session_globals
+                || objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 17
+                    ) && object.state == 14
+                        && player.animation_stamp.saturating_sub(object.state_stamp) >= 32
+                });
+            if tick < 90 || !transfer_ready {
                 return 0;
             }
-            return PAD_RIGHT | PAD_CROSS | if tick == 90 { PAD_SQUARE } else { 0 };
+            return PAD_RIGHT
+                | PAD_CROSS
+                | if tick == 90 || self.session_globals {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if self.tower_b2_row_stage == 13
+            && player.status_a & 1 != 0
+            && player.translation[0] < 6_500_000
+            && self.tower_b2_row_tick == 0
+        {
+            self.tower_b2_row_tick = 1;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 13 && player.state == 7 {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
         }
         if self.tower_b2_row_stage == 13
             && player.status_a & 1 != 0
@@ -21700,7 +25318,8 @@ impl SlipperyClimbCompletionRouteController {
         if self.tower_b2_row_stage == 16 {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
-            if player.status_a & 1 != 0 && player.translation[1] >= -3_100_000 {
+            if player.status_a & 1 != 0 && player.state != 11 && player.translation[1] >= -3_100_000
+            {
                 self.tower_b2_row_stage = 17;
                 self.tower_b2_row_tick = 0;
                 self.jump_hold = 30;
@@ -21757,6 +25376,36 @@ impl SlipperyClimbCompletionRouteController {
                 .filter(|object| object.program.name().as_deref() == Some("CasOC"))
                 .filter(|object| object.translation[0] > platform.translation[0] + 300_000)
                 .min_by_key(|object| object.translation[0]);
+            if platform.translation[0] >= 23_000_000
+                && let Some(ledge) = next_ledge.filter(|ledge| {
+                    matches!(
+                        ledge.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 99
+                    )
+                })
+            {
+                let ledge_descending = self
+                    .upper_h3_ledge_last_y
+                    .is_some_and(|last_y| ledge.translation[1] < last_y);
+                self.upper_h3_ledge_last_y = Some(ledge.translation[1]);
+                let ledge_y_ready = if self.session_globals {
+                    (-3_150_000..=-3_050_000).contains(&ledge.translation[1])
+                } else {
+                    (-3_250_000..=-3_150_000).contains(&ledge.translation[1])
+                };
+                self.upper_h3_ledge_phase_ready = ledge_descending && ledge_y_ready;
+                if !self.upper_h3_ledge_phase_ready {
+                    self.jump_hold = 0;
+                    self.vertical_jump_released = true;
+                    return if player.translation[0] < platform.translation[0] - 20_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > platform.translation[0] + 20_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                }
+            }
             let launch_distance = if player.translation[0] >= 20_500_000 {
                 600_000
             } else {
@@ -21767,6 +25416,8 @@ impl SlipperyClimbCompletionRouteController {
             if next_ledge.is_some_and(|ledge| {
                 ledge.translation[0] - platform.translation[0] <= launch_distance
                     && platform.translation[1] >= ledge.translation[1] - 100_000
+                    && (!(10_500_000..12_700_000).contains(&player.translation[0])
+                        || ledge.translation[1] >= -2_870_000)
             }) && player.status_a & 1 != 0
             {
                 self.tower_b2_row_stage = 20;
@@ -21790,6 +25441,49 @@ impl SlipperyClimbCompletionRouteController {
         {
             self.upper_m2_flip_bounced = true;
         }
+        let upper_m1_lift = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 60)
+        });
+        let upper_m1_phase_platform = if self.session_globals {
+            objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 61)
+            })
+        } else {
+            upper_m1_lift
+        };
+        if self.tower_b2_row_stage >= 18
+            && upper
+            && self.upper_m2_flip_bounced
+            && !self.upper_m1_lift_phase_ready
+            && player.status_a & 1 != 0
+            && (16_850_000..17_250_000).contains(&player.translation[0])
+        {
+            if let Some(platform) = upper_m1_phase_platform {
+                let platform_rising = self
+                    .upper_m1_lift_last_y
+                    .is_some_and(|last_y| platform.translation[1] > last_y);
+                self.upper_m1_lift_last_y = Some(platform.translation[1]);
+                let phase_window = if self.session_globals {
+                    -3_200_000..=-3_150_000
+                } else {
+                    -3_200_000..=-3_100_000
+                };
+                if platform_rising && phase_window.contains(&platform.translation[1]) {
+                    self.upper_m1_lift_phase_ready = true;
+                }
+            }
+            if !self.upper_m1_lift_phase_ready {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return if player.translation[0] > 17_050_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 16_980_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+        }
         if self.tower_b2_row_stage >= 18
             && upper
             && self.upper_m2_flip_bounced
@@ -21806,7 +25500,8 @@ impl SlipperyClimbCompletionRouteController {
                 && player.velocity[0] > 300_000)
                 || (!self.upper_m2_flip_bounced
                     && player.translation[0] >= 16_500_000
-                    && player.velocity[1] < 0))
+                    && player.velocity[1] < 0
+                    && (!self.session_globals || player.velocity[1] < -750_000)))
         {
             self.jump_hold = 30;
             return PAD_LEFT | PAD_CROSS;
@@ -21815,19 +25510,195 @@ impl SlipperyClimbCompletionRouteController {
             && upper
             && !self.upper_l4_wait_started
             && player.status_a & 1 != 0
-            && (18_300_000..18_600_000).contains(&player.translation[0])
+            && (18_300_000..18_750_000).contains(&player.translation[0])
         {
             self.upper_l4_wait_started = true;
-            self.upper_l4_wait = 100;
+            self.upper_l4_phase_target = objects
+                .iter()
+                .filter(|object| {
+                    object.program.name().as_deref() == Some("RWaOC")
+                        && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                        && (18_800_000..20_500_000).contains(&object.translation[0])
+                })
+                .min_by_key(|object| object.translation[1])
+                .map(|object| object.object);
         }
-        if self.upper_l4_wait > 0 {
-            self.upper_l4_wait -= 1;
+        if self.upper_l4_wait_started
+            && !self.upper_l4_phase_ready
+            && self
+                .upper_l4_phase_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+                .is_none()
+        {
+            self.upper_l4_phase_target = objects
+                .iter()
+                .filter(|object| {
+                    object.program.name().as_deref() == Some("RWaOC")
+                        && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                        && (18_800_000..20_500_000).contains(&object.translation[0])
+                })
+                .min_by_key(|object| object.translation[1])
+                .map(|object| object.object);
+            self.upper_l4_phase_last_y = None;
+        }
+        if self.upper_l4_wait_started
+            && !self.upper_l4_phase_ready
+            && let Some(platform) = self
+                .upper_l4_phase_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+        {
+            let platform_rising = self
+                .upper_l4_phase_last_y
+                .is_some_and(|last_y| platform.translation[1] > last_y);
+            self.upper_l4_phase_last_y = Some(platform.translation[1]);
+            if platform_rising && (-3_250_000..=-3_100_000).contains(&platform.translation[1]) {
+                self.upper_l4_phase_ready = true;
+            }
+        }
+        if self.upper_l4_wait_started && !self.upper_l4_phase_ready {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
-            return 0;
+            return if self.session_globals && player.translation[0] > 18_610_000 {
+                PAD_LEFT
+            } else if self.session_globals && player.translation[0] < 18_590_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.upper_l4_phase_ready
+            && self.tower_b2_row_stage >= 18
+            && upper
+            && player.status_a & 1 != 0
+            && (18_800_000..19_100_000).contains(&player.translation[0])
+        {
+            if !self.upper_l4_second_jump_armed {
+                self.upper_l4_second_jump_armed = true;
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return 0;
+            }
+            self.tower_b2_row_stage = 20;
+            self.tower_b2_row_tick = 0;
+            self.jump_hold = 30;
+            self.vertical_jump_released = false;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage == 20
+            && upper
+            && player.translation[0] >= 13_240_000
+            && player.translation[0] < 13_400_000
+            && player.velocity[1] < -500_000
+        {
+            return PAD_LEFT;
+        }
+        if self.tower_b2_row_stage == 20
+            && upper
+            && player.translation[0] >= 14_300_000
+            && player.translation[0] < 14_700_000
+            && player.velocity[1] < -500_000
+        {
+            return PAD_LEFT;
+        }
+        let upper_landing_brake_start = if self.session_globals {
+            15_170_000
+        } else {
+            15_220_000
+        };
+        if self.tower_b2_row_stage == 20
+            && upper
+            && player.translation[0] >= upper_landing_brake_start
+            && player.translation[0] < 15_400_000
+            && player.velocity[1] < -500_000
+        {
+            return PAD_LEFT;
+        }
+        let lab_assistant = Eid::from_name("LabAC").expect("fixed laboratory-assistant EID");
+        if self.session_globals
+            && self.tower_b2_row_stage == 21
+            && upper
+            && player.status_a & 1 != 0
+            && (27_000_000..27_500_000).contains(&player.translation[0])
+        {
+            let launch_phase_ready = objects.iter().any(|object| {
+                object.program == lab_assistant
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 123
+                    )
+                    && object.state == 8
+                    && (8..=10).contains(&player.animation_stamp.saturating_sub(object.state_stamp))
+            });
+            if !launch_phase_ready {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return if player.translation[0] > 27_230_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 27_170_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.session_globals
+            && self.tower_b2_row_stage == 21
+            && upper
+            && player.status_a & 1 != 0
+            && (12_600_000..13_050_000).contains(&player.translation[0])
+        {
+            let transfer_phase = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 112)
+                    .then(|| {
+                        (
+                            object.state,
+                            player.animation_stamp.saturating_sub(object.state_stamp),
+                        )
+                    })
+            });
+            let walk_window = matches!(transfer_phase, Some((12, age)) if age >= 38);
+            if self.tower_b2_row_tick < 6 && (self.tower_b2_row_tick > 0 || walk_window) {
+                self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return PAD_RIGHT;
+            }
+            let transfer_cycle_started = matches!(transfer_phase, Some((11, age)) if age <= 1);
+            if self.tower_b2_row_tick < 6 || !transfer_cycle_started {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return 0;
+            }
+        }
+        if self.tower_b2_row_stage == 21
+            && zone_name.as_deref() == Some("n1_KZ")
+            && player.status_a & 1 != 0
+            && player.state == 13
+            && player.translation[0] >= 13_000_000
+            && player.translation[0] < 13_500_000
+            && self.tower_b2_row_tick == 0
+        {
+            self.tower_b2_row_tick = 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        let upper_walkway_y = if self.session_globals {
+            -3_000_000
+        } else {
+            -3_100_000
+        };
+        if self.tower_b2_row_stage == 21
+            && player.status_a & 1 != 0
+            && player.translation[1] < upper_walkway_y
+            && (15_100_000..15_320_000).contains(&player.translation[0])
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
         }
         if self.tower_b2_row_stage == 23 {
-            if self.tower_b2_row_tick < 64 {
+            if self.tower_b2_row_tick < 1 {
                 self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
                 self.jump_hold = 0;
                 self.vertical_jump_released = true;
@@ -21836,6 +25707,22 @@ impl SlipperyClimbCompletionRouteController {
             self.tower_b2_row_stage = 20;
             self.jump_hold = 30;
             return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.tower_b2_row_stage == 21 && player.status_a & 1 != 0 && player.state == 11 {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
+        }
+        if self.tower_b2_row_stage == 21
+            && upper
+            && player.status_a & 1 != 0
+            && (23_700_000..24_050_000).contains(&player.translation[0])
+            && !self.upper_h3_second_jump_armed
+        {
+            self.upper_h3_second_jump_armed = true;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return 0;
         }
         if self.tower_b2_row_stage == 21 {
             self.jump_hold = 0;
@@ -21933,12 +25820,29 @@ impl SlipperyClimbCompletionRouteController {
             if tick < 60 {
                 self.jump_hold = 0;
                 self.vertical_jump_released = true;
+                let session_lab_phase_wait = self.session_globals
+                    && self.tower_b2_row_stage == 11
+                    && objects.iter().any(|object| {
+                        object.program == lab_assistant
+                            && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                            && object.state == 9
+                            && player.animation_stamp.saturating_sub(object.state_stamp) < 9
+                    });
+                let session_casoc_bounce_spin = self.session_globals
+                    && self.tower_b2_row_stage == 20
+                    && (9_700_000..9_900_000).contains(&player.translation[0])
+                    && player.velocity[1] < 0;
                 let target_depth = if player.translation[0] >= 15_600_000 {
                     220_000
                 } else {
                     120_000
                 };
-                let depth = if player.translation[0] < 15_000_000 {
+                let upper_depth_start = if self.session_globals && tick < 20 {
+                    14_900_000
+                } else {
+                    15_000_000
+                };
+                let depth = if player.translation[0] < upper_depth_start {
                     0
                 } else if player.translation[2] > target_depth {
                     PAD_UP
@@ -21947,10 +25851,20 @@ impl SlipperyClimbCompletionRouteController {
                 } else {
                     0
                 };
-                return PAD_RIGHT
-                    | PAD_CROSS
+                return if session_lab_phase_wait {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                } | PAD_CROSS
                     | depth
-                    | if tick.is_multiple_of(6) {
+                    | if session_casoc_bounce_spin
+                        || (tick.is_multiple_of(6)
+                            && !((15_000_000..16_700_000).contains(&player.translation[0])
+                                || (self.session_globals
+                                    && (25_500_000..26_200_000).contains(&player.translation[0]))
+                                || (player.translation[0] >= 23_000_000
+                                    && !self.upper_h3_second_jump_armed)))
+                    {
                         PAD_SQUARE
                     } else {
                         0
@@ -21966,6 +25880,34 @@ impl SlipperyClimbCompletionRouteController {
         {
             self.tower_b1_step_reached = true;
         }
+        let tower_wall_direction = [4_812_800, 4_580_000, 4_275_000, 4_070_000]
+            .get(usize::from(self.tower_wall_step))
+            .map_or(
+                if self.tower_b2_row_stage >= 5 {
+                    PAD_RIGHT
+                } else if self.tower_b2_row_stage >= 2 {
+                    PAD_LEFT
+                } else if self.tower_b2_checkpoint_rightward {
+                    PAD_RIGHT
+                } else if self.tower_b2_exit_leftward {
+                    PAD_LEFT
+                } else if self.tower_b1_rightward {
+                    PAD_RIGHT
+                } else if zone_name.as_deref() == Some("b1_KZ") || self.tower_top_lift_leftward {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                },
+                |&target_x| {
+                    if player.translation[0] > target_x + 24_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < target_x - 24_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    }
+                },
+            );
         let b1_depth_direction =
             if (self.tower_b2_row_stage >= 10 && upper) || self.tower_b2_row_stage >= 8 {
                 0
@@ -21986,10 +25928,40 @@ impl SlipperyClimbCompletionRouteController {
             } else {
                 0
             };
+        let first_lift_depth_direction =
+            if lower && (15_400_000..17_460_000).contains(&player.translation[0]) {
+                let target = if self.first_lift_recovered {
+                    136_960
+                } else {
+                    124_672
+                };
+                if player.translation[2] < target - 6_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > target + 6_000 {
+                    PAD_UP
+                } else {
+                    0
+                }
+            } else {
+                0
+            };
+        let tower_depth_balance_direction = if vertical
+            && self.tower_third_leftward
+            && self.tower_depth_lane_ready
+            && !self.tower_top_lift_staged
+        {
+            if player.translation[2] >= 96_000 || player.velocity[2] > 100_000 {
+                PAD_UP
+            } else {
+                PAD_DOWN
+            }
+        } else {
+            0
+        };
         let course_direction = if upper {
             PAD_RIGHT | b1_depth_direction
         } else if vertical && self.tower_third_leftward {
-            tower_wall_direction | b1_depth_direction
+            tower_wall_direction | tower_depth_balance_direction | b1_depth_direction
         } else if vertical && self.tower_second_lift_rightward {
             PAD_RIGHT
         } else if vertical && self.tower_leftward {
@@ -21997,7 +25969,7 @@ impl SlipperyClimbCompletionRouteController {
         } else if vertical && self.vertical_rightward {
             PAD_RIGHT
         } else {
-            PAD_LEFT
+            PAD_LEFT | first_lift_depth_direction
         };
         if self.tower_third_leftward && !self.tower_third_spin_released {
             self.tower_third_spin_released = true;
@@ -22024,15 +25996,32 @@ impl SlipperyClimbCompletionRouteController {
             self.tower_wall_wait -= 1;
             self.jump_hold = 0;
             self.vertical_jump_released = true;
-            let current_x = [4_812_800, 4_505_600, 4_198_400, 3_993_600]
-                [usize::from(self.tower_wall_step.saturating_sub(1).min(3))];
-            return if player.translation[0] > current_x + 20_000 {
-                PAD_LEFT
-            } else if player.translation[0] < current_x - 20_000 {
-                PAD_RIGHT
-            } else {
-                0
-            };
+            return 0;
+        }
+        if self.session_globals
+            && self.tower_wall_step >= 4
+            && player.status_a & 1 != 0
+            && player.translation[1].abs_diff(-8_814_336) <= 8_192
+            && matches!(player.state, 17 | 18)
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
+        }
+        if self.tower_wall_step >= 4
+            && !self.tower_depth_lane_ready
+            && player.status_a & 1 != 0
+            && (4_050_000..=4_400_000).contains(&player.translation[0])
+            && (-8_630_000..=-8_580_000).contains(&player.translation[1])
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if player.translation[2] < 96_000 {
+                return PAD_RIGHT | PAD_DOWN;
+            }
+            self.tower_depth_lane_ready = true;
+            self.jump_hold = 29;
+            return PAD_RIGHT | PAD_UP | PAD_CROSS | PAD_SQUARE;
         }
         if self.tower_wall_step >= 4
             && player.status_a & 1 != 0
@@ -22115,12 +26104,73 @@ impl SlipperyClimbCompletionRouteController {
             self.vertical_jump_released = true;
             return PAD_RIGHT | PAD_UP;
         }
+        if self.session_globals
+            && self.tower_b1_launch_staged
+            && !self.tower_b1_wall_lift_phase_ready
+            && self.tower_b1_wall_crossed
+            && !self.tower_b1_step_reached
+            && player.status_a & 1 != 0
+            && (4_650_000..=4_900_000).contains(&player.translation[0])
+            && (-6_700_000..=-6_550_000).contains(&player.translation[1])
+            && let Some(lift) = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 97)
+            })
+        {
+            let descending = self
+                .tower_b1_wall_lift_last_y
+                .is_some_and(|last_y| lift.translation[1] < last_y);
+            self.tower_b1_wall_lift_last_y = Some(lift.translation[1]);
+            if descending && lift.translation[1] <= -6_230_000 {
+                self.tower_b1_wall_lift_phase_ready = true;
+            } else {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return if player.translation[0] < 4_720_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 4_800_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.session_globals
+            && self.tower_b1_wall_lift_phase_ready
+            && !self.tower_b1_wall_runup_ready
+            && !self.tower_b1_step_reached
+            && player.status_a & 1 != 0
+            && (4_650_000..=4_900_000).contains(&player.translation[0])
+            && (-6_700_000..=-6_550_000).contains(&player.translation[1])
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            if player.velocity[0] < 500_000 {
+                return PAD_RIGHT;
+            }
+            self.tower_b1_wall_runup_ready = true;
+        }
         if self.tower_b1_launch_staged
             && !self.tower_b1_wall_crossed
             && player.translation[0] >= 4_250_000
             && player.translation[2] <= 60_000
         {
             self.tower_b1_wall_crossed = true;
+        }
+        if self.session_globals
+            && !self.vertical_entry_braked
+            && vertical
+            && player.status_a & 1 != 0
+            && (4_550_000..4_700_000).contains(&player.translation[0])
+            && (-13_500_000..-13_000_000).contains(&player.translation[1])
+        {
+            self.vertical_entry_braked = true;
+            self.vertical_entry_brake_frames = 1;
+        }
+        if self.vertical_entry_brake_frames > 0 && player.status_a & 1 != 0 {
+            self.vertical_entry_brake_frames -= 1;
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_LEFT;
         }
         if vertical && player.status_a & 1 == 0 {
             self.vertical_jump_released = false;
@@ -22190,6 +26240,15 @@ impl SlipperyClimbCompletionRouteController {
                 0
             };
         }
+        if self.session_globals
+            && player.status_a & 1 != 0
+            && platform_id == Some(7)
+            && next_platform_id == Some(6)
+            && player.velocity[0] >= 0
+        {
+            self.jump_hold = 0;
+            return PAD_LEFT;
+        }
         if (long_f5_transfer || platform_id == Some(43))
             && player.status_a & 1 != 0
             && let Some(platform) = platform
@@ -22246,6 +26305,60 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 0;
             return PAD_RIGHT;
         }
+        let rotating_target = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 23)
+        });
+        if rotating_target
+            .and_then(|target| target.frame_bound)
+            .is_some_and(|bound| bound.max.z <= 0)
+        {
+            self.rotating_target_lowered = true;
+        }
+        if player.status_a & 1 != 0 && (11_650_000..12_150_000).contains(&player.translation[0]) {
+            if !self.second_rotating_launch_staged && player.translation[0] > 11_890_000 {
+                self.jump_hold = 0;
+                return PAD_LEFT;
+            }
+            self.second_rotating_launch_staged = true;
+            let rotating_target_ready = self.rotating_target_lowered
+                && rotating_target
+                    .and_then(|target| target.frame_bound)
+                    .is_some_and(|bound| bound.max.z >= 20_000);
+            if !rotating_target_ready {
+                self.jump_hold = 0;
+                if self.rotating_target_lowered
+                    && rotating_target.is_some_and(|target| {
+                        player.animation_stamp.saturating_sub(target.state_stamp) >= 24
+                    })
+                {
+                    return PAD_LEFT;
+                }
+                let target_x =
+                    rotating_target.map_or(11_940_000, |target| target.translation[0] + 470_000);
+                return if player.translation[0] < target_x - 20_000 || player.velocity[0] < -100_000
+                {
+                    PAD_RIGHT
+                } else if player.translation[0] > target_x + 20_000 || player.velocity[0] > 100_000
+                {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if player.status_a & 1 != 0 && (12_000_000..12_800_000).contains(&player.translation[0]) {
+            if player.translation[0] >= 12_350_000 {
+                self.rotating_block_centered = true;
+            }
+            if !self.rotating_block_centered || player.velocity[0] > -500_000 {
+                self.jump_hold = 0;
+                return if self.rotating_block_centered {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+        }
         if !self.barrier_jump_released
             && player.status_a & 1 != 0
             && (9_100_000..9_400_000).contains(&player.translation[0])
@@ -22253,6 +26366,51 @@ impl SlipperyClimbCompletionRouteController {
             self.barrier_jump_released = true;
             self.jump_hold = 0;
             return PAD_LEFT;
+        }
+        if self.lower_d1_runup_stage == 0
+            && zone_name.as_deref() == Some("d1_KZ")
+            && player.status_a & 1 != 0
+            && (7_050_000..7_350_000).contains(&player.translation[0])
+        {
+            self.lower_d1_runup_stage = 1;
+        }
+        if self.lower_d1_runup_stage == 1 && player.status_a & 1 != 0 {
+            self.jump_hold = 0;
+            if player.translation[0] >= 7_450_000 {
+                self.lower_d1_runup_stage = 2;
+                return PAD_LEFT;
+            }
+            return PAD_RIGHT;
+        }
+        if self.lower_d1_runup_stage == 2 && player.status_a & 1 != 0 {
+            if player.translation[0] > 7_430_000 || player.velocity[0] > -500_000 {
+                self.jump_hold = 0;
+                return PAD_LEFT;
+            }
+            self.lower_d1_runup_stage = 3;
+        }
+        if self.lower_corner_runup_stage == 0
+            && camera.path.zone == c3
+            && camera.path.index == 0
+            && player.status_a & 1 != 0
+            && (5_200_000..5_500_000).contains(&player.translation[0])
+        {
+            self.lower_corner_runup_stage = 1;
+        }
+        if self.lower_corner_runup_stage == 1 && player.status_a & 1 != 0 {
+            self.jump_hold = 0;
+            if player.translation[0] >= 5_450_000 {
+                self.lower_corner_runup_stage = 2;
+                return PAD_LEFT;
+            }
+            return PAD_RIGHT;
+        }
+        if self.lower_corner_runup_stage == 2 && player.status_a & 1 != 0 {
+            if player.translation[0] > 5_430_000 || player.velocity[0] > -500_000 {
+                self.jump_hold = 0;
+                return PAD_LEFT;
+            }
+            self.lower_corner_runup_stage = 3;
         }
         if self.second_lift_spin
             && player.status_a & 1 != 0
@@ -22274,10 +26432,21 @@ impl SlipperyClimbCompletionRouteController {
                 0
             };
         }
-        if first_lift_jump && player.status_a & 1 != 0 && player.translation[0] > 16_750_000 {
-            return PAD_LEFT;
+        if first_lift_jump
+            && player.status_a & 1 != 0
+            && (player.state != 2 || player.translation[0] > 16_900_000)
+        {
+            return PAD_LEFT | first_lift_depth_direction;
         }
-        if second_lift_jump && player.status_a & 1 != 0 && player.translation[0] > 15_700_000 {
+        let second_lift_runup_edge = if self.session_globals {
+            15_690_000
+        } else {
+            15_700_000
+        };
+        if second_lift_jump
+            && player.status_a & 1 != 0
+            && player.translation[0] > second_lift_runup_edge
+        {
             return PAD_LEFT;
         }
         if second_lift_jump
@@ -22287,9 +26456,9 @@ impl SlipperyClimbCompletionRouteController {
         {
             return PAD_LEFT;
         }
-        let second_lift_square = if vertical {
+        let second_lift_square = if vertical || self.rotating_block_staged {
             false
-        } else if self.third_lift_spin && player.state == 18 {
+        } else if self.third_lift_spin && matches!(player.state, 17..=19) {
             self.second_lift_square_released = true;
             false
         } else if self.third_lift_spin && player.status_a & 1 != 0 {
@@ -22305,7 +26474,12 @@ impl SlipperyClimbCompletionRouteController {
         if player.status_a & 1 != 0 && (5_700_000..6_100_000).contains(&player.translation[0]) {
             self.lift_brake_complete = true;
         }
-        let direction = if !self.lift_brake_complete
+        let third_lift_up_min = if self.session_globals {
+            14_210_000
+        } else {
+            14_200_000
+        };
+        let mut direction = if !self.lift_brake_complete
             && player.status_a & 1 == 0
             && (5_600_000..5_950_000).contains(&player.translation[0])
         {
@@ -22314,13 +26488,32 @@ impl SlipperyClimbCompletionRouteController {
             course_direction
                 | if self.third_lift_spin
                     && player.status_a & 1 == 0
-                    && (14_200_000..14_700_000).contains(&player.translation[0])
+                    && (third_lift_up_min..14_700_000).contains(&player.translation[0])
                 {
                     PAD_UP
                 } else {
                     0
                 }
         };
+        if self.session_globals
+            && self.third_lift_spin
+            && !self.third_lift_nudge_applied
+            && player.status_a & 1 != 0
+            && (13_000_000..=14_150_000).contains(&player.translation[0])
+        {
+            self.third_lift_nudge_applied = true;
+            direction = PAD_LEFT | PAD_DOWN;
+        }
+        if self.session_globals
+            && self.third_lift_spin
+            && !self.third_lift_lane_restored
+            && player.status_a & 1 == 0
+            && (13_000_000..13_300_000).contains(&player.translation[0])
+            && player.translation[2] > 36_608
+        {
+            self.third_lift_lane_restored = true;
+            direction |= PAD_UP;
+        }
         let tower_third_square = if self.tower_third_leftward && !self.tower_top_lift_leftward {
             if self.tower_wall_step >= 2
                 && let Some(&target_y) = [-9_019_136, -8_814_336]
@@ -22335,7 +26528,6 @@ impl SlipperyClimbCompletionRouteController {
         } else {
             false
         };
-        let lab_assistant = Eid::from_name("LabAC").expect("fixed laboratory-assistant EID");
         let upper_attack_square = self.tower_b2_row_stage >= 10
             && matches!(zone_name.as_deref(), Some("c1_KZ" | "o2_KZ"))
             && objects.iter().any(|object| {
@@ -22384,13 +26576,27 @@ impl SlipperyClimbCompletionRouteController {
 /// still requires a brief return to the center, followed by a rope re-entry
 /// before `b3_mZ`. The end island is centered again only after its safe bank
 /// so the retail `WarpC` object performs the level-complete handoff.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct HighRoadCompletionRouteController {
     jump_hold: u8,
+    session_globals: bool,
     sunset_tick: u32,
     sunset_wait: u16,
     sunset_stage: u8,
+    sunset_f4_phase_gate: u8,
+    sunset_h5_ruin_phase_gate: u8,
+    sunset_h5_upper_entry_phase: u8,
+    sunset_i3_stage126_ready_wait: u8,
     sunset_attack_tick: u8,
+    sunset_d1_recovery_alignment: bool,
+    sunset_d2_first_support_alignment: bool,
+    sunset_d3_first_gap_alignment: bool,
+    sunset_d3_first_gap_retimed: bool,
+    sunset_e3_first_wall_alignment: bool,
+    sunset_e3_first_wall_retimed: bool,
+    sunset_e3_ruin_volley_alignment: bool,
+    sunset_e3_ruin_volley_retimed: bool,
     collect_sunset_cortex_tokens: bool,
     sunset_token_detour_stage: u8,
     sunset_token_detour_tick: u16,
@@ -22476,7 +26682,13 @@ fn sunset_route_default(name: &str) -> Option<&'static str> {
         "C1_SUNSET_STAGE122_CENTER" => Some("1"),
         "C1_SUNSET_STAGE122_RELEASE" => Some("24"),
         "C1_SUNSET_STAGE125_WAIT" => Some("30"),
+        "C1_SUNSET_STAGE126_READY_WAIT" => Some("0"),
+        "C1_SUNSET_STAGE129_NEUTRAL_JUMP" => Some("0"),
         "C1_SUNSET_STAGE129_RUNUP" => Some("2"),
+        "C1_SUNSET_STAGE129_SESSION_RUNUP" => Some("0"),
+        "C1_SUNSET_STAGE130_CROSS_TICKS" => Some("255"),
+        "C1_SUNSET_STAGE130_UP_TICKS" => Some("0"),
+        "C1_SUNSET_STAGE130_WAIT" => Some("20"),
         "C1_SUNSET_STAGE131_RUNUP" => Some("6"),
         "C1_SUNSET_STAGE138_RUNUP" => Some("10"),
         "C1_SUNSET_STAGE146_PHASED" => Some("1"),
@@ -22508,21 +26720,20 @@ fn sunset_route_default(name: &str) -> Option<&'static str> {
         "C1_SUNSET_STAGE208_LEFT_BRAKE" => Some("20"),
         "C1_SUNSET_STAGE208_RIGHT_HOLD" => Some("14"),
         "C1_SUNSET_STAGE210_DIRECT_H12" => Some("1"),
-        "C1_SUNSET_STAGE210_LEFT_HOLD" => Some("1"),
-        "C1_SUNSET_STAGE210_RIGHT_BRAKE" => Some("4"),
-        "C1_SUNSET_STAGE210_SWAP" => Some("0"),
         _ => None,
     }
 }
 
 fn sunset_var(name: &str) -> Result<String, std::env::VarError> {
-    sunset_route_default(name)
-        .map(str::to_owned)
-        .ok_or(std::env::VarError::NotPresent)
+    std::env::var(name).or_else(|_| {
+        sunset_route_default(name)
+            .map(str::to_owned)
+            .ok_or(std::env::VarError::NotPresent)
+    })
 }
 
 fn sunset_var_os(name: &str) -> Option<std::ffi::OsString> {
-    sunset_route_default(name).map(std::ffi::OsString::from)
+    std::env::var_os(name).or_else(|| sunset_route_default(name).map(std::ffi::OsString::from))
 }
 
 // These ordinary digital-pad masks are the five short bootstrap windows still
@@ -22652,7 +26863,12 @@ impl HighRoadCompletionRouteController {
                     return PAD_UP;
                 }
                 self.sunset_stage = 5;
-                self.sunset_wait = 150;
+                // Entering through the authored campaign keeps the retail
+                // moving-support phase accumulated by the preceding screens.
+                // Its first safe return is fifteen frames later than a fresh
+                // direct boot; preserve that phase before starting the
+                // ordinary-pad departure sequence.
+                self.sunset_wait = if self.session_globals { 165 } else { 150 };
                 return 0;
             }
             if self.sunset_stage == 5 {
@@ -22694,7 +26910,11 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 7;
-                    self.sunset_wait = 40;
+                    // The carried support phase reaches this safe landing
+                    // fourteen frames before a fresh boot. Resynchronize
+                    // while Crash is stationary so the following authored
+                    // moving-platform sequence sees the same phase.
+                    self.sunset_wait = if self.session_globals { 54 } else { 40 };
                     return 0;
                 }
                 if self.sunset_stage == 7 {
@@ -23152,7 +27372,11 @@ impl HighRoadCompletionRouteController {
                 {
                     self.sunset_stage = 94;
                     self.sunset_attack_tick = 0;
-                    return PAD_LEFT | lane | PAD_SQUARE;
+                    // Cancel any outward depth impulse before the long H1
+                    // jump cycle. Entering this stage on the alternating
+                    // down-phase lets a one-frame carried-session offset
+                    // compound across the gap and miss H2 entirely.
+                    return PAD_LEFT | PAD_UP | PAD_SQUARE;
                 }
                 return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
             }
@@ -23585,6 +27809,7 @@ impl HighRoadCompletionRouteController {
                 if player.status_a & 1 != 0 && player.translation[1] > -14_650_000 {
                     self.sunset_stage = 113;
                     self.sunset_attack_tick = 0;
+                    self.sunset_h5_ruin_phase_gate = 0;
                     return 0;
                 }
                 if tick < 2 {
@@ -23609,6 +27834,28 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 113
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
+                if self.session_globals && self.sunset_h5_ruin_phase_gate < 2 {
+                    let ruin_wave_present = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Runtime {
+                                executable: 42,
+                                subtype: 11
+                            }
+                        )
+                    });
+                    if self.sunset_h5_ruin_phase_gate == 0 {
+                        if ruin_wave_present {
+                            self.sunset_h5_ruin_phase_gate = 1;
+                        }
+                        return 0;
+                    }
+                    if ruin_wave_present {
+                        return 0;
+                    }
+                    self.sunset_h5_ruin_phase_gate = 2;
+                    self.sunset_attack_tick = 0;
+                }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 if player.status_a & 1 != 0 && player.translation[1] > -14_400_000 {
@@ -23720,6 +27967,7 @@ impl HighRoadCompletionRouteController {
                 {
                     self.sunset_stage = 118;
                     self.sunset_attack_tick = 0;
+                    self.sunset_h5_upper_entry_phase = 0;
                     return 0;
                 }
                 let horizontal = if player.translation[0] < 21_730_000 {
@@ -23747,15 +27995,53 @@ impl HighRoadCompletionRouteController {
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(0);
-                if tick < 4 {
+                if !self.session_globals && tick < 4 {
                     return PAD_RIGHT;
-                }
-                if tick < wait_frames {
-                    return 0;
                 }
                 if player.status_a & 1 != 0 && player.translation[0] >= 21_850_000 {
                     self.sunset_stage = 119;
                     self.sunset_attack_tick = 0;
+                    return 0;
+                }
+                if self.session_globals {
+                    if self.sunset_h5_upper_entry_phase == 0 {
+                        if player.translation[0] < 21_730_000 {
+                            return PAD_RIGHT;
+                        }
+                        self.sunset_h5_upper_entry_phase = 1;
+                        return 0;
+                    }
+                    if self.sunset_h5_upper_entry_phase == 1 {
+                        if player.velocity[0] != 0 {
+                            return 0;
+                        }
+                        self.sunset_h5_upper_entry_phase = 2;
+                        self.sunset_attack_tick = 0;
+                        return 0;
+                    }
+                    let (runtime_ruin_count, runtime_ruins_clear) = objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 10
+                                }
+                            )
+                        })
+                        .fold((0_u8, true), |(count, clear), object| {
+                            (
+                                count.saturating_add(1),
+                                clear && object.state == 5 && object.frame_bound.is_none(),
+                            )
+                        });
+                    if runtime_ruin_count < 3 || !runtime_ruins_clear {
+                        return 0;
+                    }
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                if !self.session_globals && tick < wait_frames {
                     return 0;
                 }
                 return if tick < 8 {
@@ -23918,6 +28204,18 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
+                    let tick = if self.session_globals {
+                        let session_wait = sunset_var("C1_SUNSET_STAGE122_SESSION_WAIT")
+                            .ok()
+                            .and_then(|value| value.parse::<u8>().ok())
+                            .unwrap_or(0);
+                        if tick < session_wait {
+                            return 0;
+                        }
+                        tick - session_wait
+                    } else {
+                        tick
+                    };
                     if let Ok(release) = sunset_var("C1_SUNSET_STAGE122_RELEASE") {
                         let release = release.parse::<u8>().unwrap_or(u8::MAX);
                         if tick >= release {
@@ -23961,13 +28259,21 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 123
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
+                let carrier_release_height = if self.session_globals {
+                    -12_610_000
+                } else {
+                    -12_600_000
+                };
                 if player.status_a & 1 != 0
-                    && player.translation[1] > -12_600_000
+                    && player.translation[1] > carrier_release_height
                     && player.translation[0] > 22_000_000
                 {
                     self.sunset_stage = 124;
                     self.sunset_attack_tick = 0;
                     return PAD_RIGHT | PAD_CROSS;
+                }
+                if self.session_globals && player.translation[0] > 22_280_000 {
+                    return PAD_LEFT;
                 }
                 return 0;
             }
@@ -24004,9 +28310,14 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 126;
                         self.sunset_attack_tick = 0;
+                        self.sunset_i3_stage126_ready_wait = 0;
                         return 0;
                     }
-                    return if tick < wait { 0 } else { PAD_CROSS };
+                    if tick < wait {
+                        return 0;
+                    }
+                    let horizontal = if self.session_globals { PAD_LEFT } else { 0 };
+                    return horizontal | PAD_CROSS;
                 }
                 if let Ok(start) = sunset_var("C1_SUNSET_STAGE125_TAS_TICK") {
                     let start = start.parse::<u32>().unwrap_or(4_217);
@@ -24023,10 +28334,20 @@ impl HighRoadCompletionRouteController {
                     && player.translation[1] > -11_590_000
                     && player.translation[0] < 22_120_000
                 {
+                    let ready_wait = sunset_var("C1_SUNSET_STAGE126_READY_WAIT")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .unwrap_or(0);
+                    if self.session_globals && self.sunset_i3_stage126_ready_wait < ready_wait {
+                        self.sunset_i3_stage126_ready_wait =
+                            self.sunset_i3_stage126_ready_wait.saturating_add(1);
+                        return 0;
+                    }
                     self.sunset_stage = 127;
                     self.sunset_attack_tick = 0;
                     return PAD_LEFT | PAD_CROSS;
                 }
+                self.sunset_i3_stage126_ready_wait = 0;
                 return 0;
             }
             if self.sunset_stage == 127
@@ -24082,7 +28403,19 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
-                let runup = sunset_var("C1_SUNSET_STAGE129_RUNUP")
+                let neutral_jump = sunset_var("C1_SUNSET_STAGE129_NEUTRAL_JUMP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if self.session_globals && tick < neutral_jump {
+                    return PAD_CROSS;
+                }
+                let runup_name = if self.session_globals {
+                    "C1_SUNSET_STAGE129_SESSION_RUNUP"
+                } else {
+                    "C1_SUNSET_STAGE129_RUNUP"
+                };
+                let runup = sunset_var(runup_name)
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
@@ -24101,6 +28434,16 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 130
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
+                let tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                let wait = sunset_var("C1_SUNSET_STAGE130_WAIT")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                if self.session_globals && tick < wait {
+                    return 0;
+                }
+                let route_tick = tick.saturating_sub(wait);
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_010_000
                     && (21_520_000..21_900_000).contains(&player.translation[0])
@@ -24116,7 +28459,25 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                return horizontal | PAD_CROSS;
+                let up_ticks = sunset_var("C1_SUNSET_STAGE130_UP_TICKS")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(0);
+                let lane = if self.session_globals && route_tick < up_ticks {
+                    PAD_UP
+                } else {
+                    0
+                };
+                let cross_ticks = sunset_var("C1_SUNSET_STAGE130_CROSS_TICKS")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(u8::MAX);
+                let jump = if self.session_globals && route_tick >= cross_ticks {
+                    0
+                } else {
+                    PAD_CROSS
+                };
+                return horizontal | lane | jump;
             }
             if self.sunset_stage == 131
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
@@ -24525,6 +28886,26 @@ impl HighRoadCompletionRouteController {
                         0
                     };
                 }
+                let closed_wall_cycle = [160_u16, 161_u16].into_iter().all(|id| {
+                    objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                        ) && object.frame_bound.is_some_and(|bound| {
+                            bound.min.z <= player.translation[2] - 64_000
+                                && bound.max.z >= player.translation[2] + 64_000
+                        })
+                    })
+                });
+                if self.session_globals && !closed_wall_cycle {
+                    return if player.translation[0] > 24_280_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 24_240_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                }
                 self.sunset_stage = 141;
                 self.sunset_attack_tick = 0;
                 return PAD_RIGHT | PAD_CROSS;
@@ -24772,6 +29153,41 @@ impl HighRoadCompletionRouteController {
                         }
                         return PAD_RIGHT | PAD_CROSS;
                     }
+                    if self.session_globals && self.sunset_attack_tick < 2 {
+                        let ruin = Eid::from_name("RuiOC").expect("fixed Sunset ruin EID is valid");
+                        let lane = if player.translation[2] < 228_000 {
+                            PAD_DOWN
+                        } else if player.translation[2] > 232_000 || player.velocity[2] > 0 {
+                            PAD_UP
+                        } else if player.velocity[2] < 0 {
+                            PAD_DOWN
+                        } else {
+                            0
+                        };
+                        let (rolling_stone_count, rolling_stones_are_clear) = objects
+                            .iter()
+                            .filter(|object| {
+                                object.program == ruin
+                                    && matches!(
+                                        object.origin,
+                                        ObjectOrigin::Runtime {
+                                            executable: 42,
+                                            subtype: 11
+                                        }
+                                    )
+                            })
+                            .fold((0_u8, true), |(count, clear), object| {
+                                (
+                                    count.saturating_add(1),
+                                    clear && object.state == 18 && object.frame_bound.is_none(),
+                                )
+                            });
+                        if rolling_stone_count == 0 || !rolling_stones_are_clear {
+                            return lane;
+                        }
+                        self.sunset_attack_tick = 2;
+                        return PAD_RIGHT | lane | PAD_CROSS;
+                    }
                     let lane = 0;
                     return sunset_var("C1_SUNSET_STAGE149_TEST")
                         .ok()
@@ -24813,10 +29229,33 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 0;
                         return 0;
                     }
-                    return sunset_var("C1_SUNSET_STAGE150_TEST")
-                        .ok()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .unwrap_or(PAD_RIGHT);
+                    if let Ok(test) = sunset_var("C1_SUNSET_STAGE150_TEST") {
+                        return test.parse::<u32>().unwrap_or(0);
+                    }
+                    if self.session_globals {
+                        let landing_brake_x = objects
+                            .iter()
+                            .find_map(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Entity(descriptor) if descriptor.id == 165
+                                )
+                                .then_some(object.frame_bound.or(object.bound))
+                                .flatten()
+                            })
+                            .map_or(27_841_408, |bound| bound.max.x.saturating_add(80_000));
+                        if self.sunset_attack_tick == 0 && player.translation[0] >= landing_brake_x
+                        {
+                            self.sunset_attack_tick = 1;
+                        }
+                        let horizontal = if self.sunset_attack_tick == 0 {
+                            PAD_RIGHT
+                        } else {
+                            PAD_LEFT
+                        };
+                        return horizontal | PAD_CROSS;
+                    }
+                    return PAD_RIGHT;
                 }
                 if player.status_a & 1 != 0 && player.translation[0] > 26_750_000 {
                     self.sunset_stage = 151;
@@ -24835,6 +29274,7 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 152;
                         self.sunset_attack_tick = 0;
+                        self.sunset_wait = 0;
                         return 0;
                     }
                     let tick = self.sunset_attack_tick;
@@ -24858,14 +29298,23 @@ impl HighRoadCompletionRouteController {
                     if tick < wait {
                         return 0;
                     }
-                    return sunset_var("C1_SUNSET_STAGE151_TEST")
-                        .ok()
-                        .and_then(|value| value.parse::<u32>().ok())
-                        .unwrap_or(PAD_RIGHT | PAD_CROSS);
+                    if let Ok(test) = sunset_var("C1_SUNSET_STAGE151_TEST") {
+                        return test.parse::<u32>().unwrap_or(0);
+                    }
+                    if self.session_globals {
+                        let horizontal = if player.translation[0] < 28_090_000 {
+                            PAD_RIGHT
+                        } else {
+                            PAD_LEFT
+                        };
+                        return horizontal | PAD_CROSS;
+                    }
+                    return PAD_RIGHT | PAD_CROSS;
                 }
                 if player.status_a & 1 != 0 && player.translation[0] > 27_050_000 {
                     self.sunset_stage = 152;
                     self.sunset_attack_tick = 0;
+                    self.sunset_wait = 0;
                     return 0;
                 }
                 let lane = if player.translation[2] < 180_000 {
@@ -24881,13 +29330,124 @@ impl HighRoadCompletionRouteController {
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                    let exit_x = if self.session_globals {
+                        28_681_000
+                    } else {
+                        28_680_000
+                    };
                     if player.status_a & 1 != 0
-                        && player.translation[0] > 28_680_000
+                        && player.translation[0] > exit_x
                         && player.translation[1] > -11_000_000
                     {
                         self.sunset_stage = 153;
                         self.sunset_attack_tick = 0;
                         return 0;
+                    }
+                    if self.session_globals {
+                        if let Ok(wait) = std::env::var("C1_SUNSET_STAGE152_SESSION_WAIT")
+                            && let Ok(wait) = wait.parse::<u8>()
+                        {
+                            let tick = self.sunset_attack_tick;
+                            self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                            if tick < wait {
+                                return 0;
+                            }
+                            return PAD_RIGHT | PAD_CROSS;
+                        }
+                        if self.sunset_attack_tick == u8::MAX {
+                            return PAD_RIGHT | PAD_CROSS;
+                        }
+                        let wall = |id| {
+                            objects.iter().find(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                                )
+                            })
+                        };
+                        let lane_min = player.translation[2].saturating_sub(64_000);
+                        let lane_max = player.translation[2].saturating_add(64_000);
+                        let wall_is_closed = |id| {
+                            wall(id).is_some_and(|object| {
+                                object.state == 17
+                                    && object.frame_bound.is_some_and(|bound| {
+                                        bound.min.z <= lane_max && bound.max.z >= lane_min
+                                    })
+                            })
+                        };
+                        if self.sunset_attack_tick == 0 {
+                            if wall_is_closed(166) && wall_is_closed(167) {
+                                self.sunset_attack_tick = 1;
+                            }
+                            return 0;
+                        }
+                        if self.sunset_attack_tick >= 2 && self.sunset_attack_tick.is_multiple_of(2)
+                        {
+                            if wall_is_closed(166) && wall_is_closed(167) {
+                                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                            }
+                            return 0;
+                        }
+                        let wall_is_open = |id| {
+                            wall(id).is_some_and(|object| {
+                                object.state == 18
+                                    && object.frame_bound.is_none_or(|bound| {
+                                        bound.max.z < lane_min || bound.min.z > lane_max
+                                    })
+                            })
+                        };
+                        if !self.sunset_attack_tick.is_multiple_of(2) {
+                            if wall_is_open(166) && wall_is_open(167) {
+                                let approach_walls_early = [166, 167].into_iter().all(|id| {
+                                    wall(id).is_some_and(|object| {
+                                        object.state == 18
+                                            && (7..=10).contains(
+                                                &player
+                                                    .animation_stamp
+                                                    .saturating_sub(object.state_stamp),
+                                            )
+                                    })
+                                });
+                                // Wait at the safe approach until the later
+                                // entity-177 wall is early in its withdrawn
+                                // phase. Stage 152 and 153 then use the same
+                                // ordinary right/jump traversal as the fresh
+                                // route and meet that wall after it has
+                                // rotated back under Crash's landing point.
+                                let landing_wall_phase_ready = objects.iter().any(|object| {
+                                    matches!(
+                                        object.origin,
+                                        ObjectOrigin::Entity(descriptor)
+                                            if descriptor.id == 177
+                                    ) && object.state == 18
+                                        && object.frame_bound.is_none()
+                                        && (7..=10).contains(
+                                            &player
+                                                .animation_stamp
+                                                .saturating_sub(object.state_stamp),
+                                        )
+                                });
+                                if self.sunset_attack_tick != u8::MAX
+                                    && (!approach_walls_early || !landing_wall_phase_ready)
+                                {
+                                    return 0;
+                                }
+                                let open_cycle = std::env::var("C1_SUNSET_STAGE152_OPEN_CYCLE")
+                                    .ok()
+                                    .and_then(|value| value.parse::<u8>().ok())
+                                    .unwrap_or(0);
+                                let completed_cycles = self.sunset_attack_tick / 2;
+                                if completed_cycles < open_cycle {
+                                    self.sunset_attack_tick =
+                                        self.sunset_attack_tick.saturating_add(1);
+                                    return 0;
+                                }
+                                self.sunset_attack_tick = u8::MAX;
+                                return PAD_RIGHT | PAD_CROSS;
+                            }
+                            return 0;
+                        }
+                        return PAD_RIGHT | PAD_CROSS;
                     }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -24968,6 +29528,20 @@ impl HighRoadCompletionRouteController {
                         0
                     };
                 }
+                if self.session_globals && !self.collect_sunset_cortex_tokens {
+                    // The carried route reaches this shelf one lane lower
+                    // than the fresh route. Correct that lane while Crash
+                    // still has the preceding shelf as run-up: doing it after
+                    // stage 158 starts consumes all forward speed and moves
+                    // the eventual jump roughly one crate-width too far
+                    // forward.
+                    if player.translation[2] < 270_000 {
+                        return PAD_RIGHT | PAD_DOWN;
+                    }
+                    if player.translation[2] > 276_000 {
+                        return PAD_RIGHT | PAD_UP;
+                    }
+                }
                 return sunset_var("C1_SUNSET_STAGE157_TEST")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -24992,6 +29566,31 @@ impl HighRoadCompletionRouteController {
                     // starts a fresh jump across the second half of the gap.
                     self.sunset_attack_tick = 1;
                     return PAD_RIGHT;
+                }
+                if self.session_globals
+                    && !self.collect_sunset_cortex_tokens
+                    && self.sunset_attack_tick == 0
+                {
+                    if player.translation[2] < 270_000 || player.velocity[2] < -100_000 {
+                        return PAD_DOWN;
+                    }
+                    if player.translation[2] > 276_000 || player.velocity[2] > 100_000 {
+                        return PAD_UP;
+                    }
+                    if player.velocity[0] < 500_000 {
+                        self.sunset_attack_tick = 1;
+                        return PAD_RIGHT;
+                    }
+                    self.sunset_attack_tick = 2;
+                }
+                if self.session_globals
+                    && !self.collect_sunset_cortex_tokens
+                    && self.sunset_attack_tick == 1
+                {
+                    if player.velocity[0] < 500_000 {
+                        return PAD_RIGHT;
+                    }
+                    self.sunset_attack_tick = 2;
                 }
                 let lane = if self.collect_sunset_cortex_tokens
                     && player.translation[0] < 31_950_000
@@ -25065,6 +29664,62 @@ impl HighRoadCompletionRouteController {
                     self.sunset_stage = 162;
                     self.sunset_attack_tick = 0;
                     return 0;
+                }
+                if self.session_globals
+                    && !self.collect_sunset_cortex_tokens
+                    && self.sunset_attack_tick < 3
+                {
+                    if self.sunset_attack_tick == 0 {
+                        // First make the authored jump from the l1 entrance
+                        // onto the safe shelf before the rotating pair.
+                        if player.status_a & 1 == 0 || player.translation[0] < 34_250_000 {
+                            return PAD_RIGHT | PAD_CROSS;
+                        }
+                        self.sunset_attack_tick = 1;
+                        return PAD_RIGHT;
+                    }
+                    if self.sunset_attack_tick == 1 {
+                        // The fresh route is stopped at this safe edge by
+                        // entity 189 until entity 188 rotates underneath it.
+                        // In a carried session their independently retained
+                        // phases can leave the wall withdrawn first, so brake
+                        // before the edge rather than walking into the gap.
+                        if player.translation[0] < 34_480_000 {
+                            return PAD_RIGHT;
+                        }
+                        self.sunset_attack_tick = 2;
+                        return 0;
+                    }
+                    let lane_min = player.translation[2].saturating_sub(19_200);
+                    let lane_max = player.translation[2].saturating_add(19_200);
+                    let platform_is_under_lane = objects
+                        .iter()
+                        .find(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == 188
+                            )
+                        })
+                        .and_then(|object| object.frame_bound)
+                        .is_some_and(|bound| bound.min.z <= lane_max && bound.max.z >= lane_min);
+                    let paired_wall_is_clear = objects
+                        .iter()
+                        .find(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == 189
+                            )
+                        })
+                        .is_some_and(|object| {
+                            object.frame_bound.is_none_or(|bound| {
+                                bound.max.z < lane_min || bound.min.z > lane_max
+                            })
+                        });
+                    if !platform_is_under_lane || !paired_wall_is_clear {
+                        return 0;
+                    }
+                    self.sunset_attack_tick = 3;
+                    return PAD_RIGHT | PAD_CROSS;
                 }
                 return sunset_var("C1_SUNSET_STAGE161_TEST")
                     .ok()
@@ -25165,6 +29820,58 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
+                if self.session_globals
+                    && !self.collect_sunset_cortex_tokens
+                    && self.sunset_attack_tick < 2
+                {
+                    let landing_slab = objects.iter().find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 207
+                        )
+                    });
+                    if self.sunset_attack_tick == 0 {
+                        let slab_retracted = landing_slab.is_some_and(|object| {
+                            object.state == 12
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| bound.max.z <= -9_000)
+                        });
+                        if slab_retracted {
+                            self.sunset_attack_tick = 1;
+                        }
+                        return 0;
+                    }
+                    let slab_opening = landing_slab.is_some_and(|object| {
+                        object.state == 12
+                            && object
+                                .frame_bound
+                                .is_some_and(|bound| bound.max.z >= 400_000)
+                    });
+                    let lane_min = player.translation[2].saturating_sub(64_000);
+                    let lane_max = player.translation[2].saturating_add(64_000);
+                    let rotating_walls_are_open = [208, 209].into_iter().all(|id| {
+                        objects
+                            .iter()
+                            .find(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                                )
+                            })
+                            .is_some_and(|object| {
+                                object.state == 18
+                                    && object.frame_bound.is_none_or(|bound| {
+                                        bound.max.z < lane_min || bound.min.z > lane_max
+                                    })
+                            })
+                    });
+                    if !slab_opening || !rotating_walls_are_open {
+                        return 0;
+                    }
+                    self.sunset_attack_tick = 2;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
                 if self.collect_sunset_cortex_tokens && player.translation[0] < 35_800_000 {
                     let rotating_walls_are_open = [208, 209].into_iter().all(|id| {
                         objects
@@ -25206,6 +29913,38 @@ impl HighRoadCompletionRouteController {
                     .unwrap_or(PAD_RIGHT | PAD_CROSS);
             }
             if self.sunset_stage == 170 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if self.session_globals
+                    && !self.collect_sunset_cortex_tokens
+                    && player.velocity[1] < -700_000
+                    && let brake_margin = std::env::var("C1_SUNSET_STAGE170_BRAKE_MARGIN")
+                        .ok()
+                        .and_then(|value| value.parse::<i32>().ok())
+                        .unwrap_or(180_000)
+                    && let Some(bound) = objects
+                        .iter()
+                        .filter(|object| {
+                            object.program.name().as_deref() == Some("RWaOC")
+                                && object.state == 1
+                                && matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 46,
+                                        subtype: 1
+                                    }
+                                )
+                        })
+                        .filter_map(|object| object.frame_bound)
+                        .filter(|bound| {
+                            bound.min.x >= 36_800_000
+                                && bound.max.x <= 37_500_000
+                                && bound.min.z <= player.translation[2]
+                                && bound.max.z >= player.translation[2]
+                        })
+                        .min_by_key(|bound| bound.max.y)
+                    && player.translation[0] >= bound.max.x.saturating_sub(brake_margin)
+                {
+                    return PAD_LEFT | PAD_CROSS;
+                }
                 let stage_end = if self.collect_sunset_cortex_tokens {
                     37_000_000
                 } else {
@@ -26315,6 +31054,8 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 209 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                let stage_tick = self.sunset_attack_tick;
+                self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 let trigger_y = sunset_var("C1_SUNSET_STAGE209_TRIGGER_Y")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
@@ -26326,6 +31067,10 @@ impl HighRoadCompletionRouteController {
                 if player.status_a & 1 != 0
                     && (40_550_000..=trigger_x_max).contains(&player.translation[0])
                     && player.translation[1] >= trigger_y
+                    && std::env::var("C1_SUNSET_STAGE209_MIN_TICKS")
+                        .ok()
+                        .and_then(|value| value.parse::<u8>().ok())
+                        .is_none_or(|minimum| stage_tick >= minimum)
                 {
                     self.sunset_stage = 210;
                     self.sunset_attack_tick = 0;
@@ -26354,18 +31099,19 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let runup = sunset_var("C1_SUNSET_STAGE210_RUNUP")
+                let carried_phase = self.session_globals && !self.collect_sunset_cortex_tokens;
+                let runup = std::env::var("C1_SUNSET_STAGE210_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
-                    .unwrap_or(0);
+                    .unwrap_or(if carried_phase { 5 } else { 0 });
                 if tick < runup {
                     return PAD_LEFT;
                 }
                 let tick = tick.saturating_sub(runup);
-                let left_hold = sunset_var("C1_SUNSET_STAGE210_LEFT_HOLD")
+                let left_hold = std::env::var("C1_SUNSET_STAGE210_LEFT_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
-                    .unwrap_or(1);
+                    .unwrap_or(u8::from(!carried_phase));
                 let depth = sunset_var("C1_SUNSET_STAGE210_DEPTH")
                     .ok()
                     .and_then(|value| value.parse::<u32>().ok())
@@ -26375,19 +31121,21 @@ impl HighRoadCompletionRouteController {
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(left_hold);
                 let depth_input = if tick < depth_hold { depth } else { 0 };
+                let swap = std::env::var_os("C1_SUNSET_STAGE210_SWAP")
+                    .map_or(carried_phase, |value| value != "0");
                 if tick < left_hold {
-                    return if sunset_var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0") {
+                    return if swap {
                         PAD_RIGHT | PAD_CROSS | depth_input
                     } else {
                         PAD_LEFT | PAD_CROSS | depth_input
                     };
                 }
-                let right_brake = sunset_var("C1_SUNSET_STAGE210_RIGHT_BRAKE")
+                let right_brake = std::env::var("C1_SUNSET_STAGE210_RIGHT_BRAKE")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(4);
                 if tick < left_hold.saturating_add(right_brake) {
-                    return if sunset_var_os("C1_SUNSET_STAGE210_SWAP").is_some_and(|v| v != "0") {
+                    return if swap {
                         PAD_LEFT | PAD_CROSS | depth_input
                     } else {
                         PAD_RIGHT | PAD_CROSS | depth_input
@@ -26549,7 +31297,13 @@ impl HighRoadCompletionRouteController {
                 let hold = sunset_var("C1_SUNSET_STAGE215_HOLD")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
-                    .unwrap_or(8);
+                    .unwrap_or(
+                        if self.session_globals && !self.collect_sunset_cortex_tokens {
+                            11
+                        } else {
+                            8
+                        },
+                    );
                 if tick < hold {
                     return PAD_LEFT | PAD_CROSS;
                 }
@@ -26642,6 +31396,19 @@ impl HighRoadCompletionRouteController {
                     self.sunset_stage = 220;
                     self.sunset_attack_tick = 0;
                     return 0;
+                }
+                if self.session_globals && self.sunset_attack_tick == 0 {
+                    let target_turned_away = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 223
+                        ) && object
+                            .frame_bound
+                            .is_some_and(|bound| bound.max.z < player.translation[2])
+                    });
+                    if !target_turned_away {
+                        return 0;
+                    }
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -27377,6 +32144,11 @@ impl HighRoadCompletionRouteController {
                         .ok()
                         .and_then(|value| value.parse::<u8>().ok())
                         .unwrap_or(0);
+                    // Waiting for the first ruin bank to retract leaves the
+                    // carried moving bridge two frames behind a fresh boot.
+                    // Let it move under Crash before takeoff so the retail
+                    // carrier attaches on the same safe side of the bridge.
+                    let wait = wait.saturating_add(u8::from(self.session_globals) * 2);
                     if self.sunset_attack_tick < wait {
                         self.sunset_attack_tick += 1;
                         return 0;
@@ -27390,6 +32162,30 @@ impl HighRoadCompletionRouteController {
                     return held;
                 }
                 if self.sunset_stage == 67 && camera.path.zone == g1 {
+                    if self.session_globals {
+                        let ruin = Eid::from_name("RuiOC").expect("fixed Sunset ruin EID is valid");
+                        let (runtime_ruin_count, runtime_ruins_clear) = objects
+                            .iter()
+                            .filter(|object| {
+                                object.program == ruin
+                                    && matches!(
+                                        object.origin,
+                                        ObjectOrigin::Runtime {
+                                            executable: 42,
+                                            subtype: 10
+                                        }
+                                    )
+                            })
+                            .fold((0_u8, true), |(count, clear), object| {
+                                (
+                                    count.saturating_add(1),
+                                    clear && object.state == 5 && object.frame_bound.is_none(),
+                                )
+                            });
+                        if runtime_ruin_count < 3 || !runtime_ruins_clear {
+                            return 0;
+                        }
+                    }
                     if let Some((run_frames, down_frames)) =
                         sunset_var("C1_SUNSET_STAGE67_RUN_DIAG")
                             .ok()
@@ -27891,8 +32687,39 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 60;
                         self.sunset_attack_tick = 0;
+                        self.sunset_f4_phase_gate = 0;
                         self.jump_hold = 0;
                         return 0;
+                    }
+                    if self.session_globals && self.sunset_f4_phase_gate < 2 {
+                        let target_wall = objects.iter().find(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(entity) if entity.id == 89
+                            )
+                        });
+                        if self.sunset_f4_phase_gate == 0 {
+                            let positive_phase = target_wall.is_some_and(|object| {
+                                object.state == 11
+                                    && object
+                                        .frame_bound
+                                        .is_some_and(|bound| bound.max.z >= 240_000)
+                            });
+                            if positive_phase {
+                                self.sunset_f4_phase_gate = 1;
+                            }
+                            return 0;
+                        }
+                        let negative_phase = target_wall.is_some_and(|object| {
+                            object.state == 12
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| bound.max.z <= -9_000)
+                        });
+                        if !negative_phase {
+                            return 0;
+                        }
+                        self.sunset_f4_phase_gate = 2;
                     }
                     let runup = sunset_var("C1_SUNSET_F4_SECOND_RUNUP")
                         .ok()
@@ -27923,6 +32750,7 @@ impl HighRoadCompletionRouteController {
                     {
                         self.sunset_stage = 59;
                         self.sunset_attack_tick = 0;
+                        self.sunset_f4_phase_gate = 0;
                         self.jump_hold = 0;
                         return 0;
                     }
@@ -27978,7 +32806,12 @@ impl HighRoadCompletionRouteController {
                         self.jump_hold = 0;
                         return PAD_LEFT;
                     }
-                    let held = PAD_LEFT | f3_lane;
+                    let held = PAD_LEFT
+                        | if self.session_globals {
+                            f3_negative_lane
+                        } else {
+                            f3_lane
+                        };
                     if self.jump_hold > 0 {
                         self.jump_hold -= 1;
                         return held | PAD_CROSS;
@@ -27986,6 +32819,11 @@ impl HighRoadCompletionRouteController {
                     return held;
                 }
                 if self.sunset_stage == 54 && camera.path.zone == f3 {
+                    let launch_lane = if self.session_globals {
+                        f3_negative_lane
+                    } else {
+                        f3_lane
+                    };
                     let launch_x = sunset_var("C1_SUNSET_F3_THIRD_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
@@ -27995,14 +32833,14 @@ impl HighRoadCompletionRouteController {
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(-300_000);
                     if player.translation[0] > launch_x || player.velocity[0] > launch_speed {
-                        return PAD_LEFT | f3_lane;
+                        return PAD_LEFT | launch_lane;
                     }
                     self.sunset_stage = 55;
                     self.jump_hold = sunset_var("C1_SUNSET_F3_THIRD_HOLD")
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or(20);
-                    return PAD_LEFT | f3_lane | PAD_CROSS;
+                    return PAD_LEFT | launch_lane | PAD_CROSS;
                 }
                 if self.sunset_stage == 53
                     && camera.path.zone == f3
@@ -28045,13 +32883,47 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 49
                     && (camera.path.zone == f2 || camera.path.zone == f3)
-                    && player.translation[0] >= 28_160_000
+                    && (player.translation[0] >= 28_160_000
+                        || (self.session_globals && player.translation[0] >= 28_100_000))
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 50;
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
+                }
+                if self.session_globals && self.sunset_stage == 48 && camera.path.zone == f2 {
+                    let wall = objects.iter().find(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(entity) if entity.id == 79
+                        )
+                    });
+                    if self.sunset_attack_tick == 0 {
+                        let wall_open = wall.is_some_and(|object| {
+                            object.state == 18
+                                && object
+                                    .frame_bound
+                                    .is_none_or(|bound| bound.max.z <= 160_000)
+                        });
+                        if wall_open {
+                            self.sunset_attack_tick = 1;
+                        }
+                        return 0;
+                    }
+                    if self.sunset_attack_tick == 1 {
+                        let wall_closed = wall.is_some_and(|object| {
+                            object.state == 17
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| bound.max.z >= 500_000)
+                        });
+                        if wall_closed {
+                            self.sunset_attack_tick = 2;
+                            self.sunset_wait = 28;
+                        }
+                        return 0;
+                    }
                 }
                 if self.sunset_stage == 48 && (camera.path.zone == f2 || camera.path.zone == f3) {
                     self.sunset_stage = 49;
@@ -28063,7 +32935,7 @@ impl HighRoadCompletionRouteController {
                 }
                 if self.sunset_stage == 47
                     && camera.path.zone == f2
-                    && (27_900_000..28_160_000).contains(&player.translation[0])
+                    && (27_650_000..28_160_000).contains(&player.translation[0])
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 48;
@@ -28127,6 +32999,135 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
+                }
+                if self.session_globals
+                    && self.sunset_stage == 41
+                    && !self.sunset_e3_ruin_volley_retimed
+                    && !self.sunset_e3_ruin_volley_alignment
+                    && camera.path.zone == e3
+                    && player.translation[0] >= 24_200_000
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_e3_ruin_volley_alignment = true;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                }
+                if self.sunset_e3_ruin_volley_alignment
+                    && self.sunset_stage == 41
+                    && camera.path.zone == e3
+                {
+                    if self.sunset_attack_tick == 2 {
+                        self.sunset_e3_ruin_volley_alignment = false;
+                        self.sunset_e3_ruin_volley_retimed = true;
+                        self.sunset_attack_tick = 0;
+                        self.sunset_stage = 42;
+                        self.jump_hold = sunset_var("C1_SUNSET_E3_SECOND_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(20);
+                        return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
+                    }
+                    if self.sunset_attack_tick == 1 {
+                        let held = PAD_RIGHT | e3_lane | PAD_SQUARE;
+                        if self.jump_hold > 0 {
+                            self.jump_hold -= 1;
+                            return held | PAD_CROSS;
+                        }
+                        if player.status_a & 1 == 0 {
+                            return held;
+                        }
+                        // Release Cross for one grounded frame so the retail
+                        // player state recognizes the next jump edge.
+                        self.sunset_attack_tick = 2;
+                        return held;
+                    }
+                    let ruin_volley_head = objects
+                        .iter()
+                        .filter_map(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 11,
+                                }
+                            )
+                            .then_some(object.translation[0])
+                        })
+                        .max();
+                    let ruin_spike_count = objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 10,
+                                }
+                            )
+                        })
+                        .count();
+                    let ruin_spikes_ready = ruin_spike_count == 3
+                        && objects
+                            .iter()
+                            .filter(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 42,
+                                        subtype: 10,
+                                    }
+                                )
+                            })
+                            .all(|object| object.state == 5 && object.frame_bound.is_none());
+                    if self.sunset_attack_tick != 4
+                        && (player.translation[0] > 24_020_000 || player.velocity[0] > 100_000)
+                    {
+                        return PAD_LEFT;
+                    }
+                    if self.sunset_attack_tick != 4
+                        && (player.translation[0] < 23_980_000 || player.velocity[0] < -100_000)
+                    {
+                        return PAD_RIGHT;
+                    }
+                    if self.sunset_attack_tick == 0 {
+                        if ruin_volley_head.is_some() {
+                            self.sunset_attack_tick = 3;
+                        }
+                        // Do not mistake the quiet lead-in before this
+                        // session's first volley for its safe trailing edge.
+                        return 0;
+                    }
+                    if self.sunset_attack_tick == 3
+                        && ruin_volley_head.is_some_and(|x| x > 24_550_000)
+                    {
+                        return 0;
+                    }
+                    if self.sunset_attack_tick == 3 {
+                        self.sunset_attack_tick = 4;
+                    }
+                    if self.sunset_attack_tick == 4
+                        && (ruin_volley_head.is_some_and(|x| x > 24_220_000) || !ruin_spikes_ready)
+                    {
+                        // Preload forward velocity against the bank's vertical
+                        // step while the tail of the volley passes overhead.
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    if self.sunset_attack_tick != 4 {
+                        // States 1 and 2 are handled above; any other value is
+                        // an invalid alignment phase and should fail closed.
+                        self.sunset_attack_tick = 3;
+                        return 0;
+                    }
+                    // The ruin launcher is synchronized to the session-wide
+                    // object clock. A carried campaign reaches this bank as a
+                    // volley starts, unlike a direct level boot. Retreat onto
+                    // the preceding pillar, preload against its step, then
+                    // follow the tail closely enough to cross the next spikes
+                    // while they are still retracted.
+                    self.sunset_attack_tick = 1;
+                    self.jump_hold = 20;
+                    return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
                 }
                 if self.sunset_stage == 41 && camera.path.zone == e3 {
                     let launch_x = sunset_var("C1_SUNSET_E3_SECOND_X")
@@ -28192,6 +33193,79 @@ impl HighRoadCompletionRouteController {
                     self.jump_hold = 0;
                     return 0;
                 }
+                if self.session_globals
+                    && self.sunset_stage == 37
+                    && !self.sunset_e3_first_wall_retimed
+                    && !self.sunset_e3_first_wall_alignment
+                    && camera.path.zone == e2
+                    && (23_000_000..=23_400_000).contains(&player.translation[0])
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                    && player.state != 28
+                {
+                    self.sunset_e3_first_wall_alignment = true;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                }
+                if self.sunset_e3_first_wall_alignment
+                    && self.sunset_stage == 37
+                    && camera.path.zone == e2
+                {
+                    if self.sunset_attack_tick == 0 {
+                        if player.translation[0] > 23_200_000 || player.velocity[0] > 200_000 {
+                            return PAD_LEFT;
+                        }
+                        if player.translation[0] < 23_140_000 || player.velocity[0] < -200_000 {
+                            return PAD_RIGHT;
+                        }
+                    }
+                    let wall = |id| {
+                        objects.iter().find(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(entity) if entity.id == id
+                            )
+                        })
+                    };
+                    let first_wall_closed = wall(69).is_some_and(|object| {
+                        object.state == 17
+                            && object
+                                .frame_bound
+                                .is_some_and(|bound| bound.max.z >= 400_000)
+                    });
+                    if self.sunset_attack_tick == 0 {
+                        if first_wall_closed {
+                            self.sunset_attack_tick = 1;
+                            return PAD_RIGHT | PAD_SQUARE;
+                        }
+                        return 0;
+                    }
+                    let nearby_wall_open = |id| {
+                        wall(id).is_some_and(|object| {
+                            object.state == 18
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| bound.max.z <= 50_000)
+                        })
+                    };
+                    if !nearby_wall_open(69)
+                        || !nearby_wall_open(70)
+                        || wall(71).is_none_or(|object| object.state != 18)
+                        || player.status_a & 1 == 0
+                    {
+                        return PAD_RIGHT | PAD_SQUARE;
+                    }
+                    // A carried session reaches these rotating walls at a
+                    // different global phase. Observe a complete closed cycle
+                    // at the safe bank, build the fresh route's run-up against
+                    // its collision, then jump as the panels expose the
+                    // positive-depth lane.
+                    self.sunset_e3_first_wall_alignment = false;
+                    self.sunset_e3_first_wall_retimed = true;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 16;
+                    return PAD_RIGHT | e3_lane | PAD_CROSS | PAD_SQUARE;
+                }
                 if self.sunset_stage == 36 && (camera.path.zone == d3 || camera.path.zone == e1) {
                     let launch_x = sunset_var("C1_SUNSET_E1_FIRST_X")
                         .ok()
@@ -28218,7 +33292,98 @@ impl HighRoadCompletionRouteController {
                     self.jump_hold = 0;
                     return PAD_RIGHT | PAD_SQUARE;
                 }
+                if self.session_globals
+                    && self.sunset_stage == 35
+                    && !self.sunset_d3_first_gap_retimed
+                    && camera.path.zone == d3
+                    && (19_050_000..=19_350_000).contains(&player.translation[0])
+                    && player.translation[1] < -21_250_000
+                    && player.status_a & 1 != 0
+                    && player.state != 28
+                {
+                    self.sunset_d3_first_gap_alignment = true;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                }
+                if self.sunset_d3_first_gap_alignment
+                    && self.sunset_stage == 35
+                    && camera.path.zone == d3
+                {
+                    if player.translation[0] > 19_160_000 || player.velocity[0] > 200_000 {
+                        return PAD_LEFT;
+                    }
+                    if player.translation[0] < 19_100_000 || player.velocity[0] < -200_000 {
+                        return PAD_RIGHT;
+                    }
+                    let wall_state = |id| {
+                        objects
+                            .iter()
+                            .find(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Entity(entity) if entity.id == id
+                                )
+                            })
+                            .map(|object| object.state)
+                    };
+                    let target_will_be_live = wall_state(57) == Some(12)
+                        && wall_state(58) == Some(11)
+                        && wall_state(60) == Some(11)
+                        && wall_state(63) == Some(11);
+                    if !target_will_be_live || player.status_a & 1 == 0 {
+                        return 0;
+                    }
+                    // Wait for the retail rotating-wall pattern that precedes
+                    // the target platform's collision state, then launch from
+                    // the same ledge position as the passing fresh-boot route.
+                    self.sunset_d3_first_gap_alignment = false;
+                    self.sunset_d3_first_gap_retimed = true;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 16;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
                 if self.sunset_stage == 34 && (camera.path.zone == d1 || camera.path.zone == d2) {
+                    if self.sunset_d2_first_support_alignment {
+                        let rotating_wall =
+                            Eid::from_name("RWaOC").expect("fixed rotating-wall EID is valid");
+                        let support = objects
+                            .iter()
+                            .filter(|object| {
+                                object.program == rotating_wall
+                                    && object.state == 1
+                                    && matches!(
+                                        object.origin,
+                                        ObjectOrigin::Runtime {
+                                            executable: 46,
+                                            subtype: 1
+                                        }
+                                    )
+                                    && object.translation[0].abs_diff(player.translation[0])
+                                        <= 220_000
+                            })
+                            .min_by_key(|object| {
+                                object.translation[0].abs_diff(player.translation[0])
+                            });
+                        let Some(support) = support else {
+                            return d1_lane;
+                        };
+                        if player.translation[0] > support.translation[0] + 20_000
+                            || player.velocity[0] > 100_000
+                        {
+                            return PAD_LEFT | d1_lane;
+                        }
+                        if player.translation[0] < support.translation[0] - 20_000
+                            || player.velocity[0] < -100_000
+                        {
+                            return PAD_RIGHT | d1_lane;
+                        }
+                        if !(17_700_000..=17_750_000).contains(&support.translation[0])
+                            || support.translation[1] > -21_500_000
+                        {
+                            return d1_lane;
+                        }
+                        self.sunset_d2_first_support_alignment = false;
+                    }
                     self.sunset_stage = 35;
                     self.jump_hold = sunset_var("C1_SUNSET_D2_FIRST_HOLD")
                         .ok()
@@ -28233,15 +33398,59 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 34;
-                    self.sunset_wait = sunset_var("C1_SUNSET_D2_FIRST_WAIT")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(0);
+                    if self.session_globals {
+                        self.sunset_wait = 0;
+                        self.sunset_d2_first_support_alignment = true;
+                    } else {
+                        self.sunset_wait = sunset_var("C1_SUNSET_D2_FIRST_WAIT")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0);
+                    }
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
                 }
                 if camera.path.zone == d1 && self.sunset_stage == 31 {
+                    if self.sunset_d1_recovery_alignment {
+                        let alignment_held =
+                            if player.translation[0] > 16_430_000 || player.velocity[0] > 100_000 {
+                                PAD_LEFT | d1_lane
+                            } else if player.translation[0] < 16_350_000
+                                || player.velocity[0] < -100_000
+                            {
+                                PAD_RIGHT | d1_lane
+                            } else {
+                                d1_lane
+                            };
+                        if alignment_held != d1_lane {
+                            return alignment_held;
+                        }
+                        let rotating_wall =
+                            Eid::from_name("RWaOC").expect("fixed rotating-wall EID is valid");
+                        let next_support = objects
+                            .iter()
+                            .filter(|object| {
+                                object.program == rotating_wall
+                                    && object.state == 1
+                                    && matches!(
+                                        object.origin,
+                                        ObjectOrigin::Runtime {
+                                            executable: 46,
+                                            subtype: 1
+                                        }
+                                    )
+                                    && object.translation[0] > player.translation[0]
+                            })
+                            .min_by_key(|object| object.translation[0]);
+                        if !next_support.is_some_and(|support| {
+                            (17_350_000..=17_550_000).contains(&support.translation[0])
+                                && support.translation[1] >= -20_950_000
+                        }) {
+                            return d1_lane;
+                        }
+                        self.sunset_d1_recovery_alignment = false;
+                    }
                     self.sunset_stage = 32;
                     return PAD_RIGHT | d1_lane;
                 }
@@ -28261,9 +33470,26 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | d1_lane | PAD_CROSS;
                 }
                 if camera.path.zone == d1
+                    && self.sunset_stage == 30
+                    && player.translation[0] >= 16_350_000
+                    && player.translation[1] < -21_250_000
+                    && player.translation[1] >= -21_320_000
+                    && player.state != 28
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_stage = 31;
+                    self.sunset_wait = 0;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 0;
+                    self.sunset_d1_recovery_alignment = true;
+                    return 0;
+                }
+                if camera.path.zone == d1
                     && self.sunset_stage == 28
                     && player.translation[0] >= 16_350_000
                     && player.translation[1] < -21_250_000
+                    && player.translation[1] >= -21_320_000
+                    && player.state != 28
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 31;
@@ -28274,6 +33500,34 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
+                }
+                if camera.path.zone == d1
+                    && self.session_globals
+                    && self.sunset_stage == 28
+                    && player.translation[0] >= 16_350_000
+                    && player.translation[0] <= 16_450_000
+                    && player.translation[1] < -21_320_000
+                    && player.translation[1] >= -21_450_000
+                    && (80_000..=180_000).contains(&player.translation[2])
+                    && player.state != 28
+                    && player.status_a & 1 != 0
+                {
+                    // A long-running campaign reaches the third D1 support
+                    // while it is still below the static landing shelf. Jump
+                    // directly from that live support instead of walking off
+                    // as its horizontal phase reverses; stage 30 waits for the
+                    // same stable landing band used by a fresh direct boot.
+                    self.sunset_stage = 30;
+                    self.sunset_attack_tick = 0;
+                    self.jump_hold = 4;
+                    return PAD_RIGHT | d1_lane | PAD_CROSS;
+                }
+                if camera.path.zone == d1 && self.sunset_stage == 30 {
+                    if self.jump_hold > 0 {
+                        self.jump_hold -= 1;
+                        return d1_lane | PAD_CROSS;
+                    }
+                    return d1_lane;
                 }
                 if camera.path.zone == d1 && self.sunset_stage == 29 {
                     if self.sunset_attack_tick > 0 {
@@ -28367,6 +33621,53 @@ impl HighRoadCompletionRouteController {
                         };
                 }
                 if (camera.path.zone == c4 || camera.path.zone == d1) && self.sunset_stage == 24 {
+                    let rotating_wall =
+                        Eid::from_name("RWaOC").expect("fixed rotating-wall EID is valid");
+                    let live_target = (camera.path.zone == d1)
+                        .then(|| {
+                            objects
+                                .iter()
+                                .filter(|object| {
+                                    object.program == rotating_wall
+                                        && object.state == 1
+                                        && matches!(
+                                            object.origin,
+                                            ObjectOrigin::Runtime {
+                                                executable: 46,
+                                                subtype: 1
+                                            }
+                                        )
+                                })
+                                .filter_map(|object| {
+                                    let bound = object.frame_bound?;
+                                    let horizontal_gap =
+                                        bound.min.x.saturating_sub(player.translation[0]);
+                                    let vertical_gap =
+                                        bound.max.y.saturating_sub(player.translation[1]);
+                                    (horizontal_gap > 0).then_some((horizontal_gap, vertical_gap))
+                                })
+                                .min_by_key(|&(horizontal_gap, _)| horizontal_gap)
+                        })
+                        .flatten();
+                    if player.status_a & 1 != 0
+                        && player.velocity[0]
+                            >= if self.session_globals {
+                                300_000
+                            } else {
+                                400_000
+                            }
+                        && live_target.is_some_and(|(horizontal_gap, vertical_gap)| {
+                            (250_000..=310_000).contains(&horizontal_gap)
+                                && (375_000..=410_000).contains(&vertical_gap)
+                        })
+                    {
+                        self.sunset_stage = 25;
+                        self.jump_hold = sunset_var("C1_SUNSET_D1_HOLD")
+                            .ok()
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(16);
+                        return PAD_RIGHT | PAD_CROSS;
+                    }
                     let launch_x = sunset_var("C1_SUNSET_D1_X")
                         .ok()
                         .and_then(|value| value.parse().ok())
@@ -28424,7 +33725,7 @@ impl HighRoadCompletionRouteController {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
                 if (camera.path.zone == c2 || camera.path.zone == c3) && self.sunset_stage == 20 {
-                    if player.translation[0] < 12_450_000 || player.velocity[0] < 400_000 {
+                    if player.translation[0] < 12_455_000 || player.velocity[0] < 400_000 {
                         return PAD_RIGHT | PAD_SQUARE;
                     }
                     self.sunset_stage = 21;
@@ -28496,6 +33797,20 @@ impl HighRoadCompletionRouteController {
                     } else {
                         PAD_SQUARE
                     };
+                if camera.path.zone == c4
+                    && player.status_a & 1 != 0
+                    && self.jump_hold == 0
+                    && player.translation[0] < 14_590_000
+                {
+                    // The c3 transfer can land at different positions when
+                    // Sunset is entered through a long-running campaign. Arm
+                    // the normal c4 jump cadence at the authored takeoff
+                    // position instead of counting from that variable
+                    // landing. Keeping one tick armed makes the direct route
+                    // issue its jump on the same frame as before.
+                    self.sunset_attack_tick = 1;
+                    return held;
+                }
                 if camera.path.zone == c3
                     && !matches!(self.sunset_stage, 18..=20)
                     && player.translation[1] < -21_450_000
@@ -28617,6 +33932,13 @@ impl HighRoadCompletionRouteController {
             return held | PAD_CROSS | PAD_SQUARE;
         }
         if player.status_a & 1 != 0 {
+            let c5 = Eid::from_name("c5_mZ").expect("fixed High Road bridge-zone EID is valid");
+            if camera.path.zone == c5
+                && camera.path.index == 1
+                && player.translation[2] > -37_950_000
+            {
+                return held;
+            }
             self.jump_hold = 7;
             return held | PAD_CROSS | PAD_SQUARE;
         }
@@ -29463,6 +34785,7 @@ struct JawsOfDarknessCompletionRouteController {
     b3_shuttle_stage: u8,
     b5_entry_attack_fired: bool,
     b5_runup_start_z: Option<i32>,
+    b5_spear_row_seen: bool,
     b5_spear_wait_done: bool,
     b5_spear_launch_pending: bool,
     b5_fire_wait_done: bool,
@@ -30225,7 +35548,9 @@ impl JawsOfDarknessCompletionRouteController {
             == Eid::from_name("a5_tZ").expect("fixed Jaws corner-approach zone EID is valid")
             && camera.path.index == 0
             && !self.corner_jump_launched
-            && player.is_some_and(|player| player.translation[0] >= 21_950_000);
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0 && player.translation[0] >= 21_950_000
+            });
         if corner_approach {
             self.corner_jump_launched = true;
             self.jump_frames = 44;
@@ -30670,10 +35995,10 @@ impl JawsOfDarknessCompletionRouteController {
         if self.b9_pillar_stage == 3 {
             if collider_entity == Some(161) && player.is_some_and(|player| player.status_a & 1 != 0)
             {
-                self.b9_pillar_stage = 5;
-                self.jump_frames = 44;
-                self.release_frames = 0;
-                return PAD_UP | PAD_CROSS;
+                self.b9_pillar_stage = 4;
+                self.jump_frames = 0;
+                self.release_frames = 2;
+                return PAD_UP;
             }
             let approach = if player.is_some_and(|player| player.translation[2] > 34_650_000) {
                 PAD_LEFT | PAD_UP
@@ -30689,6 +36014,15 @@ impl JawsOfDarknessCompletionRouteController {
                 };
             }
             return approach | PAD_SQUARE;
+        }
+        if self.b9_pillar_stage == 4 {
+            if self.release_frames != 0 {
+                self.release_frames -= 1;
+                return PAD_UP;
+            }
+            self.b9_pillar_stage = 5;
+            self.jump_frames = 44;
+            return PAD_UP | PAD_CROSS;
         }
         if self.b9_pillar_stage == 5 {
             if camera.path.zone
@@ -30779,7 +36113,7 @@ impl JawsOfDarknessCompletionRouteController {
                                     subtype: 2
                                 }
                             ) && Some(object.object) != completed_target
-                                && object.frame_bound.is_some()
+                                && (object.frame_bound.is_some() || self.c0_platform_landings == 3)
                                 && object.translation[0] + 180_000 < player.translation[0]
                                 && object.translation[0].abs_diff(player.translation[0]) <= 900_000
                                 && object.translation[2].abs_diff(player.translation[2]) <= 650_000
@@ -31043,7 +36377,7 @@ impl JawsOfDarknessCompletionRouteController {
                 }) {
                     self.c3_plant_stage = 15;
                     self.jump_frames = 0;
-                    self.release_frames = 1;
+                    self.release_frames = 7;
                     return 0;
                 }
                 let mut held = if player.is_some_and(|player| player.translation[0] > 15_110_000) {
@@ -31061,12 +36395,22 @@ impl JawsOfDarknessCompletionRouteController {
                 return held;
             }
             if self.c3_plant_stage == 15 {
-                if player.is_some_and(|player| player.translation[0] < 15_180_000) {
-                    return PAD_RIGHT;
-                }
                 if self.release_frames != 0 {
                     self.release_frames -= 1;
                     return 0;
+                }
+                let runup = player.map_or(PAD_RIGHT, |player| {
+                    let mut held = 0;
+                    if player.translation[0] < 15_180_000 {
+                        held |= PAD_RIGHT;
+                    }
+                    if player.translation[2] > 32_530_000 {
+                        held |= PAD_UP;
+                    }
+                    held
+                });
+                if runup != 0 {
+                    return runup;
                 }
                 self.c3_plant_stage = 16;
                 self.jump_frames = 44;
@@ -31079,7 +36423,7 @@ impl JawsOfDarknessCompletionRouteController {
                     PAD_UP
                 };
                 if held == PAD_UP {
-                    if player.is_some_and(|player| player.translation[0] < 15_300_000) {
+                    if player.is_some_and(|player| player.translation[0] < 15_330_000) {
                         held |= PAD_RIGHT;
                     } else if player.is_some_and(|player| player.translation[0] > 15_400_000) {
                         held |= PAD_LEFT;
@@ -31264,6 +36608,10 @@ impl JawsOfDarknessCompletionRouteController {
             {
                 self.jump_frames = self.jump_frames.saturating_sub(1);
                 return PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            if self.c7_crusher_stage == 3 && player.is_some_and(|player| player.status_a & 1 == 0) {
+                self.c7_crusher_stage = 4;
+                return 0;
             }
         }
         let c8_zone = camera.path.zone
@@ -31487,7 +36835,7 @@ impl JawsOfDarknessCompletionRouteController {
                 }) {
                     self.d1_spear_stage = 4;
                     self.jump_frames = 45;
-                    return PAD_UP | PAD_CROSS | PAD_SQUARE | PAD_LEFT;
+                    return PAD_DOWN;
                 }
                 let lateral = if player.is_some_and(|player| player.translation[0] > 14_835_000) {
                     PAD_LEFT
@@ -31697,7 +37045,8 @@ impl JawsOfDarknessCompletionRouteController {
                                 all_retracted && safely_outside_lane,
                             )
                         });
-                    if count >= 3 && all_retracted {
+                    self.b5_spear_row_seen |= count >= 3;
+                    if self.b5_spear_row_seen && all_retracted {
                         self.b5_spear_wait_done = true;
                         self.b5_spear_launch_pending = true;
                         self.b5_runup_start_z = Some(player.translation[2]);
@@ -34066,14 +39415,18 @@ struct SurveyInputController {
     tawna_bonus_two: TawnaBonusTwoCompletionRouteController,
     cortex_bonus: CortexBonusCompletionRouteController,
     boulders: BouldersCompletionRouteController,
+    boulder_dash: BoulderDashCompletionRouteController,
+    heavy_machinery: HeavyMachineryCompletionRouteController,
     cortex_power: CortexPowerCompletionRouteController,
     generator_room: GeneratorRoomCompletionRouteController,
     jaws_of_darkness: JawsOfDarknessCompletionRouteController,
     toxic_waste: ToxicWasteCompletionRouteController,
     castle_machinery: CastleMachineryCompletionRouteController,
+    lights_out: LightsOutCompletionRouteController,
     slippery_climb: SlipperyClimbCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
+    rolling_stones_brio: RollingStonesBrioBonusRouteController,
     hog_wild: HogWildCompletionRouteController,
     up_the_creek: UpTheCreekRouteController,
     temple_ruins: TempleRuinsCompletionRouteController,
@@ -34084,11 +39437,13 @@ struct SurveyInputController {
     papu_papu: PapuPapuCompletionRouteController,
     ripper_roo: RipperRooCompletionRouteController,
     brio: BrioCompletionRouteController,
+    lab: LabCompletionRouteController,
     cortex: CortexCompletionRouteController,
 }
 
 impl SurveyInputController {
-    const fn new(profile: SurveyInputProfile, context_source: LevelContextSource) -> Self {
+    fn new(profile: SurveyInputProfile, context_source: LevelContextSource) -> Self {
+        let bonus_return = matches!(context_source, LevelContextSource::BonusReturn);
         Self {
             profile,
             n_sanity: NSanityRouteController {
@@ -34115,9 +39470,9 @@ impl SurveyInputController {
                     SurveyInputProfile::GreatGateYellowGemExactCarry
                 ),
                 c4_anchored: false,
-                opening_stage: 0,
+                opening_stage: if bonus_return { 12 } else { 0 },
                 opening_ready_frames: 0,
-                stage: 0,
+                stage: if bonus_return { 103 } else { 0 },
                 active: None,
                 action_tick: 0,
                 pickup_wait_frames: 0,
@@ -34162,14 +39517,71 @@ impl SurveyInputController {
                 zero_t_takeoff_fired: false,
                 post_checkpoint_spin_ticks: 0,
             },
+            boulder_dash: BoulderDashCompletionRouteController {
+                zero_c_recentered: false,
+                zero_c_recenter_hold: 0,
+                zero_c_first_jump: false,
+                zero_c_second_jump: false,
+                suffix_jump_stage: 0,
+                zero_a_path0_tick: 0,
+                zero_a_zero_entry: false,
+                zero_r_first_spin: false,
+                zero_r_second_spin: false,
+                zero_m_jump: false,
+                zero_m_jump_hold: 0,
+                zero_m_exit_jump: false,
+                zero_l_exit_jump: false,
+                zero_i_lane_tap: false,
+                zero_lower_c_exit_jump: false,
+                zero_lower_b_exit_jump: false,
+                zero_lower_b_second_jump: false,
+            },
+            heavy_machinery: HeavyMachineryCompletionRouteController {
+                opening_previous_roller_y: None,
+                opening_crossing_frame: None,
+                f1_previous_roller_x: None,
+                f1_crossing_frame: None,
+                h1_active_seen: false,
+                h1_crossing_tick: 0,
+                h1_complete: false,
+                g8_crossing_frame: None,
+                h3_active_seen: false,
+                h3_crossing_tick: 0,
+                h3_crossing_frame: None,
+                h3_complete: false,
+                i5_previous_target_x: None,
+                i5_crossing_frame: None,
+                i5_zone_entry_frame: None,
+                i5_wait_for_zone_entry: false,
+                i5_target_reanchor_done: false,
+                i6_crossing_frame: None,
+                i8_bounce_frame: None,
+                j3_zero_entry_frame: None,
+                j3_marker_contact_frame: None,
+                j3_one_entry_frame: None,
+                j3_corner_frame: None,
+                j3_portal_stabilizing: false,
+            },
             cortex_power: CortexPowerCompletionRouteController {
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
                 hazard_stage: 0,
                 hazard_tick: 0,
+                a4_entry_seen: false,
+                a4_recovery_required: false,
+                lower_barrier_previous_x: None,
+                lower_barrier_waiting: false,
+                lower_barrier_phase_cleared: false,
+                lower_barrier_runup_frames: 0,
+                second_barrier_previous_x: None,
+                six_b_middle_phase_cleared: false,
+                six_b_middle_runup_frames: 0,
+                final_reactor_previous_x: None,
+                final_reactor_phase_cleared: false,
             },
             generator_room: GeneratorRoomCompletionRouteController {
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
@@ -34205,9 +39617,14 @@ impl SurveyInputController {
                 b2_depart_runup: false,
                 b2_depart_runup_frames: 0,
                 b2_second_platform_landed: false,
+                b2_hazard_previous_z: None,
+                b2_third_target_previous_y: None,
                 b2_third_platform_landed: false,
                 b3_source_landed: false,
                 b4_turn_started: false,
+                b4_fresh_phase_stance: None,
+                b6_target_previous_y: None,
+                b7_depart_runup: false,
                 b7_brake_airborne_seen: false,
                 b7_wall_airborne_seen: false,
                 b8_platform_wait_frames: 0,
@@ -34216,6 +39633,9 @@ impl SurveyInputController {
                 c3_gap_airborne_seen: false,
                 bridge_hit: false,
                 bridge_returned: false,
+                a4_landing_brake_done: false,
+                a6_landing_brake_done: false,
+                a6_landing_brake_frames: 0,
             },
             jaws_of_darkness: JawsOfDarknessCompletionRouteController {
                 tick: 0,
@@ -34240,6 +39660,7 @@ impl SurveyInputController {
                 b3_shuttle_stage: 0,
                 b5_entry_attack_fired: false,
                 b5_runup_start_z: None,
+                b5_spear_row_seen: false,
                 b5_spear_wait_done: false,
                 b5_spear_launch_pending: false,
                 b5_fire_wait_done: false,
@@ -34260,9 +39681,27 @@ impl SurveyInputController {
                 d7_turn_stage: 0,
             },
             toxic_waste: ToxicWasteCompletionRouteController {
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
+                started: false,
+                a6_barrel_stage: 0,
+                a8_checkpoint_hold_frames: 0,
+                b6_stage: 0,
+                b6_hold_frames: 0,
+                c0_stage: 0,
+                c0_wait_frames: 0,
+                c2_stage: 0,
+                c2_wait_frames: 0,
+                c3_stage: 0,
+                c3_frames: 0,
+                c4_stage: 0,
+                c4_frames: 0,
+                c5_stage: 0,
+                c5_frames: 0,
+                c6_steer_stage: 0,
+                c6_steer_frames: 0,
             },
             castle_machinery: CastleMachineryCompletionRouteController {
                 tick: 0,
@@ -34317,26 +39756,56 @@ impl SurveyInputController {
                 d9_phase_wait: 0,
                 d9_airborne_seen: false,
             },
+            lights_out: LightsOutCompletionRouteController {
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                route_frame: 0,
+                first_platform_previous_z: None,
+                first_platform_released: false,
+                first_platform_runup_remaining: 0,
+                first_platform_dismount_released: false,
+            },
             slippery_climb: SlipperyClimbCompletionRouteController {
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                first_lift_corrected: false,
+                first_lift_correction_frames: 0,
                 jump_hold: 0,
+                first_lift_recovered: false,
                 second_lift_spin: false,
                 second_lift_wait: 0,
                 second_lift_square_released: false,
                 third_lift_spin: false,
+                third_lift_nudge_applied: false,
+                third_lift_lane_restored: false,
                 rotating_block_staged: false,
                 rotating_block_wait: 0,
+                rotating_block_centered: false,
+                second_rotating_launch_staged: false,
+                rotating_target_lowered: false,
                 second_rotating_block_staged: false,
                 second_rotating_block_wait: 0,
                 barrier_jump_released: false,
+                lower_d1_runup_stage: 0,
+                lower_d1_phase_last_y: None,
+                lower_d1_phase_ready: false,
+                lower_corner_runup_stage: 0,
+                lower_e4_brake_applied: false,
+                lower_e4_brake_frames: 0,
                 lift_brake_complete: false,
                 corner_staged: false,
                 corner_wait: 0,
+                corner_phase_ready: false,
+                corner_launch_ready: false,
                 vertical_jump_released: false,
+                vertical_entry_braked: false,
+                vertical_entry_brake_frames: 0,
                 vertical_lift_staged: false,
                 vertical_rightward: false,
+                vertical_lift_returning: false,
+                vertical_lift_return_complete: false,
                 tower_staged: false,
                 tower_wait: 0,
                 tower_leftward: false,
+                tower_first_landing_jump_armed: false,
                 tower_bounce_staged: false,
                 tower_second_lift_staged: false,
                 tower_second_lift_rightward: false,
@@ -34345,6 +39814,7 @@ impl SurveyInputController {
                 tower_third_spin_tick: 0,
                 tower_wall_step: 0,
                 tower_wall_wait: 0,
+                tower_depth_lane_ready: false,
                 tower_platform_launch_released: false,
                 tower_top_lift_staged: false,
                 tower_top_lift_leftward: false,
@@ -34353,6 +39823,9 @@ impl SurveyInputController {
                 tower_b1_rightward: false,
                 tower_b1_launch_staged: false,
                 tower_b1_launch_wait: 0,
+                tower_b1_wall_lift_last_y: None,
+                tower_b1_wall_lift_phase_ready: false,
+                tower_b1_wall_runup_ready: false,
                 tower_b1_wall_crossed: false,
                 tower_b1_step_reached: false,
                 tower_b2_exit_leftward: false,
@@ -34367,8 +39840,16 @@ impl SurveyInputController {
                 tower_b2_row_stage: 0,
                 tower_b2_row_tick: 0,
                 upper_m2_flip_bounced: false,
+                upper_m1_lift_last_y: None,
+                upper_m1_lift_phase_ready: false,
                 upper_l4_wait_started: false,
-                upper_l4_wait: 0,
+                upper_l4_phase_target: None,
+                upper_l4_phase_last_y: None,
+                upper_l4_phase_ready: false,
+                upper_l4_second_jump_armed: false,
+                upper_h3_ledge_last_y: None,
+                upper_h3_ledge_phase_ready: false,
+                upper_h3_second_jump_armed: false,
                 upper_i2_waited: false,
             },
             upstream: UpstreamRecoveryRouteController {
@@ -34393,6 +39874,14 @@ impl SurveyInputController {
                 checkpoint_phase_wait: 0,
                 checkpoint_route_retimed: false,
                 post_bank_tick: None,
+            },
+            rolling_stones_brio: RollingStonesBrioBonusRouteController {
+                route: RollingStonesRouteController {
+                    session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                    ..RollingStonesRouteController::default()
+                },
+                attempted_tokens: 0,
+                first_token_jump_tick: None,
             },
             hog_wild: HogWildCompletionRouteController {
                 stage: 0,
@@ -34536,10 +40025,23 @@ impl SurveyInputController {
             },
             high_road: HighRoadCompletionRouteController {
                 jump_hold: 0,
+                session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 sunset_tick: 0,
                 sunset_wait: 0,
                 sunset_stage: 0,
+                sunset_f4_phase_gate: 0,
+                sunset_h5_ruin_phase_gate: 0,
+                sunset_h5_upper_entry_phase: 0,
+                sunset_i3_stage126_ready_wait: 0,
                 sunset_attack_tick: 0,
+                sunset_d1_recovery_alignment: false,
+                sunset_d2_first_support_alignment: false,
+                sunset_d3_first_gap_alignment: false,
+                sunset_d3_first_gap_retimed: false,
+                sunset_e3_first_wall_alignment: false,
+                sunset_e3_first_wall_retimed: false,
+                sunset_e3_ruin_volley_alignment: false,
+                sunset_e3_ruin_volley_retimed: false,
                 collect_sunset_cortex_tokens: matches!(
                     profile,
                     SurveyInputProfile::SunsetVistaCortexBonusRoute
@@ -34562,6 +40064,16 @@ impl SurveyInputController {
                 dodge_held: 0,
                 potion_phase_complete: false,
             },
+            lab: LabCompletionRouteController {
+                route_delay: 0,
+                first_rods_waiting: false,
+                first_rods_active_seen: false,
+                first_rods_cleared: false,
+                first_rods_brake_frames: 0,
+                b9_door_waiting: false,
+                b9_door_cleared: false,
+                b9_door_brake_frames: 0,
+            },
             cortex: CortexCompletionRouteController {
                 hit_count: 0,
                 previous_boss_state: None,
@@ -34579,6 +40091,8 @@ impl SurveyInputController {
             self.jungle = JungleRouteController::default();
         } else if self.profile == SurveyInputProfile::RollingStonesCheckpoint {
             self.rolling_stones.restart_from_checkpoint();
+        } else if self.profile == SurveyInputProfile::RollingStonesBrioBonus {
+            self.rolling_stones_brio.restart_from_checkpoint();
         } else if self.profile == SurveyInputProfile::LostCityCompletionRoute {
             self.lost_city = LostCityCompletionRouteController::default();
         }
@@ -34586,6 +40100,9 @@ impl SurveyInputController {
             self.road_to_nowhere.jump_hold = 0;
             self.road_to_nowhere.final_stage = 0;
             self.road_to_nowhere.final_tick = 0;
+        }
+        if self.profile == SurveyInputProfile::BoulderDashCompletionRoute {
+            self.boulder_dash = BoulderDashCompletionRouteController::default();
         }
         if matches!(
             self.profile,
@@ -34602,7 +40119,23 @@ impl SurveyInputController {
             self.castle_machinery = CastleMachineryCompletionRouteController::default();
         }
         if self.profile == SurveyInputProfile::SlipperyClimbCompletionRoute {
-            self.slippery_climb = SlipperyClimbCompletionRouteController::default();
+            let session_globals = self.slippery_climb.session_globals;
+            self.slippery_climb = SlipperyClimbCompletionRouteController {
+                session_globals,
+                ..SlipperyClimbCompletionRouteController::default()
+            };
+        }
+        if self.profile == SurveyInputProfile::LabCompletionRoute {
+            self.lab = LabCompletionRouteController {
+                route_delay: 0,
+                first_rods_waiting: false,
+                first_rods_active_seen: false,
+                first_rods_cleared: false,
+                first_rods_brake_frames: 0,
+                b9_door_waiting: false,
+                b9_door_cleared: false,
+                b9_door_brake_frames: 0,
+            };
         }
         if self.profile == SurveyInputProfile::TawnaBonusCompletionRoute {
             self.tawna_bonus = TawnaBonusCompletionRouteController::default();
@@ -34729,7 +40262,7 @@ impl SurveyInputController {
                 self.boulders.held(frame, camera, player, local_pbak_held)
             }
             SurveyInputProfile::BoulderDashCompletionRoute => {
-                BoulderDashCompletionRouteController::held(frame)
+                self.boulder_dash.held(frame, camera, player, route_objects)
             }
             SurveyInputProfile::CortexPowerCompletionRoute => {
                 self.cortex_power.held(camera, player, route_objects)
@@ -34742,16 +40275,18 @@ impl SurveyInputController {
                 self.jaws_of_darkness
                     .held(camera, player, player_collider_entity, route_objects)
             }
-            SurveyInputProfile::HeavyMachineryCompletionRoute => {
-                HeavyMachineryCompletionRouteController::held(frame)
-            }
+            SurveyInputProfile::HeavyMachineryCompletionRoute => self.heavy_machinery.held(
+                frame,
+                camera,
+                player,
+                player_collider_entity,
+                route_objects,
+            ),
             SurveyInputProfile::ToxicWasteCompletionRoute => {
                 self.toxic_waste.held(player, route_objects)
             }
-            SurveyInputProfile::LabCompletionRoute => LabCompletionRouteController::held(frame),
-            SurveyInputProfile::LightsOutCompletionRoute => {
-                LightsOutCompletionRouteController::held(frame)
-            }
+            SurveyInputProfile::LabCompletionRoute => self.lab.held(frame, player, route_objects),
+            SurveyInputProfile::LightsOutCompletionRoute => self.lights_out.held(route_objects),
             SurveyInputProfile::CastleMachineryCompletionRoute => self.castle_machinery.held(
                 frame,
                 camera,
@@ -34776,6 +40311,10 @@ impl SurveyInputController {
             }
             SurveyInputProfile::RollingStonesCheckpoint => {
                 self.rolling_stones
+                    .held(camera, player, checkpoint_id, route_objects)
+            }
+            SurveyInputProfile::RollingStonesBrioBonus => {
+                self.rolling_stones_brio
                     .held(camera, player, checkpoint_id, route_objects)
             }
             SurveyInputProfile::HogWildCompletionRoute => {
@@ -34884,6 +40423,7 @@ struct PlayerTrace {
     status_a: u32,
     status_b: u32,
     cortex_counter: u32,
+    brio_counter: u32,
     tawna_counter: u32,
     event: u32,
     animation_stamp: u32,
@@ -35000,6 +40540,7 @@ struct LevelSurvey {
     entity_counter_samples: Vec<(u32, u16, u32)>,
     direct_send_program_samples: Vec<DirectSendProgramSample>,
     next_lid: Option<(u32, i32)>,
+    cross_level_restart: Option<(u32, LevelId)>,
 }
 
 impl LevelSurvey {
@@ -35061,6 +40602,7 @@ impl LevelSurvey {
             entity_counter_samples: Vec::new(),
             direct_send_program_samples: Vec::new(),
             next_lid: None,
+            cross_level_restart: None,
         }
     }
 
@@ -36108,6 +41650,104 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
         self.step(button);
         self.step(0);
     }
+
+    fn validate_authored_selection(&self, expected: LevelId) -> Result<(), String> {
+        let arena = self
+            .runtime
+            .arena()
+            .main_object()
+            .ok_or_else(|| "the authored map has no main arena object".to_owned())?;
+        let spawned = self
+            .runtime
+            .arena()
+            .get(arena)
+            .ok_or_else(|| "the authored map main arena handle is stale".to_owned())?;
+        let subtype = spawned.origin().subtype();
+        let object = self
+            .runtime
+            .object_for_arena(arena)
+            .ok_or_else(|| "the authored map main arena object has no VM binding".to_owned())?;
+        let vm = self
+            .runtime
+            .machine()
+            .object(object.vm())
+            .map_err(|error| format!("the authored map main VM is unavailable: {error:?}"))?;
+        let identity = vm
+            .program_identity()
+            .ok_or_else(|| "the authored map main VM has no program identity".to_owned())?;
+        let isldc = Eid::from_name("IsldC").expect("fixed retail IsldC EID is valid");
+        let selected_map_level = vm
+            .register(ISLAND_SELECTED_MAP_LEVEL_REGISTER)
+            .map_err(|error| format!("IsldC selected-map register: {error:?}"))?;
+        let selected_lid_word = vm
+            .register(ISLAND_SELECTED_LID_REGISTER)
+            .map_err(|error| format!("IsldC selected-LID register: {error:?}"))?;
+        let levels_unlocked = self
+            .runtime
+            .global_word(LEVELS_UNLOCKED_GLOBAL)
+            .map_err(|error| format!("levels-unlocked global: {error:?}"))?;
+        let island_camera_state = self
+            .runtime
+            .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+            .map_err(|error| format!("island-camera-state global: {error:?}"))?;
+        let expected_lid_word = expected
+            .get()
+            .checked_shl(8)
+            .ok_or_else(|| format!("expected LID {expected} cannot be encoded by IsldC"))?;
+
+        if identity.global_eid() == isldc
+            && subtype == 0
+            && vm.state() == 1
+            && selected_map_level == levels_unlocked
+            && selected_lid_word == expected_lid_word
+            && island_camera_state == 1
+        {
+            return Ok(());
+        }
+
+        Err(format!(
+            "program={} subtype={subtype} state={} selected-map={selected_map_level} \
+             levels-unlocked={levels_unlocked} selected-lid-word={selected_lid_word:#010x} \
+             expected-lid-word={expected_lid_word:#010x} island-camera-state={island_camera_state}",
+            identity.global_eid(),
+            vm.state(),
+        ))
+    }
+
+    fn select_next_unlocked(&mut self, expected: LevelId) {
+        self.wait_until_ready(64);
+        let ready_frame = self.frame;
+        // The authored IsldC program selects the newest unlocked map node
+        // during its neutral settle. Keep the historical 242 pre-Cross frames
+        // so map handoffs retain their characterized renderer/RNG phase, but
+        // never guess a spatial D-pad direction: different island graphs use
+        // different directions and an unnecessary tap can select a prior node.
+        let minimum_pre_cross_frame = ready_frame + 242;
+        let selection_deadline = ready_frame + 512;
+        loop {
+            let selection = self.validate_authored_selection(expected);
+            if self.frame >= minimum_pre_cross_frame && selection.is_ok() {
+                break;
+            }
+            assert!(
+                self.frame < selection_deadline,
+                "the authored map did not select {expected} by frame {}: {}",
+                self.frame,
+                selection.unwrap_err()
+            );
+            self.step(0);
+        }
+
+        let transition_frame = self.frame + 1;
+        self.step(PAD_CROSS);
+        let expected_lid =
+            i32::try_from(expected.get()).expect("selected campaign level LID fits i32");
+        assert_eq!(
+            self.transitions,
+            [(transition_frame, expected_lid)],
+            "the next unlocked authored map node must launch {expected}"
+        );
+    }
 }
 
 fn screen_projection(field_of_view: u32) -> Result<u32, String> {
@@ -36199,6 +41839,7 @@ fn player_trace(runtime: &RetailRuntime) -> Result<Option<PlayerTrace>, String> 
         status_a: register(process_register::STATUS_A)?,
         status_b: register(process_register::STATUS_B)?,
         cortex_counter: register(0x46)?,
+        brio_counter: register(0x47)?,
         tawna_counter: register(0x48)?,
         event: register(process_register::EVENT)?,
         animation_stamp: register(process_register::ANIMATION_STAMP)?,
@@ -36832,9 +42473,12 @@ fn apply_restart(
             .restart_saved_level_from_effect(host, captured_saved_level)
             .map_err(|error| format!("different-level restart: {error:?}"))?;
         return match outcome {
-            RetailRestartOutcome::DifferentLevel { saved_level, .. } => Ok(Some(format!(
-                "requested cross-level restart from {level} to {saved_level}"
-            ))),
+            RetailRestartOutcome::DifferentLevel { saved_level, .. } => {
+                survey.cross_level_restart = Some((frame, saved_level));
+                Ok(Some(format!(
+                    "requested cross-level restart from {level} to {saved_level}"
+                )))
+            }
             RetailRestartOutcome::Restarted(_) => {
                 Err("cross-level snapshot restarted in the current pair".to_owned())
             }
@@ -37024,6 +42668,24 @@ fn survey_pair_with_runtime(
 ) -> Result<(LevelSurvey, RetailRuntime), String> {
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
+    let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
+        let snapshot = runtime
+            .saved_level_state()
+            .cloned()
+            .ok_or_else(|| "bonus-return mount has no saved parent snapshot".to_owned())?;
+        if snapshot.level != level {
+            return Err(format!(
+                "bonus-return snapshot targets {}, not mounted {level}",
+                snapshot.level
+            ));
+        }
+        lifecycle
+            .transition_with_marker(snapshot.location.path.zone, true)
+            .map_err(|error| format!("bonus-return lifecycle mount: {error:?}"))?;
+        Some(snapshot)
+    } else {
+        None
+    };
     let mut camera = match context_source {
         LevelContextSource::FreshBoot => RetailCameraRuntime::new(&graph),
         LevelContextSource::SessionGlobals => RetailCameraRuntime::at_path(
@@ -37035,26 +42697,43 @@ fn survey_pair_with_runtime(
                 .map(u32::cast_signed)
                 .map_err(|error| format!("mounted camera game-state global: {error:?}"))?,
         ),
+        LevelContextSource::BonusReturn => {
+            let snapshot = bonus_return_snapshot
+                .as_ref()
+                .expect("bonus-return context always captures its snapshot");
+            RetailCameraRuntime::at_path(
+                &graph,
+                snapshot.location.path,
+                snapshot.location.progress.raw(),
+                runtime
+                    .global_word(GAME_STATE_GLOBAL)
+                    .map(u32::cast_signed)
+                    .map_err(|error| format!("bonus-return camera game-state global: {error:?}"))?,
+            )
+        }
     }
     .map_err(|error| error.to_string())?;
     let mut death_camera = RetailDeathCameraState::default();
     let mut death_camera_pose = None;
+    let initial_camera_path = camera.location().path;
     let spawn_points = graph
-        .path(graph.spawn_path())
+        .path(initial_camera_path)
         .and_then(|path| u16::try_from(path.points.len()).ok())
         .and_then(NonZeroU16::new)
-        .ok_or_else(|| "spawn camera path has no representable points".to_owned())?;
+        .ok_or_else(|| "initial camera path has no representable points".to_owned())?;
     let mut frame_state = RetailFrameState::ready(spawn_points, 0);
     match context_source {
         LevelContextSource::FreshBoot => {
             refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())?;
         }
-        LevelContextSource::SessionGlobals => seed_mounted_level_context_from_globals(
-            &mut runtime,
-            &graph,
-            &lifecycle,
-            camera.location(),
-        )?,
+        LevelContextSource::SessionGlobals | LevelContextSource::BonusReturn => {
+            seed_mounted_level_context_from_globals(
+                &mut runtime,
+                &graph,
+                &lifecycle,
+                camera.location(),
+            )?;
+        }
     }
     let mut initial_host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
     runtime
@@ -37127,6 +42806,65 @@ fn survey_pair_with_runtime(
             .transpose()?
     };
     let mut survey = LevelSurvey::new(level, name, input_profile);
+    if let Some(snapshot) = &bonus_return_snapshot {
+        let neighbors = lifecycle
+            .next_frame_spawn_scan()
+            .iter()
+            .map(|candidate| {
+                let zone = zones.get(&candidate.zone).ok_or_else(|| {
+                    format!(
+                        "bonus-return spawn zone {} is absent from the catalog",
+                        candidate.zone
+                    )
+                })?;
+                Ok(NeighborZone {
+                    eid: zone.eid,
+                    display_flags: candidate.display_flags,
+                    entities: zone.entities.as_slice(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        runtime.set_initial_crash_save_suppressed(true);
+        let attempts = runtime.spawn_current_zone_neighbors(&neighbors, &mut host);
+        runtime.set_initial_crash_save_suppressed(false);
+        survey.spawn_attempts += attempts.len() as u64;
+        for attempt in &attempts {
+            match &attempt.result {
+                Ok(_) => survey.successful_spawns += 1,
+                Err(_) if expected_spawn_rejection(&attempt.result) => {
+                    survey.expected_spawn_rejections += 1;
+                }
+                Err(error) => {
+                    survey.unexpected_spawn_errors += 1;
+                    survey.record_issue(
+                        "bonus-return-spawn",
+                        0,
+                        format!(
+                            "zone {} entity {} descriptor {:?}: {error:?}",
+                            attempt.zone, attempt.entity_index, attempt.descriptor
+                        ),
+                    );
+                }
+            }
+        }
+        let terminal = apply_restart(
+            0,
+            level,
+            snapshot.level,
+            &graph,
+            &mut camera,
+            &mut lifecycle,
+            &mut runtime,
+            &mut host,
+            &mut survey,
+        )?;
+        if let Some(terminal) = terminal {
+            return Err(format!(
+                "bonus-return parent mount requested another remount: {terminal}"
+            ));
+        }
+        drain_reclaim_diagnostics(&mut runtime, &mut survey, 0);
+    }
     let mut input_controller = SurveyInputController::new(input_profile, context_source);
     let mut empty_frames = 0_u32;
     let mut held_previous = 0_u32;
@@ -37168,10 +42906,12 @@ fn survey_pair_with_runtime(
                     | SurveyInputProfile::UpTheCreekCompletionRoute
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::TempleRuinsCompletionRoute
+                    | SurveyInputProfile::HeavyMachineryCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
+                    | SurveyInputProfile::LabCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
             ) {
             player_collider_entity(&runtime)?
@@ -37211,6 +42951,8 @@ fn survey_pair_with_runtime(
                     Eid::from_name("PoPlC")
                         .expect("fixed Cortex Power moving-platform EID is valid"),
                     Eid::from_name("PoDoC").expect("fixed Cortex Power door EID is valid"),
+                    Eid::from_name("PoREC")
+                        .expect("fixed Cortex Power electrical-barrier EID is valid"),
                 ],
             )?,
             SurveyInputProfile::KoalaKongCompletionRoute => program_object_traces(
@@ -37250,6 +42992,16 @@ fn survey_pair_with_runtime(
                     Eid::from_name("PoPlC").expect("fixed Rolling Stones platform EID is valid"),
                 ],
             )?,
+            SurveyInputProfile::RollingStonesBrioBonus => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid"),
+                    Eid::from_name("JunOC").expect("fixed Rolling Stones hazard EID is valid"),
+                    Eid::from_name("PoPlC").expect("fixed Rolling Stones platform EID is valid"),
+                    Eid::from_name("BoxsC").expect("fixed Rolling Stones crate EID is valid"),
+                    Eid::from_name("FruiC").expect("fixed Rolling Stones pickup EID is valid"),
+                ],
+            )?,
             SurveyInputProfile::GreatGatePhaseRobust
             | SurveyInputProfile::GreatGateTawnaBonus
             | SurveyInputProfile::GreatGateYellowGemExactCarry => program_object_traces(
@@ -37267,22 +43019,19 @@ fn survey_pair_with_runtime(
             | SurveyInputProfile::JawsOfDarknessCompletionRoute
             | SurveyInputProfile::ToxicWasteCompletionRoute
             | SurveyInputProfile::CastleMachineryCompletionRoute
-            | SurveyInputProfile::SlipperyClimbCompletionRoute => {
-                program_object_traces(&runtime, &[])?
-            }
-            SurveyInputProfile::LabCompletionRoute => program_object_traces(
-                &runtime,
-                &[
-                    Eid::from_name("LabAC").expect("fixed Lab hazard EID is valid"),
-                    Eid::from_name("BoxsC").expect("fixed Lab crate EID is valid"),
-                    Eid::from_name("CasOC").expect("fixed Lab gate EID is valid"),
-                    Eid::from_name("PoRoC").expect("fixed Lab reactor-rod EID is valid"),
-                    Eid::from_name("WarpC").expect("fixed Lab warp EID is valid"),
-                ],
-            )?,
+            | SurveyInputProfile::SlipperyClimbCompletionRoute
+            | SurveyInputProfile::LightsOutCompletionRoute
+            | SurveyInputProfile::LabCompletionRoute => program_object_traces(&runtime, &[])?,
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
+            )?,
+            SurveyInputProfile::BoulderDashCompletionRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("JunOC").expect("fixed Boulder Dash hazard EID is valid"),
+                    Eid::from_name("PoPlC").expect("fixed Boulder Dash platform EID is valid"),
+                ],
             )?,
             SurveyInputProfile::SunsetVistaCompletionRoute
             | SurveyInputProfile::SunsetVistaCortexBonusRoute => program_object_traces(
@@ -37294,8 +43043,63 @@ fn survey_pair_with_runtime(
                     Eid::from_name("RuiOC").expect("fixed Sunset ruin EID is valid"),
                 ],
             )?,
+            SurveyInputProfile::HeavyMachineryCompletionRoute => {
+                program_object_traces(&runtime, &[])?
+            }
             _ => Vec::new(),
         };
+        if std::env::var_os("C1_SLIPPERY_PLATFORM_TRACE").is_some()
+            && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
+            && (6_400..=6_800).contains(&frame)
+            && frame.is_multiple_of(5)
+        {
+            let platforms = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.executable == 11
+                                || matches!(descriptor.id, 20..=70)
+                    )
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.frame_bound,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let candidates = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.object.get(),
+                        3 | 5 | 7 | 8 | 13 | 14 | 15 | 16 | 17 | 18 | 24
+                    )
+                })
+                .collect::<Vec<_>>();
+            let nearby = player_before_frame
+                .map(|player| {
+                    route_objects
+                        .iter()
+                        .filter(|object| {
+                            player.translation[0].abs_diff(object.translation[0]) <= 900_000
+                                && player.translation[1].abs_diff(object.translation[1]) <= 900_000
+                                && player.translation[2].abs_diff(object.translation[2]) <= 900_000
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            eprintln!(
+                "SLIPPERY_PLATFORM frame={frame} camera={:?} player={player_before_frame:?} nearby={nearby:?} candidates={candidates:?} objects={platforms:?}",
+                camera.location()
+            );
+        }
         let pinstripe_boss_state =
             if matches!(input_profile, SurveyInputProfile::PinstripeCompletionRoute) {
                 route_objects.iter().find_map(|object| {
@@ -37329,6 +43133,83 @@ fn survey_pair_with_runtime(
             }
             previous_pinstripe_boss_state = pinstripe_boss_state;
         }
+        if input_profile == SurveyInputProfile::LabCompletionRoute
+            && std::env::var_os("C1_SURVEY_LAB_TRACE").is_some()
+            && (frame <= 700 || (1_650..=1_900).contains(&frame))
+            && frame.is_multiple_of(5)
+        {
+            let nearby = player_before_frame.map_or_else(Vec::new, |player| {
+                route_objects
+                    .iter()
+                    .filter(|object| {
+                        object.translation[2].abs_diff(player.translation[2]) <= 2_000_000
+                            && object.translation[1].abs_diff(player.translation[1]) <= 2_000_000
+                    })
+                    .map(|object| {
+                        (
+                            object.origin,
+                            object.program.name(),
+                            object.state,
+                            object.state_stamp,
+                            object.status_b,
+                            object.translation,
+                            object.frame_bound,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            eprintln!(
+                "LAB_TRACE frame={frame} delay={} camera={:?} collider={player_collider_before_frame:?} player={player_before_frame:?} nearby={nearby:?}",
+                input_controller.lab.route_delay,
+                camera.location(),
+            );
+        }
+        if input_profile == SurveyInputProfile::BrioCompletionRoute
+            && std::env::var_os("C1_SURVEY_BRIO_TRACE").is_some()
+            && (1_570..=1_800).contains(&frame)
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.event,
+                )
+            });
+            let objects = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 41,
+                            subtype: 2 | 3,
+                        }
+                    ) || object.program.name().as_deref() == Some("BrioC")
+                        || (object.program.name().as_deref() == Some("BriOC")
+                            && matches!(object.origin, ObjectOrigin::Entity(_)))
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.animation_counter,
+                        object.register_72,
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "BRIO_TRACE frame={frame} flags=({}, {}, {}, {}) player={player:?} objects={objects:?}",
+                input_controller.brio.activation_complete,
+                input_controller.brio.potion_phase_complete,
+                input_controller.brio.dodge_held,
+                input_controller.brio.tick,
+            );
+        }
         let held = input_controller.held(
             frame,
             camera.location(),
@@ -37346,11 +43227,430 @@ fn survey_pair_with_runtime(
             boss_state,
             &route_objects,
         );
+        if input_profile == SurveyInputProfile::RollingStonesBrioBonus
+            && std::env::var_os("C1_SURVEY_ROLLING_BRIO_TRACE").is_some()
+            && frame.is_multiple_of(5)
+        {
+            let tokens = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if matches!(descriptor.id, 25 | 59 | 120)
+                    ) || object.program
+                        == Eid::from_name("FruiC")
+                            .expect("fixed Rolling Stones pickup EID is valid")
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.bound,
+                        object.status_b,
+                        object.register_72,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !tokens.is_empty() {
+                eprintln!(
+                    "ROLLING_BRIO frame={frame} held={held:#06x} camera={:?} global-brio={:?} player={player_before_frame:?} tokens={tokens:?}",
+                    camera.location(),
+                    runtime.global_word(28),
+                );
+            }
+        }
+        if std::env::var_os("C1_SLIPPERY_PLATFORM_TRACE").is_some()
+            && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
+            && (6_400..=6_800).contains(&frame)
+        {
+            eprintln!(
+                "SLIPPERY_HELD frame={frame} held={held:#06x} jump={} first_corrected={} first_recovered={} second_spin={} second_wait={} third_spin={} wall_step={} b2_exit={} b2_checkpoint={} b2_first={} b2_second={} row_stage={} row_tick={} row_target={:?} player={player_before_frame:?}",
+                input_controller.slippery_climb.jump_hold,
+                input_controller.slippery_climb.first_lift_corrected,
+                input_controller.slippery_climb.first_lift_recovered,
+                input_controller.slippery_climb.second_lift_spin,
+                input_controller.slippery_climb.second_lift_wait,
+                input_controller.slippery_climb.third_lift_spin,
+                input_controller.slippery_climb.tower_wall_step,
+                input_controller.slippery_climb.tower_b2_exit_leftward,
+                input_controller
+                    .slippery_climb
+                    .tower_b2_checkpoint_rightward,
+                input_controller.slippery_climb.tower_b2_first_step_leftward,
+                input_controller.slippery_climb.tower_b2_second_step_staged,
+                input_controller.slippery_climb.tower_b2_row_stage,
+                input_controller.slippery_climb.tower_b2_row_tick,
+                input_controller.slippery_climb.tower_b2_row_target,
+            );
+        }
+        if std::env::var_os("C1_SLIPPERY_OPENING_TRACE").is_some()
+            && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
+            && frame <= 300
+        {
+            let platforms = route_objects
+                .iter()
+                .filter_map(|object| match object.origin {
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.executable == 11 && descriptor.subtype == 2 =>
+                    {
+                        Some((
+                            descriptor.id,
+                            object.object,
+                            object.state,
+                            object.translation,
+                            object.frame_bound,
+                        ))
+                    }
+                    ObjectOrigin::Entity(_) | ObjectOrigin::Runtime { .. } => None,
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "SLIPPERY_OPEN frame={frame} held={held:#06x} jump={} collider={player_collider_before_frame:?} player={player_before_frame:?} platforms={platforms:?}",
+                input_controller.slippery_climb.jump_hold,
+            );
+        }
+        if input_profile == SurveyInputProfile::BrioCompletionRoute
+            && std::env::var_os("C1_SURVEY_BRIO_TRACE").is_some()
+            && (1_570..=1_800).contains(&frame)
+        {
+            eprintln!("BRIO_HELD frame={frame} held={held:#06x}");
+        }
+        if matches!(
+            input_profile,
+            SurveyInputProfile::SunsetVistaCompletionRoute
+                | SurveyInputProfile::SunsetVistaCortexBonusRoute
+        ) && std::env::var_os("C1_SURVEY_SUNSET_TRACE").is_some()
+            && (1_650..=9_500).contains(&frame)
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                )
+            });
+            eprintln!(
+                "SUNSET_TRACE frame={frame} carry={} zone={:?}:{} progress={} stage={} wait={} f4phase={} tick={} jump={} held={held:#06x} player={player:?}",
+                input_controller.high_road.session_globals,
+                camera.location().path.zone.name(),
+                camera.location().path.index,
+                camera.location().progress.raw(),
+                input_controller.high_road.sunset_stage,
+                input_controller.high_road.sunset_wait,
+                input_controller.high_road.sunset_f4_phase_gate,
+                input_controller.high_road.sunset_tick,
+                input_controller.high_road.jump_hold,
+            );
+            if frame.is_multiple_of(10)
+                || (std::env::var_os("C1_SURVEY_SUNSET_OBJECT_EVERY_FRAME").is_some()
+                    && matches!(input_controller.high_road.sunset_stage, 152..=155 | 170))
+                || (2_185..=2_200).contains(&frame)
+                || (2_380..=2_400).contains(&frame)
+                || (2_750..=2_770).contains(&frame)
+                || (5_088..=5_100).contains(&frame)
+            {
+                let objects = route_objects
+                    .iter()
+                    .map(|object| {
+                        (
+                            object.origin,
+                            object.program.name(),
+                            object.state,
+                            object.state_stamp,
+                            object.translation,
+                            object.frame_bound,
+                            object.animation_counter,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("SUNSET_OBJECTS frame={frame} objects={objects:?}");
+            }
+        }
+        if input_profile == SurveyInputProfile::HeavyMachineryCompletionRoute
+            && std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some()
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.event,
+                )
+            });
+            eprintln!(
+                "HEAVY_TRACE frame={frame} carry={} zone={:?}:{} progress={} checkpoint={} collider={player_collider_before_frame:?} held={held:#06x} player={player:?}",
+                input_controller.high_road.session_globals,
+                camera.location().path.zone.name(),
+                camera.location().path.index,
+                camera.location().progress.raw(),
+                checkpoint_id_before_frame,
+            );
+            if ((100..=270).contains(&frame)
+                || (1_750..=2_100).contains(&frame)
+                || (3_480..=3_850).contains(&frame)
+                || (4_500..=4_900).contains(&frame)
+                || (5_050..=5_600).contains(&frame))
+                && let Some(player) = player_before_frame
+            {
+                let nearby_objects = route_objects
+                    .iter()
+                    .filter(|object| {
+                        object.translation[0].abs_diff(player.translation[0]) <= 1_000_000
+                            && object.translation[1].abs_diff(player.translation[1]) <= 1_000_000
+                            && object.translation[2].abs_diff(player.translation[2]) <= 1_000_000
+                    })
+                    .map(|object| {
+                        (
+                            object.origin,
+                            object.program.name(),
+                            object.state,
+                            object.translation,
+                            object.bound,
+                            object.animation_counter,
+                            object.status_b,
+                            object.register_72,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                eprintln!("HEAVY_OBJECTS frame={frame} objects={nearby_objects:?}");
+            }
+        }
+        if input_profile == SurveyInputProfile::CortexCompletionRoute
+            && std::env::var_os("C1_SURVEY_CORTEX_BOSS_TRACE").is_some()
+            && (2_250..=2_800).contains(&frame)
+            && (frame.is_multiple_of(5) || frame >= 2_680)
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.status_b,
+                    player.event,
+                )
+            });
+            let objects = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(object.origin, ObjectOrigin::Runtime { executable: 50, .. })
+                        || matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 10
+                        )
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.state,
+                        object.translation,
+                        object.animation_counter,
+                        object.state_stamp,
+                        object.status_b,
+                        object.register_72,
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!(
+                "CORTEX_BOSS_TRACE frame={frame} hits={} previous={:?} late={} direction={:#06x} barrage={:?} held={held:#06x} player={player:?} objects={objects:?}",
+                input_controller.cortex.hit_count,
+                input_controller.cortex.previous_boss_state,
+                input_controller.cortex.late_dodge_started,
+                input_controller.cortex.barrage_direction,
+                input_controller.cortex.barrage_object,
+            );
+        }
+        if input_profile == SurveyInputProfile::GeneratorRoomCompletionRoute
+            && std::env::var_os("C1_SURVEY_GENERATOR_TRACE").is_some()
+            && (850..=3_200).contains(&frame)
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.status_b,
+                    player.event,
+                )
+            });
+            eprintln!(
+                "GENERATOR_TRACE frame={frame} context={context_source:?} zone={:?}:{} progress={} stage={} collider={player_collider_before_frame:?} jump={} release={} target_high={} runup={} runup_frames={} held={held:#06x} player={player:?}",
+                camera.location().path.zone.name(),
+                camera.location().path.index,
+                camera.location().progress.raw(),
+                input_controller.generator_room.route_stage,
+                input_controller.generator_room.jump_frames,
+                input_controller.generator_room.release_frames,
+                input_controller.generator_room.b2_target_high_seen,
+                input_controller.generator_room.b2_depart_runup,
+                input_controller.generator_room.b2_depart_runup_frames,
+            );
+            let objects = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if matches!(
+                                descriptor.id,
+                                69
+                                    | 71
+                                    | 72
+                                    | 73
+                                    | 74
+                                    | 75
+                                    | 76
+                                    | 77
+                                    | 78
+                                    | 80
+                                    | 83
+                                    | 84
+                                    | 86
+                                    | 87
+                                    | 91
+                                    | 93
+                                    | 94..=104
+                                    | 117
+                                    | 120..=126
+                            )
+                    )
+                })
+                .map(|object| {
+                    (
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.bound,
+                        object.animation_counter,
+                        object.state_stamp,
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!("GENERATOR_OBJECTS frame={frame} objects={objects:?}");
+        }
+        if input_profile == SurveyInputProfile::ToxicWasteCompletionRoute
+            && std::env::var_os("C1_SURVEY_TOXIC_TRACE").is_some()
+            && (420..=900).contains(&frame)
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.status_b,
+                    player.event,
+                )
+            });
+            eprintln!(
+                "TOXIC_TRACE frame={frame} context={context_source:?} zone={:?}:{} progress={} tick={} jump={} release={} held={held:#06x} player={player:?}",
+                camera.location().path.zone.name(),
+                camera.location().path.index,
+                camera.location().progress.raw(),
+                input_controller.toxic_waste.tick,
+                input_controller.toxic_waste.jump_frames,
+                input_controller.toxic_waste.release_frames,
+            );
+            let objects = route_objects
+                .iter()
+                .filter(|object| {
+                    player_before_frame.is_some_and(|player| {
+                        object.translation[0].abs_diff(player.translation[0]) <= 1_000_000
+                            && object.translation[1].abs_diff(player.translation[1]) <= 1_500_000
+                            && object.translation[2].abs_diff(player.translation[2]) <= 2_000_000
+                    })
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.bound,
+                        object.animation_counter,
+                        object.state_stamp,
+                        object.status_b,
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!("TOXIC_OBJECTS frame={frame} objects={objects:?}");
+        }
+        if input_profile == SurveyInputProfile::CortexPowerCompletionRoute
+            && std::env::var_os("C1_SURVEY_CORTEX_TRACE").is_some()
+            && ((780..=960).contains(&frame)
+                || (1_040..=1_900).contains(&frame)
+                || (2_350..=2_750).contains(&frame))
+        {
+            let player = player_before_frame.map(|player| {
+                (
+                    player.translation,
+                    player.velocity,
+                    player.state,
+                    player.status_a,
+                    player.status_b,
+                    player.event,
+                )
+            });
+            eprintln!(
+                "CORTEX_POWER_TRACE frame={frame} context={context_source:?} zone={:?}:{} progress={} stage={} hazard_tick={} route_tick={} a4_recovery={} held={held:#06x} player={player:?}",
+                camera.location().path.zone.name(),
+                camera.location().path.index,
+                camera.location().progress.raw(),
+                input_controller.cortex_power.hazard_stage,
+                input_controller.cortex_power.hazard_tick,
+                input_controller.cortex_power.tick,
+                input_controller.cortex_power.a4_recovery_required,
+            );
+            let objects = route_objects
+                .iter()
+                .filter(|object| {
+                    frame < 1_040
+                        || matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 90
+                        )
+                        || player_before_frame.is_some_and(|player| {
+                            object.translation[0].abs_diff(player.translation[0]) <= 1_500_000
+                                && object.translation[1].abs_diff(player.translation[1])
+                                    <= 1_500_000
+                                && object.translation[2].abs_diff(player.translation[2])
+                                    <= 1_500_000
+                        })
+                })
+                .map(|object| {
+                    (
+                        object.object,
+                        object.origin,
+                        object.program.name(),
+                        object.state,
+                        object.translation,
+                        object.bound,
+                        object.animation_counter,
+                        object.state_stamp,
+                        object.status_b,
+                        object.register_72,
+                    )
+                })
+                .collect::<Vec<_>>();
+            eprintln!("CORTEX_POWER_OBJECTS frame={frame} objects={objects:?}");
+        }
         if matches!(
             input_profile,
             SurveyInputProfile::NSanityCompletionRoute
                 | SurveyInputProfile::RollingStonesCheckpoint
                 | SurveyInputProfile::JungleDeathAkuCompletionRoute
+                | SurveyInputProfile::GreatGatePhaseRobust
+                | SurveyInputProfile::GreatGateTawnaBonus
                 | SurveyInputProfile::BoulderDashCompletionRoute
                 | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
@@ -37507,6 +43807,54 @@ fn survey_pair_with_runtime(
         }
         for effect in &report.effects {
             survey.record_effect(frame, effect);
+            if input_profile == SurveyInputProfile::RollingStonesBrioBonus
+                && std::env::var_os("C1_SURVEY_ROLLING_BRIO_TRACE").is_some()
+                && matches!(
+                    effect,
+                    VmEffect::SpawnChildren { executable: 3, .. } | VmEffect::SendEvent(_)
+                )
+            {
+                eprintln!("ROLLING_BRIO_EFFECT frame={frame} effect={effect:?}");
+            }
+            if input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
+                && std::env::var_os("C1_SLIPPERY_PLATFORM_TRACE").is_some()
+                && (1_600..=2_100).contains(&frame)
+                && matches!(
+                    effect,
+                    VmEffect::SendEvent(_) | VmEffect::Solid { .. } | VmEffect::StateChanged { .. }
+                )
+            {
+                eprintln!("SLIPPERY_EFFECT frame={frame} effect={effect:?}");
+            }
+            if input_profile == SurveyInputProfile::CortexPowerCompletionRoute
+                && std::env::var_os("C1_SURVEY_CORTEX_TRACE").is_some()
+                && ((1_100..=1_900).contains(&frame) || (2_350..=2_750).contains(&frame))
+                && matches!(
+                    effect,
+                    VmEffect::SendEvent(_) | VmEffect::Solid { .. } | VmEffect::StateChanged { .. }
+                )
+            {
+                eprintln!("CORTEX_POWER_EFFECT frame={frame} effect={effect:?}");
+                if let VmEffect::SendEvent(request) = effect {
+                    let describe = |object| {
+                        runtime.machine().object(object).ok().map(|vm| {
+                            (
+                                vm.program_identity()
+                                    .and_then(|identity| identity.global_eid().name()),
+                                vm.state(),
+                            )
+                        })
+                    };
+                    let recipient = match request.target {
+                        SendEventTarget::Direct { recipient } => describe(recipient),
+                        _ => None,
+                    };
+                    eprintln!(
+                        "CORTEX_POWER_SEND frame={frame} sender={:?} recipient={recipient:?}",
+                        describe(request.sender)
+                    );
+                }
+            }
             if let VmEffect::SendEvent(request) = effect
                 && let SendEventTarget::Direct { recipient } = request.target
                 && survey.direct_send_program_samples.len() < 128
@@ -37622,6 +43970,11 @@ fn survey_pair_with_runtime(
                     _ => false,
                 };
                 if retain {
+                    if input_profile == SurveyInputProfile::BrioCompletionRoute
+                        && std::env::var_os("C1_SURVEY_BRIO_TRACE").is_some()
+                    {
+                        eprintln!("BRIO_SEND {sample:?}");
+                    }
                     survey.direct_send_program_samples.push(sample);
                 }
             }
@@ -37876,6 +44229,1208 @@ fn parse_local_pair(root: &Path, level: LevelId) -> Result<(Nsd, Nsf, Vec<u8>), 
     Ok((nsd, nsf, nsf_bytes))
 }
 
+struct CampaignPair {
+    level: LevelId,
+    name: &'static str,
+    nsd: Nsd,
+    nsf: Nsf,
+    nsf_bytes: Vec<u8>,
+}
+
+impl CampaignPair {
+    fn parse(root: &Path, level: LevelId) -> Self {
+        let name = KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("campaign pair is present in the retail catalog");
+        let (nsd, nsf, nsf_bytes) =
+            parse_local_pair(root, level).expect("campaign stream pair must parse");
+        Self {
+            level,
+            name,
+            nsd,
+            nsf,
+            nsf_bytes,
+        }
+    }
+
+    fn run_carried(
+        &self,
+        carry: RetailSessionCarry,
+        input: SurveyInputProfile,
+        frame_budget: u32,
+    ) -> (LevelSurvey, RetailRuntime) {
+        survey_pair_with_runtime(
+            self.name,
+            self.level,
+            &self.nsd,
+            &self.nsf,
+            &self.nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, self.level, carry)
+                .expect("campaign level must import the preceding retail carry"),
+            LevelContextSource::SessionGlobals,
+            input,
+            frame_budget,
+        )
+        .expect("carried campaign level must execute")
+    }
+
+    fn finish_checked(&self, mut runtime: RetailRuntime, expected: LevelId) -> RetailSessionCarry {
+        let expected_lid =
+            i32::try_from(expected.get()).expect("campaign destination LID fits i32");
+        let mut host = NsfProgramHost::new(&self.nsd, &self.nsf, &self.nsf_bytes);
+        let report = runtime
+            .finish_level_transition(&mut host, expected_lid)
+            .expect("campaign LEVEL_END must export the requested destination");
+        assert!(
+            report.event_failures.is_empty(),
+            "{} LEVEL_END handlers must complete cleanly: {:?}",
+            self.name,
+            report.event_failures
+        );
+        assert!(
+            report.effects.is_empty(),
+            "{} LEVEL_END must not leak deferred effects: {:?}",
+            self.name,
+            report.effects
+        );
+        assert_eq!(report.requested_lid, expected_lid);
+        assert_eq!(report.next_lid_after_event, expected_lid);
+        assert_eq!(report.resolved.level, expected);
+        assert!(!report.resolved.bonus_return);
+        report.carry
+    }
+}
+
+fn run_clean_carried_campaign_step(
+    pair: &CampaignPair,
+    carry: RetailSessionCarry,
+    input: SurveyInputProfile,
+    frame_budget: u32,
+    expected_destination: LevelId,
+    expected_globals: [u32; 7],
+) -> RetailSessionCarry {
+    let (survey, runtime) = pair.run_carried(carry, input, frame_budget);
+    let summary = survey.summary();
+    assert_eq!(
+        survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(expected_destination.get()).unwrap()),
+        "{summary}"
+    );
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert!(survey.first_terminal_fall.is_none(), "{summary}");
+    assert!(survey.is_clean(), "{summary}");
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        expected_globals,
+        "{summary}"
+    );
+    pair.finish_checked(runtime, expected_destination)
+}
+
+fn campaign_progression_globals(runtime: &RetailRuntime) -> [u32; 7] {
+    [
+        GAME_STATE_GLOBAL,
+        TITLE_STATE_GLOBAL,
+        SAVED_TITLE_STATE_GLOBAL,
+        CURRENT_MAP_LEVEL_GLOBAL,
+        LEVEL_COUNT_GLOBAL,
+        LEVELS_UNLOCKED_GLOBAL,
+        ISLAND_CAMERA_STATE_GLOBAL,
+    ]
+    .map(|index| {
+        runtime
+            .global_word(index)
+            .expect("campaign progression global must remain readable")
+    })
+}
+
+fn carry_completion_to_title(
+    completion: &CampaignPair,
+    carry: RetailSessionCarry,
+    expected_globals: [u32; 7],
+) -> RetailSessionCarry {
+    let (survey, runtime) = completion.run_carried(
+        carry,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        700,
+    );
+    assert_eq!(
+        survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(campaign_progression_globals(&runtime), expected_globals);
+    completion.finish_checked(runtime, LevelId::TITLE)
+}
+
+fn carry_map_to_next_level(
+    title: &CampaignPair,
+    carry: RetailSessionCarry,
+    expected: LevelId,
+    expected_globals: [u32; 7],
+) -> RetailSessionCarry {
+    let mut map =
+        AuthoredTitleMapHarness::from_session(&title.nsd, &title.nsf, &title.nsf_bytes, carry);
+    map.select_next_unlocked(expected);
+    assert_eq!(campaign_progression_globals(&map.runtime), expected_globals);
+    assert_eq!(map.runtime.faulted_object_count(), 0);
+    title.finish_checked(map.runtime, expected)
+}
+
+fn synthetic_title_map_carry(
+    current_map_level: u32,
+    levels_unlocked: u32,
+    random_seed: u32,
+    draw_count: u32,
+    random_seed_b: u32,
+) -> RetailSessionCarry {
+    let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0x300),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, current_map_level),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, levels_unlocked),
+        (ISLAND_CAMERA_STATE_GLOBAL, 0),
+    ] {
+        runtime
+            .set_global_word(index, value)
+            .expect("synthetic title-map progression global is writable");
+    }
+    let mut carry = runtime.export_session_carry();
+    carry.random_seed = random_seed;
+    carry.draw_count = draw_count;
+    carry.set_random_seed_b(random_seed_b);
+    carry
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_map_next_unlocked_matrix_uses_isldc_selection() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let next_level_lids = [
+        0x0c, 0x12, 0x0e, 0x0f, 0x0a, 0x15, 0x11, 0x1a, 0x18, 0x17, 0x20, 0x1c, 0x14, 0x13, 0x23,
+        0x21, 0x06, 0x03, 0x05, 0x07, 0x08, 0x16, 0x2e, 0x28, 0x1d, 0x37, 0x1b, 0x29, 0x2c, 0x1f,
+    ];
+
+    for (offset, expected_lid) in next_level_lids.into_iter().enumerate() {
+        let current_map_level = u32::try_from(offset + 1).expect("authored map ordinal fits u32");
+        let levels_unlocked = current_map_level + 1;
+        let starting_draw_count = 20_000 + current_map_level;
+        let carry = synthetic_title_map_carry(
+            current_map_level,
+            levels_unlocked,
+            0x1357_9bdf ^ current_map_level,
+            starting_draw_count,
+            0x2468_ace0 ^ levels_unlocked,
+        );
+        let mut map =
+            AuthoredTitleMapHarness::from_session(&title.nsd, &title.nsf, &title.nsf_bytes, carry);
+        let expected = LevelId::new_const(expected_lid);
+
+        map.select_next_unlocked(expected);
+
+        assert_eq!(
+            map.frame, 253,
+            "map node {levels_unlocked} must retain the characterized Cross frame"
+        );
+        assert_eq!(
+            map.runtime.draw_count(),
+            starting_draw_count + 253,
+            "map node {levels_unlocked} must retain the characterized RNG/draw phase"
+        );
+        assert_eq!(
+            campaign_progression_globals(&map.runtime),
+            [0, 15, 15, levels_unlocked, 1, levels_unlocked, 1],
+            "map node {levels_unlocked} must launch {expected}"
+        );
+        assert_eq!(map.runtime.faulted_object_count(), 0);
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn post_sunset_and_koala_carried_map_handoffs_use_isldc_selection() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+
+    for (
+        case,
+        current_map_level,
+        levels_unlocked,
+        expected_lid,
+        random_seed,
+        draw_count,
+        random_seed_b,
+    ) in [
+        (
+            "post-Sunset Vista",
+            16,
+            17,
+            0x21,
+            0x8e26_e064,
+            50_000,
+            0x93e2_6958,
+        ),
+        (
+            "post-Koala Kong",
+            17,
+            18,
+            0x06,
+            0x57e2_f952,
+            71_000,
+            0xdaa1_232b,
+        ),
+    ] {
+        let carry = synthetic_title_map_carry(
+            current_map_level,
+            levels_unlocked,
+            random_seed,
+            draw_count,
+            random_seed_b,
+        );
+        let mut map =
+            AuthoredTitleMapHarness::from_session(&title.nsd, &title.nsf, &title.nsf_bytes, carry);
+        let expected = LevelId::new_const(expected_lid);
+
+        map.select_next_unlocked(expected);
+
+        assert_eq!(map.frame, 253, "{case}");
+        assert_eq!(
+            map.transitions,
+            [(253, expected_lid.cast_signed())],
+            "{case}"
+        );
+        assert_eq!(map.runtime.draw_count(), draw_count + 253, "{case}");
+        assert_eq!(
+            campaign_progression_globals(&map.runtime),
+            [0, 15, 15, levels_unlocked, 1, levels_unlocked, 1],
+            "{case}"
+        );
+        assert_eq!(map.runtime.faulted_object_count(), 0, "{case}");
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn pinstripe_post_toxic_carried_matrix_reaches_authored_title_transition() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let pinstripe = CampaignPair::parse(&root, LevelId::new_const(0x08));
+
+    // Start from the authored post-Toxic map contract while perturbing both
+    // RNG streams and the inherited draw phase. This isolates Pinstripe's
+    // carried boss route from the still-evolving Toxic input controller and
+    // prevents the late campaign from relying on one lucky predecessor phase.
+    for (case, random_seed, draw_count, random_seed_b) in [
+        ("baseline", 0x1357_9bdf, 50_000, 0x2468_ace0),
+        ("phase-minus-one", 0x1357_9bff, 49_999, 0),
+        ("phase-plus-one", 0x1357_9bff, 50_001, 1),
+        ("independent-streams", 0xa5a5_5a5a, 73_219, 0x5a5a_a5a5),
+    ] {
+        let post_toxic_title =
+            synthetic_title_map_carry(21, 22, random_seed, draw_count, random_seed_b);
+        let pinstripe_carry = carry_map_to_next_level(
+            &title,
+            post_toxic_title,
+            pinstripe.level,
+            [0, 15, 15, 22, 1, 22, 1],
+        );
+        let (survey, runtime) = pinstripe.run_carried(
+            pinstripe_carry,
+            SurveyInputProfile::PinstripeCompletionRoute,
+            2_200,
+        );
+        let summary = survey.summary();
+
+        assert_eq!(
+            survey.next_lid.map(|(_, lid)| lid),
+            Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+            "{case}: {summary}"
+        );
+        assert_eq!(survey.restarts, 0, "{case}: {summary}");
+        assert_eq!(survey.death_camera_frames, 0, "{case}: {summary}");
+        assert!(survey.first_terminal_fall.is_none(), "{case}: {summary}");
+        assert!(survey.is_clean(), "{case}: {summary}");
+        assert_eq!(
+            campaign_progression_globals(&runtime),
+            [0x300, 15, 15, 22, 1, 23, 0],
+            "{case}: {summary}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let pinstripe = CampaignPair::parse(&root, LevelId::new_const(0x08));
+    let high_road = CampaignPair::parse(&root, LevelId::new_const(0x16));
+    let slippery_climb = CampaignPair::parse(&root, LevelId::new_const(0x2e));
+    let lights_out = CampaignPair::parse(&root, LevelId::new_const(0x28));
+    let jaws_of_darkness = CampaignPair::parse(&root, LevelId::new_const(0x1d));
+    let castle_machinery = CampaignPair::parse(&root, LevelId::new_const(0x37));
+
+    // Start at the authored post-Toxic map contract, complete Pinstripe, and
+    // retain that real boss/title carry through the rest of island three.
+    let post_toxic_title = synthetic_title_map_carry(21, 22, 0x1357_9bdf, 50_000, 0x2468_ace0);
+    let pinstripe_carry = carry_map_to_next_level(
+        &title,
+        post_toxic_title,
+        pinstripe.level,
+        [0, 15, 15, 22, 1, 22, 1],
+    );
+    let post_pinstripe_title = run_clean_carried_campaign_step(
+        &pinstripe,
+        pinstripe_carry,
+        SurveyInputProfile::PinstripeCompletionRoute,
+        2_200,
+        LevelId::TITLE,
+        [0x300, 15, 15, 22, 1, 23, 0],
+    );
+
+    let high_road_carry = carry_map_to_next_level(
+        &title,
+        post_pinstripe_title,
+        high_road.level,
+        [0, 15, 15, 23, 1, 23, 1],
+    );
+    let high_road_completion = run_clean_carried_campaign_step(
+        &high_road,
+        high_road_carry,
+        SurveyInputProfile::HighRoadCompletionRoute,
+        3_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 23, 1, 24, 0],
+    );
+    let post_high_road_title = carry_completion_to_title(
+        &completion,
+        high_road_completion,
+        [0x300, 15, 15, 23, 1, 24, 0],
+    );
+
+    let slippery_carry = carry_map_to_next_level(
+        &title,
+        post_high_road_title,
+        slippery_climb.level,
+        [0, 15, 15, 24, 1, 24, 1],
+    );
+    let slippery_completion = run_clean_carried_campaign_step(
+        &slippery_climb,
+        slippery_carry,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        8_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 24, 1, 25, 0],
+    );
+    let post_slippery_title = carry_completion_to_title(
+        &completion,
+        slippery_completion,
+        [0x300, 15, 15, 24, 1, 25, 0],
+    );
+
+    let lights_out_carry = carry_map_to_next_level(
+        &title,
+        post_slippery_title,
+        lights_out.level,
+        [0, 15, 15, 25, 1, 25, 1],
+    );
+    let lights_out_completion = run_clean_carried_campaign_step(
+        &lights_out,
+        lights_out_carry,
+        SurveyInputProfile::LightsOutCompletionRoute,
+        6_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 25, 1, 26, 0],
+    );
+    let post_lights_out_title = carry_completion_to_title(
+        &completion,
+        lights_out_completion,
+        [0x300, 15, 15, 25, 1, 26, 0],
+    );
+
+    let jaws_carry = carry_map_to_next_level(
+        &title,
+        post_lights_out_title,
+        jaws_of_darkness.level,
+        [0, 15, 15, 26, 1, 26, 1],
+    );
+    let jaws_completion = run_clean_carried_campaign_step(
+        &jaws_of_darkness,
+        jaws_carry,
+        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        5_600,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 26, 1, 27, 0],
+    );
+    let post_jaws_title =
+        carry_completion_to_title(&completion, jaws_completion, [0x300, 15, 15, 26, 1, 27, 0]);
+
+    let castle_carry = carry_map_to_next_level(
+        &title,
+        post_jaws_title,
+        castle_machinery.level,
+        [0, 15, 15, 27, 1, 27, 1],
+    );
+    let castle_completion = run_clean_carried_campaign_step(
+        &castle_machinery,
+        castle_carry,
+        SurveyInputProfile::CastleMachineryCompletionRoute,
+        7_500,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 27, 1, 28, 0],
+    );
+    let post_castle_title = carry_completion_to_title(
+        &completion,
+        castle_completion,
+        [0x300, 15, 15, 27, 1, 28, 0],
+    );
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, post_castle_title)
+        .expect("Title must import the uninterrupted post-Castle carry");
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x300, 15, 15, 27, 1, 28, 0]
+    );
+    assert_eq!(runtime.faulted_object_count(), 0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_post_slippery_carried_matrix_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let lights_out = CampaignPair::parse(&root, LevelId::new_const(0x28));
+
+    // Begin each case at the post-Slippery title progression contract. The
+    // non-zero clock matrix prevents Lights Out from depending on one lucky
+    // fresh-boot RNG, secondary RNG, or renderer phase.
+    for (case, random_seed, draw_count, random_seed_b) in [
+        ("baseline", 0x8e26_e064, 50_000, 0x93e2_6958),
+        ("phase-minus-one", 0x8e26_e084, 49_999, 0),
+        ("phase-plus-one", 0x8e26_e084, 50_001, 1),
+        ("phase-minus-seventeen", 0x8e26_e084, 49_983, 0x1234_5678),
+    ] {
+        let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+        for (index, value) in [
+            (GAME_STATE_GLOBAL, 0x300),
+            (TITLE_STATE_GLOBAL, 15),
+            (SAVED_TITLE_STATE_GLOBAL, 15),
+            (CURRENT_MAP_LEVEL_GLOBAL, 24),
+            (LEVEL_COUNT_GLOBAL, 1),
+            (LEVELS_UNLOCKED_GLOBAL, 25),
+            (ISLAND_CAMERA_STATE_GLOBAL, 0),
+        ] {
+            title_runtime
+                .set_global_word(index, value)
+                .expect("focused campaign progression global is writable");
+        }
+        let mut post_slippery_title = title_runtime.export_session_carry();
+        post_slippery_title.random_seed = random_seed;
+        post_slippery_title.draw_count = draw_count;
+        post_slippery_title.set_random_seed_b(random_seed_b);
+
+        let lights_out_carry = carry_map_to_next_level(
+            &title,
+            post_slippery_title,
+            lights_out.level,
+            [0, 15, 15, 25, 1, 25, 1],
+        );
+        let (lights_out_survey, lights_out_runtime) = lights_out.run_carried(
+            lights_out_carry,
+            SurveyInputProfile::LightsOutCompletionRoute,
+            6_000,
+        );
+        let summary = lights_out_survey.summary();
+        assert_eq!(
+            lights_out_survey.next_lid.map(|(_, lid)| lid),
+            Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+            "{case}: {summary}"
+        );
+        assert_eq!(lights_out_survey.restarts, 0, "{case}: {summary}");
+        assert_eq!(
+            lights_out_survey.death_camera_frames, 0,
+            "{case}: {summary}"
+        );
+        assert!(
+            lights_out_survey.first_terminal_fall.is_none(),
+            "{case}: {summary}"
+        );
+        assert!(lights_out_survey.is_clean(), "{case}: {summary}");
+        assert_eq!(
+            campaign_progression_globals(&lights_out_runtime),
+            [0x500, 15, 15, 25, 1, 26, 0],
+            "{case}: {summary}"
+        );
+        eprintln!(
+            "{case}: frames={} next-lid={:?}",
+            lights_out_survey.frames, lights_out_survey.next_lid
+        );
+    }
+}
+
+fn carry_boulder_dash_through_heavy_machinery(
+    root: &Path,
+    boulder_completion_carry: RetailSessionCarry,
+) {
+    let completion = CampaignPair::parse(root, LevelId::LEVEL_COMPLETE);
+    let title = CampaignPair::parse(root, LevelId::TITLE);
+    let sunset_vista = CampaignPair::parse(root, LevelId::new_const(0x23));
+    let koala_kong = CampaignPair::parse(root, LevelId::new_const(0x21));
+    let heavy_machinery = CampaignPair::parse(root, LevelId::new_const(0x06));
+    let cortex_power = CampaignPair::parse(root, LevelId::new_const(0x03));
+    let generator_room = CampaignPair::parse(root, LevelId::new_const(0x05));
+    let toxic_waste = CampaignPair::parse(root, LevelId::new_const(0x07));
+    let pinstripe = CampaignPair::parse(root, LevelId::new_const(0x08));
+    let high_road = CampaignPair::parse(root, LevelId::new_const(0x16));
+    let slippery_climb = CampaignPair::parse(root, LevelId::new_const(0x2e));
+    let lights_out = CampaignPair::parse(root, LevelId::new_const(0x28));
+    let jaws_of_darkness = CampaignPair::parse(root, LevelId::new_const(0x1d));
+    let castle_machinery = CampaignPair::parse(root, LevelId::new_const(0x37));
+    let dr_n_brio = CampaignPair::parse(root, LevelId::new_const(0x1b));
+    let lab = CampaignPair::parse(root, LevelId::new_const(0x29));
+    let great_hall = CampaignPair::parse(root, LevelId::new_const(0x2c));
+    let dr_neo_cortex = CampaignPair::parse(root, LevelId::new_const(0x1f));
+    let ending = CampaignPair::parse(root, LevelId::ENDING);
+
+    let post_boulder_title = carry_completion_to_title(
+        &completion,
+        boulder_completion_carry,
+        [0x300, 15, 15, 15, 1, 16, 0],
+    );
+    let sunset_carry = carry_map_to_next_level(
+        &title,
+        post_boulder_title,
+        sunset_vista.level,
+        [0, 15, 15, 16, 1, 16, 1],
+    );
+    eprintln!(
+        "authentic Sunset carry: rng={:#010x} draw={} rng-b={:#010x} respawns={} deaths={}",
+        sunset_carry.random_seed,
+        sunset_carry.draw_count,
+        sunset_carry.random_seed_b(),
+        sunset_carry.respawn_count,
+        sunset_carry.death_count,
+    );
+    let (sunset_survey, sunset_runtime) = sunset_vista.run_carried(
+        sunset_carry,
+        SurveyInputProfile::SunsetVistaCompletionRoute,
+        9_500,
+    );
+    assert_eq!(
+        sunset_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        sunset_survey.summary()
+    );
+    assert_eq!(sunset_survey.restarts, 0, "{}", sunset_survey.summary());
+    assert_eq!(sunset_survey.death_camera_frames, 0);
+    assert!(sunset_survey.first_terminal_fall.is_none());
+    assert!(sunset_survey.is_clean(), "{}", sunset_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&sunset_runtime),
+        [0x500, 15, 15, 16, 1, 17, 0]
+    );
+    let sunset_completion_carry =
+        sunset_vista.finish_checked(sunset_runtime, LevelId::LEVEL_COMPLETE);
+    let post_sunset_title = carry_completion_to_title(
+        &completion,
+        sunset_completion_carry,
+        [0x300, 15, 15, 16, 1, 17, 0],
+    );
+
+    let koala_carry = carry_map_to_next_level(
+        &title,
+        post_sunset_title,
+        koala_kong.level,
+        [0, 15, 15, 17, 1, 17, 1],
+    );
+    let (koala_survey, koala_runtime) = koala_kong.run_carried(
+        koala_carry,
+        SurveyInputProfile::KoalaKongCompletionRoute,
+        7_000,
+    );
+    assert_eq!(
+        koala_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        koala_survey.summary()
+    );
+    assert_eq!(koala_survey.restarts, 0, "{}", koala_survey.summary());
+    assert_eq!(koala_survey.death_camera_frames, 0);
+    assert!(koala_survey.first_terminal_fall.is_none());
+    assert!(koala_survey.is_clean(), "{}", koala_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&koala_runtime),
+        [0x300, 15, 15, 17, 1, 18, 0]
+    );
+    let post_koala_title = koala_kong.finish_checked(koala_runtime, LevelId::TITLE);
+
+    let heavy_carry = carry_map_to_next_level(
+        &title,
+        post_koala_title,
+        heavy_machinery.level,
+        [0, 15, 15, 18, 1, 18, 1],
+    );
+    let (heavy_survey, heavy_runtime) = heavy_machinery.run_carried(
+        heavy_carry,
+        SurveyInputProfile::HeavyMachineryCompletionRoute,
+        5_600,
+    );
+    assert_eq!(
+        heavy_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        heavy_survey.summary()
+    );
+    assert_eq!(heavy_survey.restarts, 0, "{}", heavy_survey.summary());
+    assert_eq!(heavy_survey.death_camera_frames, 0);
+    let (fall_frame, fall_player) = heavy_survey
+        .first_terminal_fall
+        .as_ref()
+        .expect("Heavy Machinery's authored g1 drop reaches the vertical speed cap");
+    assert!((1_390..=1_392).contains(fall_frame));
+    assert_eq!(
+        fall_player.zone,
+        Eid::from_name("g2_6Z").expect("fixed Heavy Machinery g2 EID is valid")
+    );
+    assert_eq!(fall_player.translation[0], 17_876_160);
+    assert!((-1_350_000..=-1_100_000).contains(&fall_player.translation[1]));
+    assert_eq!(fall_player.translation[2], 223_232);
+    assert_eq!(fall_player.velocity, [0, -3_072_000, 0]);
+    assert!(heavy_survey.is_clean(), "{}", heavy_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&heavy_runtime),
+        [0x500, 15, 15, 18, 1, 19, 0]
+    );
+    let heavy_completion_carry =
+        heavy_machinery.finish_checked(heavy_runtime, LevelId::LEVEL_COMPLETE);
+    let post_heavy_title = carry_completion_to_title(
+        &completion,
+        heavy_completion_carry,
+        [0x300, 15, 15, 18, 1, 19, 0],
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_heavy_title.globals[index]),
+        [0x300, 15, 15, 18, 1, 19, 0]
+    );
+
+    let cortex_power_carry = carry_map_to_next_level(
+        &title,
+        post_heavy_title,
+        cortex_power.level,
+        [0, 15, 15, 19, 1, 19, 1],
+    );
+    let (cortex_power_survey, cortex_power_runtime) = cortex_power.run_carried(
+        cortex_power_carry,
+        SurveyInputProfile::CortexPowerCompletionRoute,
+        4_000,
+    );
+    assert_eq!(
+        cortex_power_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        cortex_power_survey.summary()
+    );
+    assert_eq!(
+        cortex_power_survey.restarts,
+        0,
+        "{}",
+        cortex_power_survey.summary()
+    );
+    assert_eq!(cortex_power_survey.death_camera_frames, 0);
+    assert!(cortex_power_survey.first_terminal_fall.is_none());
+    assert!(
+        cortex_power_survey.is_clean(),
+        "{}",
+        cortex_power_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&cortex_power_runtime),
+        [0x500, 15, 15, 19, 1, 20, 0]
+    );
+    let cortex_power_completion_carry =
+        cortex_power.finish_checked(cortex_power_runtime, LevelId::LEVEL_COMPLETE);
+    let post_cortex_power_title = carry_completion_to_title(
+        &completion,
+        cortex_power_completion_carry,
+        [0x300, 15, 15, 19, 1, 20, 0],
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_cortex_power_title.globals[index]),
+        [0x300, 15, 15, 19, 1, 20, 0]
+    );
+
+    let generator_carry = carry_map_to_next_level(
+        &title,
+        post_cortex_power_title,
+        generator_room.level,
+        [0, 15, 15, 20, 1, 20, 1],
+    );
+    let (generator_survey, generator_runtime) = generator_room.run_carried(
+        generator_carry,
+        SurveyInputProfile::GeneratorRoomCompletionRoute,
+        4_200,
+    );
+    assert_eq!(
+        generator_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        generator_survey.summary()
+    );
+    assert_eq!(
+        generator_survey.restarts,
+        0,
+        "{}",
+        generator_survey.summary()
+    );
+    assert_eq!(generator_survey.death_camera_frames, 0);
+    assert!(generator_survey.first_terminal_fall.is_none());
+    assert!(
+        generator_survey.is_clean(),
+        "{}",
+        generator_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&generator_runtime),
+        [0x500, 15, 15, 20, 1, 21, 0]
+    );
+    let generator_completion_carry =
+        generator_room.finish_checked(generator_runtime, LevelId::LEVEL_COMPLETE);
+    let post_generator_title = carry_completion_to_title(
+        &completion,
+        generator_completion_carry,
+        [0x300, 15, 15, 20, 1, 21, 0],
+    );
+
+    let toxic_carry = carry_map_to_next_level(
+        &title,
+        post_generator_title,
+        toxic_waste.level,
+        [0, 15, 15, 21, 1, 21, 1],
+    );
+    let (toxic_survey, toxic_runtime) = toxic_waste.run_carried(
+        toxic_carry,
+        SurveyInputProfile::ToxicWasteCompletionRoute,
+        3_000,
+    );
+    assert_eq!(
+        toxic_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        toxic_survey.summary()
+    );
+    assert_eq!(toxic_survey.restarts, 0, "{}", toxic_survey.summary());
+    assert_eq!(toxic_survey.death_camera_frames, 0);
+    assert!(toxic_survey.first_terminal_fall.is_none());
+    assert!(toxic_survey.is_clean(), "{}", toxic_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&toxic_runtime),
+        [0x500, 15, 15, 21, 1, 22, 0]
+    );
+    let toxic_completion_carry = toxic_waste.finish_checked(toxic_runtime, LevelId::LEVEL_COMPLETE);
+    let post_toxic_title = carry_completion_to_title(
+        &completion,
+        toxic_completion_carry,
+        [0x300, 15, 15, 21, 1, 22, 0],
+    );
+
+    let pinstripe_carry = carry_map_to_next_level(
+        &title,
+        post_toxic_title,
+        pinstripe.level,
+        [0, 15, 15, 22, 1, 22, 1],
+    );
+    let (pinstripe_survey, pinstripe_runtime) = pinstripe.run_carried(
+        pinstripe_carry,
+        SurveyInputProfile::PinstripeCompletionRoute,
+        2_200,
+    );
+    assert_eq!(
+        pinstripe_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        pinstripe_survey.summary()
+    );
+    assert_eq!(
+        pinstripe_survey.restarts,
+        0,
+        "{}",
+        pinstripe_survey.summary()
+    );
+    assert_eq!(pinstripe_survey.death_camera_frames, 0);
+    assert!(pinstripe_survey.first_terminal_fall.is_none());
+    assert!(
+        pinstripe_survey.is_clean(),
+        "{}",
+        pinstripe_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&pinstripe_runtime),
+        [0x300, 15, 15, 22, 1, 23, 0]
+    );
+    let post_pinstripe_title = pinstripe.finish_checked(pinstripe_runtime, LevelId::TITLE);
+
+    let high_road_carry = carry_map_to_next_level(
+        &title,
+        post_pinstripe_title,
+        high_road.level,
+        [0, 15, 15, 23, 1, 23, 1],
+    );
+    let (high_road_survey, high_road_runtime) = high_road.run_carried(
+        high_road_carry,
+        SurveyInputProfile::HighRoadCompletionRoute,
+        3_000,
+    );
+    assert_eq!(
+        high_road_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        high_road_survey.summary()
+    );
+    assert_eq!(
+        high_road_survey.restarts,
+        0,
+        "{}",
+        high_road_survey.summary()
+    );
+    assert_eq!(high_road_survey.death_camera_frames, 0);
+    assert!(high_road_survey.first_terminal_fall.is_none());
+    assert!(
+        high_road_survey.is_clean(),
+        "{}",
+        high_road_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&high_road_runtime),
+        [0x500, 15, 15, 23, 1, 24, 0]
+    );
+    let high_road_completion_carry =
+        high_road.finish_checked(high_road_runtime, LevelId::LEVEL_COMPLETE);
+    let post_high_road_title = carry_completion_to_title(
+        &completion,
+        high_road_completion_carry,
+        [0x300, 15, 15, 23, 1, 24, 0],
+    );
+
+    let slippery_carry = carry_map_to_next_level(
+        &title,
+        post_high_road_title,
+        slippery_climb.level,
+        [0, 15, 15, 24, 1, 24, 1],
+    );
+    let (slippery_survey, slippery_runtime) = slippery_climb.run_carried(
+        slippery_carry,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        8_000,
+    );
+    assert_eq!(
+        slippery_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        slippery_survey.summary()
+    );
+    assert_eq!(slippery_survey.restarts, 0, "{}", slippery_survey.summary());
+    assert_eq!(slippery_survey.death_camera_frames, 0);
+    assert!(slippery_survey.first_terminal_fall.is_none());
+    assert!(slippery_survey.is_clean(), "{}", slippery_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&slippery_runtime),
+        [0x500, 15, 15, 24, 1, 25, 0]
+    );
+    let slippery_completion_carry =
+        slippery_climb.finish_checked(slippery_runtime, LevelId::LEVEL_COMPLETE);
+    let post_slippery_title = carry_completion_to_title(
+        &completion,
+        slippery_completion_carry,
+        [0x300, 15, 15, 24, 1, 25, 0],
+    );
+
+    let lights_out_carry = carry_map_to_next_level(
+        &title,
+        post_slippery_title,
+        lights_out.level,
+        [0, 15, 15, 25, 1, 25, 1],
+    );
+    let (lights_out_survey, lights_out_runtime) = lights_out.run_carried(
+        lights_out_carry,
+        SurveyInputProfile::LightsOutCompletionRoute,
+        6_000,
+    );
+    assert_eq!(
+        lights_out_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        lights_out_survey.summary()
+    );
+    assert_eq!(
+        lights_out_survey.restarts,
+        0,
+        "{}",
+        lights_out_survey.summary()
+    );
+    assert_eq!(lights_out_survey.death_camera_frames, 0);
+    assert!(lights_out_survey.first_terminal_fall.is_none());
+    assert!(
+        lights_out_survey.is_clean(),
+        "{}",
+        lights_out_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&lights_out_runtime),
+        [0x500, 15, 15, 25, 1, 26, 0]
+    );
+    let lights_out_completion_carry =
+        lights_out.finish_checked(lights_out_runtime, LevelId::LEVEL_COMPLETE);
+    let post_lights_out_title = carry_completion_to_title(
+        &completion,
+        lights_out_completion_carry,
+        [0x300, 15, 15, 25, 1, 26, 0],
+    );
+
+    let jaws_carry = carry_map_to_next_level(
+        &title,
+        post_lights_out_title,
+        jaws_of_darkness.level,
+        [0, 15, 15, 26, 1, 26, 1],
+    );
+    let (jaws_survey, jaws_runtime) = jaws_of_darkness.run_carried(
+        jaws_carry,
+        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        5_600,
+    );
+    assert_eq!(
+        jaws_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        jaws_survey.summary()
+    );
+    assert_eq!(jaws_survey.restarts, 0, "{}", jaws_survey.summary());
+    assert_eq!(jaws_survey.death_camera_frames, 0);
+    assert!(jaws_survey.first_terminal_fall.is_none());
+    assert!(jaws_survey.is_clean(), "{}", jaws_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&jaws_runtime),
+        [0x500, 15, 15, 26, 1, 27, 0]
+    );
+    let jaws_completion_carry =
+        jaws_of_darkness.finish_checked(jaws_runtime, LevelId::LEVEL_COMPLETE);
+    let post_jaws_title = carry_completion_to_title(
+        &completion,
+        jaws_completion_carry,
+        [0x300, 15, 15, 26, 1, 27, 0],
+    );
+
+    let castle_carry = carry_map_to_next_level(
+        &title,
+        post_jaws_title,
+        castle_machinery.level,
+        [0, 15, 15, 27, 1, 27, 1],
+    );
+    let (castle_survey, castle_runtime) = castle_machinery.run_carried(
+        castle_carry,
+        SurveyInputProfile::CastleMachineryCompletionRoute,
+        7_500,
+    );
+    assert_eq!(
+        castle_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        castle_survey.summary()
+    );
+    assert_eq!(castle_survey.restarts, 0, "{}", castle_survey.summary());
+    assert_eq!(castle_survey.death_camera_frames, 0);
+    assert!(castle_survey.first_terminal_fall.is_none());
+    assert!(castle_survey.is_clean(), "{}", castle_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&castle_runtime),
+        [0x500, 15, 15, 27, 1, 28, 0]
+    );
+    let castle_completion_carry =
+        castle_machinery.finish_checked(castle_runtime, LevelId::LEVEL_COMPLETE);
+    let post_castle_title = carry_completion_to_title(
+        &completion,
+        castle_completion_carry,
+        [0x300, 15, 15, 27, 1, 28, 0],
+    );
+
+    let brio_carry = carry_map_to_next_level(
+        &title,
+        post_castle_title,
+        dr_n_brio.level,
+        [0, 15, 15, 28, 1, 28, 1],
+    );
+    let (brio_survey, brio_runtime) =
+        dr_n_brio.run_carried(brio_carry, SurveyInputProfile::BrioCompletionRoute, 3_000);
+    assert_eq!(
+        brio_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        brio_survey.summary()
+    );
+    assert_eq!(brio_survey.restarts, 0, "{}", brio_survey.summary());
+    assert_eq!(brio_survey.death_camera_frames, 0);
+    assert!(brio_survey.first_terminal_fall.is_none());
+    assert!(brio_survey.is_clean(), "{}", brio_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&brio_runtime),
+        [0x300, 15, 15, 28, 1, 29, 0]
+    );
+    let post_brio_title = dr_n_brio.finish_checked(brio_runtime, LevelId::TITLE);
+
+    let lab_carry = carry_map_to_next_level(
+        &title,
+        post_brio_title,
+        lab.level,
+        [0, 15, 15, 29, 1, 29, 1],
+    );
+    let (lab_survey, lab_runtime) =
+        lab.run_carried(lab_carry, SurveyInputProfile::LabCompletionRoute, 3_500);
+    assert_eq!(
+        lab_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        lab_survey.summary()
+    );
+    assert_eq!(lab_survey.restarts, 0, "{}", lab_survey.summary());
+    assert_eq!(lab_survey.death_camera_frames, 0);
+    assert!(lab_survey.first_terminal_fall.is_none());
+    assert!(lab_survey.is_clean(), "{}", lab_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&lab_runtime),
+        [0x500, 15, 15, 29, 1, 30, 0]
+    );
+    let lab_completion_carry = lab.finish_checked(lab_runtime, LevelId::LEVEL_COMPLETE);
+    let post_lab_title = carry_completion_to_title(
+        &completion,
+        lab_completion_carry,
+        [0x300, 15, 15, 29, 1, 30, 0],
+    );
+
+    let great_hall_carry = carry_map_to_next_level(
+        &title,
+        post_lab_title,
+        great_hall.level,
+        [0, 15, 15, 30, 1, 30, 1],
+    );
+    let (great_hall_survey, great_hall_runtime) = great_hall.run_carried(
+        great_hall_carry,
+        SurveyInputProfile::GreatHallCortexRoute,
+        1_200,
+    );
+    assert_eq!(
+        great_hall_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        great_hall_survey.summary()
+    );
+    assert_eq!(
+        great_hall_survey.restarts,
+        0,
+        "{}",
+        great_hall_survey.summary()
+    );
+    assert_eq!(great_hall_survey.death_camera_frames, 0);
+    assert!(great_hall_survey.first_terminal_fall.is_none());
+    assert!(
+        great_hall_survey.is_clean(),
+        "{}",
+        great_hall_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&great_hall_runtime),
+        [0x300, 15, 15, 30, 1, 31, 0]
+    );
+    let post_great_hall_title = great_hall.finish_checked(great_hall_runtime, LevelId::TITLE);
+
+    let cortex_carry = carry_map_to_next_level(
+        &title,
+        post_great_hall_title,
+        dr_neo_cortex.level,
+        [0, 15, 15, 31, 1, 31, 1],
+    );
+    let (cortex_survey, cortex_runtime) = dr_neo_cortex.run_carried(
+        cortex_carry,
+        SurveyInputProfile::CortexCompletionRoute,
+        4_500,
+    );
+    assert_eq!(
+        cortex_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::ENDING.get()).unwrap()),
+        "{}",
+        cortex_survey.summary()
+    );
+    assert_eq!(cortex_survey.restarts, 0, "{}", cortex_survey.summary());
+    assert_eq!(cortex_survey.death_camera_frames, 0);
+    assert!(cortex_survey.first_terminal_fall.is_none());
+    assert!(cortex_survey.is_clean(), "{}", cortex_survey.summary());
+    let ending_carry = dr_neo_cortex.finish_checked(cortex_runtime, LevelId::ENDING);
+
+    let (ending_survey, ending_runtime) =
+        ending.run_carried(ending_carry, SurveyInputProfile::Idle, 3_600);
+    assert_eq!(
+        ending_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        ending_survey.summary()
+    );
+    assert_eq!(ending_survey.restarts, 0, "{}", ending_survey.summary());
+    assert_eq!(ending_survey.faulted_objects, 0);
+    assert!(ending_survey.is_clean(), "{}", ending_survey.summary());
+    let title_after_ending_carry = ending.finish_checked(ending_runtime, LevelId::TITLE);
+    let title_after_ending =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, title_after_ending_carry)
+            .expect("Title must import the uninterrupted Ending carry");
+    assert_eq!(title_after_ending.faulted_object_count(), 0);
+    assert_eq!(
+        campaign_progression_globals(&title_after_ending),
+        [0x300, 15, 15, 31, 1, 31, 0]
+    );
+}
+
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn temple_ruins_direct_boot_reaches_level_complete() {
@@ -38103,6 +45658,43 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         survey.is_clean(),
         "Rolling Stones completion route must remain clean: {}",
         survey.summary()
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn rolling_stones_brio_tokens_round_trip_the_exact_parent_snapshot() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let parent = LevelId::new_const(0x15);
+    let known = KNOWN_LEVELS
+        .iter()
+        .find(|known| known.id == parent)
+        .expect("the retail level catalog contains Rolling Stones");
+    let (parent_nsd, parent_nsf, parent_nsf_bytes) =
+        parse_local_pair(&root, parent).expect("the legally local Rolling Stones pair must parse");
+    let (parent_survey, parent_runtime) = survey_pair_with_runtime(
+        known.name,
+        parent,
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::RollingStonesBrioBonus,
+        3_000,
+    )
+    .expect("ordinary pad input must collect Rolling Stones' three Brio tokens");
+    eprintln!("{}", parent_survey.summary());
+    eprintln!("player={:?}", player_trace(&parent_runtime));
+
+    assert_eq!(
+        parent_survey.next_lid.map(|(_, lid)| lid),
+        Some(0x25),
+        "{}",
+        parent_survey.summary()
     );
 }
 
@@ -44681,7 +52273,7 @@ fn dr_neo_cortex_ordinary_pad_route_reaches_authored_ending_transition() {
     assert_eq!(survey.death_camera_frames, 0);
     assert!(survey.first_terminal_fall.is_none());
     assert!(!survey.effect_counts.contains_key("load-state"));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&95));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&92));
     assert_eq!(survey.effect_counts.get("state-changed"), Some(&416));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
 
@@ -44728,6 +52320,16 @@ fn dr_neo_cortex_ordinary_pad_route_reaches_authored_ending_transition() {
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn authored_completed_card_route_reaches_great_hall_cortex_and_ending_title_return() {
+    assert_authored_completed_card_tail(0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_completed_card_tail_survives_one_frame_carried_phase_offset() {
+    assert_authored_completed_card_tail(1);
+}
+
+fn assert_authored_completed_card_tail(draw_count_offset: u32) {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -44783,7 +52385,7 @@ fn authored_completed_card_route_reaches_great_hall_cortex_and_ending_title_retu
     pre_great_hall_map.step(PAD_CROSS);
     assert_eq!(pre_great_hall_map.transitions, [(131, 0x2c)]);
 
-    let great_hall_carry = {
+    let mut great_hall_carry = {
         let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
         let report = pre_great_hall_map
             .runtime
@@ -44793,6 +52395,8 @@ fn authored_completed_card_route_reaches_great_hall_cortex_and_ending_title_retu
         assert_eq!(report.resolved.level, great_hall);
         report.carry
     };
+    assert_ne!(great_hall_carry.draw_count, 0);
+    great_hall_carry.draw_count = great_hall_carry.draw_count.wrapping_add(draw_count_offset);
     let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, great_hall, great_hall_carry)
         .expect("The Great Hall must import the authored map carry");
     let (survey, mut runtime) = survey_pair_with_runtime(
@@ -45132,6 +52736,46 @@ fn cortex_power_direct_boot_reaches_authored_end_warp() {
 }
 
 #[test]
+#[ignore = "temporary legally-local Generator Room carried-phase census"]
+fn temporary_generator_room_carried_phase_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let generator_room = CampaignPair::parse(&root, LevelId::new_const(0x05));
+
+    for (case, random_seed, draw_count, random_seed_b) in [
+        ("phase-zero", 0x1357_9bdf, 0, 0),
+        ("phase-a", 0x1357_9bdf, 12_345, 0x2468_ace0),
+        ("phase-minus-one", 0x1357_9bdf, 12_344, 0),
+        ("alternate-clock", 0xdead_beef, 50_000, 0xa5a5_5a5a),
+    ] {
+        let post_cortex_title =
+            synthetic_title_map_carry(19, 20, random_seed, draw_count, random_seed_b);
+        let generator_carry = carry_map_to_next_level(
+            &title,
+            post_cortex_title,
+            generator_room.level,
+            [0, 15, 15, 20, 1, 20, 1],
+        );
+        let (survey, runtime) = generator_room.run_carried(
+            generator_carry,
+            SurveyInputProfile::GeneratorRoomCompletionRoute,
+            4_200,
+        );
+        eprintln!(
+            "{case}: draw-start={draw_count} frames={} next-lid={:?} restarts={:?} final={:?} progression={:?}",
+            survey.frames,
+            survey.next_lid,
+            survey.restart_frames,
+            survey.final_player_translation,
+            campaign_progression_globals(&runtime),
+        );
+    }
+}
+
+#[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn generator_room_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
@@ -45158,11 +52802,11 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     )
     .expect("Generator Room's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 3_227, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((3_227, 0x2d)));
+    assert_eq!(survey.frames, 3_228, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((3_228, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 3227 requested level transition to 0x2d")
+        Some("frame 3228 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
@@ -45173,7 +52817,7 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     assert!(survey.last_death_camera_pose.is_none());
     assert_eq!(
         survey.first_below_zero.as_ref().map(|(frame, _)| *frame),
-        Some(278),
+        Some(277),
         "negative Y is an authored part of Generator Room, not a death"
     );
     assert!(survey.first_terminal_fall.is_none());
@@ -45181,8 +52825,8 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.zone_transitions, 24);
     assert_eq!(survey.camera_ranges.len(), 41);
     assert_eq!(survey.camera_path_changes, 42);
-    assert_eq!(survey.last_camera_path_change, 3_012);
-    assert_eq!(survey.last_camera_progress_change, 3_126);
+    assert_eq!(survey.last_camera_path_change, 3_013);
+    assert_eq!(survey.last_camera_progress_change, 3_127);
     let initial_camera = survey
         .initial_camera
         .expect("Generator Room must retain its opening camera path");
@@ -45208,10 +52852,10 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     assert_eq!(final_camera.progress.raw(), 46_079);
 
     assert_eq!(survey.successful_spawns, 133);
-    assert_eq!(survey.spawn_attempts, 48_354);
-    assert_eq!(survey.expected_spawn_rejections, 48_221);
+    assert_eq!(survey.spawn_attempts, 48_229);
+    assert_eq!(survey.expected_spawn_rejections, 48_096);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 80_243);
+    assert_eq!(survey.executions, 79_916);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.final_live_objects, 20);
     assert_eq!(survey.max_live_objects, 50);
@@ -45232,14 +52876,13 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
         [
             (1, 0),
             (562, 0x100),
-            (695, 0x200),
-            (1_111, 0x300),
+            (640, 0x200),
+            (1_113, 0x300),
             (1_395, 0x400),
             (1_926, 0x500),
             (1_997, 0x700),
             (1_998, 0x800),
-            (2_019, 0x900),
-            (2_029, 0xa00),
+            (2_013, 0x900),
         ]
     );
     assert_eq!(survey.saved_box_count_samples, [(1_926, 0x400)]);
@@ -45271,17 +52914,17 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(
         survey.final_player_translation,
-        Some([1_532_860, 2_697_807, -16_503_172])
+        Some([1_532_716, 2_697_818, -16_502_900])
     );
     assert_eq!(
         survey.player_minimum,
-        Some([454_400, -1_090_649, -16_503_172])
+        Some([454_400, -1_090_649, -16_502_900])
     );
     assert_eq!(
         survey.player_maximum,
-        Some([4_101_888, 2_697_807, -179_200])
+        Some([4_101_888, 2_697_818, -179_200])
     );
-    assert_eq!(survey.last_player_movement, 3_223);
+    assert_eq!(survey.last_player_movement, 3_224);
     let player = player_trace(&runtime)
         .expect("Generator Room completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
@@ -45291,9 +52934,9 @@ fn generator_room_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [1_532_860, 2_697_807, -16_503_172]);
-    assert_eq!(runtime.machine().random_seed(), 0xa28b_a315);
-    assert_eq!(runtime.draw_count(), 3_227);
+    assert_eq!(player.translation, [1_532_716, 2_697_818, -16_502_900]);
+    assert_eq!(runtime.machine().random_seed(), 0x6778_1493);
+    assert_eq!(runtime.draw_count(), 3_228);
     assert!(
         survey.is_clean(),
         "Generator Room end-warp route must remain clean: {}",
@@ -45328,11 +52971,11 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     )
     .expect("Toxic Waste's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 2_204, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((2_204, 0x2d)));
+    assert_eq!(survey.frames, 2_192, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_192, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2204 requested level transition to 0x2d")
+        Some("frame 2192 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
@@ -45345,8 +52988,8 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.zone_transitions, 25);
     assert_eq!(survey.camera_ranges.len(), 26);
     assert_eq!(survey.camera_path_changes, 25);
-    assert_eq!(survey.last_camera_path_change, 1_989);
-    assert_eq!(survey.last_camera_progress_change, 2_091);
+    assert_eq!(survey.last_camera_path_change, 1_993);
+    assert_eq!(survey.last_camera_progress_change, 2_095);
     let final_camera = survey
         .final_camera
         .expect("Toxic Waste must retain its final camera path");
@@ -45360,10 +53003,10 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     assert_eq!(final_camera.progress.raw(), 24_319);
 
     assert_eq!(survey.successful_spawns, 207);
-    assert_eq!(survey.spawn_attempts, 51_729);
-    assert_eq!(survey.expected_spawn_rejections, 51_522);
+    assert_eq!(survey.spawn_attempts, 51_438);
+    assert_eq!(survey.expected_spawn_rejections, 51_231);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 85_039);
+    assert_eq!(survey.executions, 84_602);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.final_live_objects, 38);
     assert_eq!(survey.max_live_objects, 50);
@@ -45376,17 +53019,17 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (686, 0x4b00, [2_048_000, 3_123_200, 20_479_488]),
-            (1_668, 0x8e00, [2_047_744, 6_194_944, 2_661_888]),
+            (685, 0x4b00, [2_048_000, 3_123_200, 20_479_488]),
+            (1_671, 0x8e00, [2_047_744, 6_194_944, 2_661_888]),
         ]
     );
     assert_eq!(
         survey.box_count_samples,
-        [(1, 0), (123, 0x100), (686, 0x200), (1_668, 0x300)]
+        [(1, 0), (122, 0x100), (685, 0x200), (1_671, 0x300)]
     );
     assert_eq!(
         survey.saved_box_count_samples,
-        [(686, 0x100), (1_668, 0x200)]
+        [(685, 0x100), (1_671, 0x200)]
     );
     assert_eq!(survey.save_handshakes, 0);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
@@ -45413,7 +53056,7 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
 
     assert_eq!(
         survey.final_player_translation,
-        Some([2_025_216, 10_938_449, -5_626_624])
+        Some([2_047_744, 10_925_651, -5_380_864])
     );
     let player = player_trace(&runtime)
         .expect("Toxic Waste completion player trace must resolve")
@@ -45424,9 +53067,9 @@ fn toxic_waste_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [2_025_216, 10_938_449, -5_626_624]);
-    assert_eq!(runtime.machine().random_seed(), 0x8687_a955);
-    assert_eq!(runtime.draw_count(), 2_204);
+    assert_eq!(player.translation, [2_047_744, 10_925_651, -5_380_864]);
+    assert_eq!(runtime.machine().random_seed(), 0xa194_bce5);
+    assert_eq!(runtime.draw_count(), 2_192);
     assert!(
         survey.is_clean(),
         "Toxic Waste end-warp route must remain clean: {}",
@@ -45461,11 +53104,11 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
     )
     .expect("Jaws of Darkness' ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 4_335, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((4_335, 0x2d)));
+    assert_eq!(survey.frames, 4_337, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((4_337, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 4335 requested level transition to 0x2d")
+        Some("frame 4337 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
@@ -45477,10 +53120,10 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
 
-    assert_eq!(survey.zone_transitions, 46);
-    assert_eq!(survey.camera_ranges.len(), 56);
-    assert_eq!(survey.camera_path_changes, 57);
-    assert_eq!(survey.last_camera_path_change, 4_113);
+    assert_eq!(survey.zone_transitions, 50);
+    assert_eq!(survey.camera_ranges.len(), 57);
+    assert_eq!(survey.camera_path_changes, 60);
+    assert_eq!(survey.last_camera_path_change, 4_114);
     assert_eq!(survey.last_camera_progress_change, 4_230);
     let initial_camera = survey
         .initial_camera
@@ -45506,11 +53149,11 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(final_camera.progress.raw(), 27_647);
 
-    assert_eq!(survey.successful_spawns, 1_114);
-    assert_eq!(survey.spawn_attempts, 70_980);
-    assert_eq!(survey.expected_spawn_rejections, 69_866);
+    assert_eq!(survey.successful_spawns, 1_147);
+    assert_eq!(survey.spawn_attempts, 70_707);
+    assert_eq!(survey.expected_spawn_rejections, 69_560);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 137_842);
+    assert_eq!(survey.executions, 137_502);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.final_live_objects, 41);
     assert_eq!(survey.max_live_objects, 59);
@@ -45525,6 +53168,7 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
             (1, -1, [0, 0, 0]),
             (1_829, 0x9500, [19_865_344, 1_945_088, 35_327_232]),
             (2_811, 0xde00, [15_360_000, 1_433_088, 27_238_400]),
+            (3_992, 0xde00, [13_874_432, 1_893_888, 17_868_288]),
         ]
     );
     assert_eq!(
@@ -45532,9 +53176,9 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
         [
             (1, 0),
             (1_829, 0x100),
-            (2_241, 0x200),
+            (2_236, 0x200),
             (2_811, 0x300),
-            (3_967, 0x400),
+            (3_968, 0x400),
         ]
     );
     assert_eq!(survey.saved_box_count_samples, [(1_829, 0), (2_811, 0x200)]);
@@ -45567,17 +53211,17 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(
         survey.final_player_translation,
-        Some([13_833_488, 5_562_970, 15_117_856])
+        Some([13_806_736, 5_562_956, 15_109_584])
     );
     assert_eq!(
         survey.player_minimum,
-        Some([10_865_936, 498_946, 15_117_856])
+        Some([10_867_856, 498_946, 15_109_584])
     );
     assert_eq!(
         survey.player_maximum,
-        Some([22_429_904, 5_562_970, 38_087_680])
+        Some([22_429_344, 5_562_956, 38_087_680])
     );
-    assert_eq!(survey.last_player_movement, 4_331);
+    assert_eq!(survey.last_player_movement, 4_333);
     let player = player_trace(&runtime)
         .expect("Jaws of Darkness completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
@@ -45587,9 +53231,9 @@ fn jaws_of_darkness_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [13_833_488, 5_562_970, 15_117_856]);
-    assert_eq!(runtime.machine().random_seed(), 0xb97f_0fd5);
-    assert_eq!(runtime.draw_count(), 4_335);
+    assert_eq!(player.translation, [13_806_736, 5_562_956, 15_109_584]);
+    assert_eq!(runtime.machine().random_seed(), 0xb85b_4766);
+    assert_eq!(runtime.draw_count(), 4_337);
     assert!(
         survey.is_clean(),
         "Jaws of Darkness end-warp route must remain clean: {}",
@@ -45620,24 +53264,37 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::HeavyMachineryCompletionRoute,
-        5_300,
+        5_600,
     )
     .expect("Heavy Machinery's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 5_178, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((5_178, 0x2d)));
+    assert_eq!(survey.frames, 5_425, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((5_425, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 5178 requested level transition to 0x2d")
+        Some("frame 5425 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
-    assert_eq!(survey.zone_transitions, 43);
+    let (fall_frame, fall_player) = survey
+        .first_terminal_fall
+        .as_ref()
+        .expect("Heavy Machinery's authored g1 drop reaches the vertical speed cap");
+    assert!((1_390..=1_392).contains(fall_frame));
+    assert_eq!(
+        fall_player.zone,
+        Eid::from_name("g2_6Z").expect("fixed Heavy Machinery g2 EID is valid")
+    );
+    assert_eq!(fall_player.translation[0], 17_876_160);
+    assert!((-1_350_000..=-1_100_000).contains(&fall_player.translation[1]));
+    assert_eq!(fall_player.translation[2], 223_232);
+    assert_eq!(fall_player.velocity, [0, -3_072_000, 0]);
+    assert_eq!(survey.zone_transitions, 45);
     assert_eq!(survey.camera_ranges.len(), 77);
-    assert_eq!(survey.camera_path_changes, 83);
-    assert_eq!(survey.successful_spawns, 223);
-    assert_eq!(survey.executions, 118_023);
+    assert_eq!(survey.camera_path_changes, 85);
+    assert_eq!(survey.successful_spawns, 228);
+    assert_eq!(survey.executions, 123_403);
     assert_eq!(survey.final_live_objects, 19);
     assert_eq!(survey.max_live_objects, 49);
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
@@ -45666,7 +53323,7 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
         .expect("Heavy Machinery completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(runtime.draw_count(), 5_178);
+    assert_eq!(runtime.draw_count(), 5_425);
     assert!(
         survey.is_clean(),
         "Heavy Machinery end-warp route must remain clean: {}",
@@ -45701,11 +53358,11 @@ fn lab_direct_boot_reaches_authored_end_warp() {
     )
     .expect("The Lab's ordinary-pad completion route must execute");
 
-    assert_eq!(survey.frames, 2_789, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((2_789, 0x2d)));
+    assert_eq!(survey.frames, 2_795, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_795, 0x2d)));
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2789 requested level transition to 0x2d")
+        Some("frame 2795 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
@@ -45716,8 +53373,8 @@ fn lab_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.zone_transitions, 27);
     assert_eq!(survey.camera_ranges.len(), 28);
     assert_eq!(survey.camera_path_changes, 27);
-    assert_eq!(survey.last_camera_path_change, 2_596);
-    assert_eq!(survey.last_camera_progress_change, 2_700);
+    assert_eq!(survey.last_camera_path_change, 2_602);
+    assert_eq!(survey.last_camera_progress_change, 2_706);
     let initial_camera = survey
         .initial_camera
         .expect("The Lab must retain its opening camera path");
@@ -45742,12 +53399,12 @@ fn lab_direct_boot_reaches_authored_end_warp() {
     assert_eq!(final_camera.progress.raw(), 21_443);
 
     assert_eq!(survey.successful_spawns, 97);
-    assert_eq!(survey.spawn_attempts, 29_637);
-    assert_eq!(survey.expected_spawn_rejections, 29_540);
+    assert_eq!(survey.spawn_attempts, 29_710);
+    assert_eq!(survey.expected_spawn_rejections, 29_613);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 69_149);
+    assert_eq!(survey.executions, 69_278);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.final_live_objects, 56);
+    assert_eq!(survey.final_live_objects, 57);
     assert_eq!(survey.max_live_objects, 68);
     assert_eq!(survey.faulted_objects, 0);
     assert!(survey.issue_counts.is_empty(), "{}", survey.summary());
@@ -45761,11 +53418,11 @@ fn lab_direct_boot_reaches_authored_end_warp() {
             (1, 0),
             (774, 0x100),
             (902, 0x200),
-            (1_826, 0x300),
-            (2_261, 0x400),
-            (2_771, 0x500),
-            (2_772, 0x600),
-            (2_773, 0x700),
+            (1_832, 0x300),
+            (2_267, 0x400),
+            (2_777, 0x500),
+            (2_778, 0x600),
+            (2_779, 0x700),
         ]
     );
     assert!(survey.saved_box_count_samples.is_empty());
@@ -45808,7 +53465,7 @@ fn lab_direct_boot_reaches_authored_end_warp() {
         survey.player_maximum,
         Some([2_459_648, 4_748_377, 31_948_800])
     );
-    assert_eq!(survey.last_player_movement, 2_785);
+    assert_eq!(survey.last_player_movement, 2_791);
     let player = player_trace(&runtime)
         .expect("Lab completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
@@ -45816,8 +53473,8 @@ fn lab_direct_boot_reaches_authored_end_warp() {
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x0f00);
     assert_eq!(player.translation, [2_025_472, 4_748_377, -3_078_144]);
-    assert_eq!(runtime.draw_count(), 2_789);
-    assert_eq!(runtime.machine().random_seed(), 0xc6f8_3fa1);
+    assert_eq!(runtime.draw_count(), 2_795);
+    assert_eq!(runtime.machine().random_seed(), 0x0890_b723);
     assert!(
         survey.is_clean(),
         "The Lab end-warp route must remain clean: {}",
@@ -46224,6 +53881,246 @@ fn every_direct_bonus_boot_has_a_restartable_local_snapshot() {
             known.name,
             survey.summary()
         );
+    }
+}
+
+#[test]
+#[ignore = "temporary legally-local token-crate census"]
+fn temporary_authored_bonus_token_crate_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for known in KNOWN_LEVELS {
+        if known.id == LevelId::TITLE {
+            continue;
+        }
+        let Ok((nsd, nsf, nsf_bytes)) = parse_local_pair(&root, known.id) else {
+            continue;
+        };
+        let Ok(graph) = graph_for_pair(known.id, &nsd, &nsf, &nsf_bytes) else {
+            continue;
+        };
+        let Ok((zones, _)) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, known.id) else {
+            continue;
+        };
+        for zone in zones.values() {
+            for entity in &zone.entities {
+                if entity.executable == 0x22 && entity.initializer[0] >= 0x69 {
+                    eprintln!(
+                        "TOKEN_CENSUS level={} name={} zone={} id={} init={:#x?} point={:?}",
+                        known.id,
+                        known.name,
+                        zone.eid,
+                        entity.id,
+                        entity.initializer,
+                        entity.path_points.first(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "temporary legally-local bonus-selector census"]
+fn temporary_authored_bonus_selector_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for lid in [
+        0x05, 0x06, 0x07, 0x0c, 0x0f, 0x12, 0x14, 0x15, 0x16, 0x18, 0x1a, 0x1d, 0x20, 0x23, 0x29,
+    ] {
+        let level = LevelId::new_const(lid);
+        let known = KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .expect("census parent is in the retail catalog");
+        let (nsd, nsf, nsf_bytes) =
+            parse_local_pair(&root, level).expect("census parent pair must parse");
+        let (_, runtime) = survey_pair_with_runtime(
+            known.name,
+            level,
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+            LevelContextSource::FreshBoot,
+            SurveyInputProfile::Idle,
+            1,
+        )
+        .expect("census parent must mount");
+        eprintln!(
+            "BONUS_SELECTOR level={level} name={} g60={:#x} globals46/47={:#x}/{:#x}",
+            known.name,
+            runtime.global_word(60).unwrap(),
+            runtime.global_word(LEVEL_COUNT_GLOBAL).unwrap(),
+            runtime.global_word(LEVELS_UNLOCKED_GLOBAL).unwrap(),
+        );
+    }
+}
+
+#[test]
+#[ignore = "temporary legally-local token-kind census"]
+fn temporary_authored_bonus_token_kind_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for lid in [
+        0x05, 0x06, 0x07, 0x0c, 0x0f, 0x12, 0x14, 0x15, 0x16, 0x18, 0x1a, 0x1d, 0x20, 0x23, 0x29,
+    ] {
+        let level = LevelId::new_const(lid);
+        let known = KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .expect("census parent is in the retail catalog");
+        let (nsd, nsf, nsf_bytes) =
+            parse_local_pair(&root, level).expect("census parent pair must parse");
+        let (_, mut runtime) = survey_pair_with_runtime(
+            known.name,
+            level,
+            &nsd,
+            &nsf,
+            &nsf_bytes,
+            RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+            LevelContextSource::FreshBoot,
+            SurveyInputProfile::Idle,
+            1,
+        )
+        .expect("census parent must mount");
+        let graph = graph_for_pair(level, &nsd, &nsf, &nsf_bytes).expect("census graph must parse");
+        let (zones, _) =
+            zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, level).expect("census zones must parse");
+        let (zone, entity) = zones
+            .values()
+            .flat_map(|zone| zone.entities.iter().map(move |entity| (zone, entity)))
+            .find(|(_, entity)| {
+                entity.executable == 0x22
+                    && entity.subtype == 10
+                    && entity.initializer[0] == 0x69
+                    && entity.initializer[1] == 0
+            })
+            .expect("census parent has an ordinary token crate");
+        let entity = entity.clone();
+        let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+        let attempts = runtime.spawn_current_zone_neighbors(
+            &[NeighborZone {
+                eid: zone.eid,
+                display_flags: graph.zone(zone.eid).unwrap().display_flags | 2,
+                entities: std::slice::from_ref(&entity),
+            }],
+            &mut host,
+        );
+        let token_box = attempts[0].result.as_ref().unwrap_or_else(|error| {
+            panic!(
+                "census token {}:{} could not spawn: {error:?}",
+                zone.eid, entity.id
+            )
+        });
+        runtime.set_frame_timing(34, 34);
+        runtime
+            .run_frame(&mut host, INSTRUCTION_BUDGET)
+            .expect("census token must initialize");
+        runtime
+            .dispatch_event(&mut host, None, Some(*token_box), 0x0300, Some(&[0]))
+            .expect("census token must accept break event");
+        runtime.set_frame_timing(34, 34);
+        let report = runtime
+            .run_frame(&mut host, INSTRUCTION_BUDGET)
+            .expect("census token must execute break state");
+        let spawn = report.effects.iter().find_map(|effect| match effect {
+            VmEffect::SpawnChildren {
+                executable: 3,
+                subtype: 13,
+                arguments,
+                ..
+            } => Some(arguments),
+            _ => None,
+        });
+        eprintln!(
+            "TOKEN_KIND level={level} name={} zone={} id={} arguments={spawn:?}",
+            known.name, zone.eid, entity.id,
+        );
+    }
+}
+
+#[test]
+#[ignore = "temporary legally-local Sunset token descriptor census"]
+fn temporary_sunset_token_descriptor_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x23);
+    let (nsd, nsf, nsf_bytes) = parse_local_pair(&root, level).expect("Sunset pair must parse");
+    let graph = graph_for_pair(level, &nsd, &nsf, &nsf_bytes).expect("Sunset graph must parse");
+    let (zones, _) =
+        zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, level).expect("Sunset zones must parse");
+    for zone in zones.values() {
+        for entity in &zone.entities {
+            if matches!(entity.id, 94 | 175 | 187 | 202 | 210 | 219) {
+                eprintln!(
+                    "SUNSET_TOKEN zone={} id={} group={} exe={} subtype={} flags={:#x} init={:#x?} point={:?}",
+                    zone.eid,
+                    entity.id,
+                    entity.group,
+                    entity.executable,
+                    entity.subtype,
+                    entity.spawn_flags,
+                    entity.initializer,
+                    entity.path_points.first(),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "temporary legally-local Brio/Cortex token census"]
+fn temporary_brio_cortex_token_descriptor_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    for known in KNOWN_LEVELS {
+        if known.id == LevelId::TITLE {
+            continue;
+        }
+        let Ok((nsd, nsf, nsf_bytes)) = parse_local_pair(&root, known.id) else {
+            continue;
+        };
+        let Ok(graph) = graph_for_pair(known.id, &nsd, &nsf, &nsf_bytes) else {
+            continue;
+        };
+        let Ok((zones, _)) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, known.id) else {
+            continue;
+        };
+        for zone in zones.values() {
+            for entity in &zone.entities {
+                if (entity.executable == 0x22 && matches!(entity.initializer[0], 0x67 | 0x68))
+                    || (entity.executable == 3 && matches!(entity.subtype, 17 | 18))
+                {
+                    eprintln!(
+                        "OTHER_TOKEN level={} name={} zone={} id={} group={} exe={} subtype={} flags={:#x} init={:#x?} point={:?}",
+                        known.id,
+                        known.name,
+                        zone.eid,
+                        entity.id,
+                        entity.group,
+                        entity.executable,
+                        entity.subtype,
+                        entity.spawn_flags,
+                        entity.initializer,
+                        entity.path_points.first(),
+                    );
+                    if known.id == LevelId::new_const(0x15) {
+                        eprintln!("ROLLING_TOKEN_ZONE {:?}", graph.zone(zone.eid));
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -50893,6 +58790,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
             let lost_city = LevelId::new_const(0x20);
             let temple_ruins = LevelId::new_const(0x1c);
             let road_to_nowhere = LevelId::new_const(0x14);
+            let boulder_dash = LevelId::new_const(0x13);
             let island_two = Eid::from_name("2a_pZ").expect("fixed Lost-City map EID is valid");
             let (completion_nsd, completion_nsf, completion_nsf_bytes) =
                 parse_local_pair(root, completion).expect("Level Complete pair must parse");
@@ -52662,7 +60560,7 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 road_mount_survey.summary()
             );
 
-            let (road_survey, road_runtime) = survey_pair_with_runtime(
+            let (road_survey, mut road_runtime) = survey_pair_with_runtime(
                 known_name(road_to_nowhere),
                 road_to_nowhere,
                 &road_nsd,
@@ -52785,6 +60683,173 @@ fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry()
                 "Road to Nowhere's carried completion must remain clean: {}",
                 road_survey.summary()
             );
+
+            let road_completion_carry = {
+                let mut host = NsfProgramHost::new(&road_nsd, &road_nsf, &road_nsf_bytes);
+                let report = road_runtime
+                    .finish_level_transition(&mut host, 0x2d)
+                    .expect("authentic Road to Nowhere LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                report.carry
+            };
+            let (road_completion_survey, mut road_completion_runtime) = survey_pair_with_runtime(
+                known_name(completion),
+                completion,
+                &completion_nsd,
+                &completion_nsf,
+                &completion_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, road_completion_carry)
+                    .expect("Level Complete must import Road to Nowhere's authentic carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                700,
+            )
+            .expect("Road to Nowhere's authentic Level Complete screen must execute");
+            assert_eq!(
+                road_completion_survey.next_lid.map(|(_, lid)| lid),
+                Some(0x19),
+                "{}",
+                road_completion_survey.summary()
+            );
+            assert!(road_completion_survey.is_clean());
+
+            let post_road_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = road_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("Road to Nowhere's Level Complete LEVEL_END must export Title");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x19);
+                assert_eq!(report.next_lid_after_event, 0x19);
+                assert_eq!(report.resolved.level, title);
+                assert!(!report.resolved.bonus_return);
+                report.carry
+            };
+            let mut post_road_map = AuthoredTitleMapHarness::from_session(
+                &title_nsd,
+                &title_nsf,
+                &title_nsf_bytes,
+                post_road_title_carry,
+            );
+            post_road_map.wait_until_ready(64);
+            assert_eq!(post_road_map.frame, 10);
+            for _ in 0..120 {
+                post_road_map.step(0);
+            }
+            post_road_map.tap(PAD_UP);
+            assert_eq!(post_road_map.frame, 132);
+            for _ in 0..120 {
+                post_road_map.step(0);
+            }
+            post_road_map.step(PAD_CROSS);
+            assert_eq!(post_road_map.frame, 253);
+            assert_eq!(post_road_map.transitions, [(253, 0x13)]);
+
+            let boulder_dash_carry = {
+                let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
+                let report = post_road_map
+                    .runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(boulder_dash.get()).expect("Boulder Dash LID fits i32"),
+                    )
+                    .expect("authentic post-Road Map LEVEL_END must export Boulder Dash");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x13);
+                assert_eq!(report.next_lid_after_event, 0x13);
+                assert_eq!(report.resolved.level, boulder_dash);
+                assert!(!report.resolved.bonus_return);
+                report.carry
+            };
+            let (boulder_dash_nsd, boulder_dash_nsf, boulder_dash_nsf_bytes) =
+                parse_local_pair(root, boulder_dash).expect("Boulder Dash pair must parse");
+            let (boulder_dash_mount_survey, _boulder_dash_mount_runtime) =
+                survey_pair_with_runtime(
+                    known_name(boulder_dash),
+                    boulder_dash,
+                    &boulder_dash_nsd,
+                    &boulder_dash_nsf,
+                    &boulder_dash_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        boulder_dash,
+                        boulder_dash_carry.clone(),
+                    )
+                    .expect("Boulder Dash must import the authentic post-Road carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::BoulderDashCompletionRoute,
+                    1,
+                )
+                .expect("Boulder Dash's carried first frame must execute");
+            assert!(boulder_dash_mount_survey.is_clean());
+
+            let (boulder_dash_survey, mut boulder_dash_runtime) = survey_pair_with_runtime(
+                known_name(boulder_dash),
+                boulder_dash,
+                &boulder_dash_nsd,
+                &boulder_dash_nsf,
+                &boulder_dash_nsf_bytes,
+                RetailRuntime::new_from_session(GLOBAL_WORDS, boulder_dash, boulder_dash_carry)
+                    .expect("Boulder Dash must import the authentic post-Road carry"),
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::BoulderDashCompletionRoute,
+                3_100,
+            )
+            .expect("Boulder Dash's authentic carried completion route must execute");
+            assert_eq!(
+                boulder_dash_survey.next_lid.map(|(_, lid)| lid),
+                Some(0x2d),
+                "{}",
+                boulder_dash_survey.summary()
+            );
+            assert_eq!(boulder_dash_survey.restarts, 0);
+            assert!(boulder_dash_survey.restart_frames.is_empty());
+            assert_eq!(boulder_dash_survey.death_camera_frames, 0);
+            assert!(boulder_dash_survey.first_terminal_fall.is_none());
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| boulder_dash_runtime.global_word(index).unwrap()),
+                [0x500, 15, 15, 15, 1, 16, 0]
+            );
+            assert!(boulder_dash_survey.is_clean());
+            let boulder_completion_carry = {
+                let mut host = NsfProgramHost::new(
+                    &boulder_dash_nsd,
+                    &boulder_dash_nsf,
+                    &boulder_dash_nsf_bytes,
+                );
+                let report = boulder_dash_runtime
+                    .finish_level_transition(
+                        &mut host,
+                        i32::try_from(LevelId::LEVEL_COMPLETE.get())
+                            .expect("Level Complete LID fits i32"),
+                    )
+                    .expect("Boulder Dash LEVEL_END must export Level Complete");
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
+                assert!(!report.resolved.bonus_return);
+                report.carry
+            };
+            carry_boulder_dash_through_heavy_machinery(root, boulder_completion_carry);
         }
 
         eprintln!(

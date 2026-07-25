@@ -265,6 +265,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::float_cmp)] // The deterministic test clock emits these exact integer values.
     fn browser_test_clock_issues_one_fixed_step_per_request() {
         let mut clock = BrowserTestClock::default();
 

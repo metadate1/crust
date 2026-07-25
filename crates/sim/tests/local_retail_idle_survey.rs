@@ -1638,6 +1638,7 @@ enum SurveyInputProfile {
     GreatGateYellowGemExactCarry,
     TawnaBonusCompletionRoute,
     TawnaBonusTwoCompletionRoute,
+    BrioBonusCompletionRoute,
     LocalPbakPrefix,
     BouldersCompletionRoute,
     BoulderDashCompletionRoute,
@@ -1737,6 +1738,7 @@ impl SurveyInputProfile {
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::TawnaBonusCompletionRoute => "tawna-bonus-completion-route",
             Self::TawnaBonusTwoCompletionRoute => "tawna-bonus-two-completion-route",
+            Self::BrioBonusCompletionRoute => "brio-bonus-completion-route",
             Self::LocalPbakPrefix => "legally-local-pbak-prefix",
             Self::BouldersCompletionRoute => "boulders-completion-route",
             Self::BoulderDashCompletionRoute => "boulder-dash-completion-route",
@@ -1801,6 +1803,7 @@ impl SurveyInputProfile {
                 | Self::GreatGateYellowGemExactCarry
                 | Self::TawnaBonusCompletionRoute
                 | Self::TawnaBonusTwoCompletionRoute
+                | Self::BrioBonusCompletionRoute
                 | Self::BouldersCompletionRoute
                 | Self::BoulderDashCompletionRoute
                 | Self::CortexPowerCompletionRoute
@@ -1863,6 +1866,20 @@ struct TawnaBonusCompletionRouteController {
     jump_hold: u8,
     release_wait: u8,
     warp_tick: u16,
+}
+
+/// Ordinary-pad characterization route for Brio Bonus. Coordinates are read
+/// only to choose inputs; the controller never mutates Crash or retail state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BrioBonusCompletionRouteController {
+    jump_hold: u8,
+    release_wait: u8,
+    warp_tick: u16,
+    opening_stage: u8,
+    rolling_stones_layout: bool,
+    rolling_spin_ready: bool,
+    stage: u8,
+    stage_tick: u16,
 }
 
 /// Deterministic ordinary-pad route through Cortex Bonus's two timed TNT
@@ -2158,6 +2175,312 @@ impl TawnaBonusCompletionRouteController {
         if frame % 48 < 4 {
             held |= PAD_SQUARE;
         }
+        held
+    }
+}
+
+impl BrioBonusCompletionRouteController {
+    fn held(
+        &mut self,
+        frame: u32,
+        player: Option<PlayerTrace>,
+        objects: &[ProgramObjectTrace],
+    ) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if player.state == 32 {
+            self.warp_tick = self.warp_tick.saturating_add(1);
+            return if self.warp_tick == 300 { PAD_CROSS } else { 0 };
+        }
+
+        let first_crate_x = objects
+            .iter()
+            .filter(|object| object.program.name().as_deref() == Some("BoxsC"))
+            .map(|object| object.translation[0])
+            .min();
+        self.rolling_stones_layout |= first_crate_x == Some(624_640);
+        let rolling_stones_layout = self.rolling_stones_layout;
+        if self.opening_stage == 0
+            && player.state == 14
+            && first_crate_x
+                .is_some_and(|crate_x| player.translation[0].abs_diff(crate_x) < 160_000)
+        {
+            self.opening_stage = 1;
+            self.jump_hold = 0;
+            self.release_wait = 0;
+        }
+        if self.opening_stage == 1
+            && let Some(crate_x) = first_crate_x
+        {
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let horizontal = if predicted_x > crate_x + 12_000 {
+                PAD_LEFT
+            } else if predicted_x < crate_x - 12_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0 && player.translation[0].abs_diff(crate_x) < 100_000 {
+                self.opening_stage = 2;
+                return 0;
+            }
+            return horizontal;
+        }
+        if self.opening_stage == 2 {
+            self.opening_stage = 3;
+            self.jump_hold = 20;
+            self.release_wait = 2;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+
+        let rolling_upper_crate = objects.iter().find(|object| {
+            object.program.name().as_deref() == Some("BoxsC")
+                && object.translation == [2_672_640, 819_200, -25_600]
+        });
+        if rolling_stones_layout
+            && self.stage == 0
+            && player.translation[0] >= 2_400_000
+            && rolling_upper_crate.is_none_or(|crate_object| crate_object.state != 26)
+        {
+            self.stage = 9;
+            self.jump_hold = 45;
+            self.release_wait = 0;
+            self.rolling_spin_ready = true;
+        }
+        if self.stage == 7 {
+            self.stage = 9;
+            self.jump_hold = 45;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 8 {
+            let target_x = 2_100_000;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            if player.status_a & 1 != 0
+                && player.translation[0].abs_diff(target_x) < 100_000
+                && player.velocity[0].abs() <= 100_000
+            {
+                self.stage = 7;
+                return 0;
+            }
+            return if predicted_x > target_x + 12_000 {
+                PAD_LEFT
+            } else if predicted_x < target_x - 12_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
+        if self.stage == 9 {
+            if player.translation[0] >= 2_450_000 && player.status_a & 1 != 0 {
+                // Cross is still held from the long jump over the preceding
+                // gap. Release it for two samples on the metal floor so the
+                // capped crate staircase receives a real jump edge.
+                self.stage = 10;
+                self.stage_tick = 0;
+                self.rolling_spin_ready = true;
+                return PAD_RIGHT;
+            }
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 10 {
+            self.stage_tick = self.stage_tick.saturating_add(1);
+            if self.stage_tick < 2 {
+                return PAD_RIGHT;
+            }
+            self.stage = 11;
+            self.jump_hold = 30;
+            self.release_wait = 2;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if self.stage == 11 {
+            if player.translation[0] >= 3_300_000 {
+                self.stage = 12;
+                self.jump_hold = 30;
+                self.release_wait = 2;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+
+            let mut held = PAD_RIGHT;
+            if self.jump_hold > 0 {
+                self.jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if self.release_wait > 0 {
+                self.release_wait -= 1;
+            } else if player.status_a & 1 != 0 {
+                self.jump_hold = 30;
+                self.release_wait = 2;
+                held |= PAD_CROSS;
+            }
+            if self.rolling_spin_ready
+                && player.translation[1] > 850_000
+                && player.velocity[1] > 200_000
+            {
+                // Spin only after the fresh jump has started. Pressing Square
+                // on the floor enters the spin state before Cross can create
+                // the jump that clears the first metal cap.
+                self.rolling_spin_ready = false;
+                held |= PAD_SQUARE;
+            } else if !self.rolling_spin_ready {
+                // The retail route lands on the newly exposed TNT after the
+                // jumping spin. Its cap leaves an exact-height opening, so use
+                // a short depth nudge to enter that opening, then center again
+                // before descending onto the TNT.
+                let predicted_z =
+                    player.translation[2].saturating_add(player.velocity[2].saturating_mul(3) / 34);
+                let target_z = 70_000;
+                if predicted_z < target_z - 8_000 {
+                    held |= PAD_DOWN;
+                } else if predicted_z > target_z + 8_000 {
+                    held |= PAD_UP;
+                }
+                if player.translation[0] >= 2_600_000 {
+                    self.stage = 13;
+                    return PAD_LEFT | PAD_UP;
+                }
+            }
+            return held;
+        }
+        if self.stage == 13 {
+            if rolling_upper_crate.is_some_and(|crate_object| crate_object.state != 26) {
+                self.stage = 14;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let predicted_z =
+                player.translation[2].saturating_add(player.velocity[2].saturating_mul(3) / 34);
+            let horizontal = if predicted_x > 2_650_000 {
+                PAD_LEFT
+            } else if predicted_x < 2_610_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let depth = if predicted_z > -17_000 {
+                PAD_UP
+            } else if predicted_z < -34_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            return horizontal | depth;
+        }
+        if self.stage == 14 {
+            if player.translation[0] >= 2_780_000
+                && player.translation[1] > 1_050_000
+                && player.status_a & 1 != 0
+            {
+                // Re-center onto the second metal cap, release Cross for two
+                // samples, then create the fresh edge used for the final gap.
+                self.stage = 15;
+                self.stage_tick = 0;
+                return PAD_RIGHT | PAD_UP;
+            }
+            if player.translation[0] >= 3_300_000 {
+                self.stage = 12;
+                self.jump_hold = 30;
+                self.release_wait = 2;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let mut held = PAD_RIGHT | PAD_CROSS;
+            let predicted_z =
+                player.translation[2].saturating_add(player.velocity[2].saturating_mul(3) / 34);
+            if player.translation[0] >= 2_780_000 {
+                if predicted_z > -17_000 {
+                    held |= PAD_UP;
+                } else if predicted_z < -34_000 {
+                    held |= PAD_DOWN;
+                }
+            } else if predicted_z > 76_000 {
+                held |= PAD_UP;
+            } else if predicted_z < 58_000 {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+        if self.stage == 15 {
+            self.stage_tick = self.stage_tick.saturating_add(1);
+            if self.stage_tick < 2 {
+                return PAD_RIGHT | PAD_UP;
+            }
+            self.stage = 12;
+            self.jump_hold = 30;
+            self.release_wait = 2;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+
+        let upper_crate_broken = objects.iter().any(|object| {
+            object.state == 24
+                && matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 34,
+                        subtype: 8,
+                    }
+                )
+        });
+        if !rolling_stones_layout && self.stage == 0 && upper_crate_broken {
+            self.stage = 1;
+            self.jump_hold = 0;
+        }
+        if self.stage == 1 {
+            if player.translation[0] < 1_950_000 && player.status_a & 1 != 0 {
+                if player.velocity[0] < -100_000 {
+                    return PAD_RIGHT;
+                }
+                self.stage = 2;
+                self.stage_tick = 0;
+                return 0;
+            }
+            return PAD_LEFT;
+        }
+        if self.stage == 2 {
+            self.stage_tick = self.stage_tick.saturating_add(1);
+            if self.stage_tick > 1
+                && matches!(player.state, 3 | 4 | 14)
+                && player.velocity[1] > 700_000
+                && player.translation[0] < 1_950_000
+            {
+                self.stage = 3;
+                self.jump_hold = 13;
+                return PAD_RIGHT;
+            }
+            let horizontal = if player.translation[0] > 1_890_000 {
+                PAD_LEFT
+            } else if player.translation[0] < 1_810_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            return horizontal | (u32::from(self.stage_tick == 1) * PAD_CROSS);
+        }
+        if self.stage >= 3 && player.translation[0] > 4_000_000 && player.translation[2] > -220_000
+        {
+            return PAD_UP;
+        }
+
+        let mut held = PAD_RIGHT;
+        if self.jump_hold > 0 {
+            self.jump_hold -= 1;
+            held |= PAD_CROSS;
+        } else if self.release_wait > 0 {
+            self.release_wait -= 1;
+        } else if player.state != 40 && player.status_a & 1 != 0 {
+            self.jump_hold = 30;
+            self.release_wait = 2;
+            held |= PAD_CROSS;
+        }
+        if self.opening_stage == 0 && (840_000..1_100_000).contains(&player.translation[0]) {
+            held |= PAD_SQUARE;
+        }
+        if rolling_stones_layout && self.stage == 0 && player.translation[0] >= 2_050_000 {
+            self.stage = 8;
+        }
+        let _ = frame;
         held
     }
 }
@@ -11297,18 +11620,38 @@ impl RollingStonesRouteController {
     }
 }
 
-/// Ordinary-pad variant of the established Rolling Stones route that breaks
-/// the three authored Brio-token crates as Crash reaches their live bounds.
-///
-/// Entity 25 is suspended above the path and needs a jumping spin. Entities
-/// 59 and 120 are on the route itself and need only the normal spin button.
-/// The wrapper observes geometry solely to choose pad input; it never mutates
-/// a VM register, object transform, spawn flag, or level global.
+/// Ordinary-pad route that follows the normal Rolling Stones completion path
+/// while collecting its three authored Brio tokens. Collection waits park the
+/// frame-timed base route; movement resumes only from live camera/object
+/// anchors, so no VM state or transform is injected.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+// Each flag names an independent, one-shot physical obstacle in the route.
+#[allow(clippy::struct_excessive_bools)]
 struct RollingStonesBrioBonusRouteController {
     route: RollingStonesRouteController,
-    attempted_tokens: u8,
-    first_token_jump_tick: Option<u8>,
+    first_token_tick: Option<u8>,
+    bridge_center_last_x: Option<i32>,
+    bridge_phase_ready: bool,
+    second_pickup_wait: bool,
+    second_exit_tick: Option<u8>,
+    zero_y_ledge_jump_done: bool,
+    zero_y_ledge_jump_hold: u8,
+    zero_y_platform_jump_armed: bool,
+    zero_y_platform_jump_done: bool,
+    zero_a_platform_jump_done: bool,
+    zero_a_platform_jump_hold: u8,
+    zero_b_platform_jump_armed: bool,
+    zero_b_platform_jump_done: bool,
+    zero_b_platform_jump_hold: u8,
+    zero_b_exit_jump_armed: bool,
+    zero_b_exit_jump_done: bool,
+    zero_b_exit_jump_hold: u8,
+    zero_j_boulder_jump_done: bool,
+    zero_j_boulder_jump_hold: u8,
+    zero_j_boulder_rejump_armed: bool,
+    zero_j_boulder_rejump_done: bool,
+    zero_j_boulder_rejump_hold: u8,
+    third_spin_seen: bool,
 }
 
 impl RollingStonesBrioBonusRouteController {
@@ -11319,69 +11662,636 @@ impl RollingStonesBrioBonusRouteController {
         checkpoint_id: i32,
         objects: &[ProgramObjectTrace],
     ) -> u32 {
+        let zero_y =
+            Eid::from_name("0y_lZ").expect("fixed Rolling Stones correction-zone EID is valid");
+        let zero_upper_a =
+            Eid::from_name("0A_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+        let zero_upper_b =
+            Eid::from_name("0B_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+        if player.is_some_and(|player| {
+            player.brio_counter >= 0x200 && (camera.path.zone == zero_y || player.zone == zero_y)
+        }) {
+            // The two token pauses advance 0y's subtype-six wall beyond both
+            // characterized direct and campaign-carry phases. Enable the
+            // base controller's live-bound avoidance as soon as this path is
+            // entered rather than waiting for its historical tick 280 gate.
+            self.route.session_globals = true;
+            self.route.checkpoint_phase_recovered = true;
+        }
+        let route_before = self.route;
         let mut held = self.route.held(camera, player, checkpoint_id, objects);
         let Some(player) = player else {
             return held;
         };
-        if let Some(tick) = self.first_token_jump_tick {
-            self.first_token_jump_tick = (tick < 7).then_some(tick + 1);
-            held |= PAD_CROSS;
-            if tick == 2 {
-                held |= PAD_SQUARE;
-            }
-            return held;
-        }
-        let nearby_token = objects.iter().find_map(|object| {
-            let ObjectOrigin::Entity(descriptor) = object.origin else {
-                return None;
+
+        if player.brio_counter >= 0x200 && player.zone == zero_y {
+            let bound_for_wall = |id| {
+                objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == id
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
             };
-            if descriptor.executable != 34
-                || !matches!(descriptor.id, 25 | 59 | 120)
-                || self.attempted_tokens & Self::token_bit(descriptor.id) != 0
-                || object.state != if descriptor.id == 25 { 21 } else { 0 }
+            if (camera.path.zone != zero_y || camera.path.index == 0)
+                && let (Some(left), Some(right)) = (bound_for_wall(74), bound_for_wall(75))
             {
-                return None;
+                // The Brio detours meet 0y's first converging JunOC pair
+                // while its left wall occupies the historical running line.
+                // Follow the center of the live opening with ordinary lateral
+                // input while retaining the base route's jump schedule.
+                let target_x = left.max.x + (right.min.x - left.max.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let lateral = if predicted_x < target_x - 12_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 12_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+                // The base route's historical pause belongs to the direct
+                // wall phase. The token detours reach this live opening
+                // earlier in camera space, where releasing forward sheds too
+                // much momentum to clear the landing shelf.
+                if camera.path.zone != zero_y || camera.progress.raw() < 7_000 {
+                    held |= PAD_UP;
+                }
             }
-            let bound = object.bound?;
-            let x_reach = if descriptor.id == 25 { 80_000 } else { 320_000 };
-            let z_reach = if descriptor.id == 25 {
-                220_000
-            } else {
-                320_000
-            };
-            (player.translation[0] >= bound.min.x - x_reach
-                && player.translation[0] <= bound.max.x + x_reach
-                && player.translation[2] >= bound.min.z - z_reach
-                && player.translation[2] <= bound.max.z + z_reach
-                && player.translation[1] >= bound.min.y - 480_000
-                && player.translation[1] <= bound.max.y + 320_000)
-                .then_some(descriptor.id)
-        });
-        if let Some(entity) = nearby_token {
-            self.attempted_tokens |= Self::token_bit(entity);
-            if entity == 25 {
-                self.first_token_jump_tick = Some(1);
+            let landing_platform = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 82
+                            && descriptor.executable == 11
+                            && descriptor.subtype == 2
+                            && object.state == 8
+                )
+                .then_some(object.bound)
+                .flatten()
+            });
+            if camera.path.zone == zero_y
+                && camera.path.index == 1
+                && let Some(platform) = landing_platform
+            {
+                // Once past the converging walls, follow the center of 0y's
+                // authored moving platform. Its live bound remains a stable
+                // anchor even though the token detours change arrival timing.
+                let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let lateral = if predicted_x < target_x - 48_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 48_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+            }
+            if !self.zero_y_ledge_jump_done
+                && camera.path.index == 1
+                && camera.progress.raw() <= 4_000
+                && player.status_a & 1 != 0
+            {
+                // The Brio carry lands on 0y's intermediate ledge after the
+                // direct phase's Cross window. Anchor a fresh ordinary jump
+                // to that live grounded landing instead of a frame count.
+                self.zero_y_ledge_jump_done = true;
+                self.zero_y_ledge_jump_hold = 7;
                 held |= PAD_CROSS;
+            } else if self.zero_y_ledge_jump_hold > 0 {
+                self.zero_y_ledge_jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if !self.zero_y_platform_jump_done {
+                if self.zero_y_platform_jump_armed {
+                    // The base route reaches this platform while its previous
+                    // Cross window is still held. A single released sample
+                    // above creates a real second press edge here.
+                    self.zero_y_platform_jump_armed = false;
+                    self.zero_y_platform_jump_done = true;
+                    self.zero_y_ledge_jump_hold = 7;
+                    held |= PAD_CROSS;
+                } else if player.status_a & 1 != 0
+                    && landing_platform.is_some_and(|platform| {
+                        (platform.min.x.saturating_sub(16_000)
+                            ..=platform.max.x.saturating_add(16_000))
+                            .contains(&player.translation[0])
+                            && (platform.min.z.saturating_sub(16_000)
+                                ..=platform.max.z.saturating_add(16_000))
+                                .contains(&player.translation[2])
+                            && player.translation[1].abs_diff(platform.max.y) <= 16_000
+                    })
+                {
+                    self.zero_y_platform_jump_armed = true;
+                    held &= !PAD_CROSS;
+                }
+            }
+        }
+        if player.brio_counter >= 0x200
+            && matches!(player.zone, zone if zone == zero_upper_a || zone == zero_upper_b)
+            && let Some(platform) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 50
+                            && descriptor.executable == 11
+                            && descriptor.subtype == 2
+                            && object.state == 8
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+            && player.translation[2] >= platform.min.z.saturating_sub(64_000)
+        {
+            // The second token detour also changes which 0A PoPlC cycle meets
+            // Crash. Follow entity 50's live center while retaining the base
+            // controller's authored forward/jump presses.
+            let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let lateral = if predicted_x < target_x - 16_000 {
+                PAD_RIGHT
+            } else if predicted_x > target_x + 16_000 {
+                PAD_LEFT
             } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+            if self.zero_a_platform_jump_hold > 0 {
+                self.zero_a_platform_jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if !self.zero_a_platform_jump_done && player.status_a & 1 != 0 {
+                let forward_gap = player.translation[2].saturating_sub(platform.max.z);
+                let horizontally_aligned = (platform.min.x.saturating_sub(64_000)
+                    ..=platform.max.x.saturating_add(64_000))
+                    .contains(&predicted_x);
+                if (0..=300_000).contains(&forward_gap) && horizontally_aligned {
+                    // The historical Cross window starts too early for this
+                    // live platform cycle. Press from the last grounded edge,
+                    // after the released samples below, and hold the ordinary
+                    // variable-height jump through its approach.
+                    self.zero_a_platform_jump_done = true;
+                    self.zero_a_platform_jump_hold = 7;
+                    held |= PAD_CROSS;
+                } else {
+                    held &= !PAD_CROSS;
+                }
+            }
+            if self.zero_b_platform_jump_hold > 0 {
+                self.zero_b_platform_jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if !self.zero_b_platform_jump_done && player.zone == zero_upper_b {
+                if self.zero_b_platform_jump_armed {
+                    self.zero_b_platform_jump_armed = false;
+                    self.zero_b_platform_jump_done = true;
+                    self.zero_b_platform_jump_hold = 7;
+                    held |= PAD_CROSS;
+                } else if player.status_a & 1 != 0
+                    && (platform.min.x.saturating_sub(16_000)
+                        ..=platform.max.x.saturating_add(16_000))
+                        .contains(&player.translation[0])
+                    && (platform.min.z.saturating_sub(16_000)
+                        ..=platform.max.z.saturating_add(16_000))
+                        .contains(&player.translation[2])
+                    && player.translation[1].abs_diff(platform.max.y) <= 16_000
+                {
+                    // Cross remains held when the re-timed approach touches
+                    // entity 50. Release one sample on the live grounded
+                    // overlap so the following press is a genuine jump edge.
+                    self.zero_b_platform_jump_armed = true;
+                    held &= !PAD_CROSS;
+                }
+            }
+        }
+        if player.brio_counter >= 0x200
+            && player.zone == zero_upper_b
+            && (self.zero_b_platform_jump_armed || self.zero_b_platform_jump_done)
+            && let Some(platform) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 53
+                            && descriptor.executable == 11
+                            && descriptor.subtype == 2
+                            && object.state == 8
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+            && player.translation[2] >= platform.min.z.saturating_sub(64_000)
+        {
+            // Track the next authored PoPlC while the fresh entity-50 jump is
+            // airborne; its cycle is likewise shifted by the token detours.
+            let target_x = platform.min.x + (platform.max.x - platform.min.x) / 2;
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            let lateral = if predicted_x < target_x - 16_000 {
+                PAD_RIGHT
+            } else if predicted_x > target_x + 16_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+            if self.zero_b_exit_jump_hold > 0 {
+                self.zero_b_exit_jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if !self.zero_b_exit_jump_done {
+                if self.zero_b_exit_jump_armed {
+                    self.zero_b_exit_jump_armed = false;
+                    self.zero_b_exit_jump_done = true;
+                    self.zero_b_exit_jump_hold = 13;
+                    held |= PAD_CROSS;
+                } else if player.status_a & 1 != 0 {
+                    let forward_gap = player.translation[2].saturating_sub(platform.max.z);
+                    let horizontally_aligned = (platform.min.x.saturating_sub(64_000)
+                        ..=platform.max.x.saturating_add(64_000))
+                        .contains(&predicted_x);
+                    if (0..=450_000).contains(&forward_gap) && horizontally_aligned {
+                        // The base Cross window is already down on this
+                        // grounded ledge. Release it once, then make a longer
+                        // variable-height press toward entity 53's live bound.
+                        self.zero_b_exit_jump_armed = true;
+                        held &= !PAD_CROSS;
+                    }
+                }
+            }
+        }
+        let zero_j =
+            Eid::from_name("0J_lZ").expect("fixed Rolling Stones boulder-zone EID is valid");
+        if player.brio_counter >= 0x200
+            && player.zone == zero_j
+            && let Some(boulder) = objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 101
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 8
+                            && object.state == 1
+                )
+            })
+        {
+            let trailing_gap = boulder.translation[2].saturating_sub(player.translation[2]);
+            if self.zero_j_boulder_jump_hold > 0 {
+                self.zero_j_boulder_jump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if !self.zero_j_boulder_jump_done
+                && player.status_a & 1 != 0
+                && player.translation[0].abs_diff(boulder.translation[0]) <= 400_000
+                && (0..=500_000).contains(&trailing_gap)
+                && player.translation[1].abs_diff(boulder.translation[1]) <= 800_000
+            {
+                // The carried Brio path meets this rolling JunOC one sample
+                // before the historical Cross window. Use its live approach
+                // distance to start the same ordinary variable-height jump.
+                self.zero_j_boulder_jump_done = true;
+                self.zero_j_boulder_jump_hold = 7;
+                held |= PAD_CROSS;
+            }
+            if self.zero_j_boulder_rejump_hold > 0 {
+                self.zero_j_boulder_rejump_hold -= 1;
+                held |= PAD_CROSS;
+            } else if self.zero_j_boulder_jump_done && !self.zero_j_boulder_rejump_done {
+                if self.zero_j_boulder_rejump_armed {
+                    self.zero_j_boulder_rejump_armed = false;
+                    self.zero_j_boulder_rejump_done = true;
+                    self.zero_j_boulder_rejump_hold = 7;
+                    held |= PAD_CROSS;
+                } else if self.zero_j_boulder_jump_hold == 0
+                    && player.status_a & 1 != 0
+                    && player.translation[0].abs_diff(boulder.translation[0]) <= 500_000
+                    && (0..=900_000).contains(&trailing_gap)
+                {
+                    // Crash lands while the scheduled Cross input is still
+                    // down and the stone remains behind him. Release once,
+                    // then jump again from this live grounded encounter.
+                    self.zero_j_boulder_rejump_armed = true;
+                    held &= !PAD_CROSS;
+                }
+            }
+        }
+        if let Some(tick) = self.first_token_tick {
+            if player.brio_counter >= 0x100 {
+                self.first_token_tick = None;
+                return held;
+            }
+            self.route = route_before;
+            self.first_token_tick = Some(tick.saturating_add(1));
+            let mut action = if tick <= 16 { PAD_CROSS } else { 0 };
+            action |= if player.translation[0] < 1_340_000 && player.velocity[0] <= 400_000
+                || player.velocity[0] < -100_000
+            {
+                PAD_RIGHT
+            } else if player.translation[0] > 1_420_000
+                || (player.translation[0] > 1_340_000 && player.velocity[0] > 100_000)
+            {
+                PAD_LEFT
+            } else {
+                0
+            };
+            action |= if player.velocity[2] < -100_000 || player.translation[2] < 27_045_000 {
+                PAD_DOWN
+            } else if player.velocity[2] > 100_000 || player.translation[2] > 27_125_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return action;
+        }
+
+        if player.brio_counter == 0 {
+            let first = objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 25
+                            && descriptor.executable == 34
+                            && object.state == 21
+                )
+            });
+            if let Some(first) = first
+                && let Some(bound) = first.bound
+                && player.translation[0] >= bound.min.x - 160_000
+                && player.translation[0] <= bound.max.x + 160_000
+                && player.translation[2] >= bound.min.z - 220_000
+                && player.translation[2] <= bound.max.z + 220_000
+                && player.translation[1] >= bound.min.y - 480_000
+                && player.translation[1] <= bound.max.y + 320_000
+            {
+                self.first_token_tick = Some(1);
+                return PAD_RIGHT | PAD_DOWN | PAD_CROSS;
+            }
+        }
+
+        let zero_g =
+            Eid::from_name("0g_lZ").expect("fixed Rolling Stones bridge-zone EID is valid");
+        if player.brio_counter == 0x100
+            && camera.path.zone == zero_g
+            && matches!(camera.path.index, 0 | 1)
+        {
+            let bridge_center_x = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 16
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 6
+                )
+                .then_some(object.bound)
+                .flatten()
+                .map(|bound| bound.min.x + (bound.max.x - bound.min.x) / 2)
+            });
+            if !self.bridge_phase_ready
+                && camera.path.index == 0
+                && camera.progress.raw() >= 3_000
+                && let Some(center_x) = bridge_center_x
+            {
+                let moving_right = self
+                    .bridge_center_last_x
+                    .is_some_and(|previous| center_x > previous);
+                self.bridge_center_last_x = Some(center_x);
+                if !(2_850_000..=2_920_000).contains(&center_x) || !moving_right {
+                    self.route = route_before;
+                    return 0;
+                }
+                self.bridge_phase_ready = true;
+            } else if let Some(center_x) = bridge_center_x {
+                self.bridge_center_last_x = Some(center_x);
+            }
+            if camera.path.index == 1 && (4_500..=6_000).contains(&camera.progress.raw()) {
+                held |= PAD_CROSS;
+            }
+        }
+
+        let zero_h =
+            Eid::from_name("0h_lZ").expect("fixed Rolling Stones turtle-zone EID is valid");
+        if player.brio_counter == 0x100
+            && camera.path.zone == zero_h
+            && camera.path.index == 0
+            && camera.progress.raw() <= 1_000
+            && route_before.post_tick < 413
+        {
+            self.route.post_tick = 413;
+        }
+        if player.brio_counter == 0x100
+            && camera.path.zone == zero_h
+            && (1_000..=9_000).contains(&camera.progress.raw())
+            && objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 15
+                            && descriptor.executable == 19
+                            && object.state == 2
+                )
+            })
+        {
+            held |= PAD_SQUARE;
+        }
+
+        let zero_q =
+            Eid::from_name("0q_lZ").expect("fixed Rolling Stones token-grid approach EID is valid");
+        if player.brio_counter == 0x100
+            && camera.path.zone == zero_q
+            && camera.path.index == 0
+            && camera.progress.raw() <= 1_000
+            && route_before.post_tick < 736
+        {
+            self.route.post_tick = 736;
+        }
+
+        if player.brio_counter == 0x100 && (753..=786).contains(&route_before.post_tick) {
+            return PAD_UP | PAD_LEFT;
+        }
+
+        let second_broken = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor)
+                    if descriptor.id == 59
+                        && descriptor.executable == 34
+                        && object.state == 24
+            )
+        });
+        if player.brio_counter == 0x100 && (self.second_pickup_wait || second_broken) {
+            self.second_pickup_wait = true;
+            self.route = route_before;
+            return PAD_DOWN;
+        }
+
+        if player.brio_counter >= 0x200 && self.second_pickup_wait {
+            self.second_pickup_wait = false;
+            self.second_exit_tick = Some(0);
+        }
+        if let Some(tick) = self.second_exit_tick {
+            let zero_s =
+                Eid::from_name("0s_lZ").expect("fixed Rolling Stones checkpoint-zone EID is valid");
+            if camera.path.zone == zero_s {
+                self.second_exit_tick = None;
+                // The token detour reaches 0s after its turtle has crossed
+                // farther back along the path than in the direct route. Use
+                // the same ordinary spin on this live zone entrance, then
+                // rejoin the characterized schedule at its matching sample.
+                self.route.session_globals = true;
+                self.route.post_tick = 835;
+                return PAD_UP | PAD_SQUARE;
+            }
+            self.route = route_before;
+            if camera.path.zone == zero_q && tick < 100 {
+                if tick <= 8 {
+                    self.second_exit_tick = Some(tick.saturating_add(1));
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if (2_250_000..=2_340_000).contains(&player.translation[0])
+                    && (2_580_000..=2_760_000).contains(&player.translation[1])
+                    && player.velocity[1] < -400_000
+                {
+                    self.second_exit_tick = Some(200);
+                    return PAD_UP;
+                }
+                if tick > 10
+                    && matches!(player.state, 1 | 2 | 19)
+                    && player.velocity[1].abs_diff(-136_000) <= 8_000
+                    && (2_250_000..=2_340_000).contains(&player.translation[0])
+                {
+                    self.second_exit_tick = Some(200);
+                    return PAD_UP;
+                }
+                self.second_exit_tick = Some(tick.saturating_add(1));
+                let mut recovery = if player.translation[0] < 2_250_000
+                    && player.velocity[0] < 200_000
+                    || player.velocity[0] < -100_000
+                {
+                    PAD_RIGHT
+                } else if player.translation[0] > 2_340_000 || player.velocity[0] > 200_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if player.velocity[2] > 100_000 {
+                    recovery |= PAD_UP;
+                } else if player.translation[2] < 19_250_000 {
+                    recovery |= PAD_DOWN;
+                }
+                return recovery;
+            }
+            let zero_r =
+                Eid::from_name("0r_lZ").expect("fixed Rolling Stones token-grid EID is valid");
+            if camera.path.zone == zero_r && tick < 100 {
+                if tick <= 8 {
+                    self.second_exit_tick = Some(tick.saturating_add(1));
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                if (2_250_000..=2_340_000).contains(&player.translation[0])
+                    && (2_580_000..=2_760_000).contains(&player.translation[1])
+                    && player.velocity[1] < -400_000
+                {
+                    self.second_exit_tick = Some(200);
+                    return PAD_UP;
+                }
+                if player.state == 14 {
+                    self.second_exit_tick = Some(110);
+                    return PAD_UP;
+                }
+                if tick > 10
+                    && matches!(player.state, 1 | 2 | 19)
+                    && player.velocity[1].abs_diff(-136_000) <= 8_000
+                    && (2_250_000..=2_340_000).contains(&player.translation[0])
+                {
+                    self.second_exit_tick = Some(200);
+                    return PAD_UP;
+                }
+                self.second_exit_tick = Some(tick.saturating_add(1));
+                return if player.translation[0] < 2_250_000 && player.velocity[0] < 200_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 2_340_000 || player.velocity[0] > 150_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 2_270_000 || player.velocity[0] < -100_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+            if camera.path.zone == zero_r && (223..=244).contains(&tick) {
+                self.second_exit_tick = Some(tick.saturating_add(1));
+                return 0;
+            }
+            if camera.path.zone == zero_r && (10_500..=13_500).contains(&camera.progress.raw()) {
+                self.second_exit_tick = Some(tick.saturating_add(1));
+                return PAD_UP | PAD_CROSS;
+            }
+            self.second_exit_tick = Some(tick.saturating_add(1));
+            if (100..=108).contains(&tick) {
+                return PAD_UP | PAD_CROSS;
+            }
+            if tick <= 10 {
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            if tick <= 14 {
+                return PAD_UP | PAD_LEFT;
+            }
+            return PAD_UP;
+        }
+
+        if player.brio_counter == 0x200 {
+            let third_nearby = objects.iter().any(|object| {
+                let ObjectOrigin::Entity(descriptor) = object.origin else {
+                    return false;
+                };
+                if descriptor.id != 120 || descriptor.executable != 34 || object.state != 0 {
+                    return false;
+                }
+                object.bound.is_some_and(|bound| {
+                    player.translation[0] >= bound.min.x - 240_000
+                        && player.translation[0] <= bound.max.x + 240_000
+                        && player.translation[2] >= bound.min.z - 240_000
+                        && player.translation[2] <= bound.max.z + 240_000
+                        && player.translation[1] >= bound.min.y - 480_000
+                        && player.translation[1] <= bound.max.y + 320_000
+                })
+            });
+            if third_nearby {
+                self.third_spin_seen = true;
                 held |= PAD_SQUARE;
             }
         }
         held
     }
 
-    const fn token_bit(entity: u16) -> u8 {
-        match entity {
-            25 => 1,
-            59 => 2,
-            120 => 4,
-            _ => 0,
-        }
-    }
-
     fn restart_from_checkpoint(&mut self) {
         self.route.restart_from_checkpoint();
-        self.attempted_tokens = 0;
-        self.first_token_jump_tick = None;
+        self.first_token_tick = None;
+        self.bridge_center_last_x = None;
+        self.bridge_phase_ready = false;
+        self.second_pickup_wait = false;
+        self.second_exit_tick = None;
+        self.zero_y_ledge_jump_done = false;
+        self.zero_y_ledge_jump_hold = 0;
+        self.zero_y_platform_jump_armed = false;
+        self.zero_y_platform_jump_done = false;
+        self.zero_a_platform_jump_done = false;
+        self.zero_a_platform_jump_hold = 0;
+        self.zero_b_platform_jump_armed = false;
+        self.zero_b_platform_jump_done = false;
+        self.zero_b_platform_jump_hold = 0;
+        self.zero_b_exit_jump_armed = false;
+        self.zero_b_exit_jump_done = false;
+        self.zero_b_exit_jump_hold = 0;
+        self.zero_j_boulder_jump_done = false;
+        self.zero_j_boulder_jump_hold = 0;
+        self.zero_j_boulder_rejump_armed = false;
+        self.zero_j_boulder_rejump_done = false;
+        self.zero_j_boulder_rejump_hold = 0;
+        self.third_spin_seen = false;
     }
 }
 
@@ -39591,6 +40501,7 @@ struct SurveyInputController {
     great_gate: GreatGateRouteController,
     tawna_bonus: TawnaBonusCompletionRouteController,
     tawna_bonus_two: TawnaBonusTwoCompletionRouteController,
+    brio_bonus: BrioBonusCompletionRouteController,
     cortex_bonus: CortexBonusCompletionRouteController,
     boulders: BouldersCompletionRouteController,
     boulder_dash: BoulderDashCompletionRouteController,
@@ -39684,6 +40595,16 @@ impl SurveyInputController {
                 release_wait: 0,
                 warp_tick: 0,
                 stage: 0,
+            },
+            brio_bonus: BrioBonusCompletionRouteController {
+                jump_hold: 0,
+                release_wait: 0,
+                warp_tick: 0,
+                opening_stage: 0,
+                rolling_stones_layout: false,
+                rolling_spin_ready: true,
+                stage: 0,
+                stage_tick: 0,
             },
             cortex_bonus: CortexBonusCompletionRouteController {
                 stage: 0,
@@ -40058,10 +40979,40 @@ impl SurveyInputController {
             rolling_stones_brio: RollingStonesBrioBonusRouteController {
                 route: RollingStonesRouteController {
                     session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
-                    ..RollingStonesRouteController::default()
+                    opening_started: false,
+                    opening_tick: 0,
+                    post_tick: 0,
+                    checkpoint_route_started: false,
+                    checkpoint_tick: 0,
+                    checkpoint_lateral_corrected: false,
+                    checkpoint_phase_recovered: false,
+                    checkpoint_phase_wait: 0,
+                    checkpoint_route_retimed: false,
+                    post_bank_tick: None,
                 },
-                attempted_tokens: 0,
-                first_token_jump_tick: None,
+                first_token_tick: None,
+                bridge_center_last_x: None,
+                bridge_phase_ready: false,
+                second_pickup_wait: false,
+                second_exit_tick: None,
+                zero_y_ledge_jump_done: false,
+                zero_y_ledge_jump_hold: 0,
+                zero_y_platform_jump_armed: false,
+                zero_y_platform_jump_done: false,
+                zero_a_platform_jump_done: false,
+                zero_a_platform_jump_hold: 0,
+                zero_b_platform_jump_armed: false,
+                zero_b_platform_jump_done: false,
+                zero_b_platform_jump_hold: 0,
+                zero_b_exit_jump_armed: false,
+                zero_b_exit_jump_done: false,
+                zero_b_exit_jump_hold: 0,
+                zero_j_boulder_jump_done: false,
+                zero_j_boulder_jump_hold: 0,
+                zero_j_boulder_rejump_armed: false,
+                zero_j_boulder_rejump_done: false,
+                zero_j_boulder_rejump_hold: 0,
+                third_spin_seen: false,
             },
             hog_wild: HogWildCompletionRouteController {
                 stage: 0,
@@ -40323,6 +41274,9 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::TawnaBonusTwoCompletionRoute {
             self.tawna_bonus_two = TawnaBonusTwoCompletionRouteController::default();
         }
+        if self.profile == SurveyInputProfile::BrioBonusCompletionRoute {
+            self.brio_bonus = BrioBonusCompletionRouteController::default();
+        }
         if self.profile == SurveyInputProfile::CortexBonusCompletionRoute {
             self.cortex_bonus = CortexBonusCompletionRouteController::default();
         }
@@ -40435,6 +41389,9 @@ impl SurveyInputController {
             SurveyInputProfile::TawnaBonusCompletionRoute => self.tawna_bonus.held(frame, player),
             SurveyInputProfile::TawnaBonusTwoCompletionRoute => {
                 self.tawna_bonus_two.held(frame, player)
+            }
+            SurveyInputProfile::BrioBonusCompletionRoute => {
+                self.brio_bonus.held(frame, player, route_objects)
             }
             SurveyInputProfile::LocalPbakPrefix => local_pbak_held
                 .expect("the legally local PBAK prefix is loaded before frame execution"),
@@ -43180,6 +44137,14 @@ fn survey_pair_with_runtime(
                     Eid::from_name("PoPlC").expect("fixed Rolling Stones platform EID is valid"),
                     Eid::from_name("BoxsC").expect("fixed Rolling Stones crate EID is valid"),
                     Eid::from_name("FruiC").expect("fixed Rolling Stones pickup EID is valid"),
+                    Eid::from_name("TurtC").expect("fixed Rolling Stones turtle EID is valid"),
+                ],
+            )?,
+            SurveyInputProfile::BrioBonusCompletionRoute => program_object_traces(
+                &runtime,
+                &[
+                    Eid::from_name("BoxsC").expect("fixed Brio Bonus crate EID is valid"),
+                    Eid::from_name("WarpC").expect("fixed Brio Bonus warp EID is valid"),
                 ],
             )?,
             SurveyInputProfile::GreatGatePhaseRobust
@@ -44043,6 +45008,7 @@ fn survey_pair_with_runtime(
                     SurveyInputProfile::PapuPapuCompletionRoute
                         | SurveyInputProfile::TawnaBonusCompletionRoute
                         | SurveyInputProfile::TawnaBonusTwoCompletionRoute
+                        | SurveyInputProfile::BrioBonusCompletionRoute
                         | SurveyInputProfile::KoalaKongCompletionRoute
                         | SurveyInputProfile::PinstripeCompletionRoute
                         | SurveyInputProfile::RipperRooCompletionRoute
@@ -44067,7 +45033,8 @@ fn survey_pair_with_runtime(
                 let retain = match input_profile {
                     SurveyInputProfile::PapuPapuCompletionRoute => true,
                     SurveyInputProfile::TawnaBonusCompletionRoute
-                    | SurveyInputProfile::TawnaBonusTwoCompletionRoute => {
+                    | SurveyInputProfile::TawnaBonusTwoCompletionRoute
+                    | SurveyInputProfile::BrioBonusCompletionRoute => {
                         sample.event == 0x1600
                             && sample.sender
                                 == Some(
@@ -61358,4 +62325,153 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
     assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(YELLOW_GEM_BIT));
     assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(0));
     assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(1));
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn rolling_stones_carry_traverses_brio_bonus_with_ordinary_pad_input() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let parent = LevelId::new_const(0x15);
+    let bonus = LevelId::new_const(0x25);
+    let known_name = |level| {
+        KNOWN_LEVELS
+            .iter()
+            .find(|known| known.id == level)
+            .map(|known| known.name)
+            .expect("the Brio route level is present in the retail catalog")
+    };
+
+    let (parent_nsd, parent_nsf, parent_nsf_bytes) =
+        parse_local_pair(&root, parent).expect("Rolling Stones pair must parse");
+    let (parent_survey, mut parent_runtime) = survey_pair_with_runtime(
+        known_name(parent),
+        parent,
+        &parent_nsd,
+        &parent_nsf,
+        &parent_nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, parent),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::RollingStonesBrioBonus,
+        5_000,
+    )
+    .expect("ordinary pad input must earn Rolling Stones' complete Brio carry");
+    assert_eq!(
+        parent_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(bonus.get()).expect("Brio Bonus LID fits i32")),
+        "{}",
+        parent_survey.summary()
+    );
+    assert_eq!(parent_survey.restarts, 0, "{}", parent_survey.summary());
+    assert!(
+        parent_survey.is_clean(),
+        "Rolling Stones' authentic token route must remain clean: {}",
+        parent_survey.summary()
+    );
+    assert_eq!(
+        parent_runtime.global_word(60),
+        Ok(14),
+        "the complete Brio token carry must select Rolling Stones' authored bonus layout"
+    );
+    let exact_parent_snapshot = parent_runtime
+        .saved_level_state()
+        .cloned()
+        .expect("Rolling Stones must retain its complete parent snapshot");
+    let parent_transition = {
+        let mut host = NsfProgramHost::new(&parent_nsd, &parent_nsf, &parent_nsf_bytes);
+        parent_runtime
+            .finish_level_transition(
+                &mut host,
+                i32::try_from(bonus.get()).expect("Brio Bonus LID fits i32"),
+            )
+            .expect("Rolling Stones LEVEL_END must preserve the Brio Bonus target")
+    };
+    assert!(parent_transition.event_failures.is_empty());
+    assert_eq!(parent_transition.resolved.level, bonus);
+    assert!(!parent_transition.resolved.bonus_return);
+    assert_eq!(
+        parent_transition.carry.saved_level_state.as_ref(),
+        Some(&exact_parent_snapshot)
+    );
+
+    let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
+        parse_local_pair(&root, bonus).expect("Brio Bonus pair must parse");
+    let bonus_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, parent_transition.carry)
+            .expect("Brio Bonus must import Rolling Stones' session carry");
+    assert_eq!(bonus_runtime.global_word(60), Ok(14));
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&exact_parent_snapshot)
+    );
+    let (bonus_survey, mut bonus_runtime) = survey_pair_with_runtime(
+        known_name(bonus),
+        bonus,
+        &bonus_nsd,
+        &bonus_nsf,
+        &bonus_nsf_bytes,
+        bonus_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::BrioBonusCompletionRoute,
+        1_500,
+    )
+    .expect("ordinary pad input must traverse Brio Bonus");
+    eprintln!("{}", bonus_survey.summary());
+    assert_eq!(bonus_survey.restarts, 0, "{}", bonus_survey.summary());
+    assert!(bonus_survey.restart_frames.is_empty());
+    assert_eq!(bonus_survey.effect_counts.get("load-state"), Some(&1));
+    assert_eq!(bonus_survey.effect_counts.get("transition"), None);
+    assert_eq!(bonus_survey.next_lid, None);
+    assert_eq!(
+        bonus_survey.terminal.as_deref(),
+        Some("requested cross-level restart from 0x25 to 0x15")
+    );
+    assert!(
+        bonus_survey.observed_player_states.contains(&32),
+        "the physical route must enter WillC's authored WARP state"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    let crash = Eid::from_name("WillC").expect("fixed retail player EID is valid");
+    let warp_event = bonus_survey
+        .direct_send_program_samples
+        .iter()
+        .find(|sample| {
+            sample.event == 22 << 8
+                && sample.sender == Some(warp)
+                && sample.recipient == Some(crash)
+        })
+        .expect("the physical route must make WarpC send WillC the authored WARP event");
+    assert!(
+        warp_event.frame < bonus_survey.frames,
+        "WarpC's event must precede the completed bonus return"
+    );
+    let ordinary_pad_mask = PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        bonus_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the physical Brio Bonus route must use ordinary player input only"
+    );
+    assert!(bonus_survey.first_terminal_fall.is_none());
+    assert!(bonus_survey.is_clean(), "{}", bonus_survey.summary());
+    assert_eq!(
+        bonus_runtime.saved_level_state(),
+        Some(&exact_parent_snapshot)
+    );
+
+    let mut bonus_host = NsfProgramHost::new(&bonus_nsd, &bonus_nsf, &bonus_nsf_bytes);
+    let return_transition = bonus_runtime
+        .finish_level_transition(&mut bonus_host, -2)
+        .expect("the bonus LEVEL_END phase must resolve the carried Rolling Stones snapshot");
+    assert!(return_transition.event_failures.is_empty());
+    assert_eq!(return_transition.next_lid_after_event, -2);
+    assert_eq!(return_transition.resolved.level, parent);
+    assert!(return_transition.resolved.bonus_return);
+    assert_eq!(
+        return_transition.carry.saved_level_state.as_ref(),
+        Some(&exact_parent_snapshot)
+    );
 }

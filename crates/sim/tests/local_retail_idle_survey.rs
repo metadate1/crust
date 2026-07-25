@@ -462,6 +462,70 @@ fn slippery_climb_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn toxic_waste_authentic_post_generator_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x07);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Toxic Waste pair must parse");
+
+    // Exact session clocks observed after completing Generator Room and
+    // selecting Toxic Waste through the authored island map.
+    let mut title = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 21),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 21),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title
+            .set_global_word(index, value)
+            .expect("authentic campaign global must exist");
+    }
+    let mut carry = title.export_session_carry();
+    carry.random_seed = 0x8b50_51fc;
+    carry.draw_count = 45_022;
+    carry.set_random_seed_b(0x4d32_ef39);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Toxic Waste must import the authentic post-Generator phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Toxic Waste authentic post-Generator phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::ToxicWasteCompletionRoute,
+        3_000,
+    )
+    .expect("Toxic Waste's authentic carried route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((
+            survey.frames,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty(), "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(!survey.observed_player_states.contains(&28));
+    assert!(!survey.observed_player_states.contains(&31));
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn slippery_climb_authentic_campaign_phase_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -17061,7 +17125,8 @@ struct ToxicWasteCompletionRouteController {
     release_frames: u8,
     started: bool,
     a6_barrel_stage: u8,
-    a8_checkpoint_hold_frames: u8,
+    a8_checkpoint_stage: u8,
+    a8_checkpoint_wait_frames: u8,
     b6_stage: u8,
     b6_hold_frames: u8,
     c0_stage: u8,
@@ -17154,21 +17219,44 @@ impl ToxicWasteCompletionRouteController {
             return PAD_UP;
         }
 
-        // The checkpoint bounce can occur one frame after the historical
-        // absolute hold window in a carried campaign.  Latch the authored
-        // bounce state and sustain Cross until the full-width waste channel
-        // has been crossed.
+        // The carried route reaches the last a8 takeoff two movement samples
+        // behind the fresh boot.  Wait on the live solid surface, then hold
+        // the resulting jump only until the checkpoint's authored bounce
+        // begins.  Keying both edges to player state keeps the landing on the
+        // narrow a9 surface independent of the absolute campaign frame.
         let a8 = Eid::from_name("a8_7Z").expect("fixed Toxic Waste a8 EID is valid");
         if self.session_globals
-            && self.a8_checkpoint_hold_frames == 0
+            && self.a8_checkpoint_stage == 0
             && player.is_some_and(|player| {
-                player.zone == a8 && player.state == 14 && player.translation[2] <= 20_500_000
+                player.zone == a8
+                    && player.translation[2] <= 20_850_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
             })
         {
-            self.a8_checkpoint_hold_frames = 20;
+            self.a8_checkpoint_stage = 1;
+            self.a8_checkpoint_wait_frames = 2;
         }
-        if self.a8_checkpoint_hold_frames != 0 {
-            self.a8_checkpoint_hold_frames -= 1;
+        if self.a8_checkpoint_stage == 1 && self.a8_checkpoint_wait_frames != 0 {
+            self.a8_checkpoint_wait_frames -= 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.tick = self.tick.saturating_sub(1);
+            return PAD_UP;
+        }
+        if self.a8_checkpoint_stage == 1 {
+            self.a8_checkpoint_stage = 2;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_CROSS;
+        }
+        if self.a8_checkpoint_stage == 2 && player.is_some_and(|player| player.state == 14) {
+            self.a8_checkpoint_stage = 3;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_UP;
+        }
+        if self.a8_checkpoint_stage == 2 {
             held |= PAD_CROSS;
         }
 
@@ -39777,7 +39865,8 @@ impl SurveyInputController {
                 release_frames: 0,
                 started: false,
                 a6_barrel_stage: 0,
-                a8_checkpoint_hold_frames: 0,
+                a8_checkpoint_stage: 0,
+                a8_checkpoint_wait_frames: 0,
                 b6_stage: 0,
                 b6_hold_frames: 0,
                 c0_stage: 0,

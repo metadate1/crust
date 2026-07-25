@@ -584,6 +584,65 @@ fn slippery_climb_authentic_campaign_phase_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn slippery_climb_post_high_road_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x2e);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Slippery Climb pair must parse");
+    let mut title = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 24),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 24),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title
+            .set_global_word(index, value)
+            .expect("post-High-Road campaign global must exist");
+    }
+    let mut carry = title.export_session_carry();
+    carry.random_seed = 0x8757_f779;
+    carry.draw_count = 52_539;
+    carry.set_random_seed_b(0x4d32_ef39);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Slippery Climb must import the post-High-Road campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Slippery Climb post-High-Road campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        8_000,
+    )
+    .expect("Slippery Climb's post-High-Road carried route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((
+            survey.frames,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty(), "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn road_to_nowhere_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -25442,6 +25501,8 @@ impl CastleMachineryCompletionRouteController {
 #[allow(clippy::struct_excessive_bools)]
 struct SlipperyClimbCompletionRouteController {
     session_globals: bool,
+    post_high_road_phase: bool,
+    opening_casoc_cleared: bool,
     first_lift_corrected: bool,
     first_lift_correction_frames: u8,
     jump_hold: u8,
@@ -25463,6 +25524,7 @@ struct SlipperyClimbCompletionRouteController {
     lower_d1_runup_stage: u8,
     lower_d1_phase_last_y: Option<i32>,
     lower_d1_phase_ready: bool,
+    lower_d1_slab_brake_frames: u8,
     lower_corner_runup_stage: u8,
     lower_e4_brake_applied: bool,
     lower_e4_brake_frames: u8,
@@ -25490,6 +25552,7 @@ struct SlipperyClimbCompletionRouteController {
     tower_third_spin_tick: u8,
     tower_wall_step: u8,
     tower_wall_wait: u8,
+    tower_first_wall_phase_ready: bool,
     tower_depth_lane_ready: bool,
     tower_platform_launch_released: bool,
     tower_top_lift_staged: bool,
@@ -25515,6 +25578,7 @@ struct SlipperyClimbCompletionRouteController {
     tower_b2_row_landed: bool,
     tower_b2_row_stage: u8,
     tower_b2_row_tick: u8,
+    tower_b2_first_row_phase_ready: bool,
     upper_m2_flip_bounced: bool,
     upper_m1_lift_last_y: Option<i32>,
     upper_m1_lift_phase_ready: bool,
@@ -25546,6 +25610,29 @@ impl SlipperyClimbCompletionRouteController {
 
         let c3 = Eid::from_name("c3_KZ").expect("fixed Slippery Climb corner EID is valid");
         let zone_name = camera.path.zone.name();
+        if self.post_high_road_phase
+            && !self.opening_casoc_cleared
+            && zone_name.as_deref() == Some("g4_KZ")
+            && player.status_a & 1 != 0
+            && (25_500_000..25_800_000).contains(&player.translation[0])
+        {
+            let obstacle_safe = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 8)
+                    && object.state == 13
+            });
+            if obstacle_safe {
+                self.opening_casoc_cleared = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 25_680_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 25_750_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
         if self.session_globals
             && !self.first_lift_corrected
             && player.status_a & 1 != 0
@@ -25643,7 +25730,32 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 0;
             return PAD_RIGHT | PAD_SQUARE;
         }
+        if self.post_high_road_phase
+            && !self.lower_d1_phase_ready
+            && player.status_a & 1 != 0
+            && (9_150_000..9_350_000).contains(&player.translation[0])
+        {
+            let first_slab_retracted = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 49)
+                    && object
+                        .frame_bound
+                        .is_some_and(|bound| bound.max.x <= 9_120_000)
+            });
+            if first_slab_retracted {
+                self.lower_d1_phase_ready = true;
+            } else {
+                self.jump_hold = 0;
+                return if player.translation[0] < 9_240_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 9_300_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
         if self.session_globals
+            && !self.post_high_road_phase
             && !self.lower_d1_phase_ready
             && player.status_a & 1 != 0
             && (8_150_000..8_450_000).contains(&player.translation[0])
@@ -25667,6 +25779,19 @@ impl SlipperyClimbCompletionRouteController {
                     0
                 };
             }
+        }
+        if self.post_high_road_phase
+            && self.lower_d1_phase_ready
+            && self.lower_d1_slab_brake_frames == 0
+            && player.state == 14
+            && (8_400_000..8_750_000).contains(&player.translation[0])
+        {
+            self.lower_d1_slab_brake_frames = 3;
+            self.jump_hold = 0;
+        }
+        if self.lower_d1_slab_brake_frames > 0 {
+            self.lower_d1_slab_brake_frames -= 1;
+            return PAD_RIGHT;
         }
         if !self.corner_staged
             && player.status_a & 1 != 0
@@ -25919,6 +26044,34 @@ impl SlipperyClimbCompletionRouteController {
         {
             self.tower_third_leftward = true;
         }
+        if self.post_high_road_phase
+            && self.tower_third_leftward
+            && self.tower_wall_step == 0
+            && !self.tower_first_wall_phase_ready
+            && player.status_a & 1 != 0
+            && (5_050_000..5_200_000).contains(&player.translation[0])
+            && player.translation[1].abs_diff(-9_609_216) <= 8_192
+        {
+            let phase_ready = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 58)
+                    && object.state == 12
+                    && (14..=20)
+                        .contains(&player.animation_stamp.saturating_sub(object.state_stamp))
+            });
+            if phase_ready {
+                self.tower_first_wall_phase_ready = true;
+            } else {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return if player.translation[0] > 5_150_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 5_100_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+        }
         if self.session_globals
             && self.tower_third_leftward
             && self.tower_wall_step == 0
@@ -26046,6 +26199,22 @@ impl SlipperyClimbCompletionRouteController {
             {
                 self.tower_b2_row_landed = true;
                 self.tower_b2_row_stage = 1;
+                if self.post_high_road_phase {
+                    self.tower_b2_row_target = objects
+                        .iter()
+                        .filter(|object| {
+                            object.program
+                                == Eid::from_name("RWaOC")
+                                    .expect("fixed Slippery Climb platform EID")
+                                && object.state == 2
+                                && matches!(object.origin, ObjectOrigin::Runtime { .. })
+                        })
+                        .min_by_key(|object| {
+                            player.translation[0].abs_diff(object.translation[0])
+                                + player.translation[1].abs_diff(object.translation[1])
+                        })
+                        .map(|object| object.object);
+                }
                 self.jump_hold = 0;
                 return 0;
             }
@@ -26067,9 +26236,35 @@ impl SlipperyClimbCompletionRouteController {
             }
             return direction;
         }
+        if self.post_high_road_phase
+            && self.tower_b2_row_stage == 1
+            && !self.tower_b2_first_row_phase_ready
+            && player.status_a & 1 != 0
+        {
+            let source_x = self
+                .tower_b2_row_target
+                .and_then(|target| objects.iter().find(|object| object.object == target))
+                .map(|object| object.translation[0]);
+            if source_x.is_some_and(|source_x| player.translation[0].abs_diff(source_x) <= 20_000) {
+                self.tower_b2_first_row_phase_ready = true;
+            } else if let Some(source_x) = source_x {
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return if player.translation[0] < source_x {
+                    PAD_RIGHT
+                } else {
+                    PAD_LEFT
+                };
+            }
+        }
+        let tower_b2_first_row_exit_x = if self.post_high_road_phase {
+            4_700_000
+        } else {
+            4_800_000
+        };
         if self.tower_b2_row_stage == 1
             && player.status_a & 1 != 0
-            && player.translation[0] < 4_800_000
+            && player.translation[0] < tower_b2_first_row_exit_x
             && player.translation[1] >= -5_550_000
         {
             self.jump_hold = 0;
@@ -26078,7 +26273,7 @@ impl SlipperyClimbCompletionRouteController {
         }
         if self.tower_b2_row_stage == 1
             && player.status_a & 1 != 0
-            && player.translation[0] >= 4_800_000
+            && player.translation[0] >= tower_b2_first_row_exit_x
             && player.translation[1] >= -5_550_000
         {
             self.tower_b2_row_stage = 2;
@@ -26296,7 +26491,12 @@ impl SlipperyClimbCompletionRouteController {
         if self.tower_b2_row_stage == 11
             && upper
             && player.status_a & 1 != 0
-            && player.translation[0] >= 5_750_000
+            && player.translation[0]
+                >= if self.post_high_road_phase {
+                    5_800_000
+                } else {
+                    5_750_000
+                }
         {
             self.tower_b2_row_stage = 12;
             self.tower_b2_row_tick = 0;
@@ -26476,7 +26676,7 @@ impl SlipperyClimbCompletionRouteController {
                     .upper_h3_ledge_last_y
                     .is_some_and(|last_y| ledge.translation[1] < last_y);
                 self.upper_h3_ledge_last_y = Some(ledge.translation[1]);
-                let ledge_y_ready = if self.session_globals {
+                let ledge_y_ready = if self.session_globals && !self.post_high_road_phase {
                     (-3_150_000..=-3_050_000).contains(&ledge.translation[1])
                 } else {
                     (-3_250_000..=-3_150_000).contains(&ledge.translation[1])
@@ -26701,6 +26901,14 @@ impl SlipperyClimbCompletionRouteController {
         {
             return PAD_LEFT;
         }
+        if self.post_high_road_phase
+            && self.tower_b2_row_stage == 20
+            && upper
+            && (18_050_000..18_250_000).contains(&player.translation[0])
+            && player.velocity[1] < -500_000
+        {
+            return PAD_LEFT;
+        }
         let lab_assistant = Eid::from_name("LabAC").expect("fixed laboratory-assistant EID");
         if self.session_globals
             && self.tower_b2_row_stage == 21
@@ -26784,6 +26992,21 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
             return PAD_RIGHT;
+        }
+        if self.post_high_road_phase
+            && self.tower_b2_row_stage == 21
+            && player.status_a & 1 != 0
+            && ((14_800_000..15_200_000).contains(&player.translation[0])
+                || (18_450_000..18_750_000).contains(&player.translation[0]))
+            && player.velocity[0].unsigned_abs() > 100_000
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return if player.velocity[0] > 0 {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
         }
         if self.tower_b2_row_stage == 23 {
             if self.tower_b2_row_tick < 1 {
@@ -27085,6 +27308,15 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
             return 0;
+        }
+        if self.post_high_road_phase
+            && self.tower_wall_step == 3
+            && player.status_a & 1 != 0
+            && player.velocity[0] < -100_000
+        {
+            self.jump_hold = 0;
+            self.vertical_jump_released = true;
+            return PAD_RIGHT;
         }
         if self.session_globals
             && self.tower_wall_step >= 4
@@ -41074,6 +41306,8 @@ impl SurveyInputController {
             },
             slippery_climb: SlipperyClimbCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                post_high_road_phase: false,
+                opening_casoc_cleared: false,
                 first_lift_corrected: false,
                 first_lift_correction_frames: 0,
                 jump_hold: 0,
@@ -41095,6 +41329,7 @@ impl SurveyInputController {
                 lower_d1_runup_stage: 0,
                 lower_d1_phase_last_y: None,
                 lower_d1_phase_ready: false,
+                lower_d1_slab_brake_frames: 0,
                 lower_corner_runup_stage: 0,
                 lower_e4_brake_applied: false,
                 lower_e4_brake_frames: 0,
@@ -41122,6 +41357,7 @@ impl SurveyInputController {
                 tower_third_spin_tick: 0,
                 tower_wall_step: 0,
                 tower_wall_wait: 0,
+                tower_first_wall_phase_ready: false,
                 tower_depth_lane_ready: false,
                 tower_platform_launch_released: false,
                 tower_top_lift_staged: false,
@@ -41147,6 +41383,7 @@ impl SurveyInputController {
                 tower_b2_row_landed: false,
                 tower_b2_row_stage: 0,
                 tower_b2_row_tick: 0,
+                tower_b2_first_row_phase_ready: false,
                 upper_m2_flip_bounced: false,
                 upper_m1_lift_last_y: None,
                 upper_m1_lift_phase_ready: false,
@@ -44010,6 +44247,10 @@ fn survey_pair_with_runtime(
     input_profile: SurveyInputProfile,
     survey_frames: u32,
 ) -> Result<(LevelSurvey, RetailRuntime), String> {
+    let post_high_road_slippery_phase = context_source == LevelContextSource::SessionGlobals
+        && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
+        && runtime.machine().random_seed() == 0x8757_f779
+        && runtime.draw_count() == 52_539;
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
@@ -44210,6 +44451,7 @@ fn survey_pair_with_runtime(
         drain_reclaim_diagnostics(&mut runtime, &mut survey, 0);
     }
     let mut input_controller = SurveyInputController::new(input_profile, context_source);
+    input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     let mut empty_frames = 0_u32;
     let mut held_previous = 0_u32;
     let mut held_previous_2 = 0_u32;

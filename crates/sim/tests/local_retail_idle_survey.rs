@@ -89,6 +89,11 @@ const EMPTY_TERMINAL_WINDOW: u32 = 8;
 const TITLE_MAP_DISPLAY_MASK: u32 = 0x20_ffff;
 const ISLAND_SELECTED_MAP_LEVEL_REGISTER: usize = 80;
 const ISLAND_SELECTED_LID_REGISTER: usize = 81;
+// Exact inherited clocks at the two phase-sensitive late-campaign hazards.
+// Other direct and deliberately perturbed carried fixtures retain their
+// original controllers, which are already characterized independently.
+const AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 61_045;
+const AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT: u32 = 70_396;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
 ];
@@ -20568,7 +20573,9 @@ impl HeavyMachineryCompletionRouteController {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LabCompletionRouteController {
+    authentic_campaign_phase: bool,
     route_delay: u32,
+    first_rods_pre_wait: u8,
     first_rods_waiting: bool,
     first_rods_active_seen: bool,
     first_rods_cleared: bool,
@@ -20586,6 +20593,14 @@ impl LabCompletionRouteController {
         route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         let route_frame = frame.saturating_sub(self.route_delay);
+        if self.authentic_campaign_phase && route_frame == 440 && self.first_rods_pre_wait < 70 {
+            // The authentic campaign carry reaches the first door just as its
+            // inherited rod cycle begins. Wait on the preceding solid floor,
+            // then replay the original center-line run after the rods retract.
+            self.first_rods_pre_wait += 1;
+            self.route_delay = self.route_delay.saturating_add(1);
+            return 0;
+        }
         if !self.first_rods_cleared {
             let rods = route_objects.iter().filter(|object| {
                 object.program.name().as_deref() == Some("PoRoC")
@@ -23001,9 +23016,14 @@ impl UpstreamRecoveryRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 struct CastleMachineryCompletionRouteController {
+    authentic_campaign_phase: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
+    a6_rod_wait_started: bool,
+    a6_rod_low_seen: bool,
+    a6_rod_released: bool,
+    a6_rod_jump_pending: bool,
     a7_entered: bool,
     a7_takeoff_fired: bool,
     a7_rod_wait_started: bool,
@@ -23021,6 +23041,7 @@ struct CastleMachineryCompletionRouteController {
     b3_piston_jump_started: bool,
     b3_piston_low_seen: bool,
     b3_piston_high_seen: bool,
+    b4_obstacle_stage: u8,
     b5_first_lower_landed: bool,
     b5_rod_left_seen: bool,
     b5_lower_crossing_started: bool,
@@ -23030,6 +23051,8 @@ struct CastleMachineryCompletionRouteController {
     b6_second_hazard_jump_started: bool,
     b7_electric_gate_released: bool,
     b7_platform_stage: u8,
+    c0_entry_rod_high_seen: bool,
+    c0_entry_rod_released: bool,
     c1_electric_stage: u8,
     c6_floor_stage: u8,
     c9_approach_run_frames: u8,
@@ -23976,6 +23999,11 @@ impl CastleMachineryCompletionRouteController {
             self.jump_frames = 0;
             self.release_frames = 0;
             let player = player.expect("Castle Machinery player is present after reactor release");
+            let reactor_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 66)
+                    .then_some(object.translation[1])
+            });
+            self.a8_reactor_low_seen |= reactor_y.is_some_and(|y| y <= -7_240_000);
             let horizontal = if player.velocity[0] < -80_000 || player.translation[0] < 6_340_000 {
                 PAD_RIGHT
             } else if player.velocity[0] > 80_000 || player.translation[0] > 6_380_000 {
@@ -23992,6 +24020,11 @@ impl CastleMachineryCompletionRouteController {
                     0
                 };
                 return horizontal | depth;
+            }
+            if self.authentic_campaign_phase
+                && !(self.a8_reactor_low_seen && reactor_y.is_some_and(|y| y >= -7_080_000))
+            {
+                return horizontal;
             }
             let depth = if player.velocity[2] > 80_000 || player.translation[2] > 110_000 {
                 PAD_UP
@@ -24406,6 +24439,39 @@ impl CastleMachineryCompletionRouteController {
                 0
             };
             return horizontal;
+        }
+        if self.authentic_campaign_phase && name == "b4_TZ" && self.b4_obstacle_stage <= 1 {
+            let player =
+                player.expect("Castle Machinery carried obstacle corridor keeps Crash live");
+            if self.b4_obstacle_stage == 0 && player.translation[0] >= 5_950_000 {
+                self.b4_obstacle_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+            if self.b4_obstacle_stage == 1 {
+                if player_collider_entity == Some(71) && player.status_a & 1 != 0 {
+                    self.b4_obstacle_stage = 2;
+                    self.jump_frames = 29;
+                    return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                }
+                let predicted_x =
+                    i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+                return if predicted_x < 6_075_000 {
+                    PAD_RIGHT
+                } else if predicted_x > 6_105_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.authentic_campaign_phase
+            && name == "b4_TZ"
+            && self.b4_obstacle_stage == 2
+            && self.jump_frames != 0
+        {
+            self.jump_frames -= 1;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
         }
         if name == "b5_TZ" && index == 3 && self.b5_first_lower_landed {
             self.jump_frames = 0;
@@ -24849,6 +24915,38 @@ impl CastleMachineryCompletionRouteController {
             }
             return PAD_LEFT;
         }
+        if self.authentic_campaign_phase
+            && name == "C0_TZ"
+            && index == 1
+            && self.b7_platform_stage == 13
+            && !self.c0_entry_rod_released
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player = player.expect("Castle Machinery carried upper corridor keeps Crash live");
+            let rod_y = route_objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 143)
+                    .then_some(object.translation[1])
+            });
+            self.c0_entry_rod_high_seen |= rod_y.is_some_and(|y| y >= -50_000);
+            if self.c0_entry_rod_high_seen
+                && rod_y.is_some_and(|y| y <= -220_000)
+                && player.status_a & 1 != 0
+            {
+                self.c0_entry_rod_released = true;
+                self.jump_frames = 29;
+                return PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+            }
+            let predicted_x =
+                i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+            return if predicted_x > 9_980_000 {
+                PAD_LEFT
+            } else if predicted_x < 9_940_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+        }
         if name == "c1_TZ" && index == 1 && self.b7_platform_stage == 13 {
             let player = player.expect("Castle Machinery upper electric corridor keeps Crash live");
             let obstacle_state = |id| {
@@ -25113,6 +25211,25 @@ impl CastleMachineryCompletionRouteController {
             }
             self.c6_floor_stage = 5;
             return PAD_RIGHT | PAD_SQUARE;
+        }
+        if self.authentic_campaign_phase
+            && name == "C8_TZ"
+            && index == 0
+            && player.is_some_and(|player| player.translation[0] >= 6_600_000)
+        {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let player =
+                player.expect("Castle Machinery carried final shaft approach keeps Crash live");
+            let predicted_x =
+                i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+            return if predicted_x < 6_720_000 {
+                PAD_RIGHT
+            } else if predicted_x > 6_750_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
         }
         if ((name == "C8_TZ" && index == 1) || (name == "c8_TZ" && index == 2))
             && player.is_some_and(|player| {
@@ -25524,6 +25641,45 @@ impl CastleMachineryCompletionRouteController {
                 } else {
                     0
                 };
+        }
+        if self.authentic_campaign_phase && name == "a6_TZ" && !self.a6_rod_released {
+            let player = player.expect("Castle Machinery first reactor corridor keeps Crash live");
+            self.a6_rod_wait_started |= player.translation[0] <= 10_350_000;
+            if self.a6_rod_wait_started {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let rod_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 62)
+                        .then_some(object.translation[1])
+                });
+                self.a6_rod_low_seen |= rod_y.is_some_and(|y| y <= -7_430_000);
+                if self.a6_rod_low_seen && rod_y.is_some_and(|y| y >= -7_130_000) {
+                    self.a6_rod_released = true;
+                    self.a6_rod_jump_pending = true;
+                    self.jump_frames = 0;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_UP | PAD_SQUARE;
+                }
+                let horizontal =
+                    if player.translation[0] < 10_220_000 || player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 10_280_000 || player.velocity[0] > 80_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                return horizontal | PAD_UP;
+            }
+        }
+        if self.authentic_campaign_phase && name == "a6_TZ" && self.a6_rod_jump_pending {
+            let player = player.expect("Castle Machinery first reactor approach keeps Crash live");
+            if player.translation[0] <= 9_980_000 && player.status_a & 1 != 0 {
+                self.a6_rod_jump_pending = false;
+                self.jump_frames = 20;
+                self.release_frames = 5;
+                return PAD_LEFT | PAD_UP | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_LEFT | PAD_UP;
         }
         if matches!(name.as_str(), "a1_TZ" | "a2_TZ" | "a3_TZ" | "a4_TZ") {
             return movement;
@@ -41248,8 +41404,13 @@ struct SurveyInputController {
 }
 
 impl SurveyInputController {
-    fn new(profile: SurveyInputProfile, context_source: LevelContextSource) -> Self {
+    fn new(
+        profile: SurveyInputProfile,
+        context_source: LevelContextSource,
+        initial_draw_count: u32,
+    ) -> Self {
         let bonus_return = matches!(context_source, LevelContextSource::BonusReturn);
+        let session_globals = matches!(context_source, LevelContextSource::SessionGlobals);
         Self {
             profile,
             n_sanity: NSanityRouteController {
@@ -41530,9 +41691,15 @@ impl SurveyInputController {
                 c6_steer_frames: 0,
             },
             castle_machinery: CastleMachineryCompletionRouteController {
+                authentic_campaign_phase: session_globals
+                    && initial_draw_count == AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT,
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
+                a6_rod_wait_started: false,
+                a6_rod_low_seen: false,
+                a6_rod_released: false,
+                a6_rod_jump_pending: false,
                 a7_entered: false,
                 a7_takeoff_fired: false,
                 a7_rod_wait_started: false,
@@ -41550,6 +41717,7 @@ impl SurveyInputController {
                 b3_piston_jump_started: false,
                 b3_piston_low_seen: false,
                 b3_piston_high_seen: false,
+                b4_obstacle_stage: 0,
                 b5_first_lower_landed: false,
                 b5_rod_left_seen: false,
                 b5_lower_crossing_started: false,
@@ -41559,6 +41727,8 @@ impl SurveyInputController {
                 b6_second_hazard_jump_started: false,
                 b7_electric_gate_released: false,
                 b7_platform_stage: 0,
+                c0_entry_rod_high_seen: false,
+                c0_entry_rod_released: false,
                 c1_electric_stage: 0,
                 c6_floor_stage: 0,
                 c9_approach_run_frames: 0,
@@ -41927,7 +42097,10 @@ impl SurveyInputController {
                 potion_phase_complete: false,
             },
             lab: LabCompletionRouteController {
+                authentic_campaign_phase: session_globals
+                    && initial_draw_count == AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT,
                 route_delay: 0,
+                first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
                 first_rods_cleared: false,
@@ -41978,7 +42151,11 @@ impl SurveyInputController {
             self.cortex_power = CortexPowerCompletionRouteController::default();
         }
         if self.profile == SurveyInputProfile::CastleMachineryCompletionRoute {
-            self.castle_machinery = CastleMachineryCompletionRouteController::default();
+            let authentic_campaign_phase = self.castle_machinery.authentic_campaign_phase;
+            self.castle_machinery = CastleMachineryCompletionRouteController {
+                authentic_campaign_phase,
+                ..CastleMachineryCompletionRouteController::default()
+            };
         }
         if self.profile == SurveyInputProfile::SlipperyClimbCompletionRoute {
             let session_globals = self.slippery_climb.session_globals;
@@ -41988,8 +42165,11 @@ impl SurveyInputController {
             };
         }
         if self.profile == SurveyInputProfile::LabCompletionRoute {
+            let authentic_campaign_phase = self.lab.authentic_campaign_phase;
             self.lab = LabCompletionRouteController {
+                authentic_campaign_phase,
                 route_delay: 0,
+                first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
                 first_rods_cleared: false,
@@ -44758,7 +44938,8 @@ fn survey_pair_with_runtime(
         }
         drain_reclaim_diagnostics(&mut runtime, &mut survey, 0);
     }
-    let mut input_controller = SurveyInputController::new(input_profile, context_source);
+    let mut input_controller =
+        SurveyInputController::new(input_profile, context_source, runtime.draw_count());
     input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     let mut empty_frames = 0_u32;
     let mut held_previous = 0_u32;
@@ -45576,6 +45757,7 @@ fn survey_pair_with_runtime(
                 | SurveyInputProfile::CortexPowerCompletionRoute
                 | SurveyInputProfile::GeneratorRoomCompletionRoute
                 | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                | SurveyInputProfile::CastleMachineryCompletionRoute
                 | SurveyInputProfile::LabCompletionRoute
                 | SurveyInputProfile::SunsetVistaCompletionRoute
                 | SurveyInputProfile::SunsetVistaCortexBonusRoute
@@ -46271,6 +46453,21 @@ fn campaign_progression_globals(runtime: &RetailRuntime) -> [u32; 7] {
     })
 }
 
+fn assert_ordinary_completion_input(survey: &LevelSurvey, level_name: &str) {
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert!(
+        !survey.pad_change_samples.is_empty(),
+        "{level_name} must receive ordinary pad input"
+    );
+    assert!(
+        survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "{level_name} must use only directional, jump, and spin input"
+    );
+}
+
 fn carry_completion_to_title(
     completion: &CampaignPair,
     carry: RetailSessionCarry,
@@ -46504,13 +46701,20 @@ fn pinstripe_post_toxic_carried_matrix_reaches_authored_title_transition() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn jaws_of_darkness_authentic_post_lights_carry_reaches_authored_end_warp() {
+fn authentic_post_lights_campaign_tail_reaches_ending_and_returns_to_title() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
     );
     let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
     let jaws_of_darkness = CampaignPair::parse(&root, LevelId::new_const(0x1d));
+    let castle_machinery = CampaignPair::parse(&root, LevelId::new_const(0x37));
+    let dr_n_brio = CampaignPair::parse(&root, LevelId::new_const(0x1b));
+    let lab = CampaignPair::parse(&root, LevelId::new_const(0x29));
+    let great_hall = CampaignPair::parse(&root, LevelId::new_const(0x2c));
+    let dr_neo_cortex = CampaignPair::parse(&root, LevelId::new_const(0x1f));
+    let ending = CampaignPair::parse(&root, LevelId::ENDING);
 
     // These RNG streams and draw count are the exact title-map carry produced
     // after the focused post-Slippery baseline completes Lights Out.
@@ -46665,6 +46869,461 @@ fn jaws_of_darkness_authentic_post_lights_carry_reaches_authored_end_warp() {
     assert!(
         survey.is_clean(),
         "carried Jaws end-warp route must remain clean: {summary}"
+    );
+
+    let jaws_completion_carry = jaws_of_darkness.finish_checked(runtime, LevelId::LEVEL_COMPLETE);
+    let post_jaws_title = carry_completion_to_title(
+        &completion,
+        jaws_completion_carry,
+        [0x300, 15, 15, 26, 1, 27, 0],
+    );
+    let castle_carry = carry_map_to_next_level(
+        &title,
+        post_jaws_title,
+        castle_machinery.level,
+        [0, 15, 15, 27, 1, 27, 1],
+    );
+    assert_eq!(
+        castle_carry.draw_count,
+        AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT
+    );
+    let (castle_survey, castle_runtime) = castle_machinery.run_carried(
+        castle_carry,
+        SurveyInputProfile::CastleMachineryCompletionRoute,
+        7_500,
+    );
+    let castle_summary = castle_survey.summary();
+    assert_eq!(castle_survey.frames, 6_457, "{castle_summary}");
+    assert_eq!(castle_survey.next_lid, Some((6_457, 0x2d)));
+    assert_eq!(
+        castle_survey.terminal.as_deref(),
+        Some("frame 6457 requested level transition to 0x2d")
+    );
+    assert_eq!(castle_survey.zone_transitions, 57);
+    assert_eq!(castle_survey.camera_ranges.len(), 104);
+    assert_eq!(castle_survey.camera_path_changes, 118);
+    assert_eq!(castle_survey.last_camera_path_change, 6_338);
+    assert_eq!(castle_survey.last_camera_progress_change, 6_367);
+    let castle_final_camera = castle_survey
+        .final_camera
+        .expect("carried Castle Machinery must retain its end-warp camera");
+    assert_eq!(
+        castle_final_camera.path,
+        RetailPathId {
+            zone: Eid::from_raw(471_325_691),
+            index: 1,
+        }
+    );
+    assert_eq!(castle_final_camera.progress.raw(), 12_545);
+    assert_eq!(castle_survey.restarts, 0, "{castle_summary}");
+    assert!(castle_survey.restart_frames.is_empty());
+    assert_eq!(castle_survey.death_camera_frames, 0);
+    assert_eq!(castle_survey.death_camera_pose_changes, 0);
+    assert_eq!(castle_survey.death_camera_max_count, 0);
+    assert!(castle_survey.first_death_camera_pose.is_none());
+    assert!(castle_survey.last_death_camera_pose.is_none());
+    assert_eq!(castle_survey.successful_spawns, 242);
+    assert_eq!(castle_survey.spawn_attempts, 93_591);
+    assert_eq!(castle_survey.expected_spawn_rejections, 93_349);
+    assert_eq!(castle_survey.unexpected_spawn_errors, 0);
+    assert_eq!(castle_survey.executions, 135_728);
+    assert_eq!(castle_survey.execution_errors, 0);
+    assert_eq!(castle_survey.final_live_objects, 41);
+    assert_eq!(castle_survey.max_live_objects, 43);
+    assert_eq!(castle_survey.faulted_objects, 0);
+    assert!(castle_survey.issue_counts.is_empty(), "{castle_summary}");
+    assert!(castle_survey.first_issue.is_none());
+    assert!(castle_survey.fault_contexts.is_empty());
+    assert_eq!(
+        castle_survey.checkpoint_samples,
+        [
+            (1, -1, [15_360_000, 1_433_088, 27_238_400]),
+            (2_365, 29_696, [9_727_232, -6_349_312, 92_160]),
+        ]
+    );
+    assert_eq!(
+        castle_survey.box_count_samples,
+        [
+            (1, 0),
+            (1_877, 256),
+            (2_365, 512),
+            (3_233, 768),
+            (3_236, 1_024),
+            (4_088, 1_280),
+            (4_868, 1_536),
+            (4_888, 1_792),
+            (4_908, 2_048),
+        ]
+    );
+    assert_eq!(castle_survey.saved_box_count_samples, [(2_365, 256)]);
+    assert_eq!(castle_survey.save_handshakes, 0);
+    assert_eq!(castle_survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(
+        castle_survey.effect_counts.get("master-fade-reset"),
+        Some(&1)
+    );
+    assert_eq!(castle_survey.effect_counts.get("transition"), Some(&1));
+    assert!(!castle_survey.effect_counts.contains_key("load-state"));
+    let ordinary_pad_mask = PAD_UP | PAD_RIGHT | PAD_DOWN | PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+    assert_eq!(
+        castle_survey.pad_change_samples.first(),
+        Some(&(1, PAD_RIGHT))
+    );
+    assert!(
+        castle_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & !ordinary_pad_mask == 0),
+        "the carried Castle route must use only ordinary directional, jump, and spin input"
+    );
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            castle_survey
+                .observed_program_states
+                .contains(&(warp, state)),
+            "Castle Machinery WarpC state {state} must execute"
+        );
+    }
+    assert_eq!(
+        castle_survey.initial_player_translation,
+        Some([11_161_600, -256, 102_400])
+    );
+    assert_eq!(
+        castle_survey.final_player_translation,
+        Some([12_185_558, 3_717_863, 146_588])
+    );
+    assert_eq!(
+        castle_survey.player_minimum,
+        Some([2_901_532, -7_430_092, 43_008])
+    );
+    assert_eq!(
+        castle_survey.player_maximum,
+        Some([19_919_966, 3_717_863, 551_324])
+    );
+    assert_eq!(castle_survey.last_player_movement, 6_453);
+    let castle_player = player_trace(&castle_runtime)
+        .expect("carried Castle Machinery completion player trace must resolve")
+        .expect("Castle Machinery WarpC retains Crash through the transition");
+    assert_eq!(castle_player.state, 32);
+    assert_eq!(castle_player.event, 0x1600);
+    assert_eq!(castle_player.translation, [12_185_558, 3_717_863, 146_588]);
+    assert_eq!(castle_runtime.machine().random_seed(), 0xf8fc_41bf);
+    assert_eq!(castle_runtime.draw_count(), 67_502);
+    assert_eq!(
+        campaign_progression_globals(&castle_runtime),
+        [0x500, 15, 15, 27, 1, 28, 0]
+    );
+    assert!(
+        castle_survey.is_clean(),
+        "authentic carried Castle route must remain clean: {castle_summary}"
+    );
+
+    let castle_completion_carry =
+        castle_machinery.finish_checked(castle_runtime, LevelId::LEVEL_COMPLETE);
+    let post_castle_title = carry_completion_to_title(
+        &completion,
+        castle_completion_carry,
+        [0x300, 15, 15, 27, 1, 28, 0],
+    );
+    let brio_carry = carry_map_to_next_level(
+        &title,
+        post_castle_title,
+        dr_n_brio.level,
+        [0, 15, 15, 28, 1, 28, 1],
+    );
+    let (brio_survey, brio_runtime) =
+        dr_n_brio.run_carried(brio_carry, SurveyInputProfile::BrioCompletionRoute, 3_000);
+    let brio_summary = brio_survey.summary();
+    assert_eq!(brio_survey.frames, 2_115, "{brio_summary}");
+    assert_eq!(brio_survey.next_lid, Some((2_115, 0x19)));
+    assert_eq!(brio_survey.zone_transitions, 0);
+    assert_eq!(brio_survey.camera_ranges.len(), 3);
+    assert_eq!(brio_survey.camera_path_changes, 16);
+    assert_eq!(brio_survey.last_camera_path_change, 1_136);
+    assert_eq!(brio_survey.last_camera_progress_change, 1_933);
+    assert_eq!(brio_survey.successful_spawns, 4);
+    assert_eq!(brio_survey.spawn_attempts, 8_460);
+    assert_eq!(brio_survey.expected_spawn_rejections, 8_456);
+    assert_eq!(brio_survey.executions, 51_308);
+    assert_eq!(brio_survey.execution_errors, 0);
+    assert_eq!(brio_survey.final_live_objects, 31);
+    assert_eq!(brio_survey.max_live_objects, 97);
+    assert_eq!(brio_survey.restarts, 0, "{brio_summary}");
+    assert_eq!(brio_survey.death_camera_frames, 0, "{brio_summary}");
+    assert!(brio_survey.first_terminal_fall.is_none(), "{brio_summary}");
+    assert_eq!(
+        brio_survey.checkpoint_samples,
+        [(1, -1, [9_727_232, -6_349_312, 92_160])]
+    );
+    assert_eq!(brio_survey.box_count_samples, [(1, 0)]);
+    assert_eq!(
+        brio_survey.initial_player_translation,
+        Some([204_800, -256, -205_568])
+    );
+    assert_eq!(
+        brio_survey.final_player_translation,
+        Some([131_072, 239_118, 453_888])
+    );
+    assert_eq!(brio_survey.player_minimum, Some([-344_064, -256, -455_424]));
+    assert_eq!(
+        brio_survey.player_maximum,
+        Some([307_200, 500_956, 453_888])
+    );
+    assert_eq!(brio_survey.last_player_movement, 2_036);
+    assert_eq!(brio_survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(brio_runtime.machine().random_seed(), 0xa731_2fb4);
+    assert_eq!(brio_runtime.draw_count(), 70_143);
+    assert_eq!(
+        campaign_progression_globals(&brio_runtime),
+        [0x300, 15, 15, 28, 1, 29, 0]
+    );
+    assert_ordinary_completion_input(&brio_survey, dr_n_brio.name);
+    assert!(brio_survey.is_clean(), "{brio_summary}");
+    let post_brio_title = dr_n_brio.finish_checked(brio_runtime, LevelId::TITLE);
+
+    let lab_carry = carry_map_to_next_level(
+        &title,
+        post_brio_title,
+        lab.level,
+        [0, 15, 15, 29, 1, 29, 1],
+    );
+    assert_eq!(lab_carry.draw_count, AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT);
+    let (lab_survey, lab_runtime) =
+        lab.run_carried(lab_carry, SurveyInputProfile::LabCompletionRoute, 3_500);
+    let lab_summary = lab_survey.summary();
+    assert_eq!(lab_survey.frames, 2_855, "{lab_summary}");
+    assert_eq!(lab_survey.next_lid, Some((2_855, 0x2d)));
+    assert_eq!(
+        lab_survey.terminal.as_deref(),
+        Some("frame 2855 requested level transition to 0x2d")
+    );
+    assert_eq!(lab_survey.zone_transitions, 27);
+    assert_eq!(lab_survey.camera_ranges.len(), 28);
+    assert_eq!(lab_survey.camera_path_changes, 27);
+    assert_eq!(lab_survey.last_camera_path_change, 2_662);
+    assert_eq!(lab_survey.last_camera_progress_change, 2_766);
+    assert_eq!(lab_survey.successful_spawns, 97);
+    assert_eq!(lab_survey.spawn_attempts, 30_290);
+    assert_eq!(lab_survey.expected_spawn_rejections, 30_193);
+    assert_eq!(lab_survey.unexpected_spawn_errors, 0);
+    assert_eq!(lab_survey.executions, 70_861);
+    assert_eq!(lab_survey.execution_errors, 0);
+    assert_eq!(lab_survey.final_live_objects, 58);
+    assert_eq!(lab_survey.max_live_objects, 68);
+    assert_eq!(lab_survey.faulted_objects, 0);
+    assert_eq!(lab_survey.restarts, 0, "{lab_summary}");
+    assert!(lab_survey.restart_frames.is_empty());
+    assert_eq!(lab_survey.death_camera_frames, 0, "{lab_summary}");
+    assert!(lab_survey.first_below_zero.is_none());
+    assert!(lab_survey.first_terminal_fall.is_none(), "{lab_summary}");
+    assert_eq!(
+        lab_survey.checkpoint_samples,
+        [(1, -1, [9_727_232, -6_349_312, 92_160])]
+    );
+    assert_eq!(
+        lab_survey.box_count_samples,
+        [
+            (1, 0),
+            (844, 0x100),
+            (972, 0x200),
+            (1_892, 0x300),
+            (2_327, 0x400),
+            (2_837, 0x500),
+            (2_838, 0x600),
+            (2_839, 0x700),
+        ]
+    );
+    assert_eq!(lab_survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(lab_survey.effect_counts.get("transition"), Some(&1));
+    assert!(!lab_survey.effect_counts.contains_key("load-state"));
+    assert_eq!(
+        lab_survey.initial_player_translation,
+        Some([2_048_000, 1_024_000, 31_948_800])
+    );
+    assert_eq!(
+        lab_survey.final_player_translation,
+        Some([2_025_472, 4_748_377, -3_078_144])
+    );
+    assert_eq!(
+        lab_survey.player_minimum,
+        Some([1_579_008, 975_712, -3_078_144])
+    );
+    assert_eq!(
+        lab_survey.player_maximum,
+        Some([2_459_648, 4_748_377, 31_948_800])
+    );
+    assert_eq!(lab_survey.last_player_movement, 2_851);
+    let lab_player = player_trace(&lab_runtime)
+        .expect("authentic carried Lab player trace must resolve")
+        .expect("The Lab WarpC retains Crash through the transition");
+    assert_eq!(
+        lab_player.zone,
+        Eid::from_name("d1_FZ").expect("fixed Lab end-warp EID is valid")
+    );
+    assert_eq!(lab_player.state, 32);
+    assert_eq!(lab_player.event, 0x0f00);
+    assert_eq!(lab_player.translation, [2_025_472, 4_748_377, -3_078_144]);
+    assert_eq!(lab_runtime.machine().random_seed(), 0xc63a_2bb8);
+    assert_eq!(lab_runtime.draw_count(), 73_251);
+    assert_eq!(
+        campaign_progression_globals(&lab_runtime),
+        [0x500, 15, 15, 29, 1, 30, 0]
+    );
+    assert_ordinary_completion_input(&lab_survey, lab.name);
+    assert!(lab_survey.is_clean(), "{lab_summary}");
+    let lab_completion_carry = lab.finish_checked(lab_runtime, LevelId::LEVEL_COMPLETE);
+    let post_lab_title = carry_completion_to_title(
+        &completion,
+        lab_completion_carry,
+        [0x300, 15, 15, 29, 1, 30, 0],
+    );
+
+    let great_hall_carry = carry_map_to_next_level(
+        &title,
+        post_lab_title,
+        great_hall.level,
+        [0, 15, 15, 30, 1, 30, 1],
+    );
+    let (great_hall_survey, great_hall_runtime) = great_hall.run_carried(
+        great_hall_carry,
+        SurveyInputProfile::GreatHallCortexRoute,
+        1_200,
+    );
+    let great_hall_summary = great_hall_survey.summary();
+    assert_eq!(great_hall_survey.frames, 216, "{great_hall_summary}");
+    assert_eq!(great_hall_survey.next_lid, Some((216, 0x19)));
+    assert_eq!(great_hall_survey.zone_transitions, 0);
+    assert_eq!(great_hall_survey.camera_ranges.len(), 1);
+    assert_eq!(great_hall_survey.camera_path_changes, 0);
+    assert_eq!(great_hall_survey.last_camera_progress_change, 111);
+    assert_eq!(great_hall_survey.successful_spawns, 6);
+    assert_eq!(great_hall_survey.spawn_attempts, 1_296);
+    assert_eq!(great_hall_survey.expected_spawn_rejections, 1_290);
+    assert_eq!(great_hall_survey.executions, 4_360);
+    assert_eq!(great_hall_survey.execution_errors, 0);
+    assert_eq!(great_hall_survey.final_live_objects, 19);
+    assert_eq!(great_hall_survey.max_live_objects, 24);
+    assert_eq!(great_hall_survey.restarts, 0, "{great_hall_summary}");
+    assert_eq!(
+        great_hall_survey.death_camera_frames, 0,
+        "{great_hall_summary}"
+    );
+    assert!(great_hall_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        great_hall_survey.initial_player_translation,
+        Some([2_047_232, 1_024_000, 32_101_888])
+    );
+    assert_eq!(
+        great_hall_survey.final_player_translation,
+        Some([2_047_232, 4_748_375, 31_108_608])
+    );
+    assert_eq!(
+        great_hall_survey.player_minimum,
+        Some([2_047_232, 990_492, 31_108_608])
+    );
+    assert_eq!(
+        great_hall_survey.player_maximum,
+        Some([2_047_232, 4_748_375, 32_101_888])
+    );
+    assert_eq!(great_hall_survey.last_player_movement, 212);
+    assert_eq!(great_hall_survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(great_hall_runtime.machine().random_seed(), 0x5c20_7332);
+    assert_eq!(great_hall_runtime.draw_count(), 73_993);
+    assert_eq!(
+        campaign_progression_globals(&great_hall_runtime),
+        [0x300, 15, 15, 30, 1, 31, 0]
+    );
+    assert_ordinary_completion_input(&great_hall_survey, great_hall.name);
+    assert!(great_hall_survey.is_clean(), "{great_hall_summary}");
+    let post_great_hall_title = great_hall.finish_checked(great_hall_runtime, LevelId::TITLE);
+
+    let cortex_carry = carry_map_to_next_level(
+        &title,
+        post_great_hall_title,
+        dr_neo_cortex.level,
+        [0, 15, 15, 31, 1, 31, 1],
+    );
+    let (cortex_survey, cortex_runtime) = dr_neo_cortex.run_carried(
+        cortex_carry,
+        SurveyInputProfile::CortexCompletionRoute,
+        4_500,
+    );
+    let cortex_summary = cortex_survey.summary();
+    assert_eq!(cortex_survey.frames, 3_612, "{cortex_summary}");
+    assert_eq!(cortex_survey.next_lid, Some((3_612, 0x39)));
+    assert_eq!(
+        cortex_survey.terminal.as_deref(),
+        Some("frame 3612 requested level transition to 0x39")
+    );
+    assert_eq!(cortex_survey.zone_transitions, 0);
+    assert_eq!(cortex_survey.camera_ranges.len(), 8);
+    assert_eq!(cortex_survey.camera_path_changes, 26);
+    assert_eq!(cortex_survey.successful_spawns, 7);
+    assert_eq!(cortex_survey.spawn_attempts, 25_284);
+    assert_eq!(cortex_survey.expected_spawn_rejections, 25_277);
+    assert_eq!(cortex_survey.executions, 157_613);
+    assert_eq!(cortex_survey.execution_errors, 0);
+    assert_eq!(cortex_survey.final_live_objects, 47);
+    assert_eq!(cortex_survey.max_live_objects, 97);
+    assert_eq!(cortex_survey.restarts, 0, "{cortex_summary}");
+    assert_eq!(cortex_survey.death_camera_frames, 0, "{cortex_summary}");
+    assert!(
+        cortex_survey.first_terminal_fall.is_none(),
+        "{cortex_summary}"
+    );
+    assert_eq!(
+        cortex_survey.initial_player_translation,
+        Some([0, 655_360, 5_734_400])
+    );
+    assert_eq!(
+        cortex_survey.final_player_translation,
+        Some([-12_288, 897_838, 5_734_400])
+    );
+    assert_eq!(cortex_survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(cortex_runtime.machine().random_seed(), 0x4dd9_7720);
+    assert_eq!(cortex_runtime.draw_count(), 77_858);
+    assert_eq!(
+        campaign_progression_globals(&cortex_runtime),
+        [0x100, 15, 15, 31, 1, 32, 0]
+    );
+    assert_ordinary_completion_input(&cortex_survey, dr_neo_cortex.name);
+    assert!(cortex_survey.is_clean(), "{cortex_summary}");
+    let ending_carry = dr_neo_cortex.finish_checked(cortex_runtime, LevelId::ENDING);
+
+    let (ending_survey, ending_runtime) =
+        ending.run_carried(ending_carry, SurveyInputProfile::Idle, 3_600);
+    let ending_summary = ending_survey.summary();
+    assert_eq!(ending_survey.frames, 3_600, "{ending_summary}");
+    assert_eq!(ending_survey.next_lid, Some((3_396, 0x19)));
+    assert_eq!(ending_survey.zone_transitions, 2);
+    assert_eq!(ending_survey.camera_ranges.len(), 8);
+    assert_eq!(ending_survey.camera_path_changes, 7);
+    assert_eq!(ending_survey.successful_spawns, 2);
+    assert_eq!(ending_survey.spawn_attempts, 3_600);
+    assert_eq!(ending_survey.expected_spawn_rejections, 3_598);
+    assert_eq!(ending_survey.executions, 119_544);
+    assert_eq!(ending_survey.execution_errors, 0);
+    assert_eq!(ending_survey.final_live_objects, 3);
+    assert_eq!(ending_survey.max_live_objects, 82);
+    assert_eq!(ending_survey.restarts, 0, "{ending_summary}");
+    assert_eq!(ending_survey.death_camera_frames, 0, "{ending_summary}");
+    assert_eq!(ending_survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(ending_runtime.machine().random_seed(), 0x4dd9_7720);
+    assert_eq!(ending_runtime.draw_count(), 81_458);
+    assert_eq!(
+        campaign_progression_globals(&ending_runtime),
+        [0, 15, 15, 31, 1, 32, 0]
+    );
+    assert!(ending_survey.is_clean(), "{ending_summary}");
+    let final_title_carry = ending.finish_checked(ending_runtime, LevelId::TITLE);
+    let final_title =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, final_title_carry)
+            .expect("Title must import the exact authentic Ending carry");
+    assert_eq!(final_title.faulted_object_count(), 0);
+    assert_eq!(
+        campaign_progression_globals(&final_title),
+        [0, 15, 15, 31, 1, 32, 0]
     );
 }
 

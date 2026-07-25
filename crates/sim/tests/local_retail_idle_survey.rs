@@ -845,6 +845,64 @@ fn lights_out_direct_boot_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_authentic_post_slippery_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x28);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Lights Out pair must parse");
+
+    // Exact session clocks observed after completing Slippery Climb and
+    // selecting Lights Out through the authored island map.
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 25),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 25),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("authentic post-Slippery progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = 0x0453_a2f1;
+    carry.draw_count = 62_218;
+    carry.set_random_seed_b(0x1bd5_35c3);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Lights Out must import the authentic post-Slippery phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Lights Out authentic post-Slippery phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::LightsOutCompletionRoute,
+        6_000,
+    )
+    .expect("Lights Out's authentic carried route must execute");
+
+    assert_eq!(
+        survey.next_lid,
+        Some((survey.frames, 0x2d)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn castle_machinery_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -19541,6 +19599,7 @@ struct LightsOutCompletionRouteController {
     first_platform_released: bool,
     first_platform_runup_remaining: u8,
     first_platform_dismount_released: bool,
+    late_phase_wait_elapsed: u8,
 }
 
 impl LightsOutCompletionRouteController {
@@ -19590,6 +19649,13 @@ impl LightsOutCompletionRouteController {
             }
             self.first_platform_dismount_released = true;
         }
+        if self.session_globals && next_frame == 3_761 && self.late_phase_wait_elapsed < 4 {
+            // The carried projectile cycle reaches the d8 landing four ticks
+            // later than a fresh boot. Wait on the preceding safe floor so
+            // the authored jump crosses that live cycle without taking a hit.
+            self.late_phase_wait_elapsed += 1;
+            return 0;
+        }
         self.route_frame = next_frame;
         let mut held = Self::held_at(next_frame);
         if self.session_globals {
@@ -19601,6 +19667,30 @@ impl LightsOutCompletionRouteController {
                 1_900..=1_907 | 3_965..=3_979 | 4_024..=4_031
             ) {
                 held |= PAD_CROSS;
+            }
+            if (1_988..=1_990).contains(&next_frame) {
+                held &= !PAD_CROSS;
+            }
+            if (1_991..=2_002).contains(&next_frame) {
+                held |= PAD_CROSS;
+            }
+            if next_frame == 2_199 {
+                held |= PAD_SQUARE;
+            }
+            if next_frame == 2_256 {
+                held &= !PAD_UP;
+            }
+            if next_frame == 2_257 {
+                held |= PAD_CROSS;
+            }
+            if (2_298..=2_309).contains(&next_frame) {
+                held |= PAD_CROSS;
+            }
+            if (2_554..=2_563).contains(&next_frame) {
+                held = 0;
+            }
+            if (2_624..=2_630).contains(&next_frame) {
+                held = PAD_UP | PAD_LEFT;
             }
             if (4_050..=4_051).contains(&next_frame) {
                 held |= PAD_UP;
@@ -39763,6 +39853,7 @@ impl SurveyInputController {
                 first_platform_released: false,
                 first_platform_runup_remaining: 0,
                 first_platform_dismount_released: false,
+                late_phase_wait_elapsed: 0,
             },
             slippery_climb: SlipperyClimbCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),

@@ -596,6 +596,15 @@ gameplay path.
   `[2237184, 9256237, -1792768]`. It has no restart, state-31 squash, death camera, terminal fall,
   fault, execution error, or LoadState; RNG is `0xb40bac74` at draw 6,863.
 
+  A separate exact raw-BIN browser-derived post-Papu phase is now pinned independently of that
+  synthetic process-session carry. Rolling Stones begins at draw 17,124 with the carried Map,
+  checkpoint, pad-history, and dual-RNG state, then uses live entity bounds to wait for and cross
+  the phase-shifted platform and JunOC cycles. It requests Level Complete on frame 2,525 with no
+  restart, squash, death camera, terminal fall, fault, execution error, or unexpected spawn error.
+  The run activates checkpoint `0x0800`, advances boxes from zero to `0x0b00`, records 117
+  successful spawns and 56,673 clean executions across 32 lifecycle zone transitions, and ends at
+  `0O_lZ:0@8448` with RNG-A `0xd252a6ab` at draw 19,649 while preserving RNG-B `0xe7301ec7`.
+
   That uninterrupted process session crosses Rolling Stones' 425-frame Level Complete graph at draw
   7,288, selects Hog Wild on Map frame 253 at draw 7,541, and reaches Hog Wild's Level Complete on
   gameplay frame 1,949 at draw 9,490. Hog Wild's completion takes 273 frames (draw 9,763), and Map
@@ -785,8 +794,9 @@ gameplay path.
   carried frame 5,041 through its authored Level Complete request. Temple's completion graph
   requests Title on frame 633, the next Map selects Road to Nowhere on frame 253, and Road reaches
   its authored Level Complete request on frame 2,449 with zero deaths or restarts. The independent
-  Rolling Stones direct boot reaches the same end on its own deterministic phase; the later
-  uninterrupted campaign remains unproved.
+  Rolling Stones direct boot reaches the same end on its own deterministic phase, and the exact
+  raw-BIN browser-derived post-Papu carry now reaches it independently. A complete browser-driven
+  session through that boundary remains unproved.
   The Tawna
   bonus control path is covered at
   exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser

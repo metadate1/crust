@@ -1804,6 +1804,7 @@ enum SurveyInputProfile {
     UpstreamCarriedRecovery,
     UpstreamPhaseRobust,
     RollingStonesCheckpoint,
+    RollingStonesExactCampaign,
     RollingStonesBrioBonus,
     HogWildCompletionRoute,
     WholeHogCompletionRoute,
@@ -1910,6 +1911,7 @@ impl SurveyInputProfile {
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::UpstreamPhaseRobust => "upstream-phase-robust",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
+            Self::RollingStonesExactCampaign => "rolling-stones-exact-campaign",
             Self::RollingStonesBrioBonus => "rolling-stones-brio-bonus",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
             Self::WholeHogCompletionRoute => "whole-hog-completion-route",
@@ -1980,6 +1982,7 @@ impl SurveyInputProfile {
                 | Self::UpstreamCarriedRecovery
                 | Self::UpstreamPhaseRobust
                 | Self::RollingStonesCheckpoint
+                | Self::RollingStonesExactCampaign
                 | Self::RollingStonesBrioBonus
                 | Self::HogWildCompletionRoute
                 | Self::WholeHogCompletionRoute
@@ -11381,6 +11384,7 @@ impl WholeHogCompletionRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct RollingStonesRouteController {
     session_globals: bool,
+    exact_campaign_phase: bool,
     opening_started: bool,
     opening_tick: u16,
     post_tick: u16,
@@ -11390,6 +11394,10 @@ struct RollingStonesRouteController {
     checkpoint_phase_recovered: bool,
     checkpoint_phase_wait: u8,
     checkpoint_route_retimed: bool,
+    exact_zero_b_wall_jump_done: bool,
+    exact_zero_b_wall_jump_hold: u8,
+    exact_zero_e_wall_jump_done: bool,
+    exact_zero_e_wall_jump_hold: u8,
     post_bank_tick: Option<u16>,
 }
 
@@ -11481,6 +11489,10 @@ impl RollingStonesRouteController {
         self.checkpoint_phase_recovered = false;
         self.checkpoint_phase_wait = 0;
         self.checkpoint_route_retimed = false;
+        self.exact_zero_b_wall_jump_done = false;
+        self.exact_zero_b_wall_jump_hold = 0;
+        self.exact_zero_e_wall_jump_done = false;
+        self.exact_zero_e_wall_jump_hold = 0;
         self.post_bank_tick = None;
     }
 
@@ -11540,13 +11552,304 @@ impl RollingStonesRouteController {
             self.checkpoint_route_started = true;
         }
         if self.checkpoint_route_started {
-            let tick = self.checkpoint_tick;
+            let mut tick = self.checkpoint_tick;
             let zero_y =
                 Eid::from_name("0y_lZ").expect("fixed Rolling Stones correction-zone EID is valid");
+            let zero_x =
+                Eid::from_name("0x_lZ").expect("fixed Rolling Stones approach-zone EID is valid");
+            let zero_upper_a =
+                Eid::from_name("0A_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
             let zero_upper_b =
                 Eid::from_name("0B_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
             let zero_upper_c =
                 Eid::from_name("0C_lZ").expect("fixed Rolling Stones ledge-zone EID is valid");
+            let zero_upper_e =
+                Eid::from_name("0E_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+            if self.exact_campaign_phase
+                && !self.checkpoint_phase_recovered
+                && tick > 295
+                && camera.path.zone == zero_y
+                && camera.path.index == 0
+            {
+                // Waiting for the exact campaign's live entity-78 cycle is
+                // intentionally not movement time. Rebase at the invariant
+                // next-path entrance so the existing live JunOC recovery
+                // begins on its characterized route sample.
+                self.checkpoint_tick = 280;
+                tick = 280;
+            }
+            if self.exact_campaign_phase
+                && !self.checkpoint_phase_recovered
+                && (270..=300).contains(&tick)
+                && camera.path.zone == zero_x
+                && camera.path.index == 0
+                && let Some(player) = player
+            {
+                // Entity 78 carries the exact campaign onto the left edge of
+                // the following JunOC corridor. Recenter on the flat approach
+                // before those converging walls own Crash's collision.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let held = if matches!(tick, 295..=296) {
+                    // Do not idle in the exact campaign's converging wall
+                    // lane; that historical landing pause lets the pair
+                    // close around Crash after he has entered their depth.
+                    PAD_UP
+                } else {
+                    Self::carried_checkpoint_pad(tick)
+                };
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                if predicted_x < 2_280_000 {
+                    return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_RIGHT;
+                }
+                if predicted_x > 2_320_000 {
+                    return (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
+                }
+                return held & !(PAD_LEFT | PAD_RIGHT);
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_y
+                && camera.path.index == 1
+                && let Some(player) = player
+                && matches!(player.state, 1 | 2 | 10)
+                && let Some(bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 76
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && player.translation[2] <= bound.max.z
+                && player.translation[2] >= bound.min.z
+                && player.translation[0] < bound.min.x
+            {
+                // At the exact browser-campaign phase Crash lands immediately
+                // left of entity 76 while it is still sweeping toward him.
+                // Keep crossing its narrow depth on the already-clear left
+                // side instead of taking the direct route's stationary pause.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_LEFT | PAD_CROSS;
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_y
+                && camera.path.index == 1
+                && let Some(player) = player
+                && player.status_a & 1 != 0
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 82
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && player.translation[2] <= platform_bound.min.z + 16_000
+                && player.translation[2] >= platform_bound.min.z - 64_000
+            {
+                // The exact phase lands late in the scheduled Cross hold.
+                // Create a fresh ordinary edge at the live platform's forward
+                // lip instead of walking off before the next timed jump.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_CROSS;
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_y
+                && camera.path.index == 1
+                && let Some(player) = player
+                && player.status_a & 1 == 0
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 82
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && player.translation[2] <= platform_bound.max.z + 350_000
+                && player.translation[2] >= platform_bound.min.z - 64_000
+            {
+                // The early wall jump reaches PoPlC 82 before the direct
+                // schedule's lateral acceleration. Follow the live platform
+                // center until collision reports a grounded landing.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let target_x =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let jump = Self::direct_checkpoint_pad(tick) & PAD_CROSS;
+                if predicted_x < target_x - 32_000 {
+                    return PAD_UP | PAD_RIGHT | jump;
+                }
+                if predicted_x > target_x + 32_000 {
+                    return PAD_UP | PAD_LEFT | jump;
+                }
+                return PAD_UP | jump;
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_upper_a
+                && camera.path.index == 0
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 50
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                let target_x =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let lateral = if predicted_x < target_x - 32_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 32_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let forward_gap = player.translation[2].saturating_sub(platform_bound.max.z);
+                if player.status_a & 1 != 0
+                    && player.translation[2] >= platform_bound.max.z
+                    && forward_gap <= 280_000
+                {
+                    // Jump from the stable approach while platform 50 is
+                    // still ahead; the direct schedule's later edge belongs
+                    // to a different arrival phase.
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP | lateral | PAD_CROSS;
+                }
+                if player.status_a & 1 == 0
+                    && player.translation[2] <= platform_bound.max.z + 300_000
+                    && player.translation[2] >= platform_bound.min.z - 64_000
+                {
+                    // Keep the airborne line over the live platform center
+                    // while retaining any already-scheduled Cross hold.
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP | lateral | (Self::direct_checkpoint_pad(tick) & PAD_CROSS);
+                }
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_upper_a
+                && camera.path.index == 1
+                && tick >= 422
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 50
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(first_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 51
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(second_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 52
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let gap = if first_wall.max.x < second_wall.min.x {
+                    Some((first_wall.max.x, second_wall.min.x))
+                } else {
+                    None
+                };
+                let platform_target =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let open_gap = gap;
+                let target_x = open_gap.map_or(platform_target, |(left, right)| {
+                    // Crash reaches the pair about twenty-seven samples
+                    // after leaving platform 50. The live midpoint starts
+                    // on the right and then sweeps left while he is in
+                    // flight, so cap the early target at the midpoint he
+                    // will meet at the wall instead of chasing its stale
+                    // takeoff position.
+                    (left + (right - left) / 2).min(3_145_000)
+                });
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(6) / 34);
+                let lateral = if predicted_x > target_x + 24_000 {
+                    PAD_LEFT
+                } else if predicted_x < target_x - 24_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                if tick == 422 {
+                    // The exact phase lands while Cross is still held from
+                    // the platform-50 approach. Release it on the grounded
+                    // collision before waiting for the moving walls to part.
+                    return 0;
+                }
+                if !self.exact_zero_b_wall_jump_done
+                    && open_gap.is_some()
+                    && player.status_a & 1 != 0
+                {
+                    // The pair crosses in front of platform 50. Wait on its
+                    // live center, then take a fresh full-height jump through
+                    // the ordinary gap once both collision bounds leave room
+                    // for Crash.
+                    self.exact_zero_b_wall_jump_done = true;
+                    self.exact_zero_b_wall_jump_hold = 7;
+                    return PAD_UP | lateral | PAD_CROSS;
+                }
+                if self.exact_zero_b_wall_jump_hold > 0 {
+                    self.exact_zero_b_wall_jump_hold -= 1;
+                    return PAD_UP | lateral | PAD_CROSS;
+                }
+                if self.exact_zero_b_wall_jump_done {
+                    return PAD_UP | lateral;
+                }
+                // Build a short ordinary run-up across platform 50 before
+                // the opening appears. Jumping from rest reaches entity 52
+                // only after the pair has started closing again.
+                return if tick >= 445 {
+                    PAD_UP | lateral
+                } else {
+                    lateral
+                };
+            }
             if self.session_globals
                 && self.checkpoint_phase_recovered
                 && camera.path.zone == zero_y
@@ -11615,10 +11918,15 @@ impl RollingStonesRouteController {
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
-                if predicted_x > 2_302_000 {
+                let (minimum_x, maximum_x) = if self.exact_campaign_phase {
+                    (2_280_000, 2_320_000)
+                } else {
+                    (2_270_000, 2_302_000)
+                };
+                if predicted_x > maximum_x {
                     return PAD_LEFT;
                 }
-                if predicted_x < 2_270_000 {
+                if predicted_x < minimum_x {
                     return PAD_RIGHT;
                 }
                 return PAD_UP;
@@ -11641,6 +11949,18 @@ impl RollingStonesRouteController {
 
             let zero_u =
                 Eid::from_name("0u_lZ").expect("fixed Rolling Stones platform-zone EID is valid");
+            if self.exact_campaign_phase
+                && (129..=137).contains(&tick)
+                && camera.path.zone == zero_u
+                && camera.path.index == 1
+            {
+                // The uninterrupted raw-BIN campaign reaches the paired
+                // subtype-six wall while its right member is sweeping across
+                // the historical jump line. Keep the scheduled jump edge but
+                // take its ordinary left route around the live collision.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return Self::historical_checkpoint_pad(tick) | PAD_LEFT;
+            }
             if self.session_globals
                 && (90..110).contains(&tick)
                 && camera.path.zone == zero_u
@@ -11677,7 +11997,8 @@ impl RollingStonesRouteController {
             }
 
             if self.session_globals
-                && (201..=223).contains(&tick)
+                && ((201..=223).contains(&tick)
+                    || self.exact_campaign_phase && (224..=260).contains(&tick))
                 && let Some(player) = player
                 && let Some(platform_bound) = objects.iter().find_map(|object| {
                     matches!(
@@ -11691,7 +12012,17 @@ impl RollingStonesRouteController {
                 // The carried hazard phase meets entity 78 on a different
                 // lateral cycle; steer against its live collision bounds.
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                let held = Self::historical_checkpoint_pad(tick);
+                let held = if self.exact_campaign_phase {
+                    if (205..=212).contains(&tick) {
+                        PAD_UP | PAD_CROSS
+                    } else if tick <= 226 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                } else {
+                    Self::historical_checkpoint_pad(tick)
+                };
                 if tick >= 209 && player.status_a & 1 != 0 {
                     return held;
                 }
@@ -11707,6 +12038,115 @@ impl RollingStonesRouteController {
                     0
                 };
                 return (held & !(PAD_LEFT | PAD_RIGHT)) | lateral;
+            }
+
+            if self.exact_campaign_phase
+                && tick >= 423
+                && (camera.path.zone == zero_upper_a && camera.path.index == 1
+                    || camera.path.zone == zero_upper_b && camera.path.index == 0)
+                && let Some(player) = player
+                && let Some(first_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 51
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(second_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 52
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && [first_wall, second_wall].into_iter().any(|bound| {
+                    let forward_gap = player.translation[2].saturating_sub(bound.max.z);
+                    (0..=600_000).contains(&forward_gap)
+                        || (bound.min.z.saturating_sub(64_000)..=bound.max.z)
+                            .contains(&player.translation[2])
+                })
+            {
+                // Continue tracking the opening while the camera crosses into
+                // 0B. Both wall members keep moving during the jump, and a
+                // fixed lane drifts into entity 52's trailing collision face.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                if tick >= 470 && player.status_a & 1 != 0 {
+                    // The run-up lands on entity 51's trailing shelf. Take a
+                    // fresh jump immediately: platform 53 is separated from
+                    // that shelf by a gap wider than Crash can run across.
+                    self.exact_zero_b_wall_jump_hold = 10;
+                    return PAD_UP | PAD_RIGHT | PAD_CROSS;
+                }
+                if self.exact_zero_b_wall_jump_hold > 0 {
+                    self.exact_zero_b_wall_jump_hold -= 1;
+                    return PAD_UP | PAD_RIGHT | PAD_CROSS;
+                }
+                let gap = (first_wall.max.x < second_wall.min.x)
+                    .then_some((first_wall.max.x, second_wall.min.x));
+                let target_x = gap.map_or(3_145_000, |(left, right)| left + (right - left) / 2);
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(6) / 34);
+                let lateral = if predicted_x > target_x + 24_000 {
+                    PAD_LEFT
+                } else if predicted_x < target_x - 24_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                return PAD_UP | lateral;
+            }
+            if self.exact_campaign_phase
+                && camera.path.zone == zero_upper_b
+                && camera.path.index == 0
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 53
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && player.translation[2] <= platform_bound.max.z + 350_000
+                && player.translation[2] >= platform_bound.min.z - 64_000
+            {
+                // Recenter on entity 53 after taking the pair's live left
+                // opening. Its horizontal cycle continues while Crash is
+                // airborne, so use the collision bound rather than a fixed
+                // historical lane.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let target_x =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let lateral = if predicted_x < target_x - 24_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 24_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let jump = if self.exact_zero_b_wall_jump_hold > 0 {
+                    self.exact_zero_b_wall_jump_hold -= 1;
+                    PAD_CROSS
+                } else {
+                    Self::direct_checkpoint_pad(tick) & PAD_CROSS
+                };
+                return PAD_UP | lateral | jump;
             }
 
             if self.session_globals
@@ -11762,6 +12202,136 @@ impl RollingStonesRouteController {
                     self.checkpoint_route_retimed = true;
                     self.checkpoint_tick = 577;
                     return Self::direct_checkpoint_pad(576);
+                }
+            }
+            if self.exact_campaign_phase
+                && (camera.path.zone == zero_upper_c && camera.path.index == 1
+                    || camera.path.zone == zero_upper_e && camera.path.index == 0)
+                && let Some(player) = player
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 84
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(left_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 89
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(right_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 88
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                let reversed_gap = (right_wall.max.x + 80_000 < left_wall.min.x)
+                    .then_some((right_wall.max.x, left_wall.min.x));
+                let left_wall_center = left_wall.min.x + (left_wall.max.x - left_wall.min.x) / 2;
+                let right_wall_center =
+                    right_wall.min.x + (right_wall.max.x - right_wall.min.x) / 2;
+                let wall_center_separation = right_wall_center.saturating_sub(left_wall_center);
+                let walls_crossing = wall_center_separation <= 100_000;
+                let walls_runup = wall_center_separation <= 260_000;
+                let platform_target =
+                    platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
+                let target_x =
+                    reversed_gap.map_or(platform_target, |(left, right)| left + (right - left) / 2);
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(4) / 34);
+                let lateral = if predicted_x > target_x + 24_000 {
+                    PAD_LEFT
+                } else if predicted_x < target_x - 24_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let near_platform = player.translation[2] <= platform_bound.max.z + 160_000
+                    && player.translation[2] >= platform_bound.min.z - 80_000;
+                let platform_target_z =
+                    platform_bound.min.z + (platform_bound.max.z - platform_bound.min.z) / 2;
+                let predicted_z =
+                    player.translation[2].saturating_add(player.velocity[2].saturating_mul(4) / 34);
+                let longitudinal = if predicted_z > platform_target_z + 24_000 {
+                    PAD_UP
+                } else if predicted_z < platform_target_z - 24_000 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if self.exact_zero_e_wall_jump_hold > 0 {
+                    self.exact_zero_e_wall_jump_hold -= 1;
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP | lateral | PAD_CROSS;
+                }
+                if self.exact_zero_e_wall_jump_done
+                    && player.status_a & 1 != 0
+                    && player.translation[2] < platform_bound.min.z - 80_000
+                {
+                    // Rejoin the direct route at its invariant landing on the
+                    // shelf beyond the pair. The exact phase spent additional
+                    // live samples waiting for the wall cycle, so its route
+                    // clock must not carry that wait into the next jump.
+                    self.exact_zero_e_wall_jump_done = false;
+                    self.checkpoint_tick = 624;
+                    return Self::direct_checkpoint_pad(624);
+                }
+                if self.exact_zero_e_wall_jump_done {
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    let landing_target_x = 3_100_000;
+                    let landing_predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(4) / 34);
+                    let landing_lateral = if landing_predicted_x < landing_target_x {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    return PAD_UP | landing_lateral;
+                }
+                if near_platform
+                    && (walls_crossing || reversed_gap.is_some())
+                    && player.status_a & 1 != 0
+                {
+                    // The direct route reaches this pair while its center is
+                    // open. The exact raw-BIN phase reaches the same platform
+                    // as the walls close. Take off as their centers cross so
+                    // their reverse opening has widened by the time Crash
+                    // reaches the wall depth; platform 84 drops immediately
+                    // after this live cycle and cannot hold a later wait.
+                    self.exact_zero_e_wall_jump_done = true;
+                    self.exact_zero_e_wall_jump_hold = 9;
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP | lateral | PAD_CROSS;
+                }
+                if near_platform && reversed_gap.is_some() {
+                    self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                    return PAD_UP | lateral;
+                }
+                if near_platform {
+                    // This is object-cycle wait time, not route time.
+                    if walls_runup && player.status_a & 1 != 0 {
+                        // Build forward speed during the last few live wall
+                        // samples. A jump from rest clears the lateral gap but
+                        // reaches the far shelf after falling below its top.
+                        return PAD_UP | lateral;
+                    }
+                    return longitudinal | lateral;
                 }
             }
 
@@ -12631,6 +13201,7 @@ impl RollingStonesBrioBonusRouteController {
 fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     let mut controller = RollingStonesRouteController {
         session_globals: true,
+        exact_campaign_phase: false,
         opening_started: true,
         opening_tick: 225,
         post_tick: 877,
@@ -12640,6 +13211,10 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         checkpoint_phase_recovered: true,
         checkpoint_phase_wait: 2,
         checkpoint_route_retimed: true,
+        exact_zero_b_wall_jump_done: true,
+        exact_zero_b_wall_jump_hold: 3,
+        exact_zero_e_wall_jump_done: true,
+        exact_zero_e_wall_jump_hold: 4,
         post_bank_tick: Some(23),
     };
 
@@ -12654,6 +13229,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert!(!controller.checkpoint_phase_recovered);
     assert_eq!(controller.checkpoint_phase_wait, 0);
     assert!(!controller.checkpoint_route_retimed);
+    assert!(!controller.exact_zero_e_wall_jump_done);
+    assert_eq!(controller.exact_zero_e_wall_jump_hold, 0);
     assert_eq!(controller.post_bank_tick, None);
 }
 
@@ -42484,6 +43061,7 @@ impl SurveyInputController {
             },
             rolling_stones: RollingStonesRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                exact_campaign_phase: profile == SurveyInputProfile::RollingStonesExactCampaign,
                 opening_started: false,
                 opening_tick: 0,
                 post_tick: 0,
@@ -42493,11 +43071,16 @@ impl SurveyInputController {
                 checkpoint_phase_recovered: false,
                 checkpoint_phase_wait: 0,
                 checkpoint_route_retimed: false,
+                exact_zero_b_wall_jump_done: false,
+                exact_zero_b_wall_jump_hold: 0,
+                exact_zero_e_wall_jump_done: false,
+                exact_zero_e_wall_jump_hold: 0,
                 post_bank_tick: None,
             },
             rolling_stones_brio: RollingStonesBrioBonusRouteController {
                 route: RollingStonesRouteController {
                     session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                    exact_campaign_phase: false,
                     opening_started: false,
                     opening_tick: 0,
                     post_tick: 0,
@@ -42507,6 +43090,10 @@ impl SurveyInputController {
                     checkpoint_phase_recovered: false,
                     checkpoint_phase_wait: 0,
                     checkpoint_route_retimed: false,
+                    exact_zero_b_wall_jump_done: false,
+                    exact_zero_b_wall_jump_hold: 0,
+                    exact_zero_e_wall_jump_done: false,
+                    exact_zero_e_wall_jump_hold: 0,
                     post_bank_tick: None,
                 },
                 first_token_tick: None,
@@ -42742,7 +43329,11 @@ impl SurveyInputController {
             self.jungle_restarted = true;
             self.jungle_restart_tick = 0;
             self.jungle = JungleRouteController::default();
-        } else if self.profile == SurveyInputProfile::RollingStonesCheckpoint {
+        } else if matches!(
+            self.profile,
+            SurveyInputProfile::RollingStonesCheckpoint
+                | SurveyInputProfile::RollingStonesExactCampaign
+        ) {
             self.rolling_stones.restart_from_checkpoint();
         } else if self.profile == SurveyInputProfile::RollingStonesBrioBonus {
             self.rolling_stones_brio.restart_from_checkpoint();
@@ -42996,7 +43587,8 @@ impl SurveyInputController {
                 self.upstream
                     .held(camera, player, upstream_platforms, checkpoint_id)
             }
-            SurveyInputProfile::RollingStonesCheckpoint => {
+            SurveyInputProfile::RollingStonesCheckpoint
+            | SurveyInputProfile::RollingStonesExactCampaign => {
                 self.rolling_stones
                     .held(camera, player, checkpoint_id, route_objects)
             }
@@ -46336,7 +46928,8 @@ fn survey_pair_with_runtime_impl(
                     Eid::from_name("SheNC").expect("fixed Native Fortress shield EID is valid"),
                 ],
             )?,
-            SurveyInputProfile::RollingStonesCheckpoint => program_object_traces(
+            SurveyInputProfile::RollingStonesCheckpoint
+            | SurveyInputProfile::RollingStonesExactCampaign => program_object_traces(
                 &runtime,
                 &[
                     Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid"),
@@ -47035,6 +47628,7 @@ fn survey_pair_with_runtime_impl(
                 input_profile,
                 SurveyInputProfile::NSanityCompletionRoute
                     | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::RollingStonesExactCampaign
                     | SurveyInputProfile::JungleDeathAkuCompletionRoute
                     | SurveyInputProfile::GreatGatePhaseRobust
                     | SurveyInputProfile::GreatGatePublisherPhaseRobust
@@ -47478,6 +48072,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::RollingStonesExactCampaign
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
@@ -47492,6 +48087,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::RollingStonesExactCampaign
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::HighRoadCompletionRoute
@@ -60735,6 +61331,169 @@ fn exact_post_boulders_upstream_phase_completes_with_live_controller() {
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
     assert_eq!(player.translation, [2_228_980, 6_590_796, -472_772]);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let rolling_stones = CampaignPair::parse(&root, LevelId::new_const(0x15));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 7),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 7),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (CHECKPOINT_ID_GLOBAL, 57 << 8),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 2_252_800),
+        (CHECKPOINT_TRANSLATION_GLOBALS[1], 2_350_080),
+        (CHECKPOINT_TRANSLATION_GLOBALS[2], 15_564_288),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("exact Rolling Stones carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // Rolling Stones' first source frame performs one ordinary RNG-A draw.
+    // This is the exact one-step inverse of the raw-BIN browser's published
+    // frame-one word.
+    carry.random_seed = 0xae85_3827;
+    carry.draw_count = 17_124;
+    carry.set_random_seed_b(0xe730_1ec7);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, rolling_stones.level, carry)
+        .expect("Rolling Stones must import the exact post-Papu map carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        rolling_stones.name,
+        rolling_stones.level,
+        &rolling_stones.nsd,
+        &rolling_stones.nsf,
+        &rolling_stones.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::RollingStonesExactCampaign,
+        3_200,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("exact carried Rolling Stones phase must execute");
+    let first = survey
+        .first_frame_phase
+        .expect("exact Rolling Stones frame-one phase must be captured");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (17_125, 0xe36c_a0b1, 0xe730_1ec7, 40)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("0a_lZ").expect("fixed Rolling Stones spawn-zone EID is valid"),
+            40,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_695,
+            },
+            [2_252_544, 1_023_744, 31_794_432],
+        ))
+    );
+    assert_eq!(survey.frames, 2_525, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_525, 0x2d)), "{}", survey.summary());
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2525 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert_eq!(survey.successful_spawns, 117);
+    assert_eq!(survey.spawn_attempts, 30_076);
+    assert_eq!(survey.expected_spawn_rejections, 29_959);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 56_673);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 32);
+    assert_eq!(survey.camera_ranges.len(), 45);
+    assert_eq!(survey.camera_path_changes, 46);
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, 57 << 8, [2_252_800, 2_350_080, 15_564_288]),
+            (1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (278, 0x100),
+            (279, 0x200),
+            (280, 0x300),
+            (281, 0x400),
+            (295, 0x500),
+            (355, 0x600),
+            (629, 0x700),
+            (1_036, 0x800),
+            (1_053, 0x900),
+            (1_159, 0xa00),
+            (1_940, 0xb00),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_159, 0x900)]);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(8 << 8));
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xb00));
+    assert_eq!(runtime.draw_count(), 19_649);
+    assert_eq!(runtime.machine().random_seed(), 0xd252_a6ab);
+    assert_eq!(runtime.random_seed_b(), 0xe730_1ec7);
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x500, 15, 15, 7, 1, 8, 0]
+    );
+    let final_camera = survey
+        .final_camera
+        .expect("exact Rolling Stones route must retain its final camera");
+    assert_eq!(
+        final_camera.path.zone,
+        Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
+    );
+    assert_eq!(final_camera.path.index, 0);
+    assert_eq!(final_camera.progress.raw(), 8_448);
+    let player = player_trace(&runtime)
+        .expect("exact Rolling Stones completion player trace must resolve")
+        .expect("Rolling Stones end warp must retain Crash");
+    assert_eq!(player.zone, Eid::from_name("0O_lZ").unwrap());
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [2_245_280, 9_256_235, -1_755_904]);
 }
 
 #[test]

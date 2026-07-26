@@ -1255,6 +1255,16 @@ is 1,322,866 bytes with SHA-256
   transitions, 45 camera ranges, and 46 path changes. The final camera is `0O_lZ:0@9424`; Crash is
   in warp state 32 at `[2237184, 9256237, -1792768]`. RNG is `0xb40bac74` and draw is 6,863.
 
+  `exact_post_papu_rolling_stones_phase_completes_with_live_controller` separately imports the
+  raw-BIN browser-derived post-Papu phase at draw 17,124, including the carried Map/checkpoint
+  globals, held-Cross history, RNG-A `0xae853827`, and RNG-B `0xe7301ec7`. Its first simulated frame
+  is pinned at draw 17,125, RNG-A `0xe36ca0b1`, 40 executions, and the exact retail spawn pose. The
+  live-bound controller crosses the phase-shifted entities 78/50/51/52/53/84/88/89 without a
+  restart or squash and requests Level Complete on frame 2,525. The final golden is
+  `0O_lZ:0@8448`, Crash `[2245280, 9256235, -1755904]` in warp state 32, draw 19,649, RNG-A
+  `0xd252a6ab`, and unchanged RNG-B `0xe7301ec7`; 117 spawns, 56,673 executions, 32 lifecycle zone
+  transitions, and the `0x0800` checkpoint/`0x0b00` live-box state are asserted.
+
   The same uninterrupted session continues through Rolling Stones' 425-frame Level Complete graph
   (draw 7,288) and a 253-frame Map selection of Hog Wild (draw 7,541). Hog Wild requests Level
   Complete on gameplay frame 1,949 at draw 9,490 without a restart; its completion takes 273 frames

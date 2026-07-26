@@ -166,6 +166,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
     schema: 1,
     bootLid: "0x19",
     unlockAll: true,
+    traceFromSegment: 2,
     settleFrames: 120,
     segments: [
       { frames: 8, held: 0 },
@@ -194,6 +195,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
 
   assert.equal(replay.bootLid, 0x19);
   assert.equal(replay.unlockAll, true);
+  assert.equal(replay.traceFromSegment, 2);
   assert.equal(replay.settleFrames, 120);
   assert.equal(replay.totalFrames, 10);
   assert.equal(replay.maximumFrames, 132);
@@ -282,6 +284,18 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
       }),
     /supports only currentLid and mountedLid/,
   );
+  for (const traceFromSegment of [0, 2]) {
+    assert.throws(
+      () =>
+        normalizeReplay({
+          schema: 1,
+          bootLid: 0x19,
+          traceFromSegment,
+          segments: [{ frames: 1, held: 0 }],
+        }),
+      /traceFromSegment/,
+    );
+  }
 });
 
 test("recorded replay segments preserve full 32-bit PBAK words explicitly", () => {

@@ -395,6 +395,14 @@ export function normalizeReplay(raw, fallback = {}) {
     schema: 1,
     bootLid: parseWholeNumber(replay.bootLid, "replay.bootLid", 0xff),
     unlockAll: replay.unlockAll ?? fallback.unlockAll ?? false,
+    traceFromSegment:
+      replay.traceFromSegment === undefined
+        ? undefined
+        : parseWholeNumber(
+            replay.traceFromSegment,
+            "replay.traceFromSegment",
+            1_000_000,
+          ),
     settleFrames: parseWholeNumber(
       replay.settleFrames ?? 0,
       "replay.settleFrames",
@@ -405,6 +413,9 @@ export function normalizeReplay(raw, fallback = {}) {
   };
   if (typeof normalized.unlockAll !== "boolean") {
     throw new Error("replay.unlockAll must be a boolean");
+  }
+  if (normalized.traceFromSegment === 0) {
+    throw new Error("replay.traceFromSegment must be at least 1");
   }
   let totalFrames = 0;
   for (const [index, segment] of replay.segments.entries()) {
@@ -463,6 +474,14 @@ export function normalizeReplay(raw, fallback = {}) {
     (sum, segment) => sum + segment.frames,
     0,
   );
+  if (
+    normalized.traceFromSegment !== undefined
+    && normalized.traceFromSegment > normalized.segments.length
+  ) {
+    throw new Error(
+      "replay.traceFromSegment must not exceed replay.segments.length",
+    );
+  }
   normalized.maximumFrames = totalFrames + normalized.settleFrames;
   return normalized;
 }
@@ -1284,6 +1303,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     };
     let segmentSettleFramesUsed = 0;
     let skippedReplayFrames = 0;
+    const segmentTrace = [];
     for (const [segmentIndex, segment] of replay.segments.entries()) {
       let remainingFrames = segment.frames;
       while (remainingFrames > 0) {
@@ -1321,6 +1341,24 @@ async function runBrowser(options, replay, chromeExecutable) {
         finalSnapshot,
         `segment ${segmentIndex + 1}`,
       );
+      if (
+        replay.traceFromSegment !== undefined
+        && segmentIndex + 1 >= replay.traceFromSegment
+      ) {
+        segmentTrace.push({
+          segment: segmentIndex + 1,
+          stepped,
+          held: segment.held,
+          retailFrame: finalSnapshot.debug?.retailFrame,
+          retailDrawCount: finalSnapshot.debug?.retailDrawCount,
+          retailRandomSeed: finalSnapshot.debug?.retailRandomSeed,
+          retailRandomSeedB: finalSnapshot.debug?.retailRandomSeedB,
+          retailCurrentZone: finalSnapshot.debug?.retailCurrentZone,
+          retailMain: finalSnapshot.debug?.retailMain
+            ? { ...finalSnapshot.debug.retailMain }
+            : null,
+        });
+      }
     }
     finalSnapshot = await browserSnapshot(cdp, sessionId);
     const settleFramesUsed = await settleExpectation(
@@ -1414,6 +1452,7 @@ async function runBrowser(options, replay, chromeExecutable) {
         : null,
       unlockAll: replay.unlockAll,
       browserTestGlobals: finalSnapshot.debug.browserTestGlobals,
+      segmentTrace,
       screenshot: options.screenshot,
       screenshotSha256: createHash("sha256")
         .update(screenshotBytes)

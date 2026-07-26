@@ -1711,6 +1711,7 @@ enum SurveyInputProfile {
     CortexPowerCompletionRoute,
     GeneratorRoomCompletionRoute,
     JawsOfDarknessCompletionRoute,
+    JawsOfDarknessExactCampaignPhase,
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LabCompletionRoute,
@@ -1815,6 +1816,7 @@ impl SurveyInputProfile {
             Self::CortexPowerCompletionRoute => "cortex-power-completion-route",
             Self::GeneratorRoomCompletionRoute => "generator-room-completion-route",
             Self::JawsOfDarknessCompletionRoute => "jaws-of-darkness-completion-route",
+            Self::JawsOfDarknessExactCampaignPhase => "jaws-of-darkness-exact-campaign-phase",
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LabCompletionRoute => "lab-completion-route",
@@ -1883,6 +1885,7 @@ impl SurveyInputProfile {
                 | Self::CortexPowerCompletionRoute
                 | Self::GeneratorRoomCompletionRoute
                 | Self::JawsOfDarknessCompletionRoute
+                | Self::JawsOfDarknessExactCampaignPhase
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LabCompletionRoute
@@ -36599,6 +36602,7 @@ impl RoadToNowhereRouteController {
 #[allow(clippy::struct_excessive_bools)]
 struct JawsOfDarknessCompletionRouteController {
     session_globals: bool,
+    exact_campaign_phase: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
@@ -36611,6 +36615,7 @@ struct JawsOfDarknessCompletionRouteController {
     a2_gap_launched: bool,
     a2_platform_exit_pending: bool,
     a4_gap_launched: bool,
+    carried_corner_runup_aligned: bool,
     corner_jump_launched: bool,
     corner_relaunch_stage: u8,
     a7_rat_attack_fired: bool,
@@ -36640,9 +36645,15 @@ struct JawsOfDarknessCompletionRouteController {
     c5_trap_wait_frames: u8,
     c6_gap_stage: u8,
     c7_crusher_stage: u8,
+    c9_entry_phase_waiting: bool,
+    c9_entry_runup: bool,
+    c9_entry_phase_frames: u8,
+    c9_entry_last_platform_y: i32,
+    c9_checkpoint_attack_fired: bool,
     c9_platform_stage: u8,
     d1_spear_stage: u8,
     d1_spear_active_seen: bool,
+    d1_spear_clear_seen: bool,
     d7_turn_stage: u8,
     d7_final_gate_wait_done: bool,
 }
@@ -36775,10 +36786,24 @@ impl JawsOfDarknessCompletionRouteController {
             self.release_frames = 0;
         }
         if self.d7_turn_stage == 1 && (d6_turn_approach || d7_turn) {
+            let turn_runup_x = if self.exact_campaign_phase {
+                11_020_000
+            } else {
+                10_940_000
+            };
             if player.is_some_and(|player| {
-                player.velocity[0] < -100_000 || player.translation[0] < 10_940_000
+                player.velocity[0] < -100_000 || player.translation[0] < turn_runup_x
             }) {
                 return PAD_RIGHT;
+            }
+            if self.exact_campaign_phase {
+                // Preserve the full turn run-up so the carried route can
+                // clear the already-falling first two bridge pillars and
+                // reach stable entity 239 within one jump arc.
+                self.d7_turn_stage = 3;
+                self.jump_frames = 45;
+                self.release_frames = 4;
+                return PAD_RIGHT | PAD_CROSS;
             }
             self.d7_turn_stage = 2;
             return PAD_LEFT;
@@ -36794,19 +36819,33 @@ impl JawsOfDarknessCompletionRouteController {
         }
         if self.d7_turn_stage == 3 {
             if player.is_some_and(|player| {
-                player.status_a & 1 != 0 && player.translation[0] >= 11_080_000
+                player.status_a & 1 != 0
+                    && player.translation[0]
+                        >= if self.exact_campaign_phase {
+                            11_480_000
+                        } else {
+                            11_080_000
+                        }
             }) {
-                self.d7_turn_stage = 4;
+                self.d7_turn_stage = if self.exact_campaign_phase { 6 } else { 4 };
                 self.jump_frames = 0;
-                self.release_frames = 4;
+                self.release_frames = if self.exact_campaign_phase { 2 } else { 4 };
                 return PAD_LEFT;
             }
-            let mut toward_crates =
-                if player.is_some_and(|player| player.translation[0] >= 11_100_000) {
-                    PAD_LEFT
-                } else {
-                    PAD_RIGHT
-                };
+            let brake_x = if self.exact_campaign_phase {
+                // Entity 237 is already committed to its one-shot fall in the
+                // carried phase. Clear it and the sunken entity 238 in one
+                // authored-strength jump, landing on stable entity 239.
+                11_570_000
+            } else {
+                11_100_000
+            };
+            let mut toward_crates = if player.is_some_and(|player| player.translation[0] >= brake_x)
+            {
+                PAD_LEFT
+            } else {
+                PAD_RIGHT
+            };
             if player.is_some_and(|player| player.translation[2] > 21_750_000) {
                 toward_crates |= PAD_UP;
             } else if player.is_some_and(|player| player.translation[2] < 21_650_000) {
@@ -37432,12 +37471,35 @@ impl JawsOfDarknessCompletionRouteController {
             }
             return PAD_RIGHT | attack;
         }
-        let corner_approach = camera.path.zone
+        let corner_approach_zone = camera.path.zone
             == Eid::from_name("a5_tZ").expect("fixed Jaws corner-approach zone EID is valid")
-            && camera.path.index == 0
+            && camera.path.index == 0;
+        let carried_corner_runup = self.exact_campaign_phase
+            && corner_approach_zone
             && !self.corner_jump_launched
             && player.is_some_and(|player| {
-                player.status_a & 1 != 0 && player.translation[0] >= 21_950_000
+                player.status_a & 1 != 0
+                    && (21_850_000..21_990_000).contains(&player.translation[0])
+            });
+        if carried_corner_runup {
+            // The carried route reaches this corner with its ordinary hop
+            // cadence ready one step too early. Keep running on the authored
+            // ledge until Crash reaches the same launch point as a fresh run,
+            // then create the corner's deliberate Cross edge below.
+            self.carried_corner_runup_aligned = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        let corner_approach = corner_approach_zone
+            && !self.corner_jump_launched
+            && player.is_some_and(|player| {
+                let launch_x = if self.carried_corner_runup_aligned {
+                    21_990_000
+                } else {
+                    21_950_000
+                };
+                player.status_a & 1 != 0 && player.translation[0] >= launch_x
             });
         if corner_approach {
             self.corner_jump_launched = true;
@@ -37483,6 +37545,20 @@ impl JawsOfDarknessCompletionRouteController {
                 self.jump_frames = 0;
                 self.release_frames = 0;
                 return PAD_UP;
+            }
+            if self.a7_spear_stage == 1
+                && self.exact_campaign_phase
+                && a8_zone
+                && player.is_some_and(|player| player.translation[2] <= 35_320_000)
+            {
+                // A carried route that reaches the a8 boundary before the
+                // spears extend has already crossed the row. Preserve forward
+                // momentum instead of reacting to bounds that page in behind
+                // Crash on the following frame.
+                self.a7_spear_stage = 3;
+                self.jump_frames = 18;
+                self.release_frames = 0;
+                return PAD_UP | PAD_CROSS;
             }
             if self.a7_spear_stage == 1 {
                 if final_spears_active {
@@ -37572,7 +37648,22 @@ impl JawsOfDarknessCompletionRouteController {
             // Ride entity 14 to the same world-space launch point used by the
             // direct route. This is phase-relative and avoids spending the fresh
             // Cross edge while the carried platform is still behind the gap.
-            if player.is_some_and(|player| player.translation[0] >= 19_100_000) {
+            let platform = objects.iter().find_map(|object| match object.origin {
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 14 => Some(object.translation),
+                _ => None,
+            });
+            if self.exact_campaign_phase && platform.is_some_and(|platform| platform[1] < 1_450_000)
+            {
+                return Self::platform_centering_direction(player, objects, 14);
+            }
+            let reached_launch_edge = player.is_some_and(|player| {
+                player.translation[0] >= 19_100_000
+                    || self.exact_campaign_phase
+                        && platform.is_some_and(|platform| {
+                            player.translation[0] >= platform[0].saturating_add(105_000)
+                        })
+            });
+            if reached_launch_edge {
                 self.a2_platform_exit_pending = false;
                 self.jump_frames = 17;
                 return PAD_RIGHT | PAD_CROSS;
@@ -37587,12 +37678,40 @@ impl JawsOfDarknessCompletionRouteController {
             }
             return direction | attack;
         }
+        let approaching_second_gap_platform = self.exact_campaign_phase
+            && self.a4_gap_launched
+            && self.last_platform_entity != Some(50)
+            && collider_entity != Some(50)
+            && player.is_some_and(|player| {
+                player.velocity[1] < 0
+                    && objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 50
+                        ) && object.translation[0].abs_diff(player.translation[0]) < 250_000
+                    })
+            });
+        if approaching_second_gap_platform {
+            // Release Cross before the live landing so the one-frame contact
+            // below can produce a new edge instead of inheriting the gap jump.
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return direction | attack;
+        }
         if matches!(collider_entity, Some(11 | 12 | 14 | 50 | 74))
             && collider_entity != self.last_platform_entity
         {
             self.last_platform_entity = collider_entity;
             self.jump_frames = 0;
             self.release_frames = 0;
+            if self.exact_campaign_phase && collider_entity == Some(50) {
+                // This carried phase only brushes the second gap platform for
+                // one grounded frame. Re-arm Cross on that live contact rather
+                // than waiting until the platform has moved out from below
+                // Crash.
+                self.jump_frames = 17;
+                return direction | PAD_CROSS | attack;
+            }
             if self.session_globals && collider_entity == Some(14) {
                 self.a2_platform_exit_pending = true;
                 return PAD_RIGHT;
@@ -37615,11 +37734,16 @@ impl JawsOfDarknessCompletionRouteController {
                 self.release_frames = 0;
                 return direction;
             }
-            if (1..=4).contains(&self.corner_relaunch_stage) {
+            let relaunch_wait_end = if self.carried_corner_runup_aligned {
+                2
+            } else {
+                4
+            };
+            if (1..=relaunch_wait_end).contains(&self.corner_relaunch_stage) {
                 self.corner_relaunch_stage += 1;
                 return direction;
             }
-            if self.corner_relaunch_stage == 5 {
+            if self.corner_relaunch_stage == relaunch_wait_end + 1 {
                 self.corner_relaunch_stage = 6;
                 self.jump_frames = 44;
                 return direction | PAD_CROSS;
@@ -38608,6 +38732,84 @@ impl JawsOfDarknessCompletionRouteController {
         let d0_zone = camera.path.zone
             == Eid::from_name("d0_tZ").expect("fixed Jaws moving-bridge zone EID is valid");
         if self.b9_pillar_stage == 11 && (c8_zone || c9_zone || d0_zone) {
+            let platform_203_y = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 203)
+                    .then_some(object.translation[1])
+            });
+            if self.exact_campaign_phase
+                && self.c9_platform_stage == 0
+                && !self.c9_entry_phase_waiting
+                && !self.c9_entry_runup
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && (27_700_000..=27_800_000).contains(&player.translation[2])
+                })
+                && let Some(platform_y) = platform_203_y
+            {
+                // The checkpoint crate ahead immediately bounces Crash toward
+                // entity 203, so use this last safe runway landing to align
+                // the carried platform phase before committing to the bounce.
+                self.c9_entry_phase_waiting = true;
+                self.c9_entry_last_platform_y = platform_y;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+            if self.c9_entry_phase_waiting {
+                let previous_platform_y = self.c9_entry_last_platform_y;
+                let platform_descending =
+                    platform_203_y.is_some_and(|platform_y| platform_y < previous_platform_y);
+                if let Some(platform_y) = platform_203_y {
+                    self.c9_entry_last_platform_y = platform_y;
+                }
+                if self.c9_entry_phase_frames == 0
+                    && platform_descending
+                    && previous_platform_y >= 1_500_000
+                {
+                    self.c9_entry_phase_frames = 1;
+                } else if self.c9_entry_phase_frames != 0 {
+                    self.c9_entry_phase_frames = self.c9_entry_phase_frames.saturating_add(1);
+                }
+                let runup_ready = self.c9_entry_phase_frames >= 24
+                    && player.is_some_and(|player| {
+                        player.translation[2] >= 27_880_000
+                            && player.velocity[2].unsigned_abs() <= 100_000
+                    });
+                if runup_ready {
+                    self.c9_entry_phase_waiting = false;
+                    self.c9_entry_runup = true;
+                    return PAD_UP;
+                }
+                return player.map_or(0, |player| {
+                    if self.c9_entry_phase_frames == 0 {
+                        if player.velocity[2] < -50_000 {
+                            return PAD_DOWN;
+                        }
+                        if player.velocity[2] > 50_000 {
+                            return PAD_UP;
+                        }
+                        return 0;
+                    }
+                    if player.translation[2] < 27_880_000 || player.velocity[2] < -50_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 27_920_000 || player.velocity[2] > 50_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    }
+                });
+            }
+            if self.c9_entry_runup {
+                if player.is_some_and(|player| {
+                    player.status_a & 1 != 0
+                        && player.translation[2] <= 27_790_000
+                        && player.velocity[2] <= -500_000
+                }) {
+                    self.c9_entry_runup = false;
+                    self.jump_frames = 18;
+                    return PAD_UP | PAD_CROSS | attack;
+                }
+                return PAD_UP;
+            }
             if self.c9_platform_stage == 0
                 && player.is_some_and(|player| {
                     player.status_a & 1 != 0 && player.translation[2] <= 27_350_000
@@ -38619,6 +38821,26 @@ impl JawsOfDarknessCompletionRouteController {
                 return PAD_UP;
             }
             if self.c9_platform_stage == 1 {
+                if self.exact_campaign_phase
+                    && player.is_some_and(|player| {
+                        player.status_a & 1 != 0
+                            && (27_300_000..=27_360_000).contains(&player.translation[2])
+                    })
+                {
+                    // The phase-aligned run-up lands directly in front of the
+                    // checkpoint crate. Spin it from the lower runway so the
+                    // solid side no longer traps Crash below the direct
+                    // bounce path, then continue toward the platform edge.
+                    let attack = if self.c9_checkpoint_attack_fired {
+                        PAD_UP
+                    } else {
+                        self.c9_checkpoint_attack_fired = true;
+                        PAD_SQUARE
+                    };
+                    self.jump_frames = 0;
+                    self.release_frames = 0;
+                    return attack;
+                }
                 if collider_entity == Some(203)
                     && player.is_some_and(|player| player.status_a & 1 != 0)
                 {
@@ -38640,10 +38862,6 @@ impl JawsOfDarknessCompletionRouteController {
                 return PAD_UP;
             }
             if self.c9_platform_stage == 2 {
-                let platform_203_y = objects.iter().find_map(|object| {
-                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 203)
-                        .then_some(object.translation[1])
-                });
                 let platform_202_y = objects.iter().find_map(|object| {
                     matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 202)
                         .then_some(object.translation[1])
@@ -38665,7 +38883,12 @@ impl JawsOfDarknessCompletionRouteController {
                     // vertical phase. Stay centered while it is low, then use
                     // the final part of the ascent as the run-up that direct
                     // boot naturally gets before the paired-platform jump.
-                    if platform_203_y.is_some_and(|y| y >= 1_380_000) {
+                    let launch_height = if self.exact_campaign_phase {
+                        1_430_000
+                    } else {
+                        1_380_000
+                    };
+                    if platform_203_y.is_some_and(|y| y >= launch_height) {
                         return PAD_UP;
                     }
                     return Self::platform_centering_direction(player, objects, 203);
@@ -38690,6 +38913,14 @@ impl JawsOfDarknessCompletionRouteController {
                 {
                     self.c9_platform_stage = 5;
                     self.jump_frames = 0;
+                    if self.exact_campaign_phase {
+                        // The carried phase only supplies one accepted frame
+                        // on the rising paired platform. Spend the fresh Cross
+                        // edge on that live contact before entity 202 lifts
+                        // through Crash and drops the collider.
+                        self.jump_frames = 18;
+                        return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                    }
                     return Self::platform_centering_direction(player, objects, 202);
                 }
                 self.jump_frames = self.jump_frames.saturating_sub(1);
@@ -38784,6 +39015,7 @@ impl JawsOfDarknessCompletionRouteController {
                 }
                 self.d1_spear_stage = 2;
                 self.d1_spear_active_seen = false;
+                self.d1_spear_clear_seen = false;
                 return 0;
             }
             if self.d1_spear_stage == 2 {
@@ -38803,8 +39035,19 @@ impl JawsOfDarknessCompletionRouteController {
                     })
                 });
                 self.d1_spear_active_seen |= lane_blocked;
+                let near_row_active = objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 18,
+                        }
+                    ) && (23_180_000..=23_230_000).contains(&object.translation[2])
+                        && object.frame_bound.is_some()
+                });
+                self.d1_spear_clear_seen |= !near_row_active;
                 let destination_open = player.is_some_and(|player| {
-                    objects.iter().any(|object| {
+                    let far_row_open = objects.iter().any(|object| {
                         matches!(
                             object.origin,
                             ObjectOrigin::Runtime {
@@ -38815,9 +39058,30 @@ impl JawsOfDarknessCompletionRouteController {
                             && object.frame_bound.is_some_and(|bound| {
                                 bound.min.x > player.translation[0].saturating_sub(20_000)
                             })
-                    })
+                    });
+                    let near_row_open = objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 18,
+                                }
+                            ) && (23_180_000..=23_230_000).contains(&object.translation[2])
+                        })
+                        .all(|object| {
+                            object.frame_bound.is_none_or(|bound| {
+                                bound.min.x > player.translation[0].saturating_add(20_000)
+                                    || bound.max.x < player.translation[0].saturating_sub(100_000)
+                            })
+                        });
+                    far_row_open && (!self.exact_campaign_phase || near_row_open)
                 });
-                if self.d1_spear_active_seen && destination_open {
+                if self.d1_spear_active_seen
+                    && (!self.exact_campaign_phase || self.d1_spear_clear_seen)
+                    && destination_open
+                {
                     self.d1_spear_stage = 3;
                     self.jump_frames = 0;
                     self.release_frames = 1;
@@ -41807,6 +42071,10 @@ impl SurveyInputController {
             },
             jaws_of_darkness: JawsOfDarknessCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                exact_campaign_phase: matches!(
+                    profile,
+                    SurveyInputProfile::JawsOfDarknessExactCampaignPhase
+                ),
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
@@ -41819,6 +42087,7 @@ impl SurveyInputController {
                 a2_gap_launched: false,
                 a2_platform_exit_pending: false,
                 a4_gap_launched: false,
+                carried_corner_runup_aligned: false,
                 corner_jump_launched: false,
                 corner_relaunch_stage: 0,
                 a7_rat_attack_fired: false,
@@ -41848,9 +42117,15 @@ impl SurveyInputController {
                 c5_trap_wait_frames: 0,
                 c6_gap_stage: 0,
                 c7_crusher_stage: 0,
+                c9_entry_phase_waiting: false,
+                c9_entry_runup: false,
+                c9_entry_phase_frames: 0,
+                c9_entry_last_platform_y: i32::MIN,
+                c9_checkpoint_attack_fired: false,
                 c9_platform_stage: 0,
                 d1_spear_stage: 0,
                 d1_spear_active_seen: false,
+                d1_spear_clear_seen: false,
                 d7_turn_stage: 0,
                 d7_final_gate_wait_done: false,
             },
@@ -42527,7 +42802,8 @@ impl SurveyInputController {
                 self.generator_room
                     .held(player, player_collider_entity, route_objects)
             }
-            SurveyInputProfile::JawsOfDarknessCompletionRoute => {
+            SurveyInputProfile::JawsOfDarknessCompletionRoute
+            | SurveyInputProfile::JawsOfDarknessExactCampaignPhase => {
                 self.jaws_of_darkness
                     .held(camera, player, player_collider_entity, route_objects)
             }
@@ -45821,6 +46097,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::HeavyMachineryCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                    | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
                     | SurveyInputProfile::LabCompletionRoute
@@ -45949,6 +46226,7 @@ fn survey_pair_with_runtime_impl(
             | SurveyInputProfile::TempleRuinsCompletionRoute
             | SurveyInputProfile::GeneratorRoomCompletionRoute
             | SurveyInputProfile::JawsOfDarknessCompletionRoute
+            | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
             | SurveyInputProfile::ToxicWasteCompletionRoute
             | SurveyInputProfile::CastleMachineryCompletionRoute
             | SurveyInputProfile::SlipperyClimbCompletionRoute
@@ -46612,6 +46890,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::CortexPowerCompletionRoute
                     | SurveyInputProfile::GeneratorRoomCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                    | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::LabCompletionRoute
                     | SurveyInputProfile::SunsetVistaCompletionRoute
@@ -48410,7 +48689,7 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
     let jaws_completion = run_clean_carried_campaign_step(
         &jaws_of_darkness,
         jaws_carry,
-        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
         5_600,
         LevelId::LEVEL_COMPLETE,
         [0x500, 15, 15, 26, 1, 27, 0],
@@ -48444,6 +48723,34 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
         [0x300, 15, 15, 27, 1, 28, 0]
     );
     assert_eq!(runtime.faulted_object_count(), 0);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn jaws_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let jaws = CampaignPair::parse(&root, LevelId::new_const(0x1d));
+    let post_lights = synthetic_title_map_carry(25, 26, 0x46bc_ad50, 55_228, 0x93e2_6958);
+    let mut carry =
+        carry_map_to_next_level(&title, post_lights, jaws.level, [0, 15, 15, 26, 1, 26, 1]);
+    carry.random_seed = 0x8385_1908;
+    carry.draw_count = 64_200;
+    carry.set_random_seed_b(0xdc82_6488);
+    let (survey, _) = jaws.run_carried(
+        carry,
+        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
+        5_600,
+    );
+    let summary = survey.summary();
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert!(survey.first_terminal_fall.is_none(), "{summary}");
+    assert!(survey.is_clean(), "{summary}");
 }
 
 #[test]
@@ -48968,7 +49275,7 @@ fn carry_boulder_dash_through_heavy_machinery(
     );
     let (jaws_survey, jaws_runtime) = jaws_of_darkness.run_carried(
         jaws_carry,
-        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
         5_600,
     );
     assert_eq!(

@@ -4,10 +4,30 @@ import test from "node:test";
 import {
   allLevelsFailures,
   expectationFailures,
+  nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
   snapshotFailures,
 } from "./browser-harness-smoke.mjs";
+
+test("replay batches cap constant-held runs and can isolate the launch frame", () => {
+  assert.equal(nextReplayBatchFrameCount(1), 1);
+  assert.equal(nextReplayBatchFrameCount(127), 127);
+  assert.equal(nextReplayBatchFrameCount(128), 128);
+  assert.equal(nextReplayBatchFrameCount(129), 128);
+  assert.equal(
+    nextReplayBatchFrameCount(10_000, { isolateFirstFrame: true }),
+    1,
+  );
+  assert.throws(() => nextReplayBatchFrameCount(0), /positive safe integer/);
+  assert.throws(
+    () =>
+      nextReplayBatchFrameCount(1, {
+        isolateFirstFrame: "yes",
+      }),
+    /must be a boolean/,
+  );
+});
 
 test("browser smoke arguments keep the harness local and assets explicit", () => {
   const parsed = parseArguments(

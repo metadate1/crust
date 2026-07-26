@@ -20,6 +20,7 @@ const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_URL = "http://127.0.0.1:4175/";
 const DEFAULT_BOOT_LID = 0x19;
 const DEFAULT_FRAMES = 120;
+const REPLAY_BATCH_FRAME_LIMIT = 128;
 const ALL_LEVELS_MAX_LIVES = 999 << 8;
 const ALL_LEVELS_UNLOCK_GATE = 99;
 const ALL_LEVELS_SECRET_PATH_BITS = (1 << 10) | (1 << 20);
@@ -48,6 +49,21 @@ function parseWholeNumber(raw, name, maximum) {
     throw new Error(`${name} must be a whole number from 0 through ${maximum}`);
   }
   return value;
+}
+
+export function nextReplayBatchFrameCount(
+  remainingFrames,
+  { isolateFirstFrame = false } = {},
+) {
+  if (!Number.isSafeInteger(remainingFrames) || remainingFrames < 1) {
+    throw new Error("remaining replay frames must be a positive safe integer");
+  }
+  if (typeof isolateFirstFrame !== "boolean") {
+    throw new Error("isolateFirstFrame must be a boolean");
+  }
+  return isolateFirstFrame
+    ? 1
+    : Math.min(remainingFrames, REPLAY_BATCH_FRAME_LIMIT);
 }
 
 export function usage() {
@@ -830,17 +846,47 @@ async function runBrowser(options, replay, chromeExecutable) {
     // continue far enough to spend a life legitimately.
     let allLevelsLaunchChecked = !replay.unlockAll;
     let finalSnapshot;
-    const stepReplayFrame = async (held, label) => {
-      finalSnapshot = await evaluate(
+    const stepReplayBatch = async (held, frameCount, label) => {
+      const batchStart = stepped + 1;
+      const result = await evaluate(
         cdp,
         sessionId,
         `(() => {
-          window.__crustTest.step(${held});
-          return ${snapshotExpression};
+          let executed = 0;
+          while (executed < ${frameCount}) {
+            window.__crustTest.step(${held});
+            executed += 1;
+            if (
+              window.__crustTest.lastError != null
+              || window.__crustTest.lastRequestedLid != null
+            ) {
+              break;
+            }
+          }
+          return {
+            executed,
+            snapshot: ${snapshotExpression}
+          };
         })()`,
       );
-      stepped += 1;
+      const executed = result?.executed;
+      if (
+        !Number.isSafeInteger(executed)
+        || executed < 1
+        || executed > frameCount
+      ) {
+        throw new Error(
+          `${label} returned an invalid batch count: ${JSON.stringify(executed)}`,
+        );
+      }
+      finalSnapshot = result.snapshot;
+      stepped += executed;
       if (!allLevelsLaunchChecked) {
+        if (executed !== 1) {
+          throw new Error(
+            `all-level browser launch check requires one isolated first frame; received ${executed}`,
+          );
+        }
         const startupProblems = allLevelsFailures(finalSnapshot, {
           requireStartingLives: true,
         });
@@ -857,7 +903,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       ];
       if (problems.length > 0) {
         throw new Error(
-          `${label} failed at frame ${stepped}:\n${problems.join("\n")}`,
+          `${label} failed after frames ${batchStart}-${stepped}:\n${problems.join("\n")}`,
         );
       }
       if (finalSnapshot.harness.lastRequestedLid != null) {
@@ -869,6 +915,13 @@ async function runBrowser(options, replay, chromeExecutable) {
           failures,
           120_000,
         );
+      }
+      return executed;
+    };
+    const stepReplayFrame = async (held, label) => {
+      const executed = await stepReplayBatch(held, 1, label);
+      if (executed !== 1) {
+        throw new Error(`${label} did not execute exactly one frame`);
       }
     };
     const settleExpectation = async (
@@ -889,8 +942,17 @@ async function runBrowser(options, replay, chromeExecutable) {
     };
     let segmentSettleFramesUsed = 0;
     for (const [segmentIndex, segment] of replay.segments.entries()) {
-      for (let frame = 0; frame < segment.frames; frame += 1) {
-        await stepReplayFrame(segment.held, "browser replay");
+      let remainingFrames = segment.frames;
+      while (remainingFrames > 0) {
+        const batchFrames = nextReplayBatchFrameCount(remainingFrames, {
+          isolateFirstFrame: !allLevelsLaunchChecked,
+        });
+        const executed = await stepReplayBatch(
+          segment.held,
+          batchFrames,
+          "browser replay",
+        );
+        remainingFrames -= executed;
       }
       segmentSettleFramesUsed += await settleExpectation(
         segment.expect,
@@ -977,6 +1039,13 @@ async function runBrowser(options, replay, chromeExecutable) {
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
       retailExecutions: finalSnapshot.debug.retailExecutions,
+      retailFrame: finalSnapshot.debug.retailFrame,
+      retailDrawCount: finalSnapshot.debug.retailDrawCount,
+      retailCurrentZone: finalSnapshot.debug.retailCurrentZone,
+      retailLiveObjects: finalSnapshot.debug.retailLiveObjects,
+      retailMain: finalSnapshot.debug.retailMain
+        ? { ...finalSnapshot.debug.retailMain }
+        : null,
       unlockAll: replay.unlockAll,
       browserTestGlobals: finalSnapshot.debug.browserTestGlobals,
       screenshot: options.screenshot,

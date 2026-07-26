@@ -1974,7 +1974,13 @@ impl Runtime {
             shader_wall_ticks,
             shader_clock_was_paused,
         );
+        #[cfg(feature = "browser-test-harness")]
+        let mut simulation_stepped = false;
         if !assets_stalled && self.scheduler.sample(now_us) == FrameDecision::Step {
+            #[cfg(feature = "browser-test-harness")]
+            {
+                simulation_stepped = true;
+            }
             let wall_ticks_current_frame = self.previous_step_us.map_or(34, |previous| {
                 i32::try_from(now_us.saturating_sub(previous) / 1_000).unwrap_or(i32::MAX)
             });
@@ -2359,6 +2365,11 @@ impl Runtime {
             }
         }
         if let Some(audio) = &mut self.audio {
+            #[cfg(feature = "browser-test-harness")]
+            if simulation_stepped {
+                audio.schedule_browser_test_frame(&mut self.retail_audio);
+            }
+            #[cfg(not(feature = "browser-test-harness"))]
             audio.schedule(&mut self.retail_audio)?;
         }
         self.sync_title_card(dom)?;

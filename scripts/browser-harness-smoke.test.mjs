@@ -182,7 +182,14 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         while: { currentLid: 0x2d, mountedLid: 0x2d },
       },
     ],
-    expect: { currentLid: 0x19, minRetailExecutions: 1 },
+    expect: {
+      currentLid: 0x19,
+      retailDrawCount: 123,
+      retailProcessDrawCount: 123,
+      retailRandomSeed: 0x1234_5678,
+      retailRandomSeedB: 0x8765_4321,
+      minRetailExecutions: 1,
+    },
   });
 
   assert.equal(replay.bootLid, 0x19);
@@ -198,6 +205,10 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
     currentLid: 0x2d,
     mountedLid: 0x2d,
   });
+  assert.equal(replay.expect.retailDrawCount, 123);
+  assert.equal(replay.expect.retailProcessDrawCount, 123);
+  assert.equal(replay.expect.retailRandomSeed, 0x1234_5678);
+  assert.equal(replay.expect.retailRandomSeedB, 0x8765_4321);
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -358,17 +369,41 @@ test("browser snapshot rejects runtime, fault, console, and WebGL errors", () =>
 test("checkpoint expectations compare only exported read-only debug fields", () => {
   assert.deepEqual(
     expectationFailures(
-      { mountedLid: 0x19, minFrame: 64, minRetailExecutions: 1 },
-      { debug: { mountedLid: 0x19, frame: 64, retailExecutions: 9 } },
+      {
+        mountedLid: 0x19,
+        retailDrawCount: 64,
+        retailProcessDrawCount: 64,
+        retailRandomSeed: 0x1234,
+        retailRandomSeedB: 0x5678,
+        minFrame: 64,
+        minRetailExecutions: 1,
+      },
+      {
+        debug: {
+          mountedLid: 0x19,
+          retailDrawCount: 64,
+          retailProcessDrawCount: 64,
+          retailRandomSeed: 0x1234,
+          retailRandomSeedB: 0x5678,
+          frame: 64,
+          retailExecutions: 9,
+        },
+      },
     ),
     [],
   );
   assert.match(
     expectationFailures(
-      { currentLid: 8, minRetailFrame: 65 },
-      { debug: { currentLid: 0x19, retailFrame: 2 } },
+      { currentLid: 8, retailRandomSeedB: 0x5678, minRetailFrame: 65 },
+      {
+        debug: {
+          currentLid: 0x19,
+          retailRandomSeedB: 0x9999,
+          retailFrame: 2,
+        },
+      },
     ).join("\n"),
-    /currentLid.*retailFrame/s,
+    /currentLid.*retailRandomSeedB.*retailFrame/s,
   );
 });
 

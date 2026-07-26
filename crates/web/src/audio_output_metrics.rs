@@ -1,5 +1,32 @@
 //! Browser-independent metrics for the stereo buffers scheduled to `WebAudio`.
 
+#[cfg(any(test, feature = "browser-test-harness"))]
+use crust_audio::mixer::SAMPLE_RATE;
+
+/// Carries the fractional 44.1 kHz sample remainder across fixed-duration
+/// browser-harness frames.
+///
+/// Production audio remains driven by `AudioContext.currentTime()`. The
+/// accelerated manual harness cannot use that wall clock: identical simulated
+/// frames would otherwise mix different sample counts depending on host speed,
+/// changing retail voice completion and the shared RNG-B stream.
+#[cfg(any(test, feature = "browser-test-harness"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FixedMillisecondSampleClock {
+    thousandth_sample_remainder: u32,
+}
+
+#[cfg(any(test, feature = "browser-test-harness"))]
+impl FixedMillisecondSampleClock {
+    pub(crate) fn next_frames(&mut self, duration_ms: u32) -> usize {
+        let numerator = u64::from(self.thousandth_sample_remainder)
+            + u64::from(SAMPLE_RATE) * u64::from(duration_ms);
+        self.thousandth_sample_remainder =
+            u32::try_from(numerator % 1_000).expect("sample remainder is below 1000");
+        usize::try_from(numerator / 1_000).expect("one fixed-duration audio frame count fits usize")
+    }
+}
+
 /// Metrics for the most recently scheduled final software-mixed stereo chunk.
 ///
 /// `peak` uses the signed 16-bit PCM full-scale convention already exposed by
@@ -42,6 +69,18 @@ mod tests {
     use crust_audio::output::OutputOptions;
 
     use super::*;
+
+    #[test]
+    fn fixed_millisecond_clock_carries_fractional_samples_without_drift() {
+        let mut clock = FixedMillisecondSampleClock::default();
+        assert_eq!(clock.next_frames(34), 1_499);
+        assert_eq!(clock.next_frames(34), 1_499);
+        assert_eq!(clock.next_frames(34), 1_500);
+
+        let mut clock = FixedMillisecondSampleClock::default();
+        let frames = (0..500).map(|_| clock.next_frames(34)).sum::<usize>();
+        assert_eq!(frames, 749_700);
+    }
 
     #[test]
     fn measures_the_final_three_bus_mix() {

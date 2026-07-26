@@ -340,6 +340,10 @@ function normalizeExpectation(raw, label) {
         "mountedLid",
         "currentLid",
         "titleState",
+        "retailDrawCount",
+        "retailProcessDrawCount",
+        "retailRandomSeed",
+        "retailRandomSeedB",
         "minFrame",
         "minRetailFrame",
         "minRetailExecutions",
@@ -606,7 +610,15 @@ export function liveObjectExpectationFailures(expectation, snapshot) {
 export function expectationFailures(expectation, snapshot) {
   const failures = [];
   const debug = snapshot.debug ?? {};
-  for (const name of ["mountedLid", "currentLid", "titleState"]) {
+  for (const name of [
+    "mountedLid",
+    "currentLid",
+    "titleState",
+    "retailDrawCount",
+    "retailProcessDrawCount",
+    "retailRandomSeed",
+    "retailRandomSeedB",
+  ]) {
     if (expectation[name] !== undefined && debug[name] !== expectation[name]) {
       failures.push(
         `${name}: expected ${expectation[name]}, received ${JSON.stringify(debug[name])}`,

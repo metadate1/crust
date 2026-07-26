@@ -97,6 +97,12 @@ destination before continuing. An optional `"while"` condition limits a segment 
 `currentLid` and/or `mountedLid`; once the authored transition changes that pair, the runner skips
 the segment's remaining scheduled frames without advancing the simulation. This is useful for
 bounded completion-screen pulse cycles whose exact exit frame varies by collected-box count.
+Final or per-segment expectations may also pin `retailDrawCount`, `retailProcessDrawCount`,
+`retailRandomSeed`, and `retailRandomSeedB` exactly. The accelerated harness advances every
+software-audio bus by the fractional-carrying 44.1 kHz sample count for each fixed 34 ms frame;
+production remains scheduled against `AudioContext.currentTime()`. This keeps sample completion,
+voice allocation, shared RNG-B, and repeated campaign traces independent of the host machine's
+execution speed.
 Segments default to `"inputKind": "physical"` and accept only the console's 16-bit physical pad
 mask. A legally local diagnostic reconstructed from PBAK may instead mark a segment
 `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete 32-bit `held`

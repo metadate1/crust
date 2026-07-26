@@ -64470,6 +64470,13 @@ fn rolling_stones_carry_traverses_brio_bonus_with_ordinary_pad_input() {
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn great_hall_all_gems_route_reaches_authored_epilogue_and_title() {
+    // Exact retail completion inventory: 18 clear-gem and six colored-gem
+    // flags live in pool one; the remaining two clear gems and both keys live
+    // in pool two. Do not grant unrelated/unused item bits to reach the
+    // authored 100% branch.
+    const ALL_GEMS_POOL_1: u32 = 0x2fbd_f7be;
+    const ALL_GEMS_AND_KEYS_POOL_2: u32 = 0x0014_0500;
+
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -64482,8 +64489,9 @@ fn great_hall_all_gems_route_reaches_authored_epilogue_and_title() {
     let save = SaveData {
         level_count: 30,
         gem_count: 26,
-        item_pool_1: u32::MAX,
-        item_pool_2: u32::MAX,
+        key_count: 2,
+        item_pool_1: ALL_GEMS_POOL_1,
+        item_pool_2: ALL_GEMS_AND_KEYS_POOL_2,
         initial_lives: 4 << 8,
         sfx_volume: 255,
         music_volume: 255,
@@ -64610,8 +64618,11 @@ fn great_hall_all_gems_route_reaches_authored_epilogue_and_title() {
     assert_eq!(player.state, 33);
     assert_eq!(player.translation, [8_279_948, 1_031_154, 24_872_448]);
     assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(26));
-    assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(u32::MAX));
-    assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(u32::MAX));
+    assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(ALL_GEMS_POOL_1));
+    assert_eq!(
+        runtime.global_word(ITEM_POOL_2_GLOBAL),
+        Ok(ALL_GEMS_AND_KEYS_POOL_2)
+    );
 
     let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
     let transition = runtime

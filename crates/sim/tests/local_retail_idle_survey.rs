@@ -20839,13 +20839,22 @@ impl LabCompletionRouteController {
 /// directional, jump, and spin pad bits; it never injects runtime state or
 /// embeds proprietary recording data.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum LightsOutOpeningPhase {
+    #[default]
+    Nominal,
+    Delayed,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct LightsOutCompletionRouteController {
     session_globals: bool,
     route_frame: u32,
     first_platform_previous_z: Option<i32>,
+    opening_phase: LightsOutOpeningPhase,
     first_platform_released: bool,
     first_platform_runup_remaining: u8,
     first_platform_dismount_released: bool,
+    c0_platform_wait_elapsed: u8,
     late_phase_wait_elapsed: u8,
 }
 
@@ -20869,6 +20878,12 @@ impl LightsOutCompletionRouteController {
             self.first_platform_previous_z = Some(platform.translation[2]);
         }
         if self.session_globals && next_frame == 798 && !self.first_platform_released {
+            // The uninterrupted campaign reaches this gate after the safe
+            // approach band has passed. Remember that full-cycle wait so its
+            // later phase corrections do not perturb shorter carried phases.
+            if first_platform.is_some_and(|platform| platform.translation[2] > 18_550_000) {
+                self.opening_phase = LightsOutOpeningPhase::Delayed;
+            }
             if self.first_platform_runup_remaining != 0 {
                 self.first_platform_runup_remaining -= 1;
                 if self.first_platform_runup_remaining == 0 {
@@ -20877,7 +20892,7 @@ impl LightsOutCompletionRouteController {
                 return PAD_UP;
             }
             let first_platform_ready = first_platform.is_some_and(|platform| {
-                (18_450_000..=18_700_000).contains(&platform.translation[2])
+                (18_450_000..=18_550_000).contains(&platform.translation[2])
                     && first_platform_approaching
             });
             if !first_platform_ready {
@@ -20895,6 +20910,23 @@ impl LightsOutCompletionRouteController {
                 return PAD_UP;
             }
             self.first_platform_dismount_released = true;
+        }
+        let c0_platform_phase_late = objects.iter().any(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 36)
+                && object.program.name().as_deref() == Some("PoPlC")
+                && object.state == 4
+                && object.translation[1] > -532_000
+        });
+        if self.session_globals
+            && next_frame == 2_140
+            && (c0_platform_phase_late || self.c0_platform_wait_elapsed != 0)
+            && self.c0_platform_wait_elapsed < 4
+        {
+            // This live falling-platform phase reaches c0 four ticks later.
+            // Hold on the preceding safe floor so the eventual jump leaves
+            // from the platform's usable leading edge.
+            self.c0_platform_wait_elapsed += 1;
+            return 0;
         }
         if self.session_globals && next_frame == 3_761 && self.late_phase_wait_elapsed < 4 {
             // The carried projectile cycle reaches the d8 landing four ticks
@@ -20921,6 +20953,23 @@ impl LightsOutCompletionRouteController {
             if (1_991..=2_002).contains(&next_frame) {
                 held |= PAD_CROSS;
             }
+            let player = objects.iter().find(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 6)
+                    && object.program.name().as_deref() == Some("WillC")
+            });
+            // A live carried clock can put a second rolling pillar directly
+            // into this jump. Spin only while that active pillar is close.
+            let carried_rolling_obstacle_close = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Runtime { .. })
+                        && object.program.name().as_deref() == Some("PillC")
+                        && object.state == 2
+                        && object.translation[2].abs_diff(player.translation[2]) < 300_000
+                })
+            });
+            if (2_025..=2_040).contains(&next_frame) && carried_rolling_obstacle_close {
+                held |= PAD_SQUARE;
+            }
             if next_frame == 2_199 {
                 held |= PAD_SQUARE;
             }
@@ -20938,6 +20987,46 @@ impl LightsOutCompletionRouteController {
             }
             if (2_624..=2_630).contains(&next_frame) {
                 held = PAD_UP | PAD_LEFT;
+            }
+            let carried_projectile_close = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Runtime { .. })
+                        && object.program.name().as_deref() == Some("DoctC")
+                        && object.state == 8
+                        && object.translation[0].abs_diff(player.translation[0]) < 600_000
+                        && object.translation[1].abs_diff(player.translation[1]) < 600_000
+                        && object.translation[2].abs_diff(player.translation[2]) < 600_000
+                })
+            });
+            let c0_phase_correction = self.c0_platform_wait_elapsed != 0;
+            if c0_phase_correction
+                && (3_761..=3_792).contains(&next_frame)
+                && carried_projectile_close
+            {
+                held |= PAD_SQUARE;
+            }
+            // Waiting on either carried moving-platform phase shifts a few
+            // later collapsing-floor approaches. Keep their ordinary-pad
+            // edges ahead of the live collapse without changing runtime data.
+            let corrected_late_phase = self.opening_phase == LightsOutOpeningPhase::Delayed
+                || self.c0_platform_wait_elapsed != 0;
+            if corrected_late_phase && (3_213..=3_216).contains(&next_frame) {
+                held |= PAD_UP;
+            }
+            if c0_phase_correction && (3_548..=3_559).contains(&next_frame) {
+                held |= PAD_UP;
+            }
+            if c0_phase_correction && (3_590..=3_604).contains(&next_frame) {
+                held &= !PAD_UP;
+            }
+            if c0_phase_correction && (3_665..=3_668).contains(&next_frame) {
+                held &= !PAD_CROSS;
+            }
+            if corrected_late_phase && (3_957..=3_960).contains(&next_frame) {
+                held |= PAD_UP | PAD_LEFT;
+            }
+            if corrected_late_phase && next_frame == 4_244 {
+                held |= PAD_CROSS;
             }
             if (4_050..=4_051).contains(&next_frame) {
                 held |= PAD_UP;
@@ -41756,9 +41845,11 @@ impl SurveyInputController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
                 route_frame: 0,
                 first_platform_previous_z: None,
+                opening_phase: LightsOutOpeningPhase::Nominal,
                 first_platform_released: false,
                 first_platform_runup_remaining: 0,
                 first_platform_dismount_released: false,
+                c0_platform_wait_elapsed: 0,
                 late_phase_wait_elapsed: 0,
             },
             slippery_climb: SlipperyClimbCompletionRouteController {

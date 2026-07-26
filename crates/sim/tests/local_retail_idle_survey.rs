@@ -13383,6 +13383,23 @@ impl GreatGateRouteController {
         }
         if let Some(action) = self.active {
             if !self.yellow_gem_route
+                && self.stage == 19
+                && let Some(player) = player
+                && player.status_a & 1 != 0
+                && camera.path.zone
+                    == Eid::from_name("a8_iZ").expect("fixed Great Gate route EID is valid")
+                && camera.progress.raw() >= 5_600
+            {
+                // A carried scheduler phase can reach a8's takeoff while the
+                // old 28-frame approach still owns the pad. Start the next
+                // jump from the last authored grounded sample instead of
+                // consuming the approach until Crash is already over the pit.
+                self.active = None;
+                self.action_tick = 0;
+                self.stage = 20;
+                return self.held(camera, Some(player), collect_tawna_tokens, route_objects);
+            }
+            if !self.yellow_gem_route
                 && self.stage == 94
                 && let Some(player) = player
                 && player.status_a & 1 != 0
@@ -13562,6 +13579,31 @@ impl GreatGateRouteController {
                     };
                 }
             }
+            if !self.yellow_gem_route && self.stage == 74 && !self.b6_hazard_released {
+                if let Some(hazard_y) = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 85)
+                        .then_some(object.translation[1])
+                }) {
+                    self.b6_hazard_low_seen |= hazard_y <= -7_999_000;
+                    if self.b6_hazard_low_seen && hazard_y >= -7_980_000 {
+                        self.b6_hazard_released = true;
+                    }
+                }
+                if !self.b6_hazard_released {
+                    let player = player.expect("checked Great Gate route player is present");
+                    return if player.velocity[0] < -HAZARD_VELOCITY_TOLERANCE {
+                        PAD_RIGHT
+                    } else if player.velocity[0] > HAZARD_VELOCITY_TOLERANCE
+                        || player.translation[0] > B6_LOG_HOLD_X + HAZARD_POSITION_TOLERANCE
+                    {
+                        PAD_LEFT
+                    } else if player.translation[0] < B6_LOG_HOLD_X - HAZARD_POSITION_TOLERANCE {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                }
+            }
             if !self.yellow_gem_route
                 && self.stage == 76
                 && ((18..34).contains(&self.action_tick)
@@ -13612,7 +13654,7 @@ impl GreatGateRouteController {
                 let player = player.expect("checked Great Gate route player is present");
                 if player.status_a & 1 != 0
                     && self.action_tick == 0
-                    && player.translation[0] < 8_480_000
+                    && player.translation[0] < 8_180_000
                 {
                     return PAD_RIGHT;
                 }
@@ -13643,6 +13685,21 @@ impl GreatGateRouteController {
             }
             if !self.yellow_gem_route && self.stage == 91 && (1..16).contains(&self.action_tick) {
                 held |= PAD_SQUARE;
+            }
+            if !self.yellow_gem_route && self.stage == 94 {
+                const C2_BANK_X: i32 = 8_840_000;
+                let player = player.expect("checked Great Gate route player is present");
+                held = if player.velocity[0] > HAZARD_VELOCITY_TOLERANCE
+                    || player.translation[0] > C2_BANK_X + HAZARD_POSITION_TOLERANCE
+                {
+                    PAD_LEFT
+                } else if player.velocity[0] < -HAZARD_VELOCITY_TOLERANCE
+                    || player.translation[0] < C2_BANK_X - HAZARD_POSITION_TOLERANCE
+                {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
             }
             if !self.yellow_gem_route && self.stage == 71 {
                 held = PAD_RIGHT;
@@ -14160,6 +14217,30 @@ impl GreatGateRouteController {
                 _ => unreachable!("all Great Gate opening stages are matched"),
             });
             return self.held(camera, Some(player), collect_tawna_tokens, route_objects);
+        }
+
+        if !self.yellow_gem_route && self.stage == 89 {
+            let platform_ready = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 92
+                ) && object.state == 11
+            });
+            if !grounded || !platform_ready || player.translation[0] > 10_260_000 {
+                // The publisher-carried WalOC reaches c1 later than the
+                // isolated route. Stay on its authored top face until it has
+                // carried Crash close enough for the ordinary full-height
+                // jump to reach c2.
+                return PAD_LEFT;
+            }
+        }
+
+        if !self.yellow_gem_route && self.stage == 90 && !grounded {
+            // Stage 89's carried jump can still be descending when the c2
+            // approach becomes current. Preserve its lateral carry without
+            // changing depth until a real landing, then let stage 90 emit a
+            // fresh Cross edge from the c2 bank.
+            return PAD_LEFT;
         }
 
         let triggered = match self.stage {
@@ -42627,6 +42708,46 @@ struct DirectSendProgramSample {
     recipient: Option<Eid>,
 }
 
+/// Browser-compatible controller history retained across stream remounts.
+///
+/// Native calls `PadUpdate` once from `CoreObjectsCreate`, then again at
+/// Crash's traversal boundary on every cooperative frame. Most isolated
+/// surveys deliberately start this history at zero. The publisher campaign
+/// regression opts into this state so a held/tapped edge cannot be fabricated
+/// merely because the destination pair was mounted.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PersistentPadState {
+    snapshot: RetailPadSnapshot,
+}
+
+impl PersistentPadState {
+    fn update(&mut self, held: u32) -> RetailPadSnapshot {
+        let previous = self.snapshot.held;
+        self.snapshot.held_previous_2 = self.snapshot.held_previous;
+        self.snapshot.tapped_previous = self.snapshot.tapped;
+        self.snapshot.held_previous = previous;
+        self.snapshot.held = held;
+        self.snapshot.tapped = (!previous & held) & 0xf9ff;
+        self.snapshot
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PersistentSurveyPlan {
+    mount_held: u32,
+    initial_idle_frames: u32,
+    fixed_cross_frame: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FirstFramePhase {
+    draw_count: u32,
+    random_seed: u32,
+    random_seed_b: u32,
+    executions: usize,
+    player: Option<PlayerTrace>,
+}
+
 #[derive(Debug)]
 struct LevelSurvey {
     level: LevelId,
@@ -42685,6 +42806,7 @@ struct LevelSurvey {
     entity_state_samples: Vec<(u32, u16, u16)>,
     entity_counter_samples: Vec<(u32, u16, u32)>,
     direct_send_program_samples: Vec<DirectSendProgramSample>,
+    first_frame_phase: Option<FirstFramePhase>,
     next_lid: Option<(u32, i32)>,
     cross_level_restart: Option<(u32, LevelId)>,
 }
@@ -42748,6 +42870,7 @@ impl LevelSurvey {
             entity_state_samples: Vec::new(),
             entity_counter_samples: Vec::new(),
             direct_send_program_samples: Vec::new(),
+            first_frame_phase: None,
             next_lid: None,
             cross_level_restart: None,
         }
@@ -43440,6 +43563,525 @@ fn authored_completed_card_load_runtime(
         runtime.global_word(TITLE_STATE_GLOBAL),
         card.published_state(),
     );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct NativeTitleScreenProfile {
+    zone_name: &'static str,
+    display_mask: u32,
+    uses_image: bool,
+    updates_camera: bool,
+}
+
+fn native_title_screen_profile(
+    screen: TitleScreen,
+    current_map_level: u32,
+) -> NativeTitleScreenProfile {
+    match screen {
+        TitleScreen::MainMenu => NativeTitleScreenProfile {
+            zone_name: "0c_pZ",
+            display_mask: 0x22_fffc,
+            uses_image: true,
+            updates_camera: false,
+        },
+        TitleScreen::Options => NativeTitleScreenProfile {
+            zone_name: "0f_pZ",
+            display_mask: TITLE_MAP_DISPLAY_MASK,
+            uses_image: false,
+            updates_camera: true,
+        },
+        TitleScreen::PublisherFirst | TitleScreen::PublisherSecond => NativeTitleScreenProfile {
+            zone_name: "0a_pZ",
+            display_mask: 0x22_3ff0,
+            uses_image: true,
+            updates_camera: false,
+        },
+        TitleScreen::NaughtyDog => NativeTitleScreenProfile {
+            zone_name: "0d_pZ",
+            display_mask: 0x22_fffc,
+            uses_image: true,
+            updates_camera: false,
+        },
+        TitleScreen::GameOver => NativeTitleScreenProfile {
+            zone_name: "0b_pZ",
+            display_mask: TITLE_MAP_DISPLAY_MASK,
+            uses_image: false,
+            updates_camera: true,
+        },
+        TitleScreen::Password | TitleScreen::Load => NativeTitleScreenProfile {
+            zone_name: "0e_pZ",
+            display_mask: TITLE_MAP_DISPLAY_MASK,
+            uses_image: false,
+            updates_camera: true,
+        },
+        TitleScreen::Map => NativeTitleScreenProfile {
+            zone_name: if current_map_level == 99 || current_map_level < 9 {
+                "1a_pZ"
+            } else if current_map_level == 9 {
+                "1e_pZ"
+            } else if current_map_level < 18 {
+                "2b_pZ"
+            } else {
+                "3a_pZ"
+            },
+            display_mask: TITLE_MAP_DISPLAY_MASK,
+            uses_image: false,
+            updates_camera: true,
+        },
+    }
+}
+
+/// Native-only mirror of the browser's authoritative Title loop.
+///
+/// This deliberately begins at the first publisher card and keeps one
+/// [`PersistentPadState`] through every intra-title load. It is used only by
+/// the legally-local publisher campaign regression below; normal isolated map
+/// characterizations retain their smaller dedicated harness.
+struct PublisherTitleHarness<'assets> {
+    nsd: &'assets Nsd,
+    nsf: &'assets Nsf,
+    nsf_bytes: &'assets [u8],
+    graph: RetailZoneGraph,
+    zones: BTreeMap<Eid, OwnedZone>,
+    lifecycle: ZoneLifecycle,
+    camera: RetailCameraRuntime,
+    runtime: RetailRuntime,
+    card: VirtualCard,
+    pad: PersistentPadState,
+    frame: u32,
+    transitions: Vec<(u32, i32)>,
+}
+
+impl<'assets> PublisherTitleHarness<'assets> {
+    fn fresh(nsd: &'assets Nsd, nsf: &'assets Nsf, nsf_bytes: &'assets [u8]) -> Self {
+        let graph = graph_for_pair(LevelId::TITLE, nsd, nsf, nsf_bytes)
+            .expect("publisher Title graph must parse");
+        let (zones, lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, LevelId::TITLE)
+            .expect("publisher Title zones must parse");
+        let camera =
+            RetailCameraRuntime::new(&graph).expect("publisher Title camera must initialize");
+        let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+        runtime
+            .restore_card_save_data(SaveData {
+                level_count: 1,
+                initial_lives: 4 << 8,
+                sfx_volume: 255,
+                music_volume: 255,
+                ..SaveData::default()
+            })
+            .expect("publisher Title default save must restore");
+        refresh_level_context(&mut runtime, &graph, &lifecycle, camera.location())
+            .expect("publisher Title initial level context must mount");
+
+        // Native CoreObjectsCreate performs one PadUpdate before the
+        // publisher TitleLoadScreen replaces the process-lifetime roots.
+        let mut pad = PersistentPadState::default();
+        runtime
+            .set_pad_snapshot(0, pad.update(0))
+            .expect("publisher CoreObjectsCreate pad boundary must publish");
+        let mut host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
+        runtime
+            .create_retail_core_objects(camera.location().path.zone, &mut host)
+            .expect("publisher Title core objects must materialize");
+        runtime
+            .create_retail_level_misc_object(camera.location().path.zone, &mut host)
+            .expect("publisher Title level-misc object must materialize");
+        runtime
+            .configure_retail_title(TitleScreen::PublisherFirst, true)
+            .expect("publisher-first Title authority must configure");
+
+        let mut harness = Self {
+            nsd,
+            nsf,
+            nsf_bytes,
+            graph,
+            zones,
+            lifecycle,
+            camera,
+            runtime,
+            card: VirtualCard::new(),
+            pad,
+            frame: 0,
+            transitions: Vec::new(),
+        };
+        harness.mount_screen(TitleScreen::PublisherFirst);
+        harness
+    }
+
+    fn from_session(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        carry: RetailSessionCarry,
+        mut pad: PersistentPadState,
+    ) -> Self {
+        let graph = graph_for_pair(LevelId::TITLE, nsd, nsf, nsf_bytes)
+            .expect("carried Title graph must parse");
+        let (zones, lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, LevelId::TITLE)
+            .expect("carried Title zones must parse");
+        let camera =
+            RetailCameraRuntime::new(&graph).expect("carried Title camera must initialize");
+        let mut runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, carry)
+            .expect("Title must import the preceding Level Complete carry");
+        seed_mounted_level_context_from_globals(
+            &mut runtime,
+            &graph,
+            &lifecycle,
+            camera.location(),
+        )
+        .expect("carried Title initial context must mount");
+
+        let mount_held = pad.snapshot.held;
+        runtime
+            .set_pad_snapshot(0, pad.update(mount_held))
+            .expect("carried Title CoreObjectsCreate pad boundary must publish");
+        let mut host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
+        runtime
+            .create_retail_core_objects(camera.location().path.zone, &mut host)
+            .expect("carried Title core objects must materialize");
+        runtime
+            .create_retail_level_misc_object(camera.location().path.zone, &mut host)
+            .expect("carried Title level-misc object must materialize");
+        let screen = TitleScreen::from_raw(
+            runtime
+                .global_word(TITLE_STATE_GLOBAL)
+                .expect("carried Title state global must exist"),
+        )
+        .expect("carried Title state must be valid");
+        runtime
+            .configure_retail_title(screen, false)
+            .expect("carried Title authority must configure");
+
+        let mut harness = Self {
+            nsd,
+            nsf,
+            nsf_bytes,
+            graph,
+            zones,
+            lifecycle,
+            camera,
+            runtime,
+            card: VirtualCard::new(),
+            pad,
+            frame: 0,
+            transitions: Vec::new(),
+        };
+        harness.mount_screen(screen);
+        harness
+    }
+
+    fn mount_screen(&mut self, screen: TitleScreen) {
+        let current_map_level = self
+            .runtime
+            .global_word(CURRENT_MAP_LEVEL_GLOBAL)
+            .expect("Title current-map global must exist");
+        let profile = native_title_screen_profile(screen, current_map_level);
+        self.runtime
+            .set_global_word(NEXT_DISPLAY_GLOBAL, profile.display_mask)
+            .expect("Title display mask must publish");
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let teardown = self
+            .runtime
+            .terminate_all_objects(&mut host)
+            .expect("TitleLoadScreen teardown must execute");
+        assert!(
+            teardown.event_failures.is_empty(),
+            "Title {screen:?} teardown mismatch: {:?}",
+            teardown.event_failures
+        );
+        if screen == TitleScreen::MainMenu {
+            self.runtime
+                .reset_level_globals()
+                .expect("Main Menu must execute native global reset");
+            self.runtime
+                .restore_resume_after_title_reset(SaveData {
+                    level_count: 1,
+                    initial_lives: 4 << 8,
+                    sfx_volume: 255,
+                    music_volume: 255,
+                    ..SaveData::default()
+                })
+                .expect("Main Menu must restore the protected default resume");
+        }
+
+        let zone =
+            Eid::from_name(profile.zone_name).expect("fixed publisher Title zone EID is valid");
+        let path = RetailPathId { zone, index: 0 };
+        self.lifecycle
+            .transition_with_marker(zone, true)
+            .expect("TitleLoadScreen lifecycle transition must execute");
+        let step = self
+            .camera
+            .level_update(&self.graph, path, 0, 2)
+            .expect("TitleLoadScreen LevelUpdate must execute");
+        let graphics_flags = self
+            .graph
+            .zone(zone)
+            .expect("mounted Title zone must exist")
+            .graphics_flags;
+        self.runtime
+            .set_level_state_context(RetailLevelStateContext {
+                location: step.after,
+                graphics_flags,
+                box_count: 0,
+                checkpoint_id: -1,
+                checkpoint_translation: [0; 3],
+                first_spawn: false,
+                active_neighbor_zones: self.lifecycle.active_neighbor_zones(),
+            });
+
+        if profile.uses_image {
+            let mdat = load_title_mdat(self.nsd, self.nsf, self.nsf_bytes, screen as u8)
+                .expect("publisher Title MDAT must parse");
+            let levels_unlocked = self
+                .runtime
+                .global_word(LEVELS_UNLOCKED_GLOBAL)
+                .expect("Title levels-unlocked global must exist")
+                .cast_signed();
+            let eligible = mdat
+                .entities
+                .into_iter()
+                .filter(|entity| {
+                    entity
+                        .path_points
+                        .first()
+                        .is_some_and(|point| i32::from(point.z) <= levels_unlocked)
+                })
+                .collect::<Vec<_>>();
+            let neighbors = [NeighborZone {
+                eid: zone,
+                display_flags: 2,
+                entities: eligible.as_slice(),
+            }];
+            let attempts = self
+                .runtime
+                .spawn_current_zone_neighbors(&neighbors, &mut host);
+            assert!(
+                attempts.iter().all(|attempt| attempt.result.is_ok()),
+                "Title {screen:?} MDAT spawn mismatch: {attempts:?}"
+            );
+        }
+    }
+
+    fn step(&mut self, held: u32) {
+        self.frame += 1;
+        self.runtime.set_frame_timing(34, 34);
+        self.card.update();
+        self.runtime
+            .publish_card_state(self.card.published_state())
+            .expect("publisher Title card state must publish");
+
+        let neighbors = self
+            .lifecycle
+            .next_frame_spawn_scan()
+            .iter()
+            .map(|candidate| {
+                let zone = self
+                    .zones
+                    .get(&candidate.zone)
+                    .expect("publisher Title spawn zone must be cataloged");
+                NeighborZone {
+                    eid: zone.eid,
+                    display_flags: candidate.display_flags,
+                    entities: zone.entities.as_slice(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let attempts = self
+            .runtime
+            .spawn_current_zone_neighbors(&neighbors, &mut host);
+        assert!(
+            attempts.iter().all(|attempt| {
+                attempt.result.is_ok()
+                    || matches!(
+                        attempt.result,
+                        Err(RuntimeError::Spawn(
+                            SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
+                        ))
+                    )
+            }),
+            "publisher Title frame {} spawn mismatch: {attempts:?}",
+            self.frame
+        );
+
+        let camera_pad = self.pad.snapshot;
+        self.update_camera(camera_pad);
+        let runtime_pad = self.pad.update(held);
+        let report = self
+            .runtime
+            .run_frame_before_display_with_traversal_hook(
+                &mut host,
+                INSTRUCTION_BUDGET,
+                |runtime, _host, _point| {
+                    runtime
+                        .set_pad_snapshot(0, runtime_pad)
+                        .map_err(RuntimeError::Vm)
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("publisher Title frame {} runtime: {error:?}", self.frame)
+            });
+        assert!(
+            report
+                .executions
+                .iter()
+                .all(|execution| execution.result.is_ok()),
+            "publisher Title frame {} execution mismatch: {:?}",
+            self.frame,
+            report
+                .executions
+                .iter()
+                .filter(|execution| execution.result.is_err())
+                .collect::<Vec<_>>()
+        );
+        self.transitions
+            .extend(report.effects.iter().filter_map(|effect| match effect {
+                VmEffect::Transition(level) => Some((self.frame, *level)),
+                _ => None,
+            }));
+
+        let action = self
+            .runtime
+            .begin_retail_title_update()
+            .expect("publisher Title update must begin");
+        if let Some(RetailTitleAction::LoadScreen { screen, .. }) = action {
+            self.mount_screen(screen);
+        }
+        self.runtime
+            .finish_retail_title_update()
+            .expect("publisher Title update must finish");
+        self.runtime
+            .finish_deferred_display_frame()
+            .expect("publisher Title display boundary must finish");
+        assert_eq!(
+            self.runtime.faulted_object_count(),
+            0,
+            "publisher Title frame {} retained a faulted object",
+            self.frame
+        );
+    }
+
+    fn update_camera(&mut self, pad: RetailPadSnapshot) {
+        let presentation = self
+            .runtime
+            .retail_title_presentation()
+            .expect("publisher Title presentation must be readable")
+            .expect("publisher Title presentation must remain configured");
+        let current_map_level = self
+            .runtime
+            .global_word(CURRENT_MAP_LEVEL_GLOBAL)
+            .expect("Title current-map global must exist");
+        let profile = native_title_screen_profile(presentation.screen, current_map_level);
+        if !profile.updates_camera || self.runtime.arena().main_object().is_none() {
+            return;
+        }
+        let island = (presentation.screen == TitleScreen::Map).then(|| RetailIslandCameraInput {
+            island_cam_state: self
+                .runtime
+                .global_word(ISLAND_CAMERA_STATE_GLOBAL)
+                .expect("Title island-camera state must exist")
+                .cast_signed(),
+            island_cam_rot_x: self
+                .runtime
+                .global_word(ISLAND_CAMERA_ROTATION_GLOBAL)
+                .expect("Title island-camera rotation must exist")
+                .cast_signed(),
+        });
+        let step = self
+            .camera
+            .update_with_island(
+                &self.graph,
+                RetailCameraInput { tapped: pad.tapped },
+                island,
+            )
+            .expect("publisher Title camera update must execute");
+        let island_writeback = match step.outcome {
+            RetailCameraOutcome::IslandAdvanced {
+                mode,
+                state_before,
+                state_after,
+                ..
+            } => Some((mode, state_before, state_after)),
+            _ => None,
+        };
+        if let Some((7, _, state_after)) = island_writeback {
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .expect("mode-seven island state writeback must succeed");
+        }
+        for effect in &step.effects {
+            let RetailCameraEffect::LevelUpdate {
+                before,
+                after,
+                flags,
+            } = *effect
+            else {
+                continue;
+            };
+            if before.path.zone != after.path.zone {
+                self.lifecycle
+                    .transition_with_marker(after.path.zone, flags & 2 != 0)
+                    .expect("publisher Title camera lifecycle transition must execute");
+            }
+            let existing = self
+                .runtime
+                .level_state_context()
+                .expect("publisher Title level context must remain mounted")
+                .clone();
+            let graphics_flags = self
+                .graph
+                .zone(after.path.zone)
+                .expect("publisher Title destination zone must exist")
+                .graphics_flags;
+            self.runtime
+                .set_level_state_context(RetailLevelStateContext {
+                    location: after,
+                    graphics_flags,
+                    box_count: existing.box_count,
+                    checkpoint_id: existing.checkpoint_id,
+                    checkpoint_translation: existing.checkpoint_translation,
+                    first_spawn: existing.first_spawn,
+                    active_neighbor_zones: self.lifecycle.active_neighbor_zones(),
+                });
+        }
+        if let Some((8, _, state_after)) = island_writeback {
+            self.runtime
+                .set_global_word(ISLAND_CAMERA_STATE_GLOBAL, state_after.cast_unsigned())
+                .expect("mode-eight island state writeback must succeed");
+        }
+        let game_state = self
+            .runtime
+            .global_word(GAME_STATE_GLOBAL)
+            .expect("publisher Title game state must remain readable")
+            .cast_signed();
+        self.camera.synchronize_game_state(game_state);
+        self.runtime.latch_frame_context(
+            game_state,
+            self.camera
+                .rotation_xz(&self.graph)
+                .expect("publisher Title camera rotation must resolve"),
+        );
+    }
+
+    fn finish_transition(mut self, expected: LevelId) -> (RetailSessionCarry, PersistentPadState) {
+        let expected_lid = i32::try_from(expected.get()).expect("destination LID fits i32");
+        assert_eq!(
+            self.transitions.last(),
+            Some(&(self.frame, expected_lid)),
+            "publisher Title must request {expected}"
+        );
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let report = self
+            .runtime
+            .finish_level_transition(&mut host, expected_lid)
+            .expect("publisher Title LEVEL_END must export its carry");
+        assert!(report.event_failures.is_empty());
+        assert!(report.effects.is_empty());
+        assert_eq!(report.resolved.level, expected);
+        assert!(!report.resolved.bonus_return);
+        (report.carry, self.pad)
+    }
 }
 
 struct AuthoredTitleMapHarness<'assets> {
@@ -44821,10 +45463,68 @@ fn survey_pair_with_runtime(
     nsd: &Nsd,
     nsf: &Nsf,
     nsf_bytes: &[u8],
+    runtime: RetailRuntime,
+    context_source: LevelContextSource,
+    input_profile: SurveyInputProfile,
+    survey_frames: u32,
+) -> Result<(LevelSurvey, RetailRuntime), String> {
+    survey_pair_with_runtime_impl(
+        name,
+        level,
+        nsd,
+        nsf,
+        nsf_bytes,
+        runtime,
+        context_source,
+        input_profile,
+        survey_frames,
+        None,
+        PersistentSurveyPlan::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn survey_pair_with_persistent_pad(
+    name: &'static str,
+    level: LevelId,
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+    runtime: RetailRuntime,
+    context_source: LevelContextSource,
+    input_profile: SurveyInputProfile,
+    survey_frames: u32,
+    pad: &mut PersistentPadState,
+    plan: PersistentSurveyPlan,
+) -> Result<(LevelSurvey, RetailRuntime), String> {
+    survey_pair_with_runtime_impl(
+        name,
+        level,
+        nsd,
+        nsf,
+        nsf_bytes,
+        runtime,
+        context_source,
+        input_profile,
+        survey_frames,
+        Some(pad),
+        plan,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn survey_pair_with_runtime_impl(
+    name: &'static str,
+    level: LevelId,
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
     mut runtime: RetailRuntime,
     context_source: LevelContextSource,
     input_profile: SurveyInputProfile,
     survey_frames: u32,
+    persistent_pad: Option<&mut PersistentPadState>,
+    persistent_plan: PersistentSurveyPlan,
 ) -> Result<(LevelSurvey, RetailRuntime), String> {
     let replay_export_dir = std::env::var_os("C1_BROWSER_REPLAY_EXPORT").map(PathBuf::from);
     let replay_initial_draw_count = runtime.draw_count();
@@ -44900,6 +45600,14 @@ fn survey_pair_with_runtime(
                 camera.location(),
             )?;
         }
+    }
+    let persistent_pad_enabled = persistent_pad.is_some();
+    let mut active_pad = persistent_pad.as_deref().copied().unwrap_or_default();
+    if persistent_pad_enabled {
+        let mount_snapshot = active_pad.update(persistent_plan.mount_held);
+        runtime
+            .set_pad_snapshot(0, mount_snapshot)
+            .map_err(|error| format!("CoreObjectsCreate pad snapshot: {error:?}"))?;
     }
     let mut initial_host = NsfProgramHost::new(nsd, nsf, nsf_bytes);
     runtime
@@ -45035,9 +45743,9 @@ fn survey_pair_with_runtime(
         SurveyInputController::new(input_profile, context_source, runtime.draw_count());
     input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     let mut empty_frames = 0_u32;
-    let mut held_previous = 0_u32;
-    let mut held_previous_2 = 0_u32;
-    let mut tapped_previous = 0_u32;
+    let mut held_previous = active_pad.snapshot.held;
+    let mut held_previous_2 = active_pad.snapshot.held_previous;
+    let mut tapped_previous = active_pad.snapshot.tapped;
     let mut last_interaction_globals = None;
     let mut previous_box_count = None;
     let mut previous_checkpoint = None;
@@ -45405,23 +46113,30 @@ fn survey_pair_with_runtime(
                 input_controller.brio.tick,
             );
         }
-        let held = input_controller.held(
-            frame,
-            camera.location(),
-            player_before_frame,
-            player_collider_before_frame,
-            checkpoint_id_before_frame,
-            local_pbak_prefix
-                .as_deref()
-                .and_then(|frames| frames.get(usize::try_from(frame - 1).ok()?))
-                .copied(),
-            (input_profile == SurveyInputProfile::LostCityCompletionRoute)
-                .then_some(local_pbak_prefix.as_deref())
-                .flatten(),
-            &upstream_platforms,
-            boss_state,
-            &route_objects,
-        );
+        let controller_frame = frame.saturating_sub(persistent_plan.initial_idle_frames);
+        let held = if frame <= persistent_plan.initial_idle_frames {
+            0
+        } else if let Some(cross_frame) = persistent_plan.fixed_cross_frame {
+            if frame == cross_frame { PAD_CROSS } else { 0 }
+        } else {
+            input_controller.held(
+                controller_frame,
+                camera.location(),
+                player_before_frame,
+                player_collider_before_frame,
+                checkpoint_id_before_frame,
+                local_pbak_prefix
+                    .as_deref()
+                    .and_then(|frames| frames.get(usize::try_from(controller_frame - 1).ok()?))
+                    .copied(),
+                (input_profile == SurveyInputProfile::LostCityCompletionRoute)
+                    .then_some(local_pbak_prefix.as_deref())
+                    .flatten(),
+                &upstream_platforms,
+                boss_state,
+                &route_objects,
+            )
+        };
         if input_profile == SurveyInputProfile::RollingStonesBrioBonus
             && std::env::var_os("C1_SURVEY_ROLLING_BRIO_TRACE").is_some()
             && frame.is_multiple_of(5)
@@ -45877,22 +46592,23 @@ fn survey_pair_with_runtime(
         {
             survey.pad_change_samples.push((frame, held));
         }
-        let tapped = held & !held_previous;
+        let pad_snapshot = if persistent_pad_enabled {
+            active_pad.update(held)
+        } else {
+            RetailPadSnapshot {
+                tapped: held & !held_previous,
+                held,
+                tapped_previous,
+                held_previous,
+                held_previous_2,
+            }
+        };
         runtime
-            .set_pad_snapshot(
-                0,
-                RetailPadSnapshot {
-                    tapped,
-                    held,
-                    tapped_previous,
-                    held_previous,
-                    held_previous_2,
-                },
-            )
+            .set_pad_snapshot(0, pad_snapshot)
             .map_err(|error| format!("pad snapshot: {error:?}"))?;
         held_previous_2 = held_previous;
         held_previous = held;
-        tapped_previous = tapped;
+        tapped_previous = pad_snapshot.tapped;
 
         // Native CoreFrame performs one `NSUpdate(-1)` before its object spawn
         // scan. Mirror the browser boundary exactly: the pager promotes the
@@ -46264,6 +46980,15 @@ fn survey_pair_with_runtime(
         drain_reclaim_diagnostics(&mut runtime, &mut survey, frame);
 
         let player = player_trace(&runtime)?;
+        if frame == 1 {
+            survey.first_frame_phase = Some(FirstFramePhase {
+                draw_count: runtime.draw_count(),
+                random_seed: runtime.machine().random_seed(),
+                random_seed_b: runtime.random_seed_b(),
+                executions: report.executions.len(),
+                player,
+            });
+        }
         survey.observe_progress(frame, camera.location(), player);
         if std::env::var_os("C1_PROGRESSION_TRACE").is_some()
             && matches!(
@@ -46386,6 +47111,9 @@ fn survey_pair_with_runtime(
         survey
             .fault_contexts
             .insert(fault_context(&runtime, nsd, nsf, nsf_bytes, object));
+    }
+    if let Some(pad) = persistent_pad {
+        *pad = active_pad;
     }
     if let Some(export_dir) = replay_export_dir {
         export_browser_replay_fragment(
@@ -58950,6 +59678,254 @@ fn lost_city_completion_route_reaches_title_after_checkpoint_recovery() {
         "Lost City completion route reached a checked runtime boundary: {}",
         survey.summary()
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn corrected_publisher_great_gate_phase_completes_with_live_controller() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let great_gate = CampaignPair::parse(&root, LevelId::new_const(0x12));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 3),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 3),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (CHECKPOINT_ID_GLOBAL, u32::MAX),
+        (
+            CHECKPOINT_TRANSLATION_GLOBALS[0],
+            (-563_968_i32).cast_unsigned(),
+        ),
+        (CHECKPOINT_TRANSLATION_GLOBALS[1], 2_236_928),
+        (CHECKPOINT_TRANSLATION_GLOBALS[2], 15_717_376),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("corrected Great Gate carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // Great Gate's first source frame performs eleven ordinary RNG-A draws.
+    // This is the exact eleven-step inverse of the published f1 word.
+    carry.random_seed = 0x6bd6_575d;
+    carry.draw_count = 6_692;
+    carry.set_random_seed_b(0x9010_ea53);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate.level, carry)
+        .expect("Great Gate must import the corrected publisher carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        great_gate.name,
+        great_gate.level,
+        &great_gate.nsd,
+        &great_gate.nsf,
+        &great_gate.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::GreatGatePhaseRobust,
+        3_600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+        },
+    )
+    .expect("corrected Great Gate phase must execute with the live controller");
+    let first = survey
+        .first_frame_phase
+        .expect("corrected Great Gate frame-one phase must be captured");
+    eprintln!("corrected Great Gate f1: {first:?}");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (6_693, 0x39d9_7bb8, 0x9010_ea53, 30)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("a1_iZ").expect("fixed Great Gate spawn-zone EID is valid"),
+            40,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_695,
+            },
+            [11_570_944, -12_697_600, 306_944],
+        ))
+    );
+    assert!(
+        survey
+            .checkpoint_samples
+            .iter()
+            .any(|(_, checkpoint, _)| *checkpoint == 76 << 8),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(76 << 8));
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
+    const TITLE_MAP_REPLAY_IDLE_FRAMES: u32 = 252;
+    const N_SANITY_COMPLETION_REPLAY_FRAMES: u32 = 465;
+
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let n_sanity = CampaignPair::parse(&root, LevelId::N_SANITY_BEACH);
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let jungle = CampaignPair::parse(&root, LevelId::new_const(0x0c));
+
+    // This is the ordinary browser "Full Game" launch sequence. Publisher
+    // timing and every input below are authored-runtime observations, not
+    // copied game bytes or a checked-in replay.
+    let mut first_title = PublisherTitleHarness::fresh(&title.nsd, &title.nsf, &title.nsf_bytes);
+    for _ in 0..647 {
+        first_title.step(0);
+    }
+    assert_eq!(
+        first_title
+            .runtime
+            .retail_title_presentation()
+            .unwrap()
+            .unwrap()
+            .screen,
+        TitleScreen::MainMenu
+    );
+    first_title.step(PAD_CROSS);
+    for _ in 0..19 {
+        first_title.step(0);
+    }
+    assert_eq!(
+        first_title
+            .runtime
+            .retail_title_presentation()
+            .unwrap()
+            .unwrap()
+            .screen,
+        TitleScreen::Map
+    );
+    first_title.step(PAD_CROSS);
+    assert_eq!(first_title.frame, 668);
+    let (n_sanity_carry, mut pad) = first_title.finish_transition(n_sanity.level);
+
+    // The source frame following each asynchronous browser mount is an idle
+    // settle sample. Route frame one then begins with the same pad history
+    // that CoreObjectsCreate shifted at the destination boundary.
+    let n_sanity_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, n_sanity.level, n_sanity_carry)
+            .expect("N. Sanity must import the publisher Title carry");
+    let (n_sanity_survey, n_sanity_runtime) = survey_pair_with_persistent_pad(
+        n_sanity.name,
+        n_sanity.level,
+        &n_sanity.nsd,
+        &n_sanity.nsf,
+        &n_sanity.nsf_bytes,
+        n_sanity_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::NSanityCompletionRoute,
+        2_200,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 1,
+            fixed_cross_frame: None,
+        },
+    )
+    .expect("publisher-carried N. Sanity route must execute");
+    assert_eq!(
+        n_sanity_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        n_sanity_survey.summary()
+    );
+    assert_eq!(n_sanity_survey.restarts, 0, "{}", n_sanity_survey.summary());
+    assert!(n_sanity_survey.is_clean(), "{}", n_sanity_survey.summary());
+    let completion_carry = n_sanity.finish_checked(n_sanity_runtime, LevelId::LEVEL_COMPLETE);
+
+    let completion_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, completion.level, completion_carry)
+            .expect("first Level Complete must import N. Sanity's carry");
+    let completion_mount_held = pad.snapshot.held;
+    let (completion_survey, completion_runtime) = survey_pair_with_persistent_pad(
+        completion.name,
+        completion.level,
+        &completion.nsd,
+        &completion.nsf,
+        &completion.nsf_bytes,
+        completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        N_SANITY_COMPLETION_REPLAY_FRAMES + 8,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: completion_mount_held,
+            initial_idle_frames: 1,
+            fixed_cross_frame: Some(1 + N_SANITY_COMPLETION_REPLAY_FRAMES),
+        },
+    )
+    .expect("first browser-safe Level Complete acknowledgement must execute");
+    assert_eq!(
+        completion_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        completion_survey.summary()
+    );
+    assert!(
+        completion_survey.is_clean(),
+        "{}",
+        completion_survey.summary()
+    );
+    let post_beach_title_carry = completion.finish_checked(completion_runtime, LevelId::TITLE);
+
+    let mut post_beach_title = PublisherTitleHarness::from_session(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        post_beach_title_carry,
+        pad,
+    );
+    for _ in 0..=TITLE_MAP_REPLAY_IDLE_FRAMES {
+        post_beach_title.step(0);
+    }
+    post_beach_title.step(PAD_CROSS);
+    let (jungle_carry, pad) = post_beach_title.finish_transition(jungle.level);
+    assert_eq!(
+        pad.snapshot.held, PAD_CROSS,
+        "the held launch input must survive the second Title mount boundary"
+    );
+    RetailRuntime::new_from_session(GLOBAL_WORDS, jungle.level, jungle_carry)
+        .expect("Jungle Rollers must import the publisher-carried map phase");
 }
 
 #[test]

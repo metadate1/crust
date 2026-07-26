@@ -1497,6 +1497,27 @@ is 1,322,866 bytes with SHA-256
   remained zero. The pass used synthesized browser events/API fixtures where physical automation
   was unavailable; it is not physical-device certification or a full playthrough.
 
+### Owned raw-BIN campaign extension (2026-07-26)
+
+- A fresh Chrome-compatible harness session selected the user's 632,083,536-byte raw BIN locally,
+  retained all game bytes in the tab, and replayed ordinary retail pad words through the existing
+  publisher/title campaign to the exact post-Papu Rolling Stones mount. The replay then completed
+  Rolling Stones, its 425-frame Level Complete graph, the authored Title Map selection, and Hog
+  Wild before mounting Hog Wild's Level Complete screen.
+- The final snapshot reported current and mounted LID `0x2d`, retail frame one, draw 22,299,
+  RNG-A `0xa85a4587`, RNG-B `0x3388b399`, nine unlocked levels, and three initial Level Complete
+  GOOL executions. Across 22,325 executed harness frames, the runtime reported no GOOL, zone,
+  spawn, console, or WebGL error. The 6,379 omitted scheduled frames belonged only to conditional
+  replay segments whose expected destination mount had already completed; omitted segments do not
+  advance the Rust simulation.
+- Two apparent divergences were replay-authoring errors rather than runtime changes. An open-loop
+  Start interval let the native exporter advance while Chrome correctly remained paused;
+  an explicit ordinary release/resume edge restored identical gameplay-frame ordering. The first
+  completion attempt encoded `0x4000` (Down) instead of the runtime's `0x0040` Cross bit and
+  correctly remained on the authored “missed boxes” acknowledgement. Correcting only those local
+  pad words produced the clean result above. Replay files, screenshots, and user data remain
+  ignored local artifacts; only the generic opt-in segment-trace harness is tracked.
+
 ## Reproducible commands
 
 ```bash

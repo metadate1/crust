@@ -801,8 +801,15 @@ gameplay path.
   requests Title on frame 633, the next Map selects Road to Nowhere on frame 253, and Road reaches
   its authored Level Complete request on frame 2,449 with zero deaths or restarts. The independent
   Rolling Stones direct boot reaches the same end on its own deterministic phase, and the exact
-  raw-BIN browser-derived post-Papu carry now reaches it independently. A complete browser-driven
-  session through that boundary remains unproved.
+  raw-BIN browser-derived post-Papu carry now reaches it independently. A later owned-raw-BIN
+  Chromium run joined the publisher/title-to-Rolling mount, exact Rolling route, 425-frame Level
+  Complete graph, authored Title Map handoff, and exact Hog Wild route in one browser session. It
+  reached Hog Wild's Level Complete mount at draw 22,299 with nine unlocked levels and no
+  runtime/GOOL/zone/spawn diagnostic, console exception, or WebGL error. The route uses ordinary
+  exported pad words and conditionally omits only replay segments whose destination mount has
+  already completed; no skipped segment advances the simulation. Cumulative browser restart/death
+  counters were not exported in this pass, so their zero values remain native-route evidence rather
+  than a browser assertion. Browser progression beyond that second completion remains open.
   Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
   native parent-entry/portal/return coverage, including protected parent remounts where asserted.
   Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.

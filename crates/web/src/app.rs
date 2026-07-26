@@ -5225,6 +5225,21 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         &JsValue::from_str("retailDrawCount"),
         &JsValue::from_f64(f64::from(runtime.retail_frame.draw_count())),
     )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailProcessDrawCount"),
+        &JsValue::from_f64(f64::from(runtime.retail_objects.draw_count())),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailRandomSeed"),
+        &JsValue::from_f64(f64::from(runtime.retail_objects.machine().random_seed())),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailRandomSeedB"),
+        &JsValue::from_f64(f64::from(runtime.retail_objects.random_seed_b())),
+    )?;
     let scene_cache = runtime.retail_scene_builder.diagnostics();
     Reflect::set(
         debug,

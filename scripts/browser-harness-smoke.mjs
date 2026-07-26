@@ -601,7 +601,8 @@ const snapshotExpression = `(() => {
       ...pick(debug, [
         "frame", "currentLid", "titleState", "pairs", "mountedLid",
         "mountedPages", "mountedEntries", "glError", "paused", "retailFrame",
-        "retailDrawCount", "retailCurrentZone", "retailLiveObjects",
+        "retailDrawCount", "retailProcessDrawCount", "retailRandomSeed",
+        "retailRandomSeedB", "retailCurrentZone", "retailLiveObjects",
         "retailFaultedObjects", "retailExecutions", "retailExecutionErrors",
         "retailZoneEventFailures", "retailRuntimeError", "retailRuntimeWarning"
       ]),
@@ -1041,6 +1042,9 @@ async function runBrowser(options, replay, chromeExecutable) {
       retailExecutions: finalSnapshot.debug.retailExecutions,
       retailFrame: finalSnapshot.debug.retailFrame,
       retailDrawCount: finalSnapshot.debug.retailDrawCount,
+      retailProcessDrawCount: finalSnapshot.debug.retailProcessDrawCount,
+      retailRandomSeed: finalSnapshot.debug.retailRandomSeed,
+      retailRandomSeedB: finalSnapshot.debug.retailRandomSeedB,
       retailCurrentZone: finalSnapshot.debug.retailCurrentZone,
       retailLiveObjects: finalSnapshot.debug.retailLiveObjects,
       retailMain: finalSnapshot.debug.retailMain

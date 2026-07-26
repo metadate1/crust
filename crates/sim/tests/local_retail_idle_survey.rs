@@ -26,7 +26,7 @@
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
-    num::NonZeroU16,
+    num::{NonZeroU16, NonZeroU32},
     path::{Path, PathBuf},
 };
 
@@ -42737,6 +42737,7 @@ struct PersistentSurveyPlan {
     mount_held: u32,
     initial_idle_frames: u32,
     fixed_cross_frame: Option<u32>,
+    cross_pulse_period: Option<NonZeroU32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46118,6 +46119,12 @@ fn survey_pair_with_runtime_impl(
             0
         } else if let Some(cross_frame) = persistent_plan.fixed_cross_frame {
             if frame == cross_frame { PAD_CROSS } else { 0 }
+        } else if let Some(period) = persistent_plan.cross_pulse_period {
+            if controller_frame.is_multiple_of(period.get()) {
+                PAD_CROSS
+            } else {
+                0
+            }
         } else {
             input_controller.held(
                 controller_frame,
@@ -59735,6 +59742,7 @@ fn corrected_publisher_great_gate_phase_completes_with_live_controller() {
             mount_held: PAD_CROSS,
             initial_idle_frames: 0,
             fixed_cross_frame: None,
+            cross_pulse_period: None,
         },
     )
     .expect("corrected Great Gate phase must execute with the live controller");
@@ -59789,6 +59797,261 @@ fn corrected_publisher_great_gate_phase_completes_with_live_controller() {
     assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
     assert!(survey.is_clean(), "{}", survey.summary());
     assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(76 << 8));
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn exact_post_great_gate_level_complete_pulses_reach_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::new_const(0x12));
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0x500),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 3),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 4),
+        (ISLAND_CAMERA_STATE_GLOBAL, 0),
+        (CHECKPOINT_ID_GLOBAL, 76 << 8),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 15_154_944),
+        (
+            CHECKPOINT_TRANSLATION_GLOBALS[1],
+            (-8_185_290_i32).cast_unsigned(),
+        ),
+        (CHECKPOINT_TRANSLATION_GLOBALS[2], 127_744),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("exact post-Great-Gate completion global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // Level Complete's first source frame does not consume RNG-A. This is
+    // therefore both the imported and the browser-observed frame-one word.
+    carry.random_seed = 0x7a18_305a;
+    carry.draw_count = 9_693;
+    carry.set_random_seed_b(0xb82a_4c9e);
+
+    let mut pad = PersistentPadState::default();
+    for _ in 0..3 {
+        pad.update(PAD_DOWN);
+    }
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, completion.level, carry)
+        .expect("Level Complete must import the exact Great Gate carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        completion.name,
+        completion.level,
+        &completion.nsd,
+        &completion.nsf,
+        &completion.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        320,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_DOWN,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: NonZeroU32::new(16),
+        },
+    )
+    .expect("periodic ordinary Cross input must acknowledge exact Level Complete");
+    let first = survey
+        .first_frame_phase
+        .expect("exact Level Complete frame-one phase must be captured");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (9_694, 0x7a18_305a, 0xb82a_4c9e, 2)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("0__JZ").expect("fixed Level Complete zone EID is valid"),
+            16,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_602,
+            },
+            [204_800, 102_400, -102_400],
+        ))
+    );
+    assert_eq!(survey.frames, 225, "{}", survey.summary());
+    assert_eq!(
+        survey.next_lid,
+        Some((225, i32::try_from(LevelId::TITLE.get()).unwrap())),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        pad.snapshot,
+        RetailPadSnapshot {
+            tapped: 0,
+            held: 0,
+            tapped_previous: PAD_CROSS,
+            held_previous: PAD_CROSS,
+            held_previous_2: 0,
+        },
+        "native accepts the fourteenth 16-frame Cross pulse at frame 224 and publishes Title on frame 225"
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.draw_count(), 9_869);
+    assert_eq!(runtime.machine().random_seed(), 0xe555_3af1);
+    assert_eq!(runtime.random_seed_b(), 0xb82a_4c9e);
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x300, 15, 15, 3, 1, 4, 0]
+    );
+    let title_carry = completion.finish_checked(runtime, LevelId::TITLE);
+    assert_eq!(title_carry.draw_count, 9_869);
+    assert_eq!(title_carry.random_seed, 0xe555_3af1);
+    assert_eq!(title_carry.random_seed_b(), 0xb82a_4c9e);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn exact_post_great_gate_boulders_phase_completes_with_live_controller() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let boulders = CampaignPair::parse(&root, LevelId::new_const(0x0e));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 4),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 4),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (CHECKPOINT_ID_GLOBAL, 76 << 8),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 15_154_944),
+        (
+            CHECKPOINT_TRANSLATION_GLOBALS[1],
+            (-8_185_290_i32).cast_unsigned(),
+        ),
+        (CHECKPOINT_TRANSLATION_GLOBALS[2], 127_744),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("exact Boulders carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // This is the raw-BIN browser carry after the accepted Level Complete
+    // pulse and the ordinary 252-idle/Cross authored map selection.
+    // Boulders' first source frame performs three ordinary RNG-A draws.
+    // This is the exact three-step inverse of the browser's published f1 word.
+    carry.random_seed = 0x1d37_2b53;
+    carry.draw_count = 10_188;
+    carry.set_random_seed_b(0x2586_9e11);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, boulders.level, carry)
+        .expect("Boulders must import the exact post-Great-Gate map carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        boulders.name,
+        boulders.level,
+        &boulders.nsd,
+        &boulders.nsf,
+        &boulders.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::BouldersCompletionRoute,
+        2_600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("exact carried Boulders phase must execute with the live controller");
+    let first = survey
+        .first_frame_phase
+        .expect("exact Boulders frame-one phase must be captured");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (10_189, 0x7a5d_bd8e, 0x2586_9e11, 23)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("0Q_eZ").expect("fixed Boulders spawn-zone EID is valid"),
+            40,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_695,
+            },
+            [2_303_744, 9_011_200, -23_501_312],
+        ))
+    );
+    assert_eq!(
+        survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.frames, 2_235, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_235, 0x2d)));
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, 76 << 8, [15_154_944, -8_185_290, 127_744]),
+            (1_302, 59 << 8, [2_303_232, 6_860_544, -5_172_480]),
+        ]
+    );
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(59 << 8));
+    assert_eq!(runtime.draw_count(), 12_423);
+    assert_eq!(runtime.machine().random_seed(), 0x1d32_98ee);
+    assert_eq!(runtime.random_seed_b(), 0x2586_9e11);
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x500, 15, 15, 4, 1, 5, 0]
+    );
+    let player = player_trace(&runtime)
+        .expect("exact Boulders completion player trace must resolve")
+        .expect("Boulders end warp must retain Crash");
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [2_395_904, 7_835_426, 10_526_208]);
 }
 
 #[test]
@@ -59860,6 +60123,7 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
             mount_held: PAD_CROSS,
             initial_idle_frames: 1,
             fixed_cross_frame: None,
+            cross_pulse_period: None,
         },
     )
     .expect("publisher-carried N. Sanity route must execute");
@@ -59892,6 +60156,7 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
             mount_held: completion_mount_held,
             initial_idle_frames: 1,
             fixed_cross_frame: Some(1 + N_SANITY_COMPLETION_REPLAY_FRAMES),
+            cross_pulse_period: None,
         },
     )
     .expect("first browser-safe Level Complete acknowledgement must execute");

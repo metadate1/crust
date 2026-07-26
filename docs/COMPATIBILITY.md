@@ -812,7 +812,11 @@ gameplay path.
   death-camera frames, with no runtime/GOOL/zone/spawn diagnostic, console exception, network
   failure, or WebGL error. The route uses ordinary exported pad words and conditionally omits only
   replay segments whose destination mount has already completed; no skipped segment advances the
-  simulation. Browser progression beyond the post-Native Map remains open.
+  simulation. The same zero-recovery owned-BIN session then completes Up the Creek and Ripper Roo
+  before visibly mounting The Lost City at draw 37,277. Across the resulting 37,313 executed
+  harness frames, every cumulative recovery and fault counter remains zero. The Lost City's
+  existing deterministic route intentionally uses six authored death/LoadState recoveries, so a
+  separate zero-recovery carried route and browser progression beyond that mount remain open.
   Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
   native parent-entry/portal/return coverage, including protected parent remounts where asserted.
   Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.

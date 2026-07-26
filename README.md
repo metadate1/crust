@@ -579,10 +579,11 @@ A later owned-raw-BIN Chromium campaign run joined the real publisher/title sequ
 Papu, Rolling Stones, its Level Complete screen, the authored map handoff, Hog Wild, its Level
 Complete screen, and the following authored map handoff in one Wasm session. It mounted Native
 Fortress at draw 22,829, completed its exact carried route, acknowledged its Level Complete screen,
-and presented the following authored map at draw 30,070. Across 30,100 executed harness frames it
-reported zero cumulative hard restarts, LoadState effects, or death-camera frames and no runtime,
-GOOL, zone, spawn, console, network, or WebGL error. This materially extends browser progression
-evidence but still does not certify the remaining campaign or full retail parity.
+then completed Up the Creek and Ripper Roo before visibly mounting The Lost City at draw 37,277.
+Across 37,313 executed harness frames it reported zero cumulative hard restarts, LoadState effects,
+or death-camera frames and no runtime, GOOL, zone, spawn, console, network, or WebGL error. This
+materially extends browser progression evidence but still does not certify The Lost City's carried
+completion, the remaining campaign, or full retail parity.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 

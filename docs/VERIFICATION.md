@@ -1523,6 +1523,21 @@ is 1,322,866 bytes with SHA-256
   human input in the browser. This is manual playability evidence separate from the deterministic
   harness; no detailed input trace or per-frame telemetry was captured from that user-controlled
   run, so it is not represented as an additional uninterrupted campaign replay.
+- The exact native carry continues from the post-Native map through Up the Creek's normal route,
+  its Level Complete graph, Ripper Roo, and the following authored map selection without a recovery.
+  Up the Creek requests Level Complete on frame 4,318 after 192 successful spawns, 125,230
+  executions, 36 zone transitions, and one SaveState; its completion graph requests Title on frame
+  176. Ripper Roo requests Title on frame 2,064 after 46,687 executions. Both report zero restart,
+  LoadState, death-camera frame, terminal fall, faulted object, execution error, or checked issue.
+- The corresponding owned-BIN Chrome extension visibly mounted The Lost City at current/mounted
+  LID `0x20`, retail frame 11, zone `a1_wZ`, draw 37,277, and 478 current-mount executions. Across
+  37,313 executed harness frames, cumulative hard restarts, LoadState effects, and death-camera
+  frames remained zero, as did runtime, GOOL, execution, zone-event, spawn, console, network, and
+  WebGL fault counters. The screenshot SHA-256 is
+  `6f6c82eb025bc7f83c047722d4410be11b97d4afa10bf2698469c538e0ae373f`;
+  the screenshot, replay, and owned data remain untracked local artifacts. The run stopped at this
+  mount because the existing Lost City controller deliberately characterizes six authored
+  death/LoadState recoveries rather than supplying a zero-recovery route.
 - Two apparent divergences were replay-authoring errors rather than runtime changes. An open-loop
   Start interval let the native exporter advance while Chrome correctly remained paused;
   an explicit ordinary release/resume edge restored identical gameplay-frame ordering. The first

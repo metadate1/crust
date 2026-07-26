@@ -8133,6 +8133,10 @@ struct NativeFortressRouteController {
     // Do not resume the fixed route until Crash has crossed completely beyond
     // WalOC 38's X bound; otherwise its next falling cycle can catch him.
     a8_platform_crossed: bool,
+    // The uninterrupted raw-BIN campaign carries Hog Wild's checkpoint into
+    // Native Fortress until the level's first SaveState. It reaches c2 one
+    // WalOC cycle earlier than a synthesized map-only session.
+    post_hog_checkpoint_carry: bool,
     // Set from entity 45's observed b9 phase; this selects the downstream
     // timing branch independently of how the level runtime was constructed.
     phase_shifted_route: bool,
@@ -8153,10 +8157,12 @@ impl NativeFortressRouteController {
     fn prepare_restart(&mut self) {
         let session_carry = self.session_carry;
         let phase_shifted_route = self.phase_shifted_route;
+        let post_hog_checkpoint_carry = self.post_hog_checkpoint_carry;
         *self = Self {
             session_carry,
             restart_pending: true,
             phase_shifted_route,
+            post_hog_checkpoint_carry,
             ..Self::default()
         };
     }
@@ -8186,6 +8192,9 @@ impl NativeFortressRouteController {
             return 0;
         };
         let grounded = player.status_a & 1 != 0;
+        if !self.started && self.session_carry && checkpoint_id == 30 << 8 {
+            self.post_hog_checkpoint_carry = true;
+        }
         if self.restart_pending {
             if checkpoint_id < 0 {
                 // A death before the first checkpoint returns to the ordinary
@@ -9191,7 +9200,16 @@ impl NativeFortressRouteController {
                 if self.route_tick <= 8 {
                     return PAD_RIGHT | PAD_SQUARE;
                 }
-                if self.phase_shifted_route && (80..=112).contains(&self.route_tick) {
+                let live_wall_window = if self.post_hog_checkpoint_carry {
+                    Some(20..=112)
+                } else if self.phase_shifted_route {
+                    Some(80..=112)
+                } else {
+                    None
+                };
+                if self.session_carry
+                    && live_wall_window.is_some_and(|window| window.contains(&self.route_tick))
+                {
                     // A carried session can reach c2 while WalOC 112 is in a
                     // different authored phase. Start the ordinary run-up as
                     // soon as its collision face is disabled.
@@ -43231,6 +43249,7 @@ impl SurveyInputController {
                 route_tick: 0,
                 a8_platform_clear: false,
                 a8_platform_crossed: false,
+                post_hog_checkpoint_carry: false,
                 phase_shifted_route: false,
                 c5_launch: false,
                 d2_spin_released: false,
@@ -52120,6 +52139,234 @@ fn native_fortress_current_campaign_phase_reaches_level_complete_warp() {
     assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
     assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
     assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn exact_raw_bin_post_hog_native_fortress_reaches_level_complete_and_map() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let native_fortress = CampaignPair::parse(&root, LevelId::new_const(0x1a));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 9),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 9),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (LIFE_COUNT_GLOBAL, 11 << 8),
+        (CHECKPOINT_ID_GLOBAL, 30 << 8),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 1_996_544),
+        (CHECKPOINT_TRANSLATION_GLOBALS[1], 6_153_728),
+        (
+            CHECKPOINT_TRANSLATION_GLOBALS[2],
+            (-5_786_112_i32).cast_unsigned(),
+        ),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("exact Native Fortress carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // Native Fortress' first source frame performs seven ordinary RNG-A
+    // draws. This is the exact seven-step inverse of the owned raw-BIN browser's
+    // published frame-one word.
+    carry.random_seed = 0xcdff_f319;
+    carry.draw_count = 22_828;
+    carry.set_random_seed_b(0x3388_1199);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, native_fortress.level, carry)
+        .expect("Native Fortress must import the exact post-Hog map carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        native_fortress.name,
+        native_fortress.level,
+        &native_fortress.nsd,
+        &native_fortress.nsf,
+        &native_fortress.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::NativeFortressD6Route,
+        7_500,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("exact carried Native Fortress route must execute");
+    let first = survey
+        .first_frame_phase
+        .expect("exact Native Fortress frame-one phase must be captured");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (22_829, 0xb7ab_3d78, 0x3388_1199, 24)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("a1_qZ").expect("fixed Native Fortress spawn-zone EID is valid"),
+            40,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_695,
+            },
+            [11_570_944, -12_697_600, 307_200],
+        ))
+    );
+    assert_eq!(survey.frames, 6_737, "{}", survey.summary());
+    assert_eq!(
+        survey.next_lid,
+        Some((6_737, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 6737 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.successful_spawns, 323);
+    assert_eq!(survey.unexpected_spawn_errors, 0);
+    assert_eq!(survey.executions, 167_263);
+    assert_eq!(survey.execution_errors, 0);
+    assert_eq!(survey.zone_transitions, 66);
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert_eq!(survey.effect_counts.get("load-state"), None);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&3));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(48_128));
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x500, 15, 15, 9, 1, 10, 0]
+    );
+    assert_eq!(runtime.draw_count(), 29_565);
+
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let completion_carry = native_fortress.finish_checked(runtime, LevelId::LEVEL_COMPLETE);
+    let completion_mount_held = pad.snapshot.held;
+    let completion_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, completion.level, completion_carry)
+            .expect("Level Complete must import the exact Native Fortress carry");
+    let (completion_survey, completion_runtime) = survey_pair_with_persistent_pad(
+        completion.name,
+        completion.level,
+        &completion.nsd,
+        &completion.nsf,
+        &completion.nsf_bytes,
+        completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: completion_mount_held,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: NonZeroU32::new(16),
+        },
+    )
+    .expect("exact Native Fortress Level Complete screen must execute");
+    assert_eq!(
+        completion_survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        completion_survey.summary()
+    );
+    assert_eq!(
+        completion_survey.restarts,
+        0,
+        "{}",
+        completion_survey.summary()
+    );
+    assert_eq!(
+        completion_survey.death_camera_frames,
+        0,
+        "{}",
+        completion_survey.summary()
+    );
+    assert!(
+        completion_survey.is_clean(),
+        "{}",
+        completion_survey.summary()
+    );
+    assert_eq!(
+        campaign_progression_globals(&completion_runtime),
+        [0x300, 15, 15, 9, 1, 10, 0]
+    );
+    assert_eq!(completion_survey.frames, 384);
+    assert_eq!(
+        completion_survey.terminal.as_deref(),
+        Some("frame 384 requested level transition to 0x19")
+    );
+    assert_eq!(completion_survey.successful_spawns, 2);
+    assert_eq!(completion_survey.unexpected_spawn_errors, 0);
+    assert_eq!(completion_survey.executions, 2_467);
+    assert_eq!(completion_survey.execution_errors, 0);
+    assert_eq!(completion_survey.effect_counts.get("transition"), Some(&1));
+    assert_eq!(completion_runtime.draw_count(), 29_949);
+    assert_eq!(completion_runtime.machine().random_seed(), 0x54a2_ca04);
+    assert_eq!(completion_runtime.random_seed_b(), 0x3388_1199);
+    assert_eq!(
+        pad.snapshot,
+        RetailPadSnapshot {
+            tapped: PAD_CROSS,
+            held: PAD_CROSS,
+            tapped_previous: 0,
+            held_previous: 0,
+            held_previous_2: 0,
+        }
+    );
+
+    let title_carry = completion.finish_checked(completion_runtime, LevelId::TITLE);
+    let mut post_native_map = PublisherTitleHarness::from_session(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        title_carry,
+        pad,
+    );
+    for _ in 0..10 {
+        post_native_map.step(0);
+    }
+    assert_eq!(
+        post_native_map
+            .runtime
+            .retail_title_presentation()
+            .expect("post-Native Title presentation must be readable")
+            .expect("post-Native Title presentation must remain mounted")
+            .screen,
+        TitleScreen::Map
+    );
+    assert_eq!(
+        campaign_progression_globals(&post_native_map.runtime),
+        [0, 15, 15, 9, 1, 10, 5]
+    );
+    assert!(post_native_map.transitions.is_empty());
+    assert_eq!(post_native_map.runtime.faulted_object_count(), 0);
 }
 
 #[test]

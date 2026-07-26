@@ -1718,6 +1718,7 @@ enum SurveyInputProfile {
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
     UpstreamCarriedRecovery,
+    UpstreamPhaseRobust,
     RollingStonesCheckpoint,
     RollingStonesBrioBonus,
     HogWildCompletionRoute,
@@ -1820,6 +1821,7 @@ impl SurveyInputProfile {
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
+            Self::UpstreamPhaseRobust => "upstream-phase-robust",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::RollingStonesBrioBonus => "rolling-stones-brio-bonus",
             Self::HogWildCompletionRoute => "hog-wild-completion-route",
@@ -1886,6 +1888,7 @@ impl SurveyInputProfile {
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
                 | Self::UpstreamCarriedRecovery
+                | Self::UpstreamPhaseRobust
                 | Self::RollingStonesCheckpoint
                 | Self::RollingStonesBrioBonus
                 | Self::HogWildCompletionRoute
@@ -21454,6 +21457,7 @@ enum UpstreamRecoveryStage {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct UpstreamRecoveryRouteController {
     stage: UpstreamRecoveryStage,
+    spawn_camera_progress_minimum: i32,
     settle_frames: u8,
     opening_tick: u16,
     action_tick: u8,
@@ -21552,7 +21556,7 @@ impl UpstreamRecoveryRouteController {
     ) -> u32 {
         match self.stage {
             UpstreamRecoveryStage::SettleAtSpawn => {
-                if !Self::normal_spawn_bank_is_ready(camera, player) {
+                if !self.normal_spawn_bank_is_ready(camera, player) {
                     self.settle_frames = 0;
                     return 0;
                 }
@@ -22537,13 +22541,14 @@ impl UpstreamRecoveryRouteController {
     }
 
     fn normal_spawn_bank_is_ready(
+        &self,
         camera: RetailCameraLocation,
         player: Option<PlayerTrace>,
     ) -> bool {
         let zone = Eid::from_name("0f_fZ").expect("fixed Upstream spawn-camera EID is valid");
         camera.path.zone == zone
             && camera.path.index == 0
-            && camera.progress.raw() >= 7_000
+            && camera.progress.raw() >= self.spawn_camera_progress_minimum
             && player.is_some_and(|player| {
                 Self::player_is_landed(player)
                     && player.translation[2] >= 25_000_000
@@ -42028,6 +42033,15 @@ impl SurveyInputController {
             },
             upstream: UpstreamRecoveryRouteController {
                 stage: UpstreamRecoveryStage::SettleAtSpawn,
+                // With Crash settled at the ordinary post-Map spawn, the
+                // camera converges to 6,899. The legacy PBAK recovery begins
+                // elsewhere and retains its stricter historical threshold.
+                spawn_camera_progress_minimum: if profile == SurveyInputProfile::UpstreamPhaseRobust
+                {
+                    6_800
+                } else {
+                    7_000
+                },
                 settle_frames: 0,
                 opening_tick: 0,
                 action_tick: 0,
@@ -42531,6 +42545,10 @@ impl SurveyInputController {
                     self.upstream
                         .held(camera, player, upstream_platforms, checkpoint_id)
                 }
+            }
+            SurveyInputProfile::UpstreamPhaseRobust => {
+                self.upstream
+                    .held(camera, player, upstream_platforms, checkpoint_id)
             }
             SurveyInputProfile::RollingStonesCheckpoint => {
                 self.rolling_stones
@@ -45795,14 +45813,16 @@ fn survey_pair_with_runtime_impl(
         } else {
             None
         };
-        let upstream_platforms =
-            if matches!(input_profile, SurveyInputProfile::UpstreamCarriedRecovery)
-                && frame > UPSTREAM_PBAK_FRAMES
-            {
-                upstream_platform_traces(&runtime)?
-            } else {
-                UpstreamPlatformTraces::default()
-            };
+        let upstream_platforms = if matches!(
+            input_profile,
+            SurveyInputProfile::UpstreamCarriedRecovery | SurveyInputProfile::UpstreamPhaseRobust
+        ) && (input_profile == SurveyInputProfile::UpstreamPhaseRobust
+            || frame > UPSTREAM_PBAK_FRAMES)
+        {
+            upstream_platform_traces(&runtime)?
+        } else {
+            UpstreamPlatformTraces::default()
+        };
         let boss_state = if matches!(
             input_profile,
             SurveyInputProfile::PapuPapuCompletionRoute
@@ -60052,6 +60072,145 @@ fn exact_post_great_gate_boulders_phase_completes_with_live_controller() {
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
     assert_eq!(player.translation, [2_395_904, 7_835_426, 10_526_208]);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn exact_post_boulders_upstream_phase_completes_with_live_controller() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let upstream = CampaignPair::parse(&root, LevelId::new_const(0x0f));
+    let mut source = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 5),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 5),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+        (CHECKPOINT_ID_GLOBAL, 59 << 8),
+        (CHECKPOINT_TRANSLATION_GLOBALS[0], 2_303_232),
+        (CHECKPOINT_TRANSLATION_GLOBALS[1], 6_860_544),
+        (
+            CHECKPOINT_TRANSLATION_GLOBALS[2],
+            (-5_172_480_i32).cast_unsigned(),
+        ),
+    ] {
+        source
+            .set_global_word(index, value)
+            .expect("exact Upstream carry global must be writable");
+    }
+    let mut carry = source.export_session_carry();
+    // Upstream's first source frame performs one ordinary RNG-A draw. This is
+    // the exact one-step inverse of the raw-BIN browser's published f1 word.
+    carry.random_seed = 0xc361_264e;
+    carry.draw_count = 12_839;
+    carry.set_random_seed_b(0xdb62_a213);
+
+    let mut pad = PersistentPadState::default();
+    pad.update(PAD_CROSS);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, upstream.level, carry)
+        .expect("Upstream must import the exact post-Boulders map carry");
+    let (survey, runtime) = survey_pair_with_persistent_pad(
+        upstream.name,
+        upstream.level,
+        &upstream.nsd,
+        &upstream.nsf,
+        &upstream.nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::UpstreamPhaseRobust,
+        4_000,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("exact carried Upstream phase must execute");
+    let first = survey
+        .first_frame_phase
+        .expect("exact Upstream frame-one phase must be captured");
+    assert_eq!(
+        (
+            first.draw_count,
+            first.random_seed,
+            first.random_seed_b,
+            first.executions,
+        ),
+        (12_840, 0x385d_436f, 0xdb62_a213, 18)
+    );
+    assert_eq!(
+        first.player.map(|player| {
+            (
+                player.zone,
+                player.state,
+                player.code_address,
+                player.translation,
+            )
+        }),
+        Some((
+            Eid::from_name("0g_fZ").expect("fixed Upstream spawn-zone EID is valid"),
+            40,
+            CodeAddress {
+                segment: CodeSegment::External,
+                pc: 2_695,
+            },
+            [2_150_400, 2_252_800, 25_025_792],
+        ))
+    );
+    assert_eq!(survey.frames, 2_929, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_929, 0x2d)), "{}", survey.summary());
+    assert_eq!(
+        survey.terminal.as_deref(),
+        Some("frame 2929 requested level transition to 0x2d")
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert!(survey.restart_frames.is_empty());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert_eq!(
+        survey.checkpoint_samples,
+        [
+            (1, 59 << 8, [2_303_232, 6_860_544, -5_172_480]),
+            (1_064, 57 << 8, [2_252_800, 2_350_080, 15_564_288]),
+        ]
+    );
+    assert_eq!(
+        survey.box_count_samples,
+        [
+            (1, 0),
+            (1_064, 0x100),
+            (1_445, 0x200),
+            (2_217, 0x300),
+            (2_223, 0x400),
+        ]
+    );
+    assert_eq!(survey.saved_box_count_samples, [(1_064, 0)]);
+    assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(survey.effect_counts.get("transition"), Some(&1));
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(57 << 8));
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x400));
+    assert_eq!(runtime.draw_count(), 15_768);
+    assert_eq!(runtime.machine().random_seed(), 0xc5f4_5e3f);
+    assert_eq!(runtime.random_seed_b(), 0xdb62_a213);
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x500, 15, 15, 5, 1, 6, 0]
+    );
+    let player = player_trace(&runtime)
+        .expect("exact Upstream completion player trace must resolve")
+        .expect("Upstream end warp must retain Crash");
+    assert_eq!(player.zone, Eid::from_name("0A_fZ").unwrap());
+    assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [2_228_980, 6_590_796, -472_772]);
 }
 
 #[test]

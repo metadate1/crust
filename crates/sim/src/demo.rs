@@ -6,6 +6,8 @@ pub const MAX_DEMO_FRAMES: usize = 30 * 60 * 30;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DemoFrame {
     pub ticks_elapsed: i32,
+    /// Exact authored 32-bit word. Native PBAK playback copies this word
+    /// verbatim; controller consumers select the supported low pad bits.
     pub held: u32,
 }
 
@@ -226,6 +228,32 @@ mod tests {
             }
         );
         assert_eq!(player.advance(0), DemoStep::Finished);
+    }
+
+    #[test]
+    fn playback_preserves_upper_authored_bits_without_exposing_tapped_controls() {
+        let demo = Demo::new(
+            7,
+            11,
+            17,
+            vec![DemoFrame {
+                ticks_elapsed: 20,
+                held: 0x0010_0000,
+            }],
+        )
+        .unwrap();
+        let mut player = DemoPlayer::new(demo);
+        assert_eq!(
+            player.advance(0),
+            DemoStep::Playing {
+                held: 0x0010_0000,
+                tapped: 0,
+                ticks_elapsed: 20,
+                ticks_per_frame: 17,
+                first_frame: true,
+                end: Some(DemoEnd::Finished),
+            }
+        );
     }
 
     #[test]

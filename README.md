@@ -483,10 +483,12 @@ direct `0x1600 [0]` handoff into WillC state 32. The downstream cross-stream cha
 real WarpC/CardC confirmation path, observes `LoadState` on frame 301, resolves `-2` back to Jungle
 Rollers, and reproduces the protected parent remount while checking Crash's transform, camera
 path/progress, box count, and all 304 spawn words. These deterministic boundaries do not
-substitute for one uninterrupted pad-driven route or browser full-playthrough. Follow and automatic
-camera movement now calls `LevelUpdate` after every successful same-path or crossing movement, in
-source order after the applicable shared game-state write. Every `LevelUpdate` also republishes the
-destination zone's graphics flags in GOOL
+substitute for a browser full-playthrough. Newer legally local ordinary-pad routes physically join
+the parent, token, bonus, portal, `LoadState`, and return boundaries for representative Tawna,
+Brio, second-Tawna, and Cortex layouts; other parent-specific layouts remain to be certified.
+Follow and automatic camera movement now calls `LevelUpdate` after every successful same-path or
+crossing movement, in source order after the applicable shared game-state write. Every
+`LevelUpdate` also republishes the destination zone's graphics flags in GOOL
 global 30 before spawning or execution. This restores the authored `0x2000` bonus WARP branch
 instead of falling through to the ordinary Title transition. WebAudio
 receives mounted ADIO SFX and retail music synthesis only; the former procedural sine-wave SFX

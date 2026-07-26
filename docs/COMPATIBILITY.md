@@ -498,8 +498,14 @@ gameplay path.
   restored Crash transform, camera location, box count, and every saved spawn word. Separate
   controlled regressions cover all three authentic `BoxsC` → `FruiC` → `DispC` Tawna-token routes,
   the third-token save/fade/status/`0x24` transition, and WarpC's parsed proximity/status gate at
-  its exact quantized boundaries. Together they cover the control path, but they are not one
-  uninterrupted pad-driven or browser playthrough.
+  its exact quantized boundaries. Newer legally local ordinary-pad routes now join those boundaries
+  physically: Jungle Rollers enters Tawna Bonus `0x24`, Rolling Stones enters Brio Bonus `0x25`,
+  carried Great Gate enters the second Tawna layout `0x33`, and Sunset Vista enters Cortex Bonus
+  `0x34`. Each tested layout reaches its authored portal/`LoadState`, resolves `-2`, and preserves
+  the exact parent snapshot through the return carry; the Jungle and Great Gate routes additionally
+  remount and resume the protected parent. Bonus `0x26` remains a valid direct-boot stream but has
+  no authored parent selector. Other parent-specific selector/layout variants and an uninterrupted
+  browser bonus playthrough remain open.
   The authentic first-completion carry into Jungle Rollers retains source RNG-A and `draw_count`,
   which independently alter its hazard/animation phase; resetting either at mount would be source
   incompatible. The former fresh-boot controller entered Crash state 23 at frame 532 and restarted
@@ -797,13 +803,12 @@ gameplay path.
   Rolling Stones direct boot reaches the same end on its own deterministic phase, and the exact
   raw-BIN browser-derived post-Papu carry now reaches it independently. A complete browser-driven
   session through that boundary remains unproved.
-  The Tawna
-  bonus control path is covered at
-  exact entry, portal, return, and remount boundaries, but no uninterrupted pad-driven/browser
-  bonus round trip has been completed.
-  Remaining gates include every unfinished normal and bonus route, broader death/checkpoint
-  sequences, a complete browser-driven endgame, long soak, mobile audio sessions, and a multiple
-  physical-gamepad matrix.
+  Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
+  native parent-entry/portal/return coverage, including protected parent remounts where asserted.
+  Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.
+  Remaining gates include every unfinished normal route and bonus-layout variant, broader
+  death/checkpoint sequences, a complete browser-driven endgame, long soak, mobile audio sessions,
+  and a multiple physical-gamepad matrix.
 
 ## Automated coverage
 

@@ -48,6 +48,8 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         frames: 1,
         held: "0x0800",
         expect: { mountedLid: 0x19, minFrame: 9 },
+        settleFrames: 2,
+        settleHeld: "0x0040",
       },
       { frames: 1, held: 0 },
     ],
@@ -58,7 +60,10 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.unlockAll, true);
   assert.equal(replay.settleFrames, 120);
   assert.equal(replay.totalFrames, 10);
+  assert.equal(replay.maximumFrames, 132);
   assert.equal(replay.segments[1].held, 0x0800);
+  assert.equal(replay.segments[1].settleFrames, 2);
+  assert.equal(replay.segments[1].settleHeld, 0x0040);
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -81,6 +86,21 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         bootLid: 0x19,
         settleFrames: 10_001,
         segments: [{ frames: 1, held: 0 }],
+      }),
+    /0 through 10000/,
+  );
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [
+          {
+            frames: 1,
+            held: 0,
+            settleFrames: 10_001,
+          },
+        ],
       }),
     /0 through 10000/,
   );

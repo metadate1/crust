@@ -221,7 +221,13 @@ export function normalizeReplay(raw, fallback = {}) {
       throw new Error(`replay.segments[${index}].frames must be at least 1`);
     }
     totalFrames += frames;
-    if (totalFrames > 5_000_000) {
+    const settleFrames = parseWholeNumber(
+      segment.settleFrames ?? 0,
+      `replay.segments[${index}].settleFrames`,
+      10_000,
+    );
+    totalFrames += settleFrames;
+    if (totalFrames + normalized.settleFrames > 5_000_000) {
       throw new Error("replay may not exceed 5,000,000 frames");
     }
     normalized.segments.push({
@@ -235,9 +241,19 @@ export function normalizeReplay(raw, fallback = {}) {
         segment.expect,
         `replay.segments[${index}].expect`,
       ),
+      settleFrames,
+      settleHeld: parseWholeNumber(
+        segment.settleHeld ?? 0,
+        `replay.segments[${index}].settleHeld`,
+        0xffff,
+      ),
     });
   }
-  normalized.totalFrames = totalFrames;
+  normalized.totalFrames = normalized.segments.reduce(
+    (sum, segment) => sum + segment.frames,
+    0,
+  );
+  normalized.maximumFrames = totalFrames + normalized.settleFrames;
   return normalized;
 }
 
@@ -814,77 +830,34 @@ async function runBrowser(options, replay, chromeExecutable) {
     // continue far enough to spend a life legitimately.
     let allLevelsLaunchChecked = !replay.unlockAll;
     let finalSnapshot;
-    for (const [segmentIndex, segment] of replay.segments.entries()) {
-      for (let frame = 0; frame < segment.frames; frame += 1) {
-        finalSnapshot = await evaluate(
-          cdp,
-          sessionId,
-          `(() => {
-            window.__crustTest.step(${segment.held});
-            return ${snapshotExpression};
-          })()`,
-        );
-        stepped += 1;
-        if (!allLevelsLaunchChecked) {
-          const startupProblems = allLevelsFailures(finalSnapshot, {
-            requireStartingLives: true,
-          });
-          if (startupProblems.length > 0) {
-            throw new Error(
-              `all-level browser launch assertion failed:\n${startupProblems.join("\n")}`,
-            );
-          }
-          allLevelsLaunchChecked = true;
-        }
-        const problems = [
-          ...failures,
-          ...snapshotFailures(finalSnapshot),
-        ];
-        if (problems.length > 0) {
-          throw new Error(
-            `browser replay failed at frame ${stepped}:\n${problems.join("\n")}`,
-          );
-        }
-        if (finalSnapshot.harness.lastRequestedLid != null) {
-          finalSnapshot = await waitFor(
-            cdp,
-            sessionId,
-            `destination 0x${Number(finalSnapshot.harness.lastRequestedLid).toString(16)} mount`,
-            (snapshot) => snapshot.runtimeState === "running",
-            failures,
-            120_000,
-          );
-        }
-      }
-      assertExpected(
-        segment.expect,
-        finalSnapshot,
-        `segment ${segmentIndex + 1}`,
-      );
-    }
-    finalSnapshot = await browserSnapshot(cdp, sessionId);
-    let settleFramesUsed = 0;
-    while (
-      settleFramesUsed < replay.settleFrames
-      && expectationFailures(replay.expect, finalSnapshot).length > 0
-    ) {
+    const stepReplayFrame = async (held, label) => {
       finalSnapshot = await evaluate(
         cdp,
         sessionId,
         `(() => {
-          window.__crustTest.step(0);
+          window.__crustTest.step(${held});
           return ${snapshotExpression};
         })()`,
       );
       stepped += 1;
-      settleFramesUsed += 1;
-      const settleProblems = [
+      if (!allLevelsLaunchChecked) {
+        const startupProblems = allLevelsFailures(finalSnapshot, {
+          requireStartingLives: true,
+        });
+        if (startupProblems.length > 0) {
+          throw new Error(
+            `all-level browser launch assertion failed:\n${startupProblems.join("\n")}`,
+          );
+        }
+        allLevelsLaunchChecked = true;
+      }
+      const problems = [
         ...failures,
         ...snapshotFailures(finalSnapshot),
       ];
-      if (settleProblems.length > 0) {
+      if (problems.length > 0) {
         throw new Error(
-          `browser replay settle failed at frame ${stepped}:\n${settleProblems.join("\n")}`,
+          `${label} failed at frame ${stepped}:\n${problems.join("\n")}`,
         );
       }
       if (finalSnapshot.harness.lastRequestedLid != null) {
@@ -897,7 +870,47 @@ async function runBrowser(options, replay, chromeExecutable) {
           120_000,
         );
       }
+    };
+    const settleExpectation = async (
+      expectation,
+      maximumFrames,
+      held,
+      label,
+    ) => {
+      let used = 0;
+      while (
+        used < maximumFrames
+        && expectationFailures(expectation, finalSnapshot).length > 0
+      ) {
+        await stepReplayFrame(held, label);
+        used += 1;
+      }
+      return used;
+    };
+    let segmentSettleFramesUsed = 0;
+    for (const [segmentIndex, segment] of replay.segments.entries()) {
+      for (let frame = 0; frame < segment.frames; frame += 1) {
+        await stepReplayFrame(segment.held, "browser replay");
+      }
+      segmentSettleFramesUsed += await settleExpectation(
+        segment.expect,
+        segment.settleFrames,
+        segment.settleHeld,
+        `browser replay segment ${segmentIndex + 1} settle`,
+      );
+      assertExpected(
+        segment.expect,
+        finalSnapshot,
+        `segment ${segmentIndex + 1}`,
+      );
     }
+    finalSnapshot = await browserSnapshot(cdp, sessionId);
+    const settleFramesUsed = await settleExpectation(
+      replay.expect,
+      replay.settleFrames,
+      0,
+      "browser replay final settle",
+    );
     const finalProblems = [
       ...failures,
       ...snapshotFailures(finalSnapshot),
@@ -960,6 +973,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       frames: stepped,
       replayFrames: replay.totalFrames,
       settleFramesUsed,
+      segmentSettleFramesUsed,
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
       retailExecutions: finalSnapshot.debug.retailExecutions,

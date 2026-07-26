@@ -34351,7 +34351,7 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = self.sunset_attack_tick.wrapping_add(1);
                     let spin = sunset_var("C1_SUNSET_F4_FOURTH_SPIN")
                         .ok()
-                        .and_then(|value| value.parse().ok())
+                        .and_then(|value| value.parse::<u8>().ok())
                         .is_some_and(|spin_tick| jump_tick == spin_tick);
                     let horizontal = if direct && player.translation[0] < 29_300_000 {
                         PAD_RIGHT
@@ -44826,6 +44826,8 @@ fn survey_pair_with_runtime(
     input_profile: SurveyInputProfile,
     survey_frames: u32,
 ) -> Result<(LevelSurvey, RetailRuntime), String> {
+    let replay_export_dir = std::env::var_os("C1_BROWSER_REPLAY_EXPORT").map(PathBuf::from);
+    let replay_initial_draw_count = runtime.draw_count();
     let post_high_road_slippery_phase = context_source == LevelContextSource::SessionGlobals
         && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
         && runtime.machine().random_seed() == 0x8757_f779
@@ -45837,39 +45839,41 @@ fn survey_pair_with_runtime(
                 .collect::<Vec<_>>();
             eprintln!("CORTEX_POWER_OBJECTS frame={frame} objects={objects:?}");
         }
-        if matches!(
-            input_profile,
-            SurveyInputProfile::NSanityCompletionRoute
-                | SurveyInputProfile::RollingStonesCheckpoint
-                | SurveyInputProfile::JungleDeathAkuCompletionRoute
-                | SurveyInputProfile::GreatGatePhaseRobust
-                | SurveyInputProfile::GreatGateTawnaBonus
-                | SurveyInputProfile::BoulderDashCompletionRoute
-                | SurveyInputProfile::CortexPowerCompletionRoute
-                | SurveyInputProfile::GeneratorRoomCompletionRoute
-                | SurveyInputProfile::JawsOfDarknessCompletionRoute
-                | SurveyInputProfile::CastleMachineryCompletionRoute
-                | SurveyInputProfile::LabCompletionRoute
-                | SurveyInputProfile::SunsetVistaCompletionRoute
-                | SurveyInputProfile::SunsetVistaCortexBonusRoute
-                | SurveyInputProfile::SlipperyClimbCompletionRoute
-                | SurveyInputProfile::RoadToNowhereCompletionRoute
-                | SurveyInputProfile::HeavyMachineryCompletionRoute
-                | SurveyInputProfile::ToxicWasteCompletionRoute
-                | SurveyInputProfile::HogWildCompletionRoute
-                | SurveyInputProfile::WholeHogCompletionRoute
-                | SurveyInputProfile::RipperRooCompletionRoute
-                | SurveyInputProfile::BrioCompletionRoute
-                | SurveyInputProfile::CortexCompletionRoute
-                | SurveyInputProfile::GreatHallCortexRoute
-                | SurveyInputProfile::GreatHallAllGemsRoute
-                | SurveyInputProfile::NativeFortressD6Route
-                | SurveyInputProfile::TawnaBonusCompletionRoute
-                | SurveyInputProfile::TawnaBonusTwoCompletionRoute
-        ) && survey
-            .pad_change_samples
-            .last()
-            .is_none_or(|(_, previous)| *previous != held)
+        if (replay_export_dir.is_some()
+            || matches!(
+                input_profile,
+                SurveyInputProfile::NSanityCompletionRoute
+                    | SurveyInputProfile::RollingStonesCheckpoint
+                    | SurveyInputProfile::JungleDeathAkuCompletionRoute
+                    | SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGateTawnaBonus
+                    | SurveyInputProfile::BoulderDashCompletionRoute
+                    | SurveyInputProfile::CortexPowerCompletionRoute
+                    | SurveyInputProfile::GeneratorRoomCompletionRoute
+                    | SurveyInputProfile::JawsOfDarknessCompletionRoute
+                    | SurveyInputProfile::CastleMachineryCompletionRoute
+                    | SurveyInputProfile::LabCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCompletionRoute
+                    | SurveyInputProfile::SunsetVistaCortexBonusRoute
+                    | SurveyInputProfile::SlipperyClimbCompletionRoute
+                    | SurveyInputProfile::RoadToNowhereCompletionRoute
+                    | SurveyInputProfile::HeavyMachineryCompletionRoute
+                    | SurveyInputProfile::ToxicWasteCompletionRoute
+                    | SurveyInputProfile::HogWildCompletionRoute
+                    | SurveyInputProfile::WholeHogCompletionRoute
+                    | SurveyInputProfile::RipperRooCompletionRoute
+                    | SurveyInputProfile::BrioCompletionRoute
+                    | SurveyInputProfile::CortexCompletionRoute
+                    | SurveyInputProfile::GreatHallCortexRoute
+                    | SurveyInputProfile::GreatHallAllGemsRoute
+                    | SurveyInputProfile::NativeFortressD6Route
+                    | SurveyInputProfile::TawnaBonusCompletionRoute
+                    | SurveyInputProfile::TawnaBonusTwoCompletionRoute
+            ))
+            && survey
+                .pad_change_samples
+                .last()
+                .is_none_or(|(_, previous)| *previous != held)
         {
             survey.pad_change_samples.push((frame, held));
         }
@@ -46383,7 +46387,117 @@ fn survey_pair_with_runtime(
             .fault_contexts
             .insert(fault_context(&runtime, nsd, nsf, nsf_bytes, object));
     }
+    if let Some(export_dir) = replay_export_dir {
+        export_browser_replay_fragment(
+            &export_dir,
+            context_source,
+            replay_initial_draw_count,
+            &survey,
+        )?;
+    }
     Ok((survey, runtime))
+}
+
+fn export_browser_replay_fragment(
+    export_dir: &Path,
+    context_source: LevelContextSource,
+    initial_draw_count: u32,
+    survey: &LevelSurvey,
+) -> Result<(), String> {
+    // This opt-in diagnostic writes only to the caller's local path. Some
+    // profiles consume pad masks reconstructed from the user's PBAK data, so
+    // exported fragments are deliberately not repository fixtures or a
+    // canonical campaign oracle. They must stay under an ignored/local output
+    // directory and must never be committed or distributed.
+    let replay_frames = survey
+        .next_lid
+        .map_or(survey.frames, |(transition_frame, _)| transition_frame)
+        .min(survey.frames);
+    let mut segments = Vec::new();
+    let mut next_frame = 1_u32;
+    let mut held = 0_u32;
+    for &(change_frame, changed_held) in survey
+        .pad_change_samples
+        .iter()
+        .take_while(|(change_frame, _)| *change_frame <= replay_frames)
+    {
+        if change_frame > next_frame {
+            segments.push(serde_json::json!({
+                "frames": change_frame - next_frame,
+                "held": held,
+            }));
+        }
+        next_frame = change_frame;
+        held = changed_held;
+    }
+    if next_frame <= replay_frames {
+        segments.push(serde_json::json!({
+            "frames": replay_frames - next_frame + 1,
+            "held": held,
+        }));
+    }
+    if segments.is_empty() && replay_frames > 0 {
+        segments.push(serde_json::json!({
+            "frames": replay_frames,
+            "held": 0,
+        }));
+    }
+
+    let profile = survey
+        .input_profile
+        .label()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let context = format!("{context_source:?}").to_ascii_lowercase();
+    let filename = format!(
+        "lid-{:02x}-draw-{initial_draw_count:08}-{}-{profile}.json",
+        survey.level.get(),
+        context,
+    );
+    let transition = survey
+        .next_lid
+        .map(|(frame, lid)| serde_json::json!({ "frame": frame, "lid": lid }));
+    let expected_lid = survey
+        .next_lid
+        .and_then(|(_, lid)| u8::try_from(lid).ok())
+        .map_or_else(|| survey.level.get(), u32::from);
+    let document = serde_json::json!({
+        "schema": 1,
+        "bootLid": survey.level.get(),
+        "unlockAll": false,
+        "settleFrames": if survey.next_lid.is_some() { 120 } else { 0 },
+        "expect": {
+            "currentLid": expected_lid,
+            "mountedLid": expected_lid,
+            "minRetailExecutions": 1,
+        },
+        "level": survey.level.get(),
+        "name": survey.name,
+        "inputProfile": survey.input_profile.label(),
+        "context": format!("{context_source:?}"),
+        "initialDrawCount": initial_draw_count,
+        "frames": replay_frames,
+        "surveyFrames": survey.frames,
+        "localDiagnosticOnly": true,
+        "canonicalCampaign": false,
+        "transition": transition,
+        "segments": segments,
+    });
+
+    std::fs::create_dir_all(export_dir)
+        .map_err(|error| format!("create replay export {}: {error}", export_dir.display()))?;
+    let path = export_dir.join(filename);
+    let bytes = serde_json::to_vec_pretty(&document)
+        .map_err(|error| format!("serialize replay fragment {}: {error}", path.display()))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| format!("write replay fragment {}: {error}", path.display()))
 }
 
 fn survey_pair(

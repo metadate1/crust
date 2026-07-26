@@ -70,24 +70,24 @@ impl PadState {
 #[must_use]
 pub fn keyboard_code(code: &str) -> Option<u16> {
     Some(match code {
-        // Preserve the original complete-pad bindings while adding the
-        // familiar gameplay aliases. The browser host accepts a bit mask, so
-        // one physical key can faithfully expose both actions.
-        "Space" => PAD_SELECT | PAD_CROSS,
+        // Gameplay aliases are deliberately action-pure. In particular,
+        // Space must not also press Select: the authored pause screen uses
+        // Select to leave for the island map.
+        "Space" | "KeyZ" => PAD_CROSS,
         "KeyK" => PAD_L3,
         "KeyL" => PAD_R3,
         "Enter" | "NumpadEnter" => PAD_START,
-        "ArrowUp" => PAD_UP,
+        "ShiftLeft" | "ShiftRight" => PAD_SELECT,
+        "ArrowUp" | "KeyW" => PAD_UP,
         "ArrowRight" | "KeyD" => PAD_RIGHT,
-        "ArrowDown" => PAD_DOWN,
-        "ArrowLeft" => PAD_LEFT,
+        "ArrowDown" | "KeyS" => PAD_DOWN,
+        "ArrowLeft" | "KeyA" => PAD_LEFT,
+        "BracketLeft" => PAD_L1,
+        "BracketRight" => PAD_R1,
         "KeyQ" => PAD_L2,
-        "KeyW" => PAD_R2 | PAD_UP,
-        "KeyA" => PAD_L1 | PAD_LEFT,
-        "KeyS" => PAD_R1 | PAD_DOWN,
+        "KeyE" => PAD_R2,
         "KeyV" => PAD_TRIANGLE,
         "KeyC" => PAD_CIRCLE,
-        "KeyZ" => PAD_CROSS,
         "KeyX" => PAD_SQUARE,
         _ => return None,
     })
@@ -162,18 +162,18 @@ mod tests {
     #[test]
     fn maps_complete_keyboard_pad() {
         let codes = [
-            "Space",
             "KeyK",
             "KeyL",
             "Enter",
+            "ShiftLeft",
             "ArrowUp",
             "ArrowRight",
             "ArrowDown",
             "ArrowLeft",
+            "BracketLeft",
+            "BracketRight",
             "KeyQ",
-            "KeyW",
-            "KeyA",
-            "KeyS",
+            "KeyE",
             "KeyV",
             "KeyC",
             "KeyZ",
@@ -187,14 +187,15 @@ mod tests {
     }
 
     #[test]
-    fn gameplay_aliases_preserve_legacy_keyboard_bits() {
-        assert_eq!(keyboard_code("KeyW"), Some(PAD_R2 | PAD_UP));
-        assert_eq!(keyboard_code("KeyA"), Some(PAD_L1 | PAD_LEFT));
-        assert_eq!(keyboard_code("KeyS"), Some(PAD_R1 | PAD_DOWN));
+    fn gameplay_aliases_do_not_press_unrelated_pad_buttons() {
+        assert_eq!(keyboard_code("KeyW"), Some(PAD_UP));
+        assert_eq!(keyboard_code("KeyA"), Some(PAD_LEFT));
+        assert_eq!(keyboard_code("KeyS"), Some(PAD_DOWN));
         assert_eq!(keyboard_code("KeyD"), Some(PAD_RIGHT));
-        assert_eq!(keyboard_code("Space"), Some(PAD_SELECT | PAD_CROSS));
+        assert_eq!(keyboard_code("Space"), Some(PAD_CROSS));
         assert_eq!(keyboard_code("KeyZ"), Some(PAD_CROSS));
         assert_eq!(keyboard_code("ArrowUp"), Some(PAD_UP));
+        assert_eq!(keyboard_code("ShiftRight"), Some(PAD_SELECT));
     }
 
     #[test]

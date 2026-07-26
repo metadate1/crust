@@ -47733,10 +47733,14 @@ fn carry_completion_to_title(
     carry: RetailSessionCarry,
     expected_globals: [u32; 7],
 ) -> RetailSessionCarry {
+    // Late campaign screens can spend more than 700 draws counting the
+    // authored box total before they accept the ordinary acknowledgement.
+    // Keep the route bounded, but give that retail graph enough time to
+    // request Title itself instead of treating a long count-up as a failure.
     let (survey, runtime) = completion.run_carried(
         carry,
         SurveyInputProfile::DirectionAndButtonSweepToTransition,
-        700,
+        2_000,
     );
     assert_eq!(
         survey.next_lid.map(|(_, lid)| lid),
@@ -48689,7 +48693,7 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
     let jaws_completion = run_clean_carried_campaign_step(
         &jaws_of_darkness,
         jaws_carry,
-        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
+        SurveyInputProfile::JawsOfDarknessCompletionRoute,
         5_600,
         LevelId::LEVEL_COMPLETE,
         [0x500, 15, 15, 26, 1, 27, 0],
@@ -48734,13 +48738,14 @@ fn jaws_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
     );
     let title = CampaignPair::parse(&root, LevelId::TITLE);
     let jaws = CampaignPair::parse(&root, LevelId::new_const(0x1d));
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
     let post_lights = synthetic_title_map_carry(25, 26, 0x46bc_ad50, 55_228, 0x93e2_6958);
     let mut carry =
         carry_map_to_next_level(&title, post_lights, jaws.level, [0, 15, 15, 26, 1, 26, 1]);
     carry.random_seed = 0x8385_1908;
     carry.draw_count = 64_200;
     carry.set_random_seed_b(0xdc82_6488);
-    let (survey, _) = jaws.run_carried(
+    let (survey, runtime) = jaws.run_carried(
         carry,
         SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
         5_600,
@@ -48751,6 +48756,14 @@ fn jaws_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
     assert_eq!(survey.death_camera_frames, 0, "{summary}");
     assert!(survey.first_terminal_fall.is_none(), "{summary}");
     assert!(survey.is_clean(), "{summary}");
+
+    let completion_carry = jaws.finish_checked(runtime, LevelId::LEVEL_COMPLETE);
+    let post_jaws_title =
+        carry_completion_to_title(&completion, completion_carry, [0x300, 15, 15, 26, 1, 27, 0]);
+    assert_eq!(
+        post_jaws_title.globals[CURRENT_MAP_LEVEL_GLOBAL], 26,
+        "the exact Jaws completion graph must return to the authored map node"
+    );
 }
 
 #[test]

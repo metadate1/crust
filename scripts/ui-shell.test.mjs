@@ -46,9 +46,17 @@ test("launcher keeps the intentionally simple full-game-first hierarchy", async 
 });
 
 test("manual browser stepping stays behind an off-by-default Cargo feature", async () => {
-  const [manifest, packageJson, harnessBuild, app, bootstrap] = await Promise.all([
+  const [
+    manifest,
+    packageJson,
+    productionBuild,
+    harnessBuild,
+    app,
+    bootstrap,
+  ] = await Promise.all([
     readFile(new URL("crates/web/Cargo.toml", root), "utf8"),
     readFile(new URL("package.json", root), "utf8"),
+    readFile(new URL("scripts/build-web.sh", root), "utf8"),
     readFile(new URL("scripts/build-browser-harness.sh", root), "utf8"),
     readFile(new URL("crates/web/src/app.rs", root), "utf8"),
     readFile(new URL("web/bootstrap.js", root), "utf8"),
@@ -63,6 +71,31 @@ test("manual browser stepping stays behind an off-by-default Cargo feature", asy
   assert.match(packageJson, /"serve:browser-harness"/);
   assert.match(harnessBuild, /--features browser-test-harness/);
   assert.match(harnessBuild, /target\/browser-test-dist/);
+  assert.match(
+    harnessBuild,
+    /CARGO_OUTPUT="\$\{CARGO_TARGET_DIR:-\$ROOT\/target\}"/,
+    "the harness builder must package the artifact from Cargo's selected target directory",
+  );
+  assert.match(
+    harnessBuild,
+    /\$CARGO_OUTPUT\/wasm32-unknown-unknown\/release\/crust_web\.wasm/,
+  );
+  for (const build of [productionBuild, harnessBuild]) {
+    assert.match(
+      build,
+      /CARGO_OUTPUT="\$\{CARGO_TARGET_DIR:-\$ROOT\/target\}"/,
+      "each web builder must honor Cargo's selected target directory",
+    );
+    assert.match(
+      build,
+      /\$CARGO_OUTPUT\/wasm32-unknown-unknown\/release\/crust_web\.wasm/,
+    );
+    assert.doesNotMatch(
+      build,
+      /"\$ROOT\/target\/wasm32-unknown-unknown\/release\/crust_web\.wasm"/,
+      "no web builder may silently package a stale default-target artifact",
+    );
+  }
   assert.doesNotMatch(
     harnessBuild,
     /["']\$ROOT\/dist["']/,

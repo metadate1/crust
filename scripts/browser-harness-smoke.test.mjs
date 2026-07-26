@@ -3,14 +3,117 @@ import test from "node:test";
 
 import {
   allLevelsFailures,
+  destinationMountReady,
   expectationFailures,
   liveObjectExpectationFailures,
   nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
+  replayLidConditionMatches,
   replayStepMethod,
   snapshotFailures,
 } from "./browser-harness-smoke.mjs";
+
+test("destination mount acknowledgement waits for the requested stream pair", () => {
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        debug: { mountedLid: 0x19 },
+      },
+      0x09,
+    ),
+    false,
+  );
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "loading",
+        debug: { mountedLid: 0x09 },
+      },
+      0x09,
+    ),
+    false,
+  );
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        debug: { mountedLid: 0x09 },
+      },
+      0x09,
+    ),
+    true,
+  );
+  const previousLog = "> Mounted destination 0x09: old mount.\n";
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        runtimeLog: previousLog,
+        debug: { mountedLid: 0x19 },
+      },
+      0x09,
+      previousLog,
+    ),
+    false,
+  );
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        runtimeLog:
+          `${previousLog}> Mounted destination 0x2D: validated replacement.\n`,
+        debug: { mountedLid: 0x19 },
+      },
+      0x2d,
+      previousLog,
+    ),
+    true,
+  );
+  const retainedTail = previousLog.slice(-18);
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        runtimeLog:
+          `${retainedTail}> Mounted destination 0x2D: bounded-log replacement.\n`,
+        debug: { mountedLid: 0x19 },
+      },
+      0x2d,
+      previousLog,
+    ),
+    true,
+  );
+  assert.equal(
+    destinationMountReady(
+      {
+        runtimeState: "running",
+        runtimeLog: "> Mounted destination 0x2D: stale unrelated visit.\n",
+        debug: { mountedLid: 0x19 },
+      },
+      0x2d,
+      previousLog,
+    ),
+    false,
+  );
+  assert.equal(
+    replayLidConditionMatches(
+      { currentLid: 0x2d, mountedLid: 0x2d },
+      0x2d,
+      0x2d,
+    ),
+    true,
+  );
+  assert.equal(
+    replayLidConditionMatches(
+      { currentLid: 0x2d, mountedLid: 0x2d },
+      0x19,
+      0x19,
+    ),
+    false,
+  );
+});
 
 test("replay batches cap constant-held runs and can isolate the launch frame", () => {
   assert.equal(nextReplayBatchFrameCount(1), 1);
@@ -73,7 +176,11 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         settleFrames: 2,
         settleHeld: "0x0040",
       },
-      { frames: 1, held: 0 },
+      {
+        frames: 1,
+        held: 0,
+        while: { currentLid: 0x2d, mountedLid: 0x2d },
+      },
     ],
     expect: { currentLid: 0x19, minRetailExecutions: 1 },
   });
@@ -87,6 +194,10 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.segments[1].held, 0x0800);
   assert.equal(replay.segments[1].settleFrames, 2);
   assert.equal(replay.segments[1].settleHeld, 0x0040);
+  assert.deepEqual(replay.segments[2].while, {
+    currentLid: 0x2d,
+    mountedLid: 0x2d,
+  });
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -135,6 +246,30 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         segments: [{ frames: 1, held: 0x1_0000 }],
       }),
     /0 through 65535/,
+  );
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [{ frames: 1, held: 0, while: {} }],
+      }),
+    /must contain at least one expectation/,
+  );
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [
+          {
+            frames: 1,
+            held: 0,
+            while: { currentLid: 0x2d, minFrame: 10 },
+          },
+        ],
+      }),
+    /supports only currentLid and mountedLid/,
   );
 });
 

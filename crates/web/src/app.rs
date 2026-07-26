@@ -5246,6 +5246,17 @@ fn load_level_pair(app: Rc<RefCell<App>>, level: FormatLevelId) {
                     .as_mut()
                     .ok_or_else(|| JsValue::from_str("runtime ended during a level transition"))
                     .and_then(|runtime| runtime.install_level_assets(pair, &dom));
+                let result = result.and_then(|()| {
+                    let runtime = app.runtime.as_ref().ok_or_else(|| {
+                        JsValue::from_str("runtime ended while publishing the mounted destination")
+                    })?;
+                    // The asynchronous mount completes between cooperative
+                    // frames. Publish its new pair immediately so diagnostics
+                    // and the browser campaign harness cannot mistake the
+                    // previous level for the active destination or spend an
+                    // extra simulation frame merely to refresh observation.
+                    update_debug(&app.debug, runtime, &app.assets)
+                });
                 match result {
                     Ok(()) => {
                         app.busy = false;

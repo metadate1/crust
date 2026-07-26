@@ -2,8 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
 export PATH="/opt/homebrew/opt/rustup/bin:$HOME/.cargo/bin:$PATH"
 mkdir -p "$ROOT/target"
+CARGO_OUTPUT="${CARGO_TARGET_DIR:-$ROOT/target}"
+if [[ "$CARGO_OUTPUT" != /* ]]; then
+  CARGO_OUTPUT="$ROOT/$CARGO_OUTPUT"
+fi
 OUTPUT="$ROOT/target/browser-test-dist"
 LOCK="$ROOT/target/browser-test-dist.lock"
 if ! mkdir "$LOCK" 2>/dev/null; then
@@ -48,7 +53,7 @@ wasm-bindgen \
   --no-typescript \
   --out-dir "$STAGE/pkg" \
   --out-name crust_web \
-  "$ROOT/target/wasm32-unknown-unknown/release/crust_web.wasm"
+  "$CARGO_OUTPUT/wasm32-unknown-unknown/release/crust_web.wasm"
 
 node "$ROOT/scripts/build-info.mjs" write "$ROOT" "$STAGE" "$SOURCE_SHA"
 

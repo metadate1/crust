@@ -85,21 +85,26 @@ Longer local traces use a run-length JSON file passed with `--replay`:
   "segments": [
     { "frames": 90, "held": 0 },
     { "frames": 1, "held": 2048 },
-    { "frames": 1, "held": 0, "expect": { "mountedLid": 25, "minFrame": 92 } }
+    { "frames": 1, "held": 0, "expect": { "mountedLid": 25, "minFrame": 92 } },
+    { "frames": 15, "held": 0, "while": { "currentLid": 45, "mountedLid": 45 } }
   ],
   "expect": { "currentLid": 25, "minRetailExecutions": 1 }
 }
 ```
 
 The runner already yields to asynchronous authored stream requests and checks the remounted
-destination before continuing. Segments default to `"inputKind": "physical"` and accept only the
-console's 16-bit physical pad mask. A legally local diagnostic reconstructed from PBAK may instead
-mark a segment `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete
-32-bit `held` word through the existing demo override while physical input remains zero. Never
-commit such local recordings. A complete campaign proof still needs a captured, reviewed pad-mask
-timeline plus level/checkpoint expectations for the whole retail route; the repository does not yet
-contain that controller oracle. The browser hook intentionally cannot force a transition or mutate
-GOOL state, so the missing trace cannot be replaced by test-only game-state shortcuts.
+destination before continuing. An optional `"while"` condition limits a segment to the named
+`currentLid` and/or `mountedLid`; once the authored transition changes that pair, the runner skips
+the segment's remaining scheduled frames without advancing the simulation. This is useful for
+bounded completion-screen pulse cycles whose exact exit frame varies by collected-box count.
+Segments default to `"inputKind": "physical"` and accept only the console's 16-bit physical pad
+mask. A legally local diagnostic reconstructed from PBAK may instead mark a segment
+`"inputKind": "recorded"`; only the feature-gated harness then supplies its complete 32-bit `held`
+word through the existing demo override while physical input remains zero. Never commit such local
+recordings. A complete campaign proof still needs a captured, reviewed pad-mask timeline plus
+level/checkpoint expectations for the whole retail route; the repository does not yet contain that
+controller oracle. The browser hook intentionally cannot force a transition or mutate GOOL state,
+so the missing trace cannot be replaced by test-only game-state shortcuts.
 
 ## Local-data verification
 

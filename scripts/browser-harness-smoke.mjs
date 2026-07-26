@@ -99,6 +99,51 @@ export function nextReplayBatchFrameCount(
     : Math.min(remainingFrames, REPLAY_BATCH_FRAME_LIMIT);
 }
 
+export function destinationMountReady(
+  snapshot,
+  requestedLid,
+  previousRuntimeLog = "",
+) {
+  const runtimeLog = snapshot?.runtimeLog ?? "";
+  let appendedLog;
+  if (runtimeLog.startsWith(previousRuntimeLog)) {
+    appendedLog = runtimeLog.slice(previousRuntimeLog.length);
+  } else {
+    // The visible engineering log is bounded and can discard its oldest
+    // lines during a verbose mount. Find the longest retained suffix/prefix
+    // overlap so a marker from an earlier visit to the same LID cannot
+    // acknowledge this request.
+    const maximumOverlap = Math.min(
+      previousRuntimeLog.length,
+      runtimeLog.length,
+      512,
+    );
+    const minimumOverlap = Math.min(16, previousRuntimeLog.length);
+    let overlap = 0;
+    for (
+      let length = maximumOverlap;
+      length >= minimumOverlap && overlap === 0;
+      length -= 1
+    ) {
+      if (
+        previousRuntimeLog.endsWith(runtimeLog.slice(0, length))
+      ) {
+        overlap = length;
+      }
+    }
+    appendedLog = overlap === 0 ? "" : runtimeLog.slice(overlap);
+  }
+  const marker =
+    `Mounted destination 0x${requestedLid.toString(16).padStart(2, "0")}:`;
+  return Boolean(
+    snapshot?.runtimeState === "running"
+    && (
+      snapshot.debug?.mountedLid === requestedLid
+      || appendedLog.toLowerCase().includes(marker.toLowerCase())
+    )
+  );
+}
+
 export function usage() {
   return `Usage:
   node scripts/browser-harness-smoke.mjs --asset PATH [--asset PATH ...] [options]
@@ -311,6 +356,23 @@ function normalizeExpectation(raw, label) {
   return expectation;
 }
 
+function normalizeReplayCondition(raw, label) {
+  if (raw === undefined) return undefined;
+  const condition = normalizeExpectation(raw, label);
+  if (Object.keys(condition).length === 0) {
+    throw new Error(`${label} must contain at least one expectation`);
+  }
+  const unsupported = Object.keys(condition).filter(
+    (name) => !["currentLid", "mountedLid"].includes(name),
+  );
+  if (unsupported.length > 0) {
+    throw new Error(
+      `${label} supports only currentLid and mountedLid; received ${unsupported.join(", ")}`,
+    );
+  }
+  return condition;
+}
+
 export function normalizeReplay(raw, fallback = {}) {
   const replay = raw ?? {
     schema: 1,
@@ -380,6 +442,10 @@ export function normalizeReplay(raw, fallback = {}) {
       expect: normalizeExpectation(
         segment.expect,
         `replay.segments[${index}].expect`,
+      ),
+      while: normalizeReplayCondition(
+        segment.while,
+        `replay.segments[${index}].while`,
       ),
       settleFrames,
       settleHeld: parseWholeNumber(
@@ -568,6 +634,17 @@ export function expectationFailures(expectation, snapshot) {
     );
   }
   return failures;
+}
+
+export function replayLidConditionMatches(
+  condition,
+  currentLid,
+  mountedLid,
+) {
+  if (condition === undefined) return true;
+  return expectationFailures(condition, {
+    debug: { currentLid, mountedLid },
+  }).length === 0;
 }
 
 export function allLevelsFailures(
@@ -1083,7 +1160,9 @@ async function runBrowser(options, replay, chromeExecutable) {
     // cooperative step. Check that first result before the replay can
     // continue far enough to spend a life legitimately.
     let allLevelsLaunchChecked = !replay.unlockAll;
-    let finalSnapshot;
+    let finalSnapshot = await browserSnapshot(cdp, sessionId);
+    let replayCurrentLid = finalSnapshot.debug?.currentLid;
+    let replayMountedLid = finalSnapshot.debug?.mountedLid;
     const stepReplayBatch = async (inputKind, held, frameCount, label) => {
       const batchStart = stepped + 1;
       const stepMethod = replayStepMethod(inputKind);
@@ -1119,6 +1198,12 @@ async function runBrowser(options, replay, chromeExecutable) {
         );
       }
       finalSnapshot = result.snapshot;
+      if (Number.isSafeInteger(finalSnapshot.debug?.currentLid)) {
+        replayCurrentLid = finalSnapshot.debug.currentLid;
+      }
+      if (Number.isSafeInteger(finalSnapshot.debug?.mountedLid)) {
+        replayMountedLid = finalSnapshot.debug.mountedLid;
+      }
       stepped += executed;
       if (!allLevelsLaunchChecked) {
         if (executed !== 1) {
@@ -1146,14 +1231,19 @@ async function runBrowser(options, replay, chromeExecutable) {
         );
       }
       if (finalSnapshot.harness.lastRequestedLid != null) {
+        const requestedLid = Number(finalSnapshot.harness.lastRequestedLid);
+        const previousRuntimeLog = finalSnapshot.runtimeLog ?? "";
         finalSnapshot = await waitFor(
           cdp,
           sessionId,
-          `destination 0x${Number(finalSnapshot.harness.lastRequestedLid).toString(16)} mount`,
-          (snapshot) => snapshot.runtimeState === "running",
+          `destination 0x${requestedLid.toString(16)} mount`,
+          (snapshot) =>
+            destinationMountReady(snapshot, requestedLid, previousRuntimeLog),
           failures,
           120_000,
         );
+        replayCurrentLid = requestedLid;
+        replayMountedLid = requestedLid;
       }
       return executed;
     };
@@ -1181,9 +1271,21 @@ async function runBrowser(options, replay, chromeExecutable) {
       return used;
     };
     let segmentSettleFramesUsed = 0;
+    let skippedReplayFrames = 0;
     for (const [segmentIndex, segment] of replay.segments.entries()) {
       let remainingFrames = segment.frames;
       while (remainingFrames > 0) {
+        if (
+          !replayLidConditionMatches(
+            segment.while,
+            replayCurrentLid,
+            replayMountedLid,
+          )
+        ) {
+          skippedReplayFrames += remainingFrames;
+          remainingFrames = 0;
+          break;
+        }
         const batchFrames = nextReplayBatchFrameCount(remainingFrames, {
           isolateFirstFrame: !allLevelsLaunchChecked,
         });
@@ -1277,6 +1379,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       pairs: imported.pairCount,
       frames: stepped,
       replayFrames: replay.totalFrames,
+      skippedReplayFrames,
       settleFramesUsed,
       segmentSettleFramesUsed,
       lastInputKind: finalSnapshot.harness.lastInputKind,

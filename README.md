@@ -578,10 +578,11 @@ bounded checks, not a full playthrough, physical-controller certification, or re
 A later owned-raw-BIN Chromium campaign run joined the real publisher/title sequence through Papu
 Papu, Rolling Stones, its Level Complete screen, the authored map handoff, Hog Wild, its Level
 Complete screen, and the following authored map handoff in one Wasm session. It mounted Native
-Fortress at draw 22,829 after 22,857 executed harness frames with zero cumulative hard restarts,
-LoadState effects, or death-camera frames and no runtime, GOOL, zone, spawn, console, or WebGL
-error. This materially extends browser progression evidence but still does not certify Native
-Fortress's carried completion, the remaining campaign, or full retail parity.
+Fortress at draw 22,829, completed its exact carried route, acknowledged its Level Complete screen,
+and presented the following authored map at draw 30,070. Across 30,100 executed harness frames it
+reported zero cumulative hard restarts, LoadState effects, or death-camera frames and no runtime,
+GOOL, zone, spawn, console, network, or WebGL error. This materially extends browser progression
+evidence but still does not certify the remaining campaign or full retail parity.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 

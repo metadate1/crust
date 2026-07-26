@@ -1503,15 +1503,22 @@ is 1,322,866 bytes with SHA-256
   retained all game bytes in the tab, and replayed ordinary retail pad words through the existing
   publisher/title campaign to the exact post-Papu Rolling Stones mount. The replay then completed
   Rolling Stones, its 425-frame Level Complete graph, the authored Title Map selection, Hog Wild,
-  its Level Complete acknowledgement, and the following Map selection before mounting Native
-  Fortress.
-- The strengthened final snapshot reported current and mounted LID `0x1a`, retail frame one, draw
-  22,829, nine unlocked levels, zero cumulative hard restarts, zero LoadState effects, and zero
-  death-camera frames. Across 22,857 executed harness frames, the runtime reported no GOOL, zone,
-  spawn, console, or WebGL error. The 7,402 omitted scheduled frames belonged only to conditional
-  replay segments whose expected destination mount had already completed; omitted segments do not
-  advance the Rust simulation. Thirty-nine segment-settle frames resolved asynchronous mount
-  boundaries. Native Fortress's carried completion was not exercised in this run.
+  its Level Complete acknowledgement, the following Map selection, Native Fortress, and Native's
+  Level Complete acknowledgement before presenting the next authored Map.
+- Native Fortress's exact post-Hog first frame is pinned at draw 22,829, RNG-A `0xb7ab3d78`,
+  RNG-B `0x33881199`, and 24 GOOL executions. Its ordinary-pad route requests Level Complete on
+  frame 6,737 after 323 successful spawns, 167,263 executions, 66 zone transitions, and three
+  SaveState effects. It has no restart, LoadState, death-camera frame, terminal fall, faulted object,
+  execution error, or checked issue. The completion graph requests Title on frame 384.
+- The strengthened final Chrome snapshot reported current and mounted LID `0x19`, Title frame 121,
+  zone `2a_pZ`, draw 30,070, 598 current-mount GOOL executions, zero cumulative hard restarts, zero
+  LoadState effects, and zero death-camera frames. Across 30,100 executed harness frames, the
+  runtime reported no GOOL, zone, spawn, console, network, or WebGL error. The 7,402 omitted
+  scheduled frames belonged only to conditional replay segments whose expected destination mount
+  had already completed; omitted segments do not advance the Rust simulation. The visible-map
+  screenshot's SHA-256 is
+  `fb02dead77409d4d65c436ae915fc40462856b32cefd37b79338d8b1ef1cf9df`; the screenshot,
+  replay, and owned data remain ignored local artifacts.
 - Two apparent divergences were replay-authoring errors rather than runtime changes. An open-loop
   Start interval let the native exporter advance while Chrome correctly remained paused;
   an explicit ordinary release/resume edge restored identical gameplay-frame ordering. The first

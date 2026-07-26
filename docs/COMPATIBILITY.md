@@ -805,12 +805,14 @@ gameplay path.
   Chromium run joined the publisher/title-to-Rolling mount, exact Rolling route, 425-frame Level
   Complete graph, authored Title Map handoff, exact Hog Wild route and its completion acknowledgement
   in one browser session. The following authored Map selection mounted Native Fortress at draw
-  22,829 with nine unlocked levels. Across 22,857 executed harness frames it reported zero
-  cumulative hard restarts, LoadState effects and death-camera frames, with no
-  runtime/GOOL/zone/spawn diagnostic, console exception, or WebGL error. The route uses ordinary
-  exported pad words and conditionally omits only replay segments whose destination mount has
-  already completed; no skipped segment advances the simulation. Native Fortress's exact carried
-  completion and browser progression beyond that mount remain open.
+  22,829 with nine unlocked levels. Its exact post-Hog carried route reaches the authored Level
+  Complete transition on frame 6,737, and that completion graph requests Title on frame 384. The
+  same owned-BIN Chromium session presents the following authored Map at draw 30,070. Across 30,100
+  executed harness frames it reported zero cumulative hard restarts, LoadState effects and
+  death-camera frames, with no runtime/GOOL/zone/spawn diagnostic, console exception, network
+  failure, or WebGL error. The route uses ordinary exported pad words and conditionally omits only
+  replay segments whose destination mount has already completed; no skipped segment advances the
+  simulation. Browser progression beyond the post-Native Map remains open.
   Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
   native parent-entry/portal/return coverage, including protected parent remounts where asserted.
   Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.

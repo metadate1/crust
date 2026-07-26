@@ -1502,14 +1502,16 @@ is 1,322,866 bytes with SHA-256
 - A fresh Chrome-compatible harness session selected the user's 632,083,536-byte raw BIN locally,
   retained all game bytes in the tab, and replayed ordinary retail pad words through the existing
   publisher/title campaign to the exact post-Papu Rolling Stones mount. The replay then completed
-  Rolling Stones, its 425-frame Level Complete graph, the authored Title Map selection, and Hog
-  Wild before mounting Hog Wild's Level Complete screen.
-- The final snapshot reported current and mounted LID `0x2d`, retail frame one, draw 22,299,
-  RNG-A `0xa85a4587`, RNG-B `0x3388b399`, nine unlocked levels, and three initial Level Complete
-  GOOL executions. Across 22,325 executed harness frames, the runtime reported no GOOL, zone,
-  spawn, console, or WebGL error. The 6,379 omitted scheduled frames belonged only to conditional
+  Rolling Stones, its 425-frame Level Complete graph, the authored Title Map selection, Hog Wild,
+  its Level Complete acknowledgement, and the following Map selection before mounting Native
+  Fortress.
+- The strengthened final snapshot reported current and mounted LID `0x1a`, retail frame one, draw
+  22,829, nine unlocked levels, zero cumulative hard restarts, zero LoadState effects, and zero
+  death-camera frames. Across 22,857 executed harness frames, the runtime reported no GOOL, zone,
+  spawn, console, or WebGL error. The 7,402 omitted scheduled frames belonged only to conditional
   replay segments whose expected destination mount had already completed; omitted segments do not
-  advance the Rust simulation.
+  advance the Rust simulation. Thirty-nine segment-settle frames resolved asynchronous mount
+  boundaries. Native Fortress's carried completion was not exercised in this run.
 - Two apparent divergences were replay-authoring errors rather than runtime changes. An open-loop
   Start interval let the native exporter advance while Chrome correctly remained paused;
   an explicit ordinary release/resume edge restored identical gameplay-frame ordering. The first

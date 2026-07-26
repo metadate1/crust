@@ -576,10 +576,12 @@ cycle persisted and reopened the version-one 15-slot virtual-card envelope. Earl
 coverage exercised the publisher screen, main menu, island map, and direct level boot. These remain
 bounded checks, not a full playthrough, physical-controller certification, or retail-parity claim.
 A later owned-raw-BIN Chromium campaign run joined the real publisher/title sequence through Papu
-Papu, Rolling Stones, its Level Complete screen, the authored map handoff, and Hog Wild in one Wasm
-session. It reached Hog Wild's Level Complete mount at draw 22,299 with no runtime, GOOL, zone,
-spawn, console, or WebGL error. This materially extends browser progression evidence but still does
-not certify the remaining campaign or full retail parity.
+Papu, Rolling Stones, its Level Complete screen, the authored map handoff, Hog Wild, its Level
+Complete screen, and the following authored map handoff in one Wasm session. It mounted Native
+Fortress at draw 22,829 after 22,857 executed harness frames with zero cumulative hard restarts,
+LoadState effects, or death-camera frames and no runtime, GOOL, zone, spawn, console, or WebGL
+error. This materially extends browser progression evidence but still does not certify Native
+Fortress's carried completion, the remaining campaign, or full retail parity.
 See [compatibility](docs/COMPATIBILITY.md) for the exact gaps and
 [verification](docs/VERIFICATION.md) for checks actually performed.
 

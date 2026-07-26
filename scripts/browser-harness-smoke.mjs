@@ -196,6 +196,11 @@ export function normalizeReplay(raw, fallback = {}) {
     schema: 1,
     bootLid: parseWholeNumber(replay.bootLid, "replay.bootLid", 0xff),
     unlockAll: replay.unlockAll ?? fallback.unlockAll ?? false,
+    settleFrames: parseWholeNumber(
+      replay.settleFrames ?? 0,
+      "replay.settleFrames",
+      10_000,
+    ),
     segments: [],
     expect: normalizeExpectation(replay.expect, "replay.expect"),
   };
@@ -858,6 +863,41 @@ async function runBrowser(options, replay, chromeExecutable) {
       );
     }
     finalSnapshot = await browserSnapshot(cdp, sessionId);
+    let settleFramesUsed = 0;
+    while (
+      settleFramesUsed < replay.settleFrames
+      && expectationFailures(replay.expect, finalSnapshot).length > 0
+    ) {
+      finalSnapshot = await evaluate(
+        cdp,
+        sessionId,
+        `(() => {
+          window.__crustTest.step(0);
+          return ${snapshotExpression};
+        })()`,
+      );
+      stepped += 1;
+      settleFramesUsed += 1;
+      const settleProblems = [
+        ...failures,
+        ...snapshotFailures(finalSnapshot),
+      ];
+      if (settleProblems.length > 0) {
+        throw new Error(
+          `browser replay settle failed at frame ${stepped}:\n${settleProblems.join("\n")}`,
+        );
+      }
+      if (finalSnapshot.harness.lastRequestedLid != null) {
+        finalSnapshot = await waitFor(
+          cdp,
+          sessionId,
+          `destination 0x${Number(finalSnapshot.harness.lastRequestedLid).toString(16)} mount`,
+          (snapshot) => snapshot.runtimeState === "running",
+          failures,
+          120_000,
+        );
+      }
+    }
     const finalProblems = [
       ...failures,
       ...snapshotFailures(finalSnapshot),
@@ -865,9 +905,9 @@ async function runBrowser(options, replay, chromeExecutable) {
     if (finalProblems.length > 0) {
       throw new Error(`browser replay failed:\n${finalProblems.join("\n")}`);
     }
-    if (finalSnapshot.harness.stepCount !== replay.totalFrames) {
+    if (finalSnapshot.harness.stepCount !== stepped) {
       throw new Error(
-        `harness issued ${finalSnapshot.harness.stepCount} steps; expected ${replay.totalFrames}`,
+        `harness issued ${finalSnapshot.harness.stepCount} steps; expected ${stepped}`,
       );
     }
     if (!(finalSnapshot.debug.frame > 0)) {
@@ -890,8 +930,6 @@ async function runBrowser(options, replay, chromeExecutable) {
         );
       }
     }
-    assertExpected(replay.expect, finalSnapshot, "final replay");
-
     const screenshot = await cdp.command(
       "Page.captureScreenshot",
       { format: "png", captureBeyondViewport: true },
@@ -901,10 +939,27 @@ async function runBrowser(options, replay, chromeExecutable) {
     const screenshotBytes = Buffer.from(screenshot.data, "base64");
     await mkdir(dirname(options.screenshot), { recursive: true });
     await writeFile(options.screenshot, screenshotBytes);
+    const finalExpectationFailures = expectationFailures(
+      replay.expect,
+      finalSnapshot,
+    );
+    if (finalExpectationFailures.length > 0) {
+      throw new Error(
+        [
+          "final replay expectation failed:",
+          ...finalExpectationFailures,
+          `failure screenshot: ${options.screenshot}`,
+          "final snapshot:",
+          JSON.stringify(finalSnapshot, null, 2),
+        ].join("\n"),
+      );
+    }
     return {
       assets: options.assets.length,
       pairs: imported.pairCount,
-      frames: replay.totalFrames,
+      frames: stepped,
+      replayFrames: replay.totalFrames,
+      settleFramesUsed,
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
       retailExecutions: finalSnapshot.debug.retailExecutions,

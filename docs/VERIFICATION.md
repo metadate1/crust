@@ -1519,6 +1519,10 @@ is 1,322,866 bytes with SHA-256
   screenshot's SHA-256 is
   `fb02dead77409d4d65c436ae915fc40462856b32cefd37b79338d8b1ef1cf9df`; the screenshot,
   replay, and owned data remain ignored local artifacts.
+- During the same live-server checkpoint, the user independently completed Native Fortress with
+  human input in the browser. This is manual playability evidence separate from the deterministic
+  harness; no detailed input trace or per-frame telemetry was captured from that user-controlled
+  run, so it is not represented as an additional uninterrupted campaign replay.
 - Two apparent divergences were replay-authoring errors rather than runtime changes. An open-loop
   Start interval let the native exporter advance while Chrome correctly remained paused;
   an explicit ordinary release/resume edge restored identical gameplay-frame ordering. The first

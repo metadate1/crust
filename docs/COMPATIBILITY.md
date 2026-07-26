@@ -648,11 +648,11 @@ gameplay path.
   windows and breaks BoxsC entity 92 on frame 1,860. Three terrain jumps continue `0M -> 0O`
   without taking alternate `0N`; a short right-jump enters end `WarpC`, which executes states zero
   through four and requests Level Complete on frame 2,447. The route records 117 successful spawns,
-  55,034 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
+  55,122 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes,
   while retaining checkpoint `0x0800`, saved translation
-  `[2815232, 2979072, 17458688]`, saved boxes `0x0a00`, and live boxes `0x0c00`. It has no restart,
+  `[2815232, 2979072, 17458688]`, saved boxes `0x0900`, and live boxes `0x0b00`. It has no restart,
   state-31 squash, fall, fault, execution error, or LoadState. Its final camera is
-  `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65` at draw 2,447.
+  `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]`, and RNG is `0xfb2e6e83` at draw 2,447.
   The uninterrupted campaign carry reaches the same authored transition 18 frames later.
   The first N. Sanity interaction sequence is now characterized from retail data: CrabC entity 14
   is defeated, BoxsC entity 7, entity 12 and seven later counted boxes break, checkpoint entity 19

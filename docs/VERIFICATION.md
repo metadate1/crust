@@ -1309,20 +1309,20 @@ is 1,322,866 bytes with SHA-256
 - The legally local Rolling Stones (`0x15`) direct-boot route uses only ordinary 30 Hz pad words and
   requests Level Complete `0x2d` on frame 2,447 with no restart, state-31 squash, death camera,
   terminal fall, VM fault, execution error, or LoadState. It performs 117 successful spawns from
-  29,190 attempts with 29,073 source-expected rejections and 55,034 clean executions across 32
+  29,168 attempts with 29,051 source-expected rejections and 55,122 clean executions across 32
   lifecycle zone transitions, 45 camera ranges, and 46 path changes. The route breaks its
   authored opening wall, defeats PlanC entities 18/49/57 and turtle entities 15/72, times jumps over
   JunOC entity 69, and avoids JunOC entities 75/77/52's `0x1900` squash paths using ordinary
-  neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,160. The
+  neutral/run/jump windows. BoxsC subtype-four entity eight activates on frame 1,159. The
   synchronous SaveState records checkpoint `0x0800`, player `[2815232, 2979072, 17458688]`, and
-  pre-increment box count `0x0a00`; the live count then becomes `0x0b00` and spawn flags become
-  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0c00`. The route
+  pre-increment box count `0x0900`; the live count then becomes `0x0a00` and spawn flags become
+  nine. BoxsC entity 92 breaks on frame 1,860 and advances the live count to `0x0b00`. The route
   retains `0I -> 0J -> 0K`, avoids category-`0x300` entity 103 with an ordinary right/left lane
   change, and crosses the successive `0K` pads. Three terrain jumps carry Crash from physical `0M`
   into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
   WarpC executes states zero through four before the transition. The final camera is
-  `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]` in warp state 32, and RNG is
-  `0x6302af65` at draw 2,447. The uninterrupted campaign carry independently reaches the same
+  `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]` in warp state 32, and RNG is
+  `0xfb2e6e83` at draw 2,447. The uninterrupted campaign carry independently reaches the same
   authored end 18 frames later.
 - Hog Wild (`0x11`) now has a complete direct-boot route using ordinary 30 Hz pad words. It
   traverses 67 camera paths/66 changes and 57 lifecycle transitions, activates checkpoints 13 and

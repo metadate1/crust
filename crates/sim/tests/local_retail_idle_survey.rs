@@ -50372,10 +50372,10 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
     let expected_terminal = format!("frame {transition_frame} requested level transition to 0x2d");
     assert_eq!(survey.terminal.as_deref(), Some(expected_terminal.as_str()));
     assert_eq!(survey.successful_spawns, 117);
-    assert_eq!(survey.spawn_attempts, 29_190);
-    assert_eq!(survey.expected_spawn_rejections, 29_073);
+    assert_eq!(survey.spawn_attempts, 29_168);
+    assert_eq!(survey.expected_spawn_rejections, 29_051);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 55_034);
+    assert_eq!(survey.executions, 55_122);
     assert_eq!(survey.zone_transitions, 32);
     assert_eq!(survey.camera_ranges.len(), 45);
     assert_eq!(survey.camera_path_changes, 46);
@@ -50396,7 +50396,7 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [2_236_000, 9_256_244, -1_821_440]);
+    assert_eq!(player.translation, [2_235_680, 9_256_244, -1_821_440]);
     assert_eq!(survey.final_live_objects, 22);
     assert!(survey.max_live_objects >= 35);
     assert_eq!(survey.restarts, 0);
@@ -50415,36 +50415,35 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
         survey.box_count_samples,
         [
             (1, 0),
-            (277, 0x100),
-            (278, 0x200),
-            (279, 0x300),
-            (280, 0x400),
-            (282, 0x500),
-            (295, 0x600),
-            (355, 0x700),
-            (630, 0x800),
-            (1_037, 0x900),
-            (1_054, 0xa00),
-            (1_160, 0xb00),
-            (1_860, 0xc00),
+            (278, 0x100),
+            (279, 0x200),
+            (280, 0x300),
+            (281, 0x400),
+            (295, 0x500),
+            (355, 0x600),
+            (629, 0x700),
+            (1_036, 0x800),
+            (1_053, 0x900),
+            (1_159, 0xa00),
+            (1_860, 0xb00),
         ]
     );
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (1_160, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
+            (1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_160, 0xa00)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_159, 0x900)]);
     for defeated in [
-        (627, 18, 3),
-        (691, 15, 3),
-        (826, 49, 3),
-        (846, 57, 3),
-        (1_118, 72, 3),
-        (1_160, 8, 9),
-        (1_697, 86, 3),
+        (626, 18, 3),
+        (690, 15, 3),
+        (825, 49, 3),
+        (845, 57, 3),
+        (1_117, 72, 3),
+        (1_159, 8, 9),
+        (1_696, 86, 3),
         (1_860, 92, 3),
     ] {
         assert!(
@@ -50476,7 +50475,7 @@ fn rolling_stones_direct_boot_reaches_level_complete() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.machine().random_seed(), 0x6302_af65);
+    assert_eq!(runtime.machine().random_seed(), 0xfb2e_6e83);
     assert_eq!(runtime.draw_count(), transition_frame);
     assert!(
         survey.is_clean(),

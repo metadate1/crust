@@ -306,15 +306,15 @@ An independent legally local direct-boot route now completes Rolling Stones usin
 30 Hz pad input.
 It breaks the authored opening wall and later crates, defeats PlanC entities 18/49/57 and turtle
 entities 15/72, clears JunOC entity 69, and avoids the `0x1900` squash paths from JunOC entities
-75/77/52. BoxsC subtype-four entity 8 still activates on frame 1,160: SaveState captures checkpoint
-`0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0a00`; the live
-count then becomes `0x0b00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
-1,860, advancing the live count to `0x0c00`. Three ordinary terrain jumps carry Crash from `0M`
+75/77/52. BoxsC subtype-four entity 8 activates on frame 1,159: SaveState captures checkpoint
+`0x0800`, player `[2815232, 2979072, 17458688]`, and pre-increment box count `0x0900`; the live
+count then becomes `0x0a00` and spawn flags become nine. It also breaks BoxsC entity 92 on frame
+1,860, advancing the live count to `0x0b00`. Three ordinary terrain jumps carry Crash from `0M`
 into normal-route `0O` without entering alternate `0N`; a short right-jump enters end `WarpC`.
 WarpC executes states zero through four and requests Level Complete `0x2d` on frame 2,447. The
-route records 117 successful spawns from 29,190 attempts with 29,073 source-expected rejections,
-55,034 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
-final camera is `0O_lZ:0@9984`, Crash is `[2236000, 9256244, -1821440]`, and RNG is `0x6302af65`
+route records 117 successful spawns from 29,168 attempts with 29,051 source-expected rejections,
+55,122 clean executions, 32 lifecycle zone transitions, 45 camera ranges and 46 path changes. Its
+final camera is `0O_lZ:0@9984`, Crash is `[2235680, 9256244, -1821440]`, and RNG is `0xfb2e6e83`
 at draw 2,447. It has no restart, state-31 squash, death camera, terminal fall, VM fault, execution
 error, or LoadState. The carried route above independently reaches the same authored end 18
 frames later.

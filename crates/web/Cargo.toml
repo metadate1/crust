@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 # Builds a separate, manually clocked browser artifact for local end-to-end
 # verification. The normal web build never exposes this API.
-browser-test-harness = []
+browser-test-harness = ["crust-sim/browser-test-harness"]
 
 [dependencies]
 crust-audio.workspace = true

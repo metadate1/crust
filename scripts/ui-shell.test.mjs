@@ -55,7 +55,10 @@ test("manual browser stepping stays behind an off-by-default Cargo feature", asy
   ]);
 
   assert.match(manifest, /\[features\]\s+default = \[\]/);
-  assert.match(manifest, /browser-test-harness = \[\]/);
+  assert.match(
+    manifest,
+    /browser-test-harness = \["crust-sim\/browser-test-harness"\]/,
+  );
   assert.match(packageJson, /"build:browser-harness"/);
   assert.match(packageJson, /"serve:browser-harness"/);
   assert.match(harnessBuild, /--features browser-test-harness/);
@@ -72,6 +75,10 @@ test("manual browser stepping stays behind an off-by-default Cargo feature", asy
   assert.match(
     app,
     /#\[cfg\(not\(feature = "browser-test-harness"\)\)\]\s+start_animation_loop/,
+  );
+  assert.match(
+    app,
+    /#\[cfg\(feature = "browser-test-harness"\)\]\s+fn browser_test_live_objects_value/,
   );
   assert.match(app, /app\.frame\(timestamp_ms\)/);
   assert.match(app, /load_level_pair\(Rc::clone\(&app\), level\)/);

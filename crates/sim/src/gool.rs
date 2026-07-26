@@ -3967,6 +3967,12 @@ impl VmObject {
         self.is_main_player = is_main_player;
     }
 
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    #[must_use]
+    pub(crate) const fn browser_test_is_main_player(&self) -> bool {
+        self.is_main_player
+    }
+
     #[must_use]
     pub const fn retail_colors(&self) -> &[u16; COLOR_COUNT] {
         &self.colors
@@ -6607,6 +6613,14 @@ impl Machine {
             Some(pool_slot) => Ok(self.live_object_in_retail_pool_slot(pool_slot)),
             None => Ok(cached),
         }
+    }
+
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    pub(crate) fn browser_test_collider(
+        &self,
+        handle: ObjectHandle,
+    ) -> Result<Option<ObjectHandle>, VmError> {
+        self.resolve_process_link(handle, PROCESS_LINK_COLLIDER)
     }
 
     /// Clears the collider pair named by `object`, in retail source order.

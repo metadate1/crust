@@ -111,6 +111,8 @@ use crate::{
 };
 #[cfg(feature = "browser-test-harness")]
 use crust_sim::gool::{INITIAL_LIFE_COUNT_GLOBAL, LIFE_COUNT_GLOBAL};
+#[cfg(feature = "browser-test-harness")]
+use crust_sim::retail_runtime::BrowserTestLiveObject;
 
 // `web-sys` 0.3 exposes `Element::request_fullscreen` as a caught void
 // method, even though current browsers return a Promise. Read that return
@@ -4946,6 +4948,38 @@ fn install_browser_test_harness(
         &JsValue::NULL,
     )?;
 
+    let debug = app.borrow().debug.clone();
+    let app_for_live_objects = Rc::clone(app);
+    let harness_for_live_objects = harness.clone();
+    let snapshot_retail_objects = Closure::<dyn FnMut() -> JsValue>::new(move || {
+        let result = app_for_live_objects
+            .try_borrow()
+            .map_err(|_| JsValue::from_str("runtime is busy while observing live objects"))
+            .and_then(|app| {
+                app.runtime.as_ref().map_or_else(
+                    || Ok(JsValue::from(js_sys::Array::new())),
+                    |runtime| browser_test_live_objects_value(&runtime.retail_objects),
+                )
+            });
+        match result {
+            Ok(value) => value,
+            Err(error) => {
+                let message = js_message(&error);
+                let _ = Reflect::set(
+                    harness_for_live_objects.as_ref(),
+                    &JsValue::from_str("lastError"),
+                    &JsValue::from_str(&message),
+                );
+                JsValue::NULL
+            }
+        }
+    });
+    Reflect::set(
+        debug.as_ref(),
+        &JsValue::from_str("snapshotRetailObjects"),
+        snapshot_retail_objects.as_ref().unchecked_ref(),
+    )?;
+
     let app = Rc::clone(app);
     let harness_for_step = harness.clone();
     let clock_and_count = Rc::new(RefCell::new((BrowserTestClock::default(), 0_u64)));
@@ -5007,7 +5041,178 @@ fn install_browser_test_harness(
         harness.as_ref(),
     )?;
     step.forget();
+    snapshot_retail_objects.forget();
     Ok(())
+}
+
+#[cfg(feature = "browser-test-harness")]
+fn browser_test_live_objects_value(runtime: &RetailRuntime) -> Result<JsValue, JsValue> {
+    let objects = js_sys::Array::new();
+    for snapshot in runtime.browser_test_live_objects().map_err(|error| {
+        JsValue::from_str(&format!(
+            "browser-test live object snapshot failed: {error:?}"
+        ))
+    })? {
+        objects.push(&browser_test_live_object_value(&snapshot)?);
+    }
+    Ok(objects.into())
+}
+
+#[cfg(feature = "browser-test-harness")]
+fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<JsValue, JsValue> {
+    let object = Object::new();
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("handle"),
+        &browser_test_object_handle_value(snapshot.handle)?,
+    )?;
+    for (name, value) in [
+        ("entityId", snapshot.entity_id.map(u32::from)),
+        ("entityGroup", snapshot.entity_group.map(u32::from)),
+        ("programEid", snapshot.program_eid.map(Eid::raw)),
+    ] {
+        Reflect::set(
+            object.as_ref(),
+            &JsValue::from_str(name),
+            &value.map_or(JsValue::NULL, |value| JsValue::from_f64(f64::from(value))),
+        )?;
+    }
+    for (name, value) in [
+        ("executable", u32::from(snapshot.executable)),
+        ("spawnSubtype", u32::from(snapshot.spawn_subtype)),
+        ("subtype", snapshot.subtype),
+        ("state", u32::from(snapshot.state)),
+        (
+            "pc",
+            u32::try_from(snapshot.pc)
+                .map_err(|_| JsValue::from_str("retail object PC exceeds 32 bits"))?,
+        ),
+        ("zoneEid", snapshot.zone.raw()),
+    ] {
+        Reflect::set(
+            object.as_ref(),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(f64::from(value)),
+        )?;
+    }
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("zone"),
+        &JsValue::from_str(&snapshot.zone.to_string()),
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("origin"),
+        &JsValue::from_str(if snapshot.entity_id.is_some() {
+            "entity"
+        } else {
+            "runtime"
+        }),
+    )?;
+
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("translation"),
+        &browser_test_vector_value(snapshot.translation, ["x", "y", "z"])?,
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("rotationYxz"),
+        &browser_test_vector_value(snapshot.rotation_yxz, ["y", "x", "z"])?,
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("velocity"),
+        &browser_test_vector_value(snapshot.velocity, ["x", "y", "z"])?,
+    )?;
+    let frame_bound = if let Some(bound) = snapshot.frame_bound {
+        let value = Object::new();
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("min"),
+            &browser_test_vector_value([bound.min.x, bound.min.y, bound.min.z], ["x", "y", "z"])?,
+        )?;
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str("max"),
+            &browser_test_vector_value([bound.max.x, bound.max.y, bound.max.z], ["x", "y", "z"])?,
+        )?;
+        JsValue::from(value)
+    } else {
+        JsValue::NULL
+    };
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("frameBound"),
+        &frame_bound,
+    )?;
+
+    let status = Object::new();
+    for (name, value) in [
+        ("a", snapshot.status_a),
+        ("b", snapshot.status_b),
+        ("c", snapshot.status_c),
+        ("stateFlags", snapshot.state_flags),
+    ] {
+        Reflect::set(
+            status.as_ref(),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(f64::from(value)),
+        )?;
+    }
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("status"),
+        status.as_ref(),
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("player"),
+        &JsValue::from_bool(snapshot.is_player),
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("collider"),
+        &snapshot.collider.map_or(Ok(JsValue::NULL), |collider| {
+            browser_test_object_handle_value(collider)
+        })?,
+    )?;
+    Reflect::set(
+        object.as_ref(),
+        &JsValue::from_str("faulted"),
+        &JsValue::from_bool(snapshot.faulted),
+    )?;
+    Ok(object.into())
+}
+
+#[cfg(feature = "browser-test-harness")]
+fn browser_test_vector_value(coordinates: [i32; 3], names: [&str; 3]) -> Result<JsValue, JsValue> {
+    let value = Object::new();
+    for (name, coordinate) in names.into_iter().zip(coordinates) {
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(f64::from(coordinate)),
+        )?;
+    }
+    Ok(value.into())
+}
+
+#[cfg(feature = "browser-test-harness")]
+fn browser_test_object_handle_value(handle: RuntimeObjectHandle) -> Result<JsValue, JsValue> {
+    let value = Object::new();
+    for (name, word) in [
+        ("arenaSlot", u32::from(handle.arena().slot())),
+        ("arenaGeneration", handle.arena().generation()),
+        ("vm", u32::from(handle.vm().get())),
+    ] {
+        Reflect::set(
+            value.as_ref(),
+            &JsValue::from_str(name),
+            &JsValue::from_f64(f64::from(word)),
+        )?;
+    }
+    Ok(value.into())
 }
 
 #[cfg(not(feature = "browser-test-harness"))]

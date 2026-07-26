@@ -51,6 +51,20 @@ function parseWholeNumber(raw, name, maximum) {
   return value;
 }
 
+function parseSignedWholeNumber(raw, name) {
+  const value = Number(raw);
+  if (
+    !Number.isSafeInteger(value) ||
+    value < -0x8000_0000 ||
+    value > 0x7fff_ffff
+  ) {
+    throw new Error(
+      `${name} must be a signed 32-bit whole number`,
+    );
+  }
+  return value;
+}
+
 export function nextReplayBatchFrameCount(
   remainingFrames,
   { isolateFirstFrame = false } = {},
@@ -166,6 +180,83 @@ export function parseArguments(argv, environment = process.env) {
   return options;
 }
 
+const LIVE_OBJECT_UNSIGNED_FIELDS = new Map([
+  ["arenaSlot", 0xff],
+  ["arenaGeneration", 0xffff_ffff],
+  ["vm", 0xffff],
+  ["entityId", 0xffff],
+  ["entityGroup", 0xffff],
+  ["programEid", 0xffff_ffff],
+  ["executable", 0xff],
+  ["spawnSubtype", 0xff],
+  ["subtype", 0xffff_ffff],
+  ["state", 0xffff],
+  ["pc", 0xffff_ffff],
+  ["zoneEid", 0xffff_ffff],
+  ["statusA", 0xffff_ffff],
+  ["statusB", 0xffff_ffff],
+  ["statusC", 0xffff_ffff],
+  ["stateFlags", 0xffff_ffff],
+  ["colliderEntityId", 0xffff],
+  ["colliderExecutable", 0xff],
+  ["colliderSubtype", 0xffff_ffff],
+  ["colliderState", 0xffff],
+]);
+const LIVE_OBJECT_SIGNED_FIELDS = new Set([
+  "x", "y", "z",
+  "velocityX", "velocityY", "velocityZ",
+  "rotationY", "rotationX", "rotationZ",
+  "minX", "maxX", "minY", "maxY", "minZ", "maxZ",
+  "minVelocityX", "maxVelocityX",
+  "minVelocityY", "maxVelocityY",
+  "minVelocityZ", "maxVelocityZ",
+]);
+const LIVE_OBJECT_BOOLEAN_FIELDS = new Set([
+  "player", "faulted", "hasCollider", "hasFrameBound",
+]);
+
+function normalizeLiveObjectExpectation(raw, label) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error(`${label} must be an object`);
+  }
+  if (Object.keys(raw).length === 0) {
+    throw new Error(`${label} must contain at least one predicate`);
+  }
+  const expectation = {};
+  for (const [name, value] of Object.entries(raw)) {
+    if (LIVE_OBJECT_UNSIGNED_FIELDS.has(name)) {
+      expectation[name] = parseWholeNumber(
+        value,
+        `${label}.${name}`,
+        LIVE_OBJECT_UNSIGNED_FIELDS.get(name),
+      );
+    } else if (LIVE_OBJECT_SIGNED_FIELDS.has(name)) {
+      expectation[name] = parseSignedWholeNumber(value, `${label}.${name}`);
+    } else if (LIVE_OBJECT_BOOLEAN_FIELDS.has(name)) {
+      if (typeof value !== "boolean") {
+        throw new Error(`${label}.${name} must be a boolean`);
+      }
+      expectation[name] = value;
+    } else {
+      throw new Error(`${label}.${name} is not a supported live-object predicate`);
+    }
+  }
+  for (const axis of ["X", "Y", "Z"]) {
+    for (const prefix of ["", "Velocity"]) {
+      const minimum = `min${prefix}${axis}`;
+      const maximum = `max${prefix}${axis}`;
+      if (
+        expectation[minimum] !== undefined &&
+        expectation[maximum] !== undefined &&
+        expectation[minimum] > expectation[maximum]
+      ) {
+        throw new Error(`${label}.${minimum} must not exceed ${label}.${maximum}`);
+      }
+    }
+  }
+  return expectation;
+}
+
 function normalizeExpectation(raw, label) {
   if (raw === undefined) return {};
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -173,6 +264,13 @@ function normalizeExpectation(raw, label) {
   }
   const expectation = {};
   for (const [name, value] of Object.entries(raw)) {
+    if (name === "liveObject") {
+      expectation.liveObject = normalizeLiveObjectExpectation(
+        value,
+        `${label}.liveObject`,
+      );
+      continue;
+    }
     if (
       ![
         "mountedLid",
@@ -312,6 +410,107 @@ export function snapshotFailures(snapshot) {
   return failures;
 }
 
+function sameLiveObjectHandle(left, right) {
+  return Boolean(
+    left &&
+    right &&
+    left.arenaSlot === right.arenaSlot &&
+    left.arenaGeneration === right.arenaGeneration &&
+    left.vm === right.vm
+  );
+}
+
+function liveObjectPredicateValue(object, name, objects) {
+  const direct = {
+    entityId: object.entityId,
+    entityGroup: object.entityGroup,
+    programEid: object.programEid,
+    executable: object.executable,
+    spawnSubtype: object.spawnSubtype,
+    subtype: object.subtype,
+    state: object.state,
+    pc: object.pc,
+    zoneEid: object.zoneEid,
+    player: object.player,
+    faulted: object.faulted,
+    hasCollider: object.collider != null,
+    hasFrameBound: object.frameBound != null,
+    x: object.translation?.x,
+    y: object.translation?.y,
+    z: object.translation?.z,
+    velocityX: object.velocity?.x,
+    velocityY: object.velocity?.y,
+    velocityZ: object.velocity?.z,
+    rotationY: object.rotationYxz?.y,
+    rotationX: object.rotationYxz?.x,
+    rotationZ: object.rotationYxz?.z,
+    statusA: object.status?.a,
+    statusB: object.status?.b,
+    statusC: object.status?.c,
+    stateFlags: object.status?.stateFlags,
+  };
+  if (name === "arenaSlot") return object.handle?.arenaSlot;
+  if (name === "arenaGeneration") return object.handle?.arenaGeneration;
+  if (name === "vm") return object.handle?.vm;
+  if (Object.hasOwn(direct, name)) return direct[name];
+  if (/^(min|max)(X|Y|Z)$/.test(name)) {
+    return object.translation?.[name.at(-1).toLowerCase()];
+  }
+  if (/^(min|max)Velocity(X|Y|Z)$/.test(name)) {
+    return object.velocity?.[name.at(-1).toLowerCase()];
+  }
+  const collider = objects.find((candidate) =>
+    sameLiveObjectHandle(candidate.handle, object.collider)
+  );
+  switch (name) {
+    case "colliderEntityId":
+      return collider?.entityId;
+    case "colliderExecutable":
+      return collider?.executable;
+    case "colliderSubtype":
+      return collider?.subtype;
+    case "colliderState":
+      return collider?.state;
+    default:
+      return undefined;
+  }
+}
+
+function liveObjectMatches(expectation, object, objects) {
+  return Object.entries(expectation).every(([name, expected]) => {
+    const actual = liveObjectPredicateValue(object, name, objects);
+    if (name.startsWith("min")) return actual >= expected;
+    if (name.startsWith("max")) return actual <= expected;
+    return actual === expected;
+  });
+}
+
+export function liveObjectExpectationFailures(expectation, snapshot) {
+  const objects = snapshot.debug?.browserTestObjects;
+  if (!Array.isArray(objects)) {
+    return ["browser-test live object snapshots are unavailable"];
+  }
+  if (objects.some((object) => liveObjectMatches(expectation, object, objects))) {
+    return [];
+  }
+  const observed = objects.slice(0, 24).map((object) => ({
+    handle: object.handle,
+    entityId: object.entityId,
+    executable: object.executable,
+    subtype: object.subtype,
+    state: object.state,
+    zoneEid: object.zoneEid,
+    translation: object.translation,
+    velocity: object.velocity,
+    player: object.player,
+    collider: object.collider,
+  }));
+  return [
+    `liveObject: no object matched ${JSON.stringify(expectation)}; ` +
+      `observed ${objects.length}: ${JSON.stringify(observed)}`,
+  ];
+}
+
 export function expectationFailures(expectation, snapshot) {
   const failures = [];
   const debug = snapshot.debug ?? {};
@@ -336,6 +535,11 @@ export function expectationFailures(expectation, snapshot) {
           JSON.stringify(debug[debugName]),
       );
     }
+  }
+  if (expectation.liveObject !== undefined) {
+    failures.push(
+      ...liveObjectExpectationFailures(expectation.liveObject, snapshot),
+    );
   }
   return failures;
 }
@@ -579,6 +783,10 @@ async function evaluate(cdp, sessionId, expression) {
 const snapshotExpression = `(() => {
   const debug = window.__crustDebug || {};
   const harness = window.__crustTest || {};
+  const browserTestObjects =
+    typeof debug.snapshotRetailObjects === "function"
+      ? debug.snapshotRetailObjects()
+      : null;
   const pick = (source, names) => Object.fromEntries(
     names.map((name) => [name, source[name] ?? null])
   );
@@ -609,7 +817,8 @@ const snapshotExpression = `(() => {
       retailMain: debug.retailMain ? { ...debug.retailMain } : null,
       browserTestGlobals: debug.browserTestGlobals
         ? { ...debug.browserTestGlobals }
-        : null
+        : null,
+      browserTestObjects
     }
   };
 })()`;

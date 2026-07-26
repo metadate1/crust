@@ -5,6 +5,12 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = []
+# Read-only live-object snapshots used by the separately built browser test
+# harness. Production builds do not compile this introspection surface.
+browser-test-harness = []
+
 [dependencies]
 crust-formats.workspace = true
 

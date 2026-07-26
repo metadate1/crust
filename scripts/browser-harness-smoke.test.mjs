@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   allLevelsFailures,
   expectationFailures,
+  liveObjectExpectationFailures,
   nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
@@ -181,6 +182,166 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
       { debug: { currentLid: 0x19, retailFrame: 2 } },
     ).join("\n"),
     /currentLid.*retailFrame/s,
+  );
+});
+
+test("live-object checkpoints match phase, motion, status, and collider identity", () => {
+  const obstacleHandle = { arenaSlot: 4, arenaGeneration: 3, vm: 9 };
+  const playerHandle = { arenaSlot: 96, arenaGeneration: 1, vm: 2 };
+  const snapshot = {
+    debug: {
+      browserTestObjects: [
+        {
+          handle: obstacleHandle,
+          entityId: 42,
+          entityGroup: 3,
+          programEid: 0x1234_5679,
+          executable: 9,
+          spawnSubtype: 3,
+          subtype: 0x123,
+          state: 7,
+          pc: 81,
+          zoneEid: 0x2234_5679,
+          translation: { x: -1_234, y: 5_678, z: -90 },
+          rotationYxz: { y: 111, x: 222, z: 333 },
+          velocity: { x: -44, y: 55, z: -66 },
+          frameBound: {
+            min: { x: -1_500, y: 5_000, z: -200 },
+            max: { x: -1_000, y: 6_000, z: 100 },
+          },
+          status: {
+            a: 0x1122_3344,
+            b: 0x5566_7788,
+            c: 0x99aa_bbcc,
+            stateFlags: 0xddee_ff00,
+          },
+          player: false,
+          collider: null,
+          faulted: false,
+        },
+        {
+          handle: playerHandle,
+          entityId: 5,
+          executable: 0,
+          subtype: 0,
+          state: 2,
+          zoneEid: 0x2234_5679,
+          translation: { x: 10, y: 20, z: 30 },
+          rotationYxz: { y: 0, x: 0, z: 0 },
+          velocity: { x: 1, y: 2, z: 3 },
+          frameBound: null,
+          status: { a: 0, b: 0, c: 0, stateFlags: 0 },
+          player: true,
+          collider: obstacleHandle,
+          faulted: false,
+        },
+      ],
+    },
+  };
+
+  assert.deepEqual(
+    liveObjectExpectationFailures(
+      {
+        executable: 9,
+        subtype: 0x123,
+        state: 7,
+        minX: -1_300,
+        maxX: -1_200,
+        velocityX: -44,
+        rotationY: 111,
+        statusB: 0x5566_7788,
+        hasFrameBound: true,
+        player: false,
+      },
+      snapshot,
+    ),
+    [],
+  );
+  assert.deepEqual(
+    liveObjectExpectationFailures(
+      {
+        player: true,
+        hasCollider: true,
+        colliderEntityId: 42,
+        colliderExecutable: 9,
+        colliderSubtype: 0x123,
+        colliderState: 7,
+      },
+      snapshot,
+    ),
+    [],
+  );
+  assert.match(
+    liveObjectExpectationFailures(
+      { executable: 9, minVelocityX: 0 },
+      snapshot,
+    ).join("\n"),
+    /no object matched/,
+  );
+  assert.match(
+    liveObjectExpectationFailures({}, { debug: {} }).join("\n"),
+    /unavailable/,
+  );
+});
+
+test("replay validation bounds live-object phase predicates", () => {
+  const replay = normalizeReplay({
+    schema: 1,
+    bootLid: 0x19,
+    segments: [
+      {
+        frames: 1,
+        held: 0,
+        expect: {
+          liveObject: {
+            executable: 9,
+            subtype: 0x123,
+            minX: -1_300,
+            maxX: -1_200,
+            player: false,
+            hasCollider: true,
+          },
+        },
+      },
+    ],
+  });
+  assert.deepEqual(replay.segments[0].expect.liveObject, {
+    executable: 9,
+    subtype: 0x123,
+    minX: -1_300,
+    maxX: -1_200,
+    player: false,
+    hasCollider: true,
+  });
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [
+          {
+            frames: 1,
+            held: 0,
+            expect: { liveObject: { minX: 10, maxX: 9 } },
+          },
+        ],
+      }),
+    /must not exceed/,
+  );
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x19,
+        segments: [
+          {
+            frames: 1,
+            held: 0,
+            expect: { liveObject: { surprise: 1 } },
+          },
+        ],
+      }),
+    /not a supported live-object predicate/,
   );
 });
 

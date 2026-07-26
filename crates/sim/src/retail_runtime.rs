@@ -468,6 +468,55 @@ pub enum RenderObjectsError {
     Vm(VmError),
 }
 
+/// One bounds-checked live object observation for the manually clocked
+/// browser characterization harness.
+///
+/// This type is compiled only for tests and the explicit
+/// `browser-test-harness` feature. It owns no asset bytes or native pointers,
+/// and every identity remains generational so a recycled arena or VM slot
+/// cannot be mistaken for the object that previously occupied it.
+#[cfg(any(test, feature = "browser-test-harness"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrowserTestLiveObject {
+    pub handle: RuntimeObjectHandle,
+    pub entity_id: Option<u16>,
+    pub entity_group: Option<u16>,
+    pub program_eid: Option<Eid>,
+    pub executable: u8,
+    /// Subtype serialized by the spawning entity or runtime-create request.
+    pub spawn_subtype: u8,
+    /// Mutable live subtype word used by retail update special cases.
+    pub subtype: u32,
+    pub state: u16,
+    pub pc: usize,
+    pub zone: Eid,
+    pub translation: [i32; 3],
+    /// Retail transform angles in Y, X, Z order.
+    pub rotation_yxz: [i32; 3],
+    /// Live `misc_a` velocity vector consumed by retail physics.
+    pub velocity: [i32; 3],
+    /// Latest world-space collider AABB registered for this frame.
+    pub frame_bound: Option<Bounds3>,
+    pub status_a: u32,
+    pub status_b: u32,
+    pub status_c: u32,
+    pub state_flags: u32,
+    pub is_player: bool,
+    pub collider: Option<RuntimeObjectHandle>,
+    pub faulted: bool,
+}
+
+/// Checked failure while observing the live object table for browser tests.
+#[cfg(any(test, feature = "browser-test-harness"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BrowserTestLiveObjectError {
+    /// A retained arena/VM binding no longer names a live arena generation.
+    UnboundArenaObject(ArenaObjectHandle),
+    /// Either side of a supposedly live identity pair disagrees.
+    StaleObjectPair(RuntimeObjectHandle),
+    Vm(VmError),
+}
+
 /// Why a program is being materialized for one arena object.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProgramOrigin<'a> {
@@ -4779,6 +4828,105 @@ impl RetailRuntime {
     #[must_use]
     pub fn object_for_vm(&self, vm: VmObjectHandle) -> Option<RuntimeObjectHandle> {
         self.handles.for_vm(vm)
+    }
+
+    /// Captures every currently live arena/VM pair in stable arena-handle
+    /// order for browser replay characterization.
+    ///
+    /// The feature-gated snapshot reads only initialized, bounds-checked
+    /// process fields. Collider pointers are returned only when they resolve
+    /// to another complete live arena/VM pair.
+    #[cfg(any(test, feature = "browser-test-harness"))]
+    pub fn browser_test_live_objects(
+        &self,
+    ) -> Result<Vec<BrowserTestLiveObject>, BrowserTestLiveObjectError> {
+        let mut snapshots = Vec::with_capacity(self.handles.vm_by_arena.len());
+        for (&arena, &vm) in &self.handles.vm_by_arena {
+            let handle = RuntimeObjectHandle { arena, vm };
+            let spawned = self
+                .arena
+                .get(arena)
+                .ok_or(BrowserTestLiveObjectError::UnboundArenaObject(arena))?;
+            if !self.handles.is_live_pair(handle) {
+                return Err(BrowserTestLiveObjectError::StaleObjectPair(handle));
+            }
+            let process = self
+                .machine
+                .object(vm)
+                .map_err(BrowserTestLiveObjectError::Vm)?;
+            if process.handle() != vm {
+                return Err(BrowserTestLiveObjectError::StaleObjectPair(handle));
+            }
+            let transform = process
+                .retail_transform()
+                .map_err(BrowserTestLiveObjectError::Vm)?;
+            let velocity = [
+                process
+                    .register(process_register::MISC_A_X)
+                    .map_err(BrowserTestLiveObjectError::Vm)?
+                    .cast_signed(),
+                process
+                    .register(process_register::MISC_A_Y)
+                    .map_err(BrowserTestLiveObjectError::Vm)?
+                    .cast_signed(),
+                process
+                    .register(process_register::MISC_A_Z)
+                    .map_err(BrowserTestLiveObjectError::Vm)?
+                    .cast_signed(),
+            ];
+            let frame_bound = self
+                .machine
+                .frame_bounds()
+                .iter()
+                .rev()
+                .find(|bound| bound.object == vm)
+                .map(|bound| bound.bound);
+            let collider = self
+                .machine
+                .browser_test_collider(vm)
+                .map_err(BrowserTestLiveObjectError::Vm)?
+                .and_then(|collider| self.handles.for_vm(collider))
+                .filter(|collider| {
+                    self.handles.is_live_pair(*collider) && self.arena.get(collider.arena).is_some()
+                });
+            let entity = spawned.entity_descriptor();
+            snapshots.push(BrowserTestLiveObject {
+                handle,
+                entity_id: entity.map(|entity| entity.id),
+                entity_group: entity.map(|entity| entity.group),
+                program_eid: process
+                    .program_identity()
+                    .map(GoolProgramIdentity::global_eid),
+                executable: spawned.origin().executable(),
+                spawn_subtype: spawned.origin().subtype(),
+                subtype: process
+                    .register(process_register::SUBTYPE)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                state: process.state(),
+                pc: process.pc(),
+                zone: spawned.zone(),
+                translation: transform.translation,
+                rotation_yxz: transform.rotation_yxz,
+                velocity,
+                frame_bound,
+                status_a: process
+                    .register(process_register::STATUS_A)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                status_b: process
+                    .register(process_register::STATUS_B)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                status_c: process
+                    .register(process_register::STATUS_C)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                state_flags: process
+                    .register(process_register::STATE_FLAGS)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                is_player: process.browser_test_is_main_player(),
+                collider,
+                faulted: self.faulted_objects.contains(&handle),
+            });
+        }
+        Ok(snapshots)
     }
 
     /// Drains platform-owned cleanup emitted by synchronous object reclaim.
@@ -9884,6 +10032,95 @@ mod tests {
                 .global_word(CURRENT_DISPLAY_GLOBAL)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn browser_test_live_objects_are_complete_ordered_and_generation_checked() {
+        let mut runtime = RetailRuntime::new_for_level(119, LevelId::N_SANITY_BEACH);
+        let obstacle = spawn_test_object(&mut runtime, ZONE, 42, 9, 3);
+        let player = spawn_test_object(&mut runtime, ZONE_B, 5, 0, 0);
+        {
+            let process = runtime.machine.object_mut(obstacle.vm).unwrap();
+            process.configure_test_state(7);
+            for (register, value) in [
+                (process_register::TRANSLATION_X, (-1_234_i32) as u32),
+                (process_register::TRANSLATION_Y, 5_678),
+                (process_register::TRANSLATION_Z, (-90_i32) as u32),
+                (process_register::ROTATION_Y, 111),
+                (process_register::ROTATION_X, 222),
+                (process_register::ROTATION_Z, 333),
+                (process_register::MISC_A_X, (-44_i32) as u32),
+                (process_register::MISC_A_Y, 55),
+                (process_register::MISC_A_Z, (-66_i32) as u32),
+                (process_register::STATUS_A, 0x1122_3344),
+                (process_register::STATUS_B, 0x5566_7788),
+                (process_register::STATUS_C, 0x99aa_bbcc),
+                (process_register::STATE_FLAGS, 0xddee_ff00),
+                (process_register::SUBTYPE, 0x123),
+            ] {
+                process.set_register(register, value).unwrap();
+            }
+        }
+        let obstacle_bound = Bounds3::new(
+            Vec3 {
+                x: -1_500,
+                y: 5_000,
+                z: -200,
+            },
+            Vec3 {
+                x: -1_000,
+                y: 6_000,
+                z: 100,
+            },
+        )
+        .unwrap();
+        runtime
+            .machine
+            .register_frame_bound(obstacle.vm, obstacle_bound)
+            .unwrap();
+        runtime
+            .machine
+            .object_mut(player.vm)
+            .unwrap()
+            .set_link(6, Some(obstacle.vm))
+            .unwrap();
+
+        let snapshots = runtime.browser_test_live_objects().unwrap();
+
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(
+            snapshots
+                .iter()
+                .map(|snapshot| snapshot.handle)
+                .collect::<Vec<_>>(),
+            [obstacle, player],
+            "arena handle order is deterministic and keeps the dedicated player last"
+        );
+        let obstacle_snapshot = &snapshots[0];
+        assert_eq!(obstacle_snapshot.entity_id, Some(42));
+        assert_eq!(obstacle_snapshot.entity_group, Some(3));
+        assert_eq!(obstacle_snapshot.program_eid, None);
+        assert_eq!(obstacle_snapshot.executable, 9);
+        assert_eq!(obstacle_snapshot.spawn_subtype, 3);
+        assert_eq!(obstacle_snapshot.subtype, 0x123);
+        assert_eq!(obstacle_snapshot.state, 7);
+        assert_eq!(obstacle_snapshot.zone, ZONE);
+        assert_eq!(obstacle_snapshot.translation, [-1_234, 5_678, -90]);
+        assert_eq!(obstacle_snapshot.rotation_yxz, [111, 222, 333]);
+        assert_eq!(obstacle_snapshot.velocity, [-44, 55, -66]);
+        assert_eq!(obstacle_snapshot.frame_bound, Some(obstacle_bound));
+        assert_eq!(obstacle_snapshot.status_a, 0x1122_3344);
+        assert_eq!(obstacle_snapshot.status_b, 0x5566_7788);
+        assert_eq!(obstacle_snapshot.status_c, 0x99aa_bbcc);
+        assert_eq!(obstacle_snapshot.state_flags, 0xddee_ff00);
+        assert!(!obstacle_snapshot.is_player);
+        assert_eq!(obstacle_snapshot.collider, None);
+        assert!(!obstacle_snapshot.faulted);
+
+        let player_snapshot = &snapshots[1];
+        assert!(player_snapshot.handle.arena().is_dedicated_main());
+        assert!(player_snapshot.is_player);
+        assert_eq!(player_snapshot.collider, Some(obstacle));
     }
 
     #[test]

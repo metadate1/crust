@@ -55466,7 +55466,9 @@ fn jungle_rollers_collects_aku_after_an_authored_death_restart() {
 
     assert_eq!(survey.frames, 600);
     assert_eq!(survey.restarts, 1);
-    assert_eq!(survey.restart_frames, [200]);
+    // The native-atomic post-spawn instruction tail commits `LoadState` on
+    // frame 199; frame 200 is the first frame of the restored Crash instance.
+    assert_eq!(survey.restart_frames, [199]);
     assert_eq!(spawned_entity_trace(&runtime, 9), Ok(None));
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(runtime.faulted_object_count(), 0);
@@ -55559,23 +55561,25 @@ fn jungle_rollers_death_aku_route_reaches_authored_level_complete() {
     )
     .expect("Jungle Rollers death/Aku completion route must execute");
 
-    assert_eq!(survey.frames, 3_391, "{}", survey.summary());
+    assert_eq!(survey.frames, 3_390, "{}", survey.summary());
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 3391 requested level transition to 0x2d")
+        Some("frame 3390 requested level transition to 0x2d")
     );
     assert_eq!(
         survey.next_lid,
-        Some((3_391, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+        Some((3_390, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
     );
     assert_eq!(survey.zone_transitions, 31);
     assert_eq!(survey.restarts, 1);
-    assert_eq!(survey.restart_frames, [200]);
+    // Match the restart boundary above: frame 200 is already the restored
+    // instance's first cooperative update.
+    assert_eq!(survey.restart_frames, [199]);
     let (fall_frame, fall) = survey
         .first_terminal_fall
         .as_ref()
         .expect("holding forward must enter the authored opening terminal fall");
-    assert_eq!(*fall_frame, 190);
+    assert_eq!(*fall_frame, 189);
     assert_eq!(
         fall.zone,
         Eid::from_name("0c_cZ").expect("fixed Jungle fall-zone EID is valid")
@@ -55585,28 +55589,28 @@ fn jungle_rollers_death_aku_route_reaches_authored_level_complete() {
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (1_904, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
+            (1_903, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
         ]
     );
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (269, 0x100),
-            (270, 0x200),
-            (1_174, 0x300),
-            (1_175, 0x400),
-            (1_904, 0x500),
-            (1_935, 0x600),
-            (1_936, 0x700),
-            (1_939, 0x800),
-            (1_940, 0x900),
-            (1_941, 0xa00),
-            (1_949, 0xb00),
-            (1_955, 0xc00),
+            (268, 0x100),
+            (269, 0x200),
+            (1_173, 0x300),
+            (1_174, 0x400),
+            (1_903, 0x500),
+            (1_934, 0x600),
+            (1_935, 0x700),
+            (1_938, 0x800),
+            (1_939, 0x900),
+            (1_940, 0xa00),
+            (1_948, 0xb00),
+            (1_954, 0xc00),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_904, 0x400)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_903, 0x400)]);
     assert_eq!(survey.effect_counts.get("load-state").copied(), Some(1));
     assert_eq!(survey.effect_counts.get("save-state").copied(), Some(1));
     assert_eq!(survey.effect_counts.get("transition").copied(), Some(1));

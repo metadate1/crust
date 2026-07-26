@@ -1699,6 +1699,7 @@ enum SurveyInputProfile {
     JunglePhaseRobust,
     JungleTawnaBonusRoute,
     GreatGatePhaseRobust,
+    GreatGatePublisherPhaseRobust,
     GreatGateTawnaBonus,
     GreatGateYellowGemExactCarry,
     TawnaBonusCompletionRoute,
@@ -1802,6 +1803,7 @@ impl SurveyInputProfile {
             Self::JunglePhaseRobust => "jungle-phase-robust",
             Self::JungleTawnaBonusRoute => "jungle-tawna-bonus-route",
             Self::GreatGatePhaseRobust => "great-gate-phase-robust",
+            Self::GreatGatePublisherPhaseRobust => "great-gate-publisher-phase-robust",
             Self::GreatGateTawnaBonus => "great-gate-tawna-bonus",
             Self::GreatGateYellowGemExactCarry => "great-gate-yellow-gem-exact-carry",
             Self::TawnaBonusCompletionRoute => "tawna-bonus-completion-route",
@@ -1870,6 +1872,7 @@ impl SurveyInputProfile {
                 | Self::JunglePhaseRobust
                 | Self::JungleTawnaBonusRoute
                 | Self::GreatGatePhaseRobust
+                | Self::GreatGatePublisherPhaseRobust
                 | Self::GreatGateTawnaBonus
                 | Self::GreatGateYellowGemExactCarry
                 | Self::TawnaBonusCompletionRoute
@@ -13133,6 +13136,7 @@ impl NSanityRouteController {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct GreatGateRouteController {
     yellow_gem_route: bool,
+    publisher_phase: bool,
     c4_anchored: bool,
     opening_stage: u8,
     opening_ready_frames: u8,
@@ -13385,7 +13389,7 @@ impl GreatGateRouteController {
             self.action_tick = 0;
         }
         if let Some(action) = self.active {
-            if !self.yellow_gem_route
+            if self.publisher_phase
                 && self.stage == 19
                 && let Some(player) = player
                 && player.status_a & 1 != 0
@@ -13582,7 +13586,7 @@ impl GreatGateRouteController {
                     };
                 }
             }
-            if !self.yellow_gem_route && self.stage == 74 && !self.b6_hazard_released {
+            if self.publisher_phase && self.stage == 74 && !self.b6_hazard_released {
                 if let Some(hazard_y) = route_objects.iter().find_map(|object| {
                     matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 85)
                         .then_some(object.translation[1])
@@ -13657,7 +13661,12 @@ impl GreatGateRouteController {
                 let player = player.expect("checked Great Gate route player is present");
                 if player.status_a & 1 != 0
                     && self.action_tick == 0
-                    && player.translation[0] < 8_180_000
+                    && player.translation[0]
+                        < if self.publisher_phase {
+                            8_180_000
+                        } else {
+                            8_480_000
+                        }
                 {
                     return PAD_RIGHT;
                 }
@@ -13689,7 +13698,7 @@ impl GreatGateRouteController {
             if !self.yellow_gem_route && self.stage == 91 && (1..16).contains(&self.action_tick) {
                 held |= PAD_SQUARE;
             }
-            if !self.yellow_gem_route && self.stage == 94 {
+            if self.publisher_phase && self.stage == 94 {
                 const C2_BANK_X: i32 = 8_840_000;
                 let player = player.expect("checked Great Gate route player is present");
                 held = if player.velocity[0] > HAZARD_VELOCITY_TOLERANCE
@@ -14222,7 +14231,7 @@ impl GreatGateRouteController {
             return self.held(camera, Some(player), collect_tawna_tokens, route_objects);
         }
 
-        if !self.yellow_gem_route && self.stage == 89 {
+        if self.publisher_phase && self.stage == 89 {
             let platform_ready = route_objects.iter().any(|object| {
                 matches!(
                     object.origin,
@@ -14238,7 +14247,7 @@ impl GreatGateRouteController {
             }
         }
 
-        if !self.yellow_gem_route && self.stage == 90 && !grounded {
+        if self.publisher_phase && self.stage == 90 && !grounded {
             // Stage 89's carried jump can still be descending when the c2
             // approach becomes current. Preserve its lateral carry without
             // changing depth until a real landing, then let stage 90 emit a
@@ -41614,6 +41623,10 @@ impl SurveyInputController {
                     profile,
                     SurveyInputProfile::GreatGateYellowGemExactCarry
                 ),
+                publisher_phase: matches!(
+                    profile,
+                    SurveyInputProfile::GreatGatePublisherPhaseRobust
+                ),
                 c4_anchored: false,
                 opening_stage: if bonus_return { 12 } else { 0 },
                 opening_ready_frames: 0,
@@ -42481,9 +42494,15 @@ impl SurveyInputController {
             }
             SurveyInputProfile::GreatGatePhaseRobust
             | SurveyInputProfile::GreatGateYellowGemExactCarry => {
+                self.great_gate.publisher_phase = false;
+                self.great_gate.held(camera, player, false, route_objects)
+            }
+            SurveyInputProfile::GreatGatePublisherPhaseRobust => {
+                self.great_gate.publisher_phase = true;
                 self.great_gate.held(camera, player, false, route_objects)
             }
             SurveyInputProfile::GreatGateTawnaBonus => {
+                self.great_gate.publisher_phase = false;
                 self.great_gate.held(camera, player, true, route_objects)
             }
             SurveyInputProfile::TawnaBonusCompletionRoute => self.tawna_bonus.held(frame, player),
@@ -45915,6 +45934,7 @@ fn survey_pair_with_runtime_impl(
                 ],
             )?,
             SurveyInputProfile::GreatGatePhaseRobust
+            | SurveyInputProfile::GreatGatePublisherPhaseRobust
             | SurveyInputProfile::GreatGateTawnaBonus
             | SurveyInputProfile::GreatGateYellowGemExactCarry => program_object_traces(
                 &runtime,
@@ -46586,6 +46606,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::JungleDeathAkuCompletionRoute
                     | SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGatePublisherPhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::BoulderDashCompletionRoute
                     | SurveyInputProfile::CortexPowerCompletionRoute
@@ -47020,6 +47041,7 @@ fn survey_pair_with_runtime_impl(
                 input_profile,
                 SurveyInputProfile::NSanityCompletionRoute
                     | SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGatePublisherPhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
@@ -47033,6 +47055,7 @@ fn survey_pair_with_runtime_impl(
             && (matches!(
                 input_profile,
                 SurveyInputProfile::GreatGatePhaseRobust
+                    | SurveyInputProfile::GreatGatePublisherPhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
                     | SurveyInputProfile::GreatGateYellowGemExactCarry
                     | SurveyInputProfile::RollingStonesCheckpoint
@@ -59753,7 +59776,7 @@ fn corrected_publisher_great_gate_phase_completes_with_live_controller() {
         &great_gate.nsf_bytes,
         runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::GreatGatePhaseRobust,
+        SurveyInputProfile::GreatGatePublisherPhaseRobust,
         3_600,
         &mut pad,
         PersistentSurveyPlan {

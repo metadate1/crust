@@ -94,6 +94,10 @@ const ISLAND_SELECTED_LID_REGISTER: usize = 81;
 // original controllers, which are already characterized independently.
 const AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 61_045;
 const AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT: u32 = 70_396;
+const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED: u32 = 0xccd8_9975;
+const UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 69_831;
+const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
+const EXACT_CAMPAIGN_CASTLE_A9_RELEASE_TICK: u32 = 1_301;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
 ];
@@ -1166,6 +1170,83 @@ fn castle_machinery_carried_phase_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn castle_machinery_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x37);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Castle Machinery pair must parse");
+
+    // Exact clocks carried into Castle Machinery by the uninterrupted
+    // first-level-through-Jaws campaign fixture. Keeping this focused fixture
+    // preserves the inherited moving-machinery phase without replaying every
+    // earlier level before each Castle route iteration.
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 27),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 27),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("exact post-Jaws progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED;
+    carry.draw_count = UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT;
+    carry.set_random_seed_b(UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Castle Machinery must import the exact uninterrupted campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Castle Machinery exact uninterrupted campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::CastleMachineryExactCampaignPhase,
+        7_500,
+    )
+    .expect("Castle Machinery's exact campaign-phase route must execute");
+    let summary = survey.summary();
+
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_eq!(survey.frames, 6_071, "{summary}");
+    assert_eq!(
+        survey.terminal,
+        Some("frame 6071 requested level transition to 0x2d".to_owned()),
+        "{summary}"
+    );
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert_eq!(
+        survey.first_terminal_fall.as_ref().map(|(frame, player)| (
+            *frame,
+            player.state,
+            player.translation
+        )),
+        Some((93, 11, [11_816_960, -1_140_975, 102_400])),
+        "Castle Machinery's authored opening shaft reaches the retail fall-speed cap \
+         without entering a death or restart: {summary}"
+    );
+    assert_eq!(
+        survey.final_player_translation,
+        Some([12_185_018, 3_717_863, 146_588]),
+        "{summary}"
+    );
+    assert_ordinary_completion_input(&survey, "Castle Machinery exact campaign phase");
+    assert!(survey.is_clean(), "{summary}");
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn fumbling_in_the_dark_direct_boot_reaches_authored_end_warp() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -1717,6 +1798,7 @@ enum SurveyInputProfile {
     LabCompletionRoute,
     LightsOutCompletionRoute,
     CastleMachineryCompletionRoute,
+    CastleMachineryExactCampaignPhase,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
     UpstreamCarriedRecovery,
@@ -1822,6 +1904,7 @@ impl SurveyInputProfile {
             Self::LabCompletionRoute => "lab-completion-route",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::CastleMachineryCompletionRoute => "castle-machinery-completion-route",
+            Self::CastleMachineryExactCampaignPhase => "castle-machinery-exact-campaign-phase",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
@@ -1891,6 +1974,7 @@ impl SurveyInputProfile {
                 | Self::LabCompletionRoute
                 | Self::LightsOutCompletionRoute
                 | Self::CastleMachineryCompletionRoute
+                | Self::CastleMachineryExactCampaignPhase
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
                 | Self::UpstreamCarriedRecovery
@@ -23204,6 +23288,7 @@ impl UpstreamRecoveryRouteController {
 #[allow(clippy::struct_excessive_bools)]
 struct CastleMachineryCompletionRouteController {
     authentic_campaign_phase: bool,
+    exact_campaign_phase: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
@@ -24182,6 +24267,38 @@ impl CastleMachineryCompletionRouteController {
             0
         };
         movement |= a7_depth;
+        if self.exact_campaign_phase
+            && name == "a8_TZ"
+            && self.a8_reactors_centered
+            && !self.a9_platform_departed
+            && player.is_some_and(|player| player.translation[0] < 6_500_000)
+            && self.tick < EXACT_CAMPAIGN_CASTLE_A9_RELEASE_TICK
+        {
+            // The uninterrupted campaign reaches the triggered a9 lift on a
+            // different machinery clock than either the fresh or deliberately
+            // perturbed fixtures. Hold the safe reactor landing until entity
+            // 70's inherited cycle can carry the jump onto the side ledge.
+            let player = player.expect("Castle Machinery exact a9 run-up keeps Crash live");
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            let predicted_x =
+                i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
+            let horizontal = if predicted_x < 6_380_000 {
+                PAD_RIGHT
+            } else if predicted_x > 6_420_000 {
+                PAD_LEFT
+            } else {
+                0
+            };
+            let depth = if player.translation[2] < 98_000 || player.velocity[2] < -80_000 {
+                PAD_DOWN
+            } else if player.translation[2] > 110_000 || player.velocity[2] > 80_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            return horizontal | depth;
+        }
         if name == "a8_TZ" && self.a8_reactor_released && !self.a8_reactors_centered {
             self.jump_frames = 0;
             self.release_frames = 0;
@@ -24283,6 +24400,29 @@ impl CastleMachineryCompletionRouteController {
                 self.a9_side_route_stage = 1;
                 self.jump_frames = 0;
                 self.release_frames = 0;
+            }
+            if self.exact_campaign_phase && self.a9_side_route_stage == 0 {
+                let horizontal = if player.translation[0] > 5_280_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 5_180_000 || player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                let depth = if player.translation[2] < 280_000 || player.velocity[2] < -80_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 320_000 || player.velocity[2] > 80_000 {
+                    PAD_UP
+                } else {
+                    0
+                };
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    return horizontal | depth | PAD_CROSS;
+                }
+                return horizontal | depth;
             }
             if self.a9_side_route_stage == 1 {
                 let horizontal = if player.translation[0] > 5_280_000 {
@@ -42156,6 +42296,10 @@ impl SurveyInputController {
             castle_machinery: CastleMachineryCompletionRouteController {
                 authentic_campaign_phase: session_globals
                     && initial_draw_count == AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT,
+                exact_campaign_phase: matches!(
+                    profile,
+                    SurveyInputProfile::CastleMachineryExactCampaignPhase
+                ),
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
@@ -42624,10 +42768,16 @@ impl SurveyInputController {
         if self.profile == SurveyInputProfile::CortexPowerCompletionRoute {
             self.cortex_power = CortexPowerCompletionRouteController::default();
         }
-        if self.profile == SurveyInputProfile::CastleMachineryCompletionRoute {
+        if matches!(
+            self.profile,
+            SurveyInputProfile::CastleMachineryCompletionRoute
+                | SurveyInputProfile::CastleMachineryExactCampaignPhase
+        ) {
             let authentic_campaign_phase = self.castle_machinery.authentic_campaign_phase;
+            let exact_campaign_phase = self.castle_machinery.exact_campaign_phase;
             self.castle_machinery = CastleMachineryCompletionRouteController {
                 authentic_campaign_phase,
+                exact_campaign_phase,
                 ..CastleMachineryCompletionRouteController::default()
             };
         }
@@ -42819,7 +42969,8 @@ impl SurveyInputController {
             }
             SurveyInputProfile::LabCompletionRoute => self.lab.held(frame, player, route_objects),
             SurveyInputProfile::LightsOutCompletionRoute => self.lights_out.held(route_objects),
-            SurveyInputProfile::CastleMachineryCompletionRoute => self.castle_machinery.held(
+            SurveyInputProfile::CastleMachineryCompletionRoute
+            | SurveyInputProfile::CastleMachineryExactCampaignPhase => self.castle_machinery.held(
                 frame,
                 camera,
                 player,
@@ -46099,6 +46250,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
                     | SurveyInputProfile::CastleMachineryCompletionRoute
+                    | SurveyInputProfile::CastleMachineryExactCampaignPhase
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
                     | SurveyInputProfile::LabCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
@@ -46229,6 +46381,7 @@ fn survey_pair_with_runtime_impl(
             | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
             | SurveyInputProfile::ToxicWasteCompletionRoute
             | SurveyInputProfile::CastleMachineryCompletionRoute
+            | SurveyInputProfile::CastleMachineryExactCampaignPhase
             | SurveyInputProfile::SlipperyClimbCompletionRoute
             | SurveyInputProfile::LightsOutCompletionRoute
             | SurveyInputProfile::LabCompletionRoute => program_object_traces(&runtime, &[])?,
@@ -46892,6 +47045,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::JawsOfDarknessCompletionRoute
                     | SurveyInputProfile::JawsOfDarknessExactCampaignPhase
                     | SurveyInputProfile::CastleMachineryCompletionRoute
+                    | SurveyInputProfile::CastleMachineryExactCampaignPhase
                     | SurveyInputProfile::LabCompletionRoute
                     | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
@@ -49319,9 +49473,26 @@ fn carry_boulder_dash_through_heavy_machinery(
         castle_machinery.level,
         [0, 15, 15, 27, 1, 27, 1],
     );
+    assert_eq!(
+        (
+            castle_carry.random_seed,
+            castle_carry.draw_count,
+            castle_carry.random_seed_b(),
+            castle_carry.respawn_count,
+            castle_carry.death_count,
+        ),
+        (
+            UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED,
+            UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT,
+            UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B,
+            0,
+            0,
+        ),
+        "the uninterrupted campaign must retain Castle Machinery's characterized machinery phase"
+    );
     let (castle_survey, castle_runtime) = castle_machinery.run_carried(
         castle_carry,
-        SurveyInputProfile::CastleMachineryCompletionRoute,
+        SurveyInputProfile::CastleMachineryExactCampaignPhase,
         7_500,
     );
     assert_eq!(
@@ -49332,7 +49503,15 @@ fn carry_boulder_dash_through_heavy_machinery(
     );
     assert_eq!(castle_survey.restarts, 0, "{}", castle_survey.summary());
     assert_eq!(castle_survey.death_camera_frames, 0);
-    assert!(castle_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        castle_survey
+            .first_terminal_fall
+            .as_ref()
+            .map(|(frame, player)| (*frame, player.state, player.translation)),
+        Some((93, 11, [11_816_960, -1_140_975, 102_400])),
+        "Castle Machinery's authored opening shaft is not a death: {}",
+        castle_survey.summary()
+    );
     assert!(castle_survey.is_clean(), "{}", castle_survey.summary());
     assert_eq!(
         campaign_progression_globals(&castle_runtime),

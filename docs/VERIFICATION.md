@@ -1535,7 +1535,10 @@ C1_STREAM_DIR=/path/to/streams \
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   n_sanity_idle_paging_matches_the_legal_360_frame_trace -- --ignored --exact --nocapture
-C1_STREAM_DIR=/path/to/streams \
+# This uninterrupted multi-level fixture retains several complete runtime
+# owners at once; give its test thread an explicit stack instead of relying
+# on the platform-specific libtest default.
+RUST_MIN_STACK=33554432 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
   authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry \
   -- --ignored --exact --nocapture

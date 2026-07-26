@@ -14,10 +14,10 @@ use std::fmt::Write as _;
 use std::rc::Rc;
 
 use crust_audio::output::{OutputOptions, RetailMasterFade};
-use crust_audio::retail::{RetailAudioEngine, RetailAudioError, retail_max_midi_voices};
+use crust_audio::retail::{RetailAudioEngine, retail_max_midi_voices};
 use crust_audio::retail_music::RetailMusic;
 use crust_audio::retail_player::RetailMusicChange;
-use crust_formats::binary::{Eid, FormatError, PageIndex};
+use crust_formats::binary::{Eid, FormatError};
 use crust_formats::stream::{
     KNOWN_LEVELS, LevelId as FormatLevelId, Nsd, Nsf, ObjectVertexKind, RetailPathId,
     RetailZoneGraph, ZoneEntity, ZoneGraphics, ZoneHeader, load_title_mdat, parse_instrument_entry,
@@ -51,7 +51,7 @@ use crust_sim::gool::{
     RetailTransformVectorsCamera, SFX_VOLUME_GLOBAL, TITLE_STATE_GLOBAL, VmEffect, VmObject,
     VmStateProgram, process_register,
 };
-use crust_sim::object_arena::{NeighborZone, SpawnError};
+use crust_sim::object_arena::NeighborZone;
 use crust_sim::object_bounds::AnimationBoundSource;
 use crust_sim::paging::{
     PageInvalidations, Pager, PagerCloseOutcome, PagerOpenOutcome, PagerUpdateOutcome, PagingError,
@@ -82,9 +82,10 @@ use web_sys::{
     MouseEvent, PointerEvent,
 };
 
-#[cfg(feature = "browser-test-harness")]
-use crate::BrowserTestClock;
 use crate::assets::{AssetStore, ValidatedPair};
+use crate::browser_spawn::{
+    BrowserProgramError, BrowserSpawnCounts, browser_spawn_counts, first_unexpected_browser_spawn,
+};
 use crate::card_persistence::CardPersistIntent;
 use crate::disc_import::discover_disc;
 use crate::dom::{Dom, window};
@@ -104,6 +105,8 @@ use crate::title_runtime::{
 };
 use crate::webaudio::WebAudio;
 use crate::webgl::{GlStage, RetailBackgroundFill, VisualState};
+#[cfg(feature = "browser-test-harness")]
+use crate::{BrowserTestClock, BrowserTestPadInput};
 use crate::{
     RetailIslandWritebackPhase, apply_all_levels_override, authoritative_save_or_last,
     core_objects_pad_update, initial_retail_level_state, require_render_object_snapshot,
@@ -194,7 +197,7 @@ pub fn boot() -> Result<(), JsValue> {
         muted: false,
         debug,
         #[cfg(feature = "browser-test-harness")]
-        browser_test_held: 0,
+        browser_test_input: BrowserTestPadInput::default(),
     }));
     bind_events(&app)?;
     app.borrow_mut().refresh_assets()?;
@@ -219,7 +222,7 @@ struct App {
     muted: bool,
     debug: Object,
     #[cfg(feature = "browser-test-harness")]
-    browser_test_held: u16,
+    browser_test_input: BrowserTestPadInput,
 }
 
 impl App {
@@ -249,9 +252,12 @@ impl App {
         #[cfg(not(feature = "browser-test-harness"))]
         let held = self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
         #[cfg(feature = "browser-test-harness")]
-        let held = self.browser_test_held;
+        let (held, recorded_override) = self.browser_test_input.frame_input();
         if let Some(runtime) = &mut self.runtime {
+            #[cfg(not(feature = "browser-test-harness"))]
             runtime.frame(timestamp_ms, held, &self.dom)?;
+            #[cfg(feature = "browser-test-harness")]
+            runtime.frame(timestamp_ms, held, recorded_override, &self.dom)?;
             update_debug(&self.debug, runtime, &self.assets)?;
             return Ok(runtime.take_asset_request());
         }
@@ -428,6 +434,7 @@ struct RetailRuntimeMetrics {
     spawn_attempts: u64,
     successful_spawns: u64,
     already_active_spawn_skips: u64,
+    authored_spawn_rejections: u64,
     failed_spawns: u64,
     executions: u64,
     execution_errors: u64,
@@ -440,6 +447,18 @@ struct RetailRuntimeMetrics {
 }
 
 impl RetailRuntimeMetrics {
+    fn record_spawns(&mut self, counts: BrowserSpawnCounts) {
+        self.spawn_attempts = self.spawn_attempts.saturating_add(counts.attempts);
+        self.successful_spawns = self.successful_spawns.saturating_add(counts.successful);
+        self.already_active_spawn_skips = self
+            .already_active_spawn_skips
+            .saturating_add(counts.already_active);
+        self.authored_spawn_rejections = self
+            .authored_spawn_rejections
+            .saturating_add(counts.authored_rejections);
+        self.failed_spawns = self.failed_spawns.saturating_add(counts.failed);
+    }
+
     fn record_frame<E>(&mut self, frame: &RuntimeFrame<E>) {
         self.executions = self
             .executions
@@ -471,40 +490,6 @@ struct RetailPbakPadBoundary {
     physical_held: u16,
     timing: PbakFrameTiming,
 }
-
-#[derive(Debug)]
-enum BrowserProgramError {
-    Program(NsfProgramError),
-    Audio(RetailAudioError),
-    AudioAsset(String),
-    Paging(PagingError),
-    PagingPageMismatch {
-        requested: PageIndex,
-        resolved: PageIndex,
-    },
-}
-
-impl std::fmt::Display for BrowserProgramError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Program(error) => write!(formatter, "stream program host: {error:?}"),
-            Self::Audio(error) => write!(formatter, "retail audio engine: {error}"),
-            Self::AudioAsset(error) => formatter.write_str(error),
-            Self::Paging(error) => write!(formatter, "retail pager: {error:?}"),
-            Self::PagingPageMismatch {
-                requested,
-                resolved,
-            } => write!(
-                formatter,
-                "retail pager resolved page {}, but GOOL requested page {}",
-                resolved.get(),
-                requested.get(),
-            ),
-        }
-    }
-}
-
-impl std::error::Error for BrowserProgramError {}
 
 /// Short-lived stream borrows around the persistent audio engine owned by a
 /// mounted [`Runtime`]. GOOL can therefore suspend at an audio opcode and
@@ -1957,7 +1942,19 @@ impl Runtime {
         }
     }
 
-    fn frame(&mut self, timestamp_ms: f64, held: u16, dom: &Dom) -> Result<(), JsValue> {
+    fn frame(
+        &mut self,
+        timestamp_ms: f64,
+        held: u16,
+        #[cfg(feature = "browser-test-harness")] recorded_override: Option<u32>,
+        dom: &Dom,
+    ) -> Result<(), JsValue> {
+        #[cfg(not(feature = "browser-test-harness"))]
+        let recorded_override = None;
+        debug_assert!(
+            recorded_override.is_none() || held == 0,
+            "recorded browser-test input must not be mixed with physical input"
+        );
         // Pair validation is asynchronous, but browser input is not. Retain
         // each RAF sample so the destination CoreObjectsCreate PadUpdate uses
         // the current physical state instead of the source level's last tick.
@@ -1987,8 +1984,12 @@ impl Runtime {
             // replace it with its prior/Crash boundary later in this frame.
             self.retail_objects
                 .set_frame_timing(wall_ticks_current_frame, wall_ticks_per_frame);
-            let physical_held = held | self.pending_buttons;
-            self.pending_buttons = 0;
+            let pending_buttons = std::mem::take(&mut self.pending_buttons);
+            let physical_held = if recorded_override.is_some() {
+                0
+            } else {
+                held | pending_buttons
+            };
             self.card.update();
             self.retail_objects
                 .publish_card_state(self.card.published_state())
@@ -2114,7 +2115,13 @@ impl Runtime {
                     )
                 } else {
                     pbak_input.map_or_else(
-                        || (wall_ticks_current_frame, wall_ticks_per_frame, None),
+                        || {
+                            (
+                                wall_ticks_current_frame,
+                                wall_ticks_per_frame,
+                                recorded_override,
+                            )
+                        },
                         |input| {
                             (
                                 17,
@@ -2451,63 +2458,29 @@ impl Runtime {
                 .spawn_current_zone_neighbors(&neighbors, &mut host)
         };
         self.drain_retail_reclaim_diagnostics(dom);
-        let attempt_count = attempts.len() as u64;
-        let successful = attempts
-            .iter()
-            .filter(|attempt| attempt.result.is_ok())
-            .count() as u64;
-        let already_active = attempts
-            .iter()
-            .filter(|attempt| {
-                matches!(
-                    &attempt.result,
-                    Err(RuntimeError::Spawn(
-                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
-                    ))
-                )
-            })
-            .count() as u64;
-        let failed = attempt_count
-            .saturating_sub(successful)
-            .saturating_sub(already_active);
-        self.retail_metrics.spawn_attempts = self
-            .retail_metrics
-            .spawn_attempts
-            .saturating_add(attempt_count);
-        self.retail_metrics.successful_spawns = self
-            .retail_metrics
-            .successful_spawns
-            .saturating_add(successful);
-        self.retail_metrics.already_active_spawn_skips = self
-            .retail_metrics
-            .already_active_spawn_skips
-            .saturating_add(already_active);
-        self.retail_metrics.failed_spawns =
-            self.retail_metrics.failed_spawns.saturating_add(failed);
+        let counts = browser_spawn_counts(&attempts);
+        self.retail_metrics.record_spawns(counts);
         self.retail_tick_state = match self.retail_tick_state {
             RetailTickState::NeedsSpawn | RetailTickState::Running => RetailTickState::Running,
             RetailTickState::PausedBeforeSpawn | RetailTickState::Paused => RetailTickState::Paused,
         };
-        let unexpected = attempts.iter().find_map(|attempt| {
-            attempt.result.as_ref().err().filter(|error| {
-                !matches!(
-                    error,
-                    RuntimeError::Spawn(
-                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
-                    )
-                )
-            })
-        });
+        let unexpected = first_unexpected_browser_spawn(&attempts);
         if let Some(error) = unexpected {
             self.retail_runtime_warning = Some(format!(
-                "Retail spawn scan reached {failed} unexpected failure(s); first error: {error:?}"
+                "Retail spawn scan reached {} unexpected failure(s); first error: {error:?}",
+                counts.failed,
             ));
         }
-        if log_scan || successful != 0 || unexpected.is_some() {
+        if log_scan || counts.successful != 0 || unexpected.is_some() {
             dom.log(
                 &format!(
-                    "Retail spawn scan covered {} active neighbor zones: {successful} new bindings, {already_active} already active, {failed} unexpected failures from {attempt_count} group-3 entities.",
+                    "Retail spawn scan covered {} active neighbor zones: {} new bindings, {} already active, {} authored sentinel rejection(s), {} unexpected failures from {} group-3 entities.",
                     self.retail_zone_lifecycle.next_frame_spawn_scan().len(),
+                    counts.successful,
+                    counts.already_active,
+                    counts.authored_rejections,
+                    counts.failed,
+                    counts.attempts,
                 ),
                 unexpected.is_some(),
             );
@@ -4172,60 +4145,25 @@ impl Runtime {
         };
         self.drain_retail_reclaim_diagnostics(dom);
 
-        let attempt_count = attempts.len() as u64;
-        let successful = attempts
-            .iter()
-            .filter(|attempt| attempt.result.is_ok())
-            .count() as u64;
-        let already_active = attempts
-            .iter()
-            .filter(|attempt| {
-                matches!(
-                    &attempt.result,
-                    Err(RuntimeError::Spawn(
-                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
-                    ))
-                )
-            })
-            .count() as u64;
-        let failed = attempt_count
-            .saturating_sub(successful)
-            .saturating_sub(already_active);
-        self.retail_metrics.spawn_attempts = self
-            .retail_metrics
-            .spawn_attempts
-            .saturating_add(attempt_count);
-        self.retail_metrics.successful_spawns = self
-            .retail_metrics
-            .successful_spawns
-            .saturating_add(successful);
-        self.retail_metrics.already_active_spawn_skips = self
-            .retail_metrics
-            .already_active_spawn_skips
-            .saturating_add(already_active);
-        self.retail_metrics.failed_spawns =
-            self.retail_metrics.failed_spawns.saturating_add(failed);
-        let unexpected = attempts.iter().find_map(|attempt| {
-            attempt.result.as_ref().err().filter(|error| {
-                !matches!(
-                    error,
-                    RuntimeError::Spawn(
-                        SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive
-                    )
-                )
-            })
-        });
+        let counts = browser_spawn_counts(&attempts);
+        self.retail_metrics.record_spawns(counts);
+        let unexpected = first_unexpected_browser_spawn(&attempts);
         if let Some(error) = unexpected {
             let message = format!(
-                "Title MDAT state {state} reached {failed} unexpected spawn failure(s); first error: {error:?}"
+                "Title MDAT state {state} reached {} unexpected spawn failure(s); first error: {error:?}",
+                counts.failed,
             );
             dom.log(&message, true);
             self.retail_runtime_warning = Some(message);
         }
         dom.log(
             &format!(
-                "Title MDAT state {state} filtered {total_entities} descriptors to {} unlocked entries and immediately bound {successful}/{attempt_count} group-3 objects to current zone {current_zone} ({already_active} already active).",
+                "Title MDAT state {state} filtered {total_entities} descriptors to {} unlocked entries and immediately bound {}/{} group-3 objects to current zone {current_zone} ({} already active, {} authored sentinel rejection(s)).",
                 eligible_entities.len(),
+                counts.successful,
+                counts.attempts,
+                counts.already_active,
+                counts.authored_rejections,
             ),
             unexpected.is_some(),
         );
@@ -4922,6 +4860,57 @@ fn launch(app: Rc<RefCell<App>>) {
 }
 
 #[cfg(feature = "browser-test-harness")]
+fn step_browser_test_frame(
+    app: &Rc<RefCell<App>>,
+    harness: &Object,
+    clock_and_count: &Rc<RefCell<(BrowserTestClock, u64)>>,
+    input: BrowserTestPadInput,
+) {
+    let (timestamp_ms, step_count) = {
+        let mut state = clock_and_count.borrow_mut();
+        let timestamp_ms = state.0.take_timestamp_ms();
+        state.1 = state.1.wrapping_add(1);
+        (timestamp_ms, state.1)
+    };
+    let (frame_result, effective_held) = {
+        let mut app = app.borrow_mut();
+        app.browser_test_input = input;
+        let frame_result = app.frame(timestamp_ms);
+        let effective_held = app
+            .runtime
+            .as_ref()
+            .map_or_else(|| input.held_word(), |runtime| runtime.pad.snapshot().held);
+        (frame_result, effective_held)
+    };
+    let requested_lid = match frame_result {
+        Ok(Some(level)) => {
+            load_level_pair(Rc::clone(app), level);
+            JsValue::from_f64(f64::from(level.get()))
+        }
+        Ok(None) => JsValue::NULL,
+        Err(error) => {
+            let message = js_message(&error);
+            let _ = Reflect::set(
+                harness.as_ref(),
+                &JsValue::from_str("lastError"),
+                &JsValue::from_str(&message),
+            );
+            app.borrow_mut().fail(&message);
+            JsValue::NULL
+        }
+    };
+    for (name, value) in [
+        ("lastHeld", JsValue::from_f64(f64::from(effective_held))),
+        ("lastInputKind", JsValue::from_str(input.input_kind())),
+        ("lastTimestampMs", JsValue::from_f64(timestamp_ms)),
+        ("stepCount", JsValue::from_f64(step_count as f64)),
+        ("lastRequestedLid", requested_lid),
+    ] {
+        let _ = Reflect::set(harness.as_ref(), &JsValue::from_str(name), &value);
+    }
+}
+
+#[cfg(feature = "browser-test-harness")]
 fn install_browser_test_harness(
     app: &Rc<RefCell<App>>,
     browser_window: &web_sys::Window,
@@ -4980,55 +4969,39 @@ fn install_browser_test_harness(
         snapshot_retail_objects.as_ref().unchecked_ref(),
     )?;
 
-    let app = Rc::clone(app);
-    let harness_for_step = harness.clone();
     let clock_and_count = Rc::new(RefCell::new((BrowserTestClock::default(), 0_u64)));
+    let app_for_step = Rc::clone(app);
+    let harness_for_step = harness.clone();
     let clock_and_count_for_step = Rc::clone(&clock_and_count);
     let step = Closure::<dyn FnMut(u32)>::new(move |raw_held| {
-        let Ok(held) = u16::try_from(raw_held) else {
-            let _ = Reflect::set(
-                harness_for_step.as_ref(),
-                &JsValue::from_str("lastError"),
-                &JsValue::from_str("held pad mask exceeds 16 bits"),
-            );
-            return;
-        };
-        let (timestamp_ms, step_count) = {
-            let mut state = clock_and_count_for_step.borrow_mut();
-            let timestamp_ms = state.0.take_timestamp_ms();
-            state.1 = state.1.wrapping_add(1);
-            (timestamp_ms, state.1)
-        };
-        let frame_result = {
-            let mut app = app.borrow_mut();
-            app.browser_test_held = held;
-            app.frame(timestamp_ms)
-        };
-        let requested_lid = match frame_result {
-            Ok(Some(level)) => {
-                load_level_pair(Rc::clone(&app), level);
-                JsValue::from_f64(f64::from(level.get()))
-            }
-            Ok(None) => JsValue::NULL,
-            Err(error) => {
-                let message = js_message(&error);
+        let input = match BrowserTestPadInput::physical(raw_held) {
+            Ok(input) => input,
+            Err(message) => {
                 let _ = Reflect::set(
                     harness_for_step.as_ref(),
                     &JsValue::from_str("lastError"),
-                    &JsValue::from_str(&message),
+                    &JsValue::from_str(message),
                 );
-                app.borrow_mut().fail(&message);
-                JsValue::NULL
+                return;
             }
         };
-        for (name, value) in [
-            ("lastHeld", JsValue::from_f64(f64::from(held))),
-            ("lastTimestampMs", JsValue::from_f64(timestamp_ms)),
-            ("stepCount", JsValue::from_f64(step_count as f64)),
-            ("lastRequestedLid", requested_lid),
-        ] {
-            let _ = Reflect::set(harness_for_step.as_ref(), &JsValue::from_str(name), &value);
-        }
+        step_browser_test_frame(
+            &app_for_step,
+            &harness_for_step,
+            &clock_and_count_for_step,
+            input,
+        );
+    });
+    let app_for_recorded_step = Rc::clone(app);
+    let harness_for_recorded_step = harness.clone();
+    let clock_and_count_for_recorded_step = Rc::clone(&clock_and_count);
+    let step_recorded = Closure::<dyn FnMut(u32)>::new(move |held| {
+        step_browser_test_frame(
+            &app_for_recorded_step,
+            &harness_for_recorded_step,
+            &clock_and_count_for_recorded_step,
+            BrowserTestPadInput::recorded(held),
+        );
     });
     Reflect::set(
         harness.as_ref(),
@@ -5036,11 +5009,17 @@ fn install_browser_test_harness(
         step.as_ref().unchecked_ref(),
     )?;
     Reflect::set(
+        harness.as_ref(),
+        &JsValue::from_str("stepRecorded"),
+        step_recorded.as_ref().unchecked_ref(),
+    )?;
+    Reflect::set(
         browser_window.as_ref(),
         &JsValue::from_str("__crustTest"),
         harness.as_ref(),
     )?;
     step.forget();
+    step_recorded.forget();
     snapshot_retail_objects.forget();
     Ok(())
 }
@@ -5586,6 +5565,11 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         debug,
         &JsValue::from_str("retailAlreadyActiveSpawnSkips"),
         &JsValue::from_f64(runtime.retail_metrics.already_active_spawn_skips as f64),
+    )?;
+    Reflect::set(
+        debug,
+        &JsValue::from_str("retailAuthoredSpawnRejections"),
+        &JsValue::from_f64(runtime.retail_metrics.authored_spawn_rejections as f64),
     )?;
     Reflect::set(
         debug,

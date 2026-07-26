@@ -21,6 +21,8 @@ mod assets;
 #[cfg(any(target_arch = "wasm32", test))]
 mod audio_output_metrics;
 #[cfg(any(target_arch = "wasm32", test))]
+mod browser_spawn;
+#[cfg(any(target_arch = "wasm32", test))]
 mod card_persistence;
 #[cfg(target_arch = "wasm32")]
 mod disc_import;
@@ -61,6 +63,63 @@ impl BrowserTestClock {
         let timestamp = self.next_timestamp_ms;
         self.next_timestamp_ms += Self::FRAME_DURATION_MS;
         timestamp
+    }
+}
+
+/// Input source accepted by the feature-only manually stepped browser harness.
+///
+/// Physical input deliberately remains a 16-bit console-controller mask.
+/// Recorded input is a separate diagnostic path because native
+/// `PadUpdatePbak` copies the complete 32-bit frame word into the pad state.
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BrowserTestPadInput {
+    Physical(u16),
+    Recorded(u32),
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+impl Default for BrowserTestPadInput {
+    fn default() -> Self {
+        Self::Physical(0)
+    }
+}
+
+#[cfg(any(test, all(target_arch = "wasm32", feature = "browser-test-harness")))]
+impl BrowserTestPadInput {
+    pub(crate) fn physical(raw: u32) -> Result<Self, &'static str> {
+        u16::try_from(raw)
+            .map(Self::Physical)
+            .map_err(|_| "held physical pad mask exceeds 16 bits")
+    }
+
+    #[must_use]
+    pub(crate) const fn recorded(raw: u32) -> Self {
+        Self::Recorded(raw)
+    }
+
+    #[must_use]
+    pub(crate) const fn frame_input(self) -> (u16, Option<u32>) {
+        match self {
+            Self::Physical(held) => (held, None),
+            Self::Recorded(held) => (0, Some(held)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn held_word(self) -> u32 {
+        match self {
+            Self::Physical(held) => held as u32,
+            Self::Recorded(held) => held,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn input_kind(self) -> &'static str {
+        match self {
+            Self::Physical(_) => "physical",
+            Self::Recorded(_) => "recorded",
+        }
     }
 }
 
@@ -272,6 +331,41 @@ mod tests {
         assert_eq!(clock.take_timestamp_ms(), 0.0);
         assert_eq!(clock.take_timestamp_ms(), 34.0);
         assert_eq!(clock.take_timestamp_ms(), 68.0);
+    }
+
+    #[test]
+    fn browser_test_recorded_input_preserves_full_words_without_widening_physical_input() {
+        use crust_platform::input::{PadState, TAP_MASK};
+
+        assert_eq!(
+            BrowserTestPadInput::physical(u32::from(u16::MAX)),
+            Ok(BrowserTestPadInput::Physical(u16::MAX))
+        );
+        assert_eq!(
+            BrowserTestPadInput::physical(u32::from(u16::MAX) + 1),
+            Err("held physical pad mask exceeds 16 bits")
+        );
+
+        let recorded = BrowserTestPadInput::recorded(u32::MAX);
+        assert_eq!(recorded.frame_input(), (0, Some(u32::MAX)));
+        assert_eq!(recorded.held_word(), u32::MAX);
+        assert_eq!(recorded.input_kind(), "recorded");
+
+        let mut pad = PadState::default();
+        let (physical, demo_override) = recorded.frame_input();
+        pad.update(physical, 0, demo_override);
+        assert_eq!(pad.snapshot().held, u32::MAX);
+        assert_eq!(pad.snapshot().tapped, u32::from(TAP_MASK));
+
+        let released = BrowserTestPadInput::physical(0).unwrap();
+        let (physical, demo_override) = released.frame_input();
+        pad.update(physical, 0, demo_override);
+        assert_eq!(pad.snapshot().held, 0);
+        assert_eq!(
+            pad.snapshot().held_previous,
+            u32::MAX,
+            "switching back to ordinary physical input must retain pad history"
+        );
     }
 
     #[test]

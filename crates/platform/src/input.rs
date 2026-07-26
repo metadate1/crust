@@ -40,14 +40,18 @@ impl PadState {
     }
 
     pub fn update(&mut self, physical: u16, touch: u16, demo_override: Option<u32>) {
-        let mut held = demo_override.unwrap_or_else(|| u32::from(physical | touch));
-        // The console resolves impossible opposing inputs in a stable direction.
-        if held & u32::from(PAD_UP) != 0 {
-            held &= !u32::from(PAD_DOWN);
-        }
-        if held & u32::from(PAD_LEFT) != 0 {
-            held &= !u32::from(PAD_RIGHT);
-        }
+        let held = demo_override.unwrap_or_else(|| {
+            let mut held = u32::from(physical | touch);
+            // The console resolves impossible opposing live inputs before
+            // PadUpdatePbak replaces the complete word with recorded input.
+            if held & u32::from(PAD_UP) != 0 {
+                held &= !u32::from(PAD_DOWN);
+            }
+            if held & u32::from(PAD_LEFT) != 0 {
+                held &= !u32::from(PAD_RIGHT);
+            }
+            held
+        });
         let previous = self.snapshot.held;
         self.snapshot.held_previous_2 = self.snapshot.held_previous;
         self.snapshot.tapped_previous = self.snapshot.tapped;
@@ -258,8 +262,8 @@ mod tests {
     #[test]
     fn demo_preserves_non_controller_word_bits_for_retail_gool() {
         let mut pad = PadState::default();
-        pad.update(0, 0, Some(0x0010_0040));
-        assert_eq!(pad.snapshot().held, 0x0010_0040);
-        assert_eq!(pad.snapshot().tapped, u32::from(PAD_CROSS));
+        pad.update(0, 0, Some(u32::MAX));
+        assert_eq!(pad.snapshot().held, u32::MAX);
+        assert_eq!(pad.snapshot().tapped, u32::from(TAP_MASK));
     }
 }

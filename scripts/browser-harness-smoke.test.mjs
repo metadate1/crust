@@ -8,6 +8,7 @@ import {
   nextReplayBatchFrameCount,
   normalizeReplay,
   parseArguments,
+  replayStepMethod,
   snapshotFailures,
 } from "./browser-harness-smoke.mjs";
 
@@ -82,6 +83,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.settleFrames, 120);
   assert.equal(replay.totalFrames, 10);
   assert.equal(replay.maximumFrames, 132);
+  assert.equal(replay.segments[1].inputKind, "physical");
   assert.equal(replay.segments[1].held, 0x0800);
   assert.equal(replay.segments[1].settleFrames, 2);
   assert.equal(replay.segments[1].settleHeld, 0x0040);
@@ -133,6 +135,56 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
         segments: [{ frames: 1, held: 0x1_0000 }],
       }),
     /0 through 65535/,
+  );
+});
+
+test("recorded replay segments preserve full 32-bit PBAK words explicitly", () => {
+  const replay = normalizeReplay({
+    schema: 1,
+    bootLid: 0x0e,
+    segments: [
+      {
+        frames: 2,
+        inputKind: "recorded",
+        held: "0x00100040",
+        settleFrames: 1,
+        settleHeld: "0xffffffff",
+      },
+      { frames: 1, inputKind: "physical", held: 0xffff },
+    ],
+  });
+
+  assert.equal(replay.segments[0].inputKind, "recorded");
+  assert.equal(replay.segments[0].held, 0x0010_0040);
+  assert.equal(replay.segments[0].settleHeld, 0xffff_ffff);
+  assert.equal(replayStepMethod(replay.segments[0].inputKind), "stepRecorded");
+  assert.equal(replay.segments[1].inputKind, "physical");
+  assert.equal(replay.segments[1].held, 0xffff);
+  assert.equal(replayStepMethod(replay.segments[1].inputKind), "step");
+  assert.throws(() => replayStepMethod("demo"), /unsupported replay input kind/);
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x0e,
+        segments: [
+          {
+            frames: 1,
+            inputKind: "recorded",
+            held: 0x1_0000_0000,
+          },
+        ],
+      }),
+    /0 through 4294967295/,
+  );
+  assert.throws(
+    () =>
+      normalizeReplay({
+        schema: 1,
+        bootLid: 0x0e,
+        segments: [{ frames: 1, inputKind: "demo", held: 0 }],
+      }),
+    /must be "physical" or "recorded"/,
   );
 });
 

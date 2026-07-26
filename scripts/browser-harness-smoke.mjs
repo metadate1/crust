@@ -21,6 +21,8 @@ const DEFAULT_URL = "http://127.0.0.1:4175/";
 const DEFAULT_BOOT_LID = 0x19;
 const DEFAULT_FRAMES = 120;
 const REPLAY_BATCH_FRAME_LIMIT = 128;
+const PHYSICAL_INPUT_KIND = "physical";
+const RECORDED_INPUT_KIND = "recorded";
 const ALL_LEVELS_MAX_LIVES = 999 << 8;
 const ALL_LEVELS_UNLOCK_GATE = 99;
 const ALL_LEVELS_SECRET_PATH_BITS = (1 << 10) | (1 << 20);
@@ -63,6 +65,23 @@ function parseSignedWholeNumber(raw, name) {
     );
   }
   return value;
+}
+
+function normalizeReplayInputKind(raw, label) {
+  const inputKind = raw ?? PHYSICAL_INPUT_KIND;
+  if (
+    inputKind !== PHYSICAL_INPUT_KIND
+    && inputKind !== RECORDED_INPUT_KIND
+  ) {
+    throw new Error(`${label} must be "physical" or "recorded"`);
+  }
+  return inputKind;
+}
+
+export function replayStepMethod(inputKind) {
+  if (inputKind === PHYSICAL_INPUT_KIND) return "step";
+  if (inputKind === RECORDED_INPUT_KIND) return "stepRecorded";
+  throw new Error(`unsupported replay input kind ${JSON.stringify(inputKind)}`);
 }
 
 export function nextReplayBatchFrameCount(
@@ -344,12 +363,19 @@ export function normalizeReplay(raw, fallback = {}) {
     if (totalFrames + normalized.settleFrames > 5_000_000) {
       throw new Error("replay may not exceed 5,000,000 frames");
     }
+    const inputKind = normalizeReplayInputKind(
+      segment.inputKind,
+      `replay.segments[${index}].inputKind`,
+    );
+    const heldMaximum =
+      inputKind === RECORDED_INPUT_KIND ? 0xffff_ffff : 0xffff;
     normalized.segments.push({
       frames,
+      inputKind,
       held: parseWholeNumber(
         segment.held,
         `replay.segments[${index}].held`,
-        0xffff,
+        heldMaximum,
       ),
       expect: normalizeExpectation(
         segment.expect,
@@ -359,7 +385,7 @@ export function normalizeReplay(raw, fallback = {}) {
       settleHeld: parseWholeNumber(
         segment.settleHeld ?? 0,
         `replay.segments[${index}].settleHeld`,
-        0xffff,
+        heldMaximum,
       ),
     });
   }
@@ -803,7 +829,7 @@ const snapshotExpression = `(() => {
     consoleErrors: [...(window.__consoleErrors || [])],
     harness: pick(harness, [
       "mode", "frameDurationMs", "stepCount", "lastError", "lastHeld",
-      "lastTimestampMs", "lastRequestedLid"
+      "lastInputKind", "lastTimestampMs", "lastRequestedLid"
     ]),
     debug: {
       ...pick(debug, [
@@ -811,6 +837,8 @@ const snapshotExpression = `(() => {
         "mountedPages", "mountedEntries", "glError", "paused", "retailFrame",
         "retailDrawCount", "retailProcessDrawCount", "retailRandomSeed",
         "retailRandomSeedB", "retailCurrentZone", "retailLiveObjects",
+        "retailAlreadyActiveSpawnSkips", "retailAuthoredSpawnRejections",
+        "retailFailedSpawns",
         "retailFaultedObjects", "retailExecutions", "retailExecutionErrors",
         "retailZoneEventFailures", "retailRuntimeError", "retailRuntimeWarning"
       ]),
@@ -1056,15 +1084,16 @@ async function runBrowser(options, replay, chromeExecutable) {
     // continue far enough to spend a life legitimately.
     let allLevelsLaunchChecked = !replay.unlockAll;
     let finalSnapshot;
-    const stepReplayBatch = async (held, frameCount, label) => {
+    const stepReplayBatch = async (inputKind, held, frameCount, label) => {
       const batchStart = stepped + 1;
+      const stepMethod = replayStepMethod(inputKind);
       const result = await evaluate(
         cdp,
         sessionId,
         `(() => {
           let executed = 0;
           while (executed < ${frameCount}) {
-            window.__crustTest.step(${held});
+            window.__crustTest.${stepMethod}(${held});
             executed += 1;
             if (
               window.__crustTest.lastError != null
@@ -1128,8 +1157,8 @@ async function runBrowser(options, replay, chromeExecutable) {
       }
       return executed;
     };
-    const stepReplayFrame = async (held, label) => {
-      const executed = await stepReplayBatch(held, 1, label);
+    const stepReplayFrame = async (inputKind, held, label) => {
+      const executed = await stepReplayBatch(inputKind, held, 1, label);
       if (executed !== 1) {
         throw new Error(`${label} did not execute exactly one frame`);
       }
@@ -1137,6 +1166,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     const settleExpectation = async (
       expectation,
       maximumFrames,
+      inputKind,
       held,
       label,
     ) => {
@@ -1145,7 +1175,7 @@ async function runBrowser(options, replay, chromeExecutable) {
         used < maximumFrames
         && expectationFailures(expectation, finalSnapshot).length > 0
       ) {
-        await stepReplayFrame(held, label);
+        await stepReplayFrame(inputKind, held, label);
         used += 1;
       }
       return used;
@@ -1158,6 +1188,7 @@ async function runBrowser(options, replay, chromeExecutable) {
           isolateFirstFrame: !allLevelsLaunchChecked,
         });
         const executed = await stepReplayBatch(
+          segment.inputKind,
           segment.held,
           batchFrames,
           "browser replay",
@@ -1167,6 +1198,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       segmentSettleFramesUsed += await settleExpectation(
         segment.expect,
         segment.settleFrames,
+        segment.inputKind,
         segment.settleHeld,
         `browser replay segment ${segmentIndex + 1} settle`,
       );
@@ -1180,6 +1212,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     const settleFramesUsed = await settleExpectation(
       replay.expect,
       replay.settleFrames,
+      PHYSICAL_INPUT_KIND,
       0,
       "browser replay final settle",
     );
@@ -1246,6 +1279,8 @@ async function runBrowser(options, replay, chromeExecutable) {
       replayFrames: replay.totalFrames,
       settleFramesUsed,
       segmentSettleFramesUsed,
+      lastInputKind: finalSnapshot.harness.lastInputKind,
+      lastHeld: finalSnapshot.harness.lastHeld,
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
       retailExecutions: finalSnapshot.debug.retailExecutions,
@@ -1256,6 +1291,9 @@ async function runBrowser(options, replay, chromeExecutable) {
       retailRandomSeedB: finalSnapshot.debug.retailRandomSeedB,
       retailCurrentZone: finalSnapshot.debug.retailCurrentZone,
       retailLiveObjects: finalSnapshot.debug.retailLiveObjects,
+      retailAuthoredSpawnRejections:
+        finalSnapshot.debug.retailAuthoredSpawnRejections,
+      retailFailedSpawns: finalSnapshot.debug.retailFailedSpawns,
       retailMain: finalSnapshot.debug.retailMain
         ? { ...finalSnapshot.debug.retailMain }
         : null,

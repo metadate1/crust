@@ -80,8 +80,14 @@ test("manual browser stepping stays behind an off-by-default Cargo feature", asy
     app,
     /#\[cfg\(feature = "browser-test-harness"\)\]\s+fn browser_test_live_objects_value/,
   );
+  assert.match(
+    app,
+    /#\[cfg\(feature = "browser-test-harness"\)\]\s+fn step_browser_test_frame/,
+  );
+  assert.match(app, /BrowserTestPadInput::recorded/);
+  assert.match(app, /"stepRecorded"/);
   assert.match(app, /app\.frame\(timestamp_ms\)/);
-  assert.match(app, /load_level_pair\(Rc::clone\(&app\), level\)/);
+  assert.match(app, /load_level_pair\(Rc::clone\(app\), level\)/);
   assert.doesNotMatch(
     bootstrap,
     /__crustTest|browser-test-harness/,

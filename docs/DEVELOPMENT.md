@@ -92,7 +92,11 @@ Longer local traces use a run-length JSON file passed with `--replay`:
 ```
 
 The runner already yields to asynchronous authored stream requests and checks the remounted
-destination before continuing. A complete campaign proof still needs a captured, reviewed pad-mask
+destination before continuing. Segments default to `"inputKind": "physical"` and accept only the
+console's 16-bit physical pad mask. A legally local diagnostic reconstructed from PBAK may instead
+mark a segment `"inputKind": "recorded"`; only the feature-gated harness then supplies its complete
+32-bit `held` word through the existing demo override while physical input remains zero. Never
+commit such local recordings. A complete campaign proof still needs a captured, reviewed pad-mask
 timeline plus level/checkpoint expectations for the whole retail route; the repository does not yet
 contain that controller oracle. The browser hook intentionally cannot force a transition or mutate
 GOOL state, so the missing trace cannot be replaced by test-only game-state shortcuts.

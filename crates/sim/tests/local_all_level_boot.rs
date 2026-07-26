@@ -23,9 +23,7 @@ fn is_native_rejected_spawn(
         Err(RuntimeError::Spawn(
             SpawnError::SpawnBlocked { .. } | SpawnError::MainObjectAlreadyActive,
         )) => true,
-        Err(RuntimeError::Program(NsfProgramError::Format(error))) => error
-            .message()
-            .contains("maps to the invalid-state sentinel"),
+        Err(RuntimeError::Program(error)) => error.is_invalid_state_sentinel_mapping(),
         _ => false,
     }
 }

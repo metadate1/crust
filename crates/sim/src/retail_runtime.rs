@@ -906,6 +906,26 @@ pub enum NsfProgramError {
     Vm(VmError),
 }
 
+impl NsfProgramError {
+    /// Whether this is the authored `0xff` subtype-map sentinel.
+    ///
+    /// Retail uses that map value to reject spawning the corresponding
+    /// descriptor. Match the exact parser diagnostic shape so unrelated
+    /// malformed GOOL data remains a hard program error.
+    #[must_use]
+    pub fn is_invalid_state_sentinel_mapping(&self) -> bool {
+        let Self::Format(error) = self else {
+            return false;
+        };
+        let Some(subtype) = error.message().strip_prefix("GOOL subtype ") else {
+            return false;
+        };
+        subtype
+            .strip_suffix(" maps to the invalid-state sentinel")
+            .is_some_and(|subtype| subtype.parse::<u16>().is_ok())
+    }
+}
+
 impl ProgramHost for NsfProgramHost<'_> {
     type Error = NsfProgramError;
 
@@ -10011,6 +10031,30 @@ mod tests {
         assert!(retail_zone_rect_contains(rect, [-256, 0, 0]));
         assert!(retail_zone_rect_contains(rect, [0, 0, 0]));
         assert!(!retail_zone_rect_contains(rect, [1, 0, 0]));
+    }
+
+    #[test]
+    fn program_error_recognizes_only_the_authored_invalid_state_sentinel_mapping() {
+        assert!(
+            NsfProgramError::Format(FormatError::at(
+                0x120,
+                "GOOL subtype 4 maps to the invalid-state sentinel",
+            ))
+            .is_invalid_state_sentinel_mapping()
+        );
+        assert!(
+            !NsfProgramError::Format(FormatError::global(
+                "GOOL subtype four maps to the invalid-state sentinel",
+            ))
+            .is_invalid_state_sentinel_mapping()
+        );
+        assert!(
+            !NsfProgramError::Format(FormatError::global(
+                "other data maps to the invalid-state sentinel",
+            ))
+            .is_invalid_state_sentinel_mapping()
+        );
+        assert!(!NsfProgramError::MissingLdat.is_invalid_state_sentinel_mapping());
     }
 
     #[test]

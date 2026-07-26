@@ -446,6 +446,14 @@ struct RetailRuntimeMetrics {
     camera_save_handshakes: u64,
 }
 
+#[cfg(feature = "browser-test-harness")]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct BrowserTestCumulativeMetrics {
+    hard_restarts: u64,
+    load_states: u64,
+    death_camera_frames: u64,
+}
+
 impl RetailRuntimeMetrics {
     fn record_spawns(&mut self, counts: BrowserSpawnCounts) {
         self.spawn_attempts = self.spawn_attempts.saturating_add(counts.attempts);
@@ -888,6 +896,8 @@ struct Runtime {
     retail_zone_pager: Pager,
     retail_tick_state: RetailTickState,
     retail_metrics: RetailRuntimeMetrics,
+    #[cfg(feature = "browser-test-harness")]
+    browser_test_cumulative_metrics: BrowserTestCumulativeMetrics,
     retail_runtime_error: Option<String>,
     retail_runtime_warning: Option<String>,
     retail_scene_builder: RetailSceneBuilder,
@@ -1189,6 +1199,8 @@ impl Runtime {
             retail_zone_pager,
             retail_tick_state: RetailTickState::NeedsSpawn,
             retail_metrics: RetailRuntimeMetrics::default(),
+            #[cfg(feature = "browser-test-harness")]
+            browser_test_cumulative_metrics: BrowserTestCumulativeMetrics::default(),
             retail_runtime_error: None,
             retail_runtime_warning: None,
             retail_scene_builder,
@@ -3096,6 +3108,13 @@ impl Runtime {
                     saved_level: Some(saved_level),
                     ..
                 } => {
+                    #[cfg(feature = "browser-test-harness")]
+                    {
+                        self.browser_test_cumulative_metrics.load_states = self
+                            .browser_test_cumulative_metrics
+                            .load_states
+                            .saturating_add(1);
+                    }
                     let replaces_live_objects = saved_level == self.level_assets.level;
                     self.apply_retail_hard_restart_from_effect(dom, saved_level)?;
                     if replaces_live_objects {
@@ -3138,6 +3157,13 @@ impl Runtime {
         dom: &Dom,
         captured_saved_level: FormatLevelId,
     ) -> Result<(), String> {
+        #[cfg(feature = "browser-test-harness")]
+        {
+            self.browser_test_cumulative_metrics.hard_restarts = self
+                .browser_test_cumulative_metrics
+                .hard_restarts
+                .saturating_add(1);
+        }
         let snapshot = self
             .retail_objects
             .saved_level_state()
@@ -3446,6 +3472,13 @@ impl Runtime {
             // work until Crash has spawned.
             Ok(self.retail_camera.stationary_step())
         } else if spin_death {
+            #[cfg(feature = "browser-test-harness")]
+            {
+                self.browser_test_cumulative_metrics.death_camera_frames = self
+                    .browser_test_cumulative_metrics
+                    .death_camera_frames
+                    .saturating_add(1);
+            }
             let inputs = {
                 let mut host = NsfProgramHost::new(
                     &self.level_assets.nsd,
@@ -5634,6 +5667,27 @@ fn update_debug(debug: &Object, runtime: &Runtime, assets: &AssetStore) -> Resul
         (
             "retailCameraSaveHandshakes",
             runtime.retail_metrics.camera_save_handshakes,
+        ),
+    ] {
+        Reflect::set(
+            debug,
+            &JsValue::from_str(name),
+            &JsValue::from_f64(value as f64),
+        )?;
+    }
+    #[cfg(feature = "browser-test-harness")]
+    for (name, value) in [
+        (
+            "retailHardRestarts",
+            runtime.browser_test_cumulative_metrics.hard_restarts,
+        ),
+        (
+            "retailLoadStates",
+            runtime.browser_test_cumulative_metrics.load_states,
+        ),
+        (
+            "retailDeathCameraFrames",
+            runtime.browser_test_cumulative_metrics.death_camera_frames,
         ),
     ] {
         Reflect::set(

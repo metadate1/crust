@@ -344,6 +344,9 @@ function normalizeExpectation(raw, label) {
         "retailProcessDrawCount",
         "retailRandomSeed",
         "retailRandomSeedB",
+        "retailHardRestarts",
+        "retailLoadStates",
+        "retailDeathCameraFrames",
         "minFrame",
         "minRetailFrame",
         "minRetailExecutions",
@@ -637,6 +640,9 @@ export function expectationFailures(expectation, snapshot) {
     "retailProcessDrawCount",
     "retailRandomSeed",
     "retailRandomSeedB",
+    "retailHardRestarts",
+    "retailLoadStates",
+    "retailDeathCameraFrames",
   ]) {
     if (expectation[name] !== undefined && debug[name] !== expectation[name]) {
       failures.push(
@@ -945,6 +951,7 @@ const snapshotExpression = `(() => {
         "mountedPages", "mountedEntries", "glError", "paused", "retailFrame",
         "retailDrawCount", "retailProcessDrawCount", "retailRandomSeed",
         "retailRandomSeedB", "retailCurrentZone", "retailLiveObjects",
+        "retailHardRestarts", "retailLoadStates", "retailDeathCameraFrames",
         "retailAlreadyActiveSpawnSkips", "retailAuthoredSpawnRejections",
         "retailFailedSpawns",
         "retailFaultedObjects", "retailExecutions", "retailExecutionErrors",
@@ -1353,6 +1360,10 @@ async function runBrowser(options, replay, chromeExecutable) {
           retailDrawCount: finalSnapshot.debug?.retailDrawCount,
           retailRandomSeed: finalSnapshot.debug?.retailRandomSeed,
           retailRandomSeedB: finalSnapshot.debug?.retailRandomSeedB,
+          retailHardRestarts: finalSnapshot.debug?.retailHardRestarts,
+          retailLoadStates: finalSnapshot.debug?.retailLoadStates,
+          retailDeathCameraFrames:
+            finalSnapshot.debug?.retailDeathCameraFrames,
           retailCurrentZone: finalSnapshot.debug?.retailCurrentZone,
           retailMain: finalSnapshot.debug?.retailMain
             ? { ...finalSnapshot.debug.retailMain }
@@ -1442,6 +1453,9 @@ async function runBrowser(options, replay, chromeExecutable) {
       retailProcessDrawCount: finalSnapshot.debug.retailProcessDrawCount,
       retailRandomSeed: finalSnapshot.debug.retailRandomSeed,
       retailRandomSeedB: finalSnapshot.debug.retailRandomSeedB,
+      retailHardRestarts: finalSnapshot.debug.retailHardRestarts,
+      retailLoadStates: finalSnapshot.debug.retailLoadStates,
+      retailDeathCameraFrames: finalSnapshot.debug.retailDeathCameraFrames,
       retailCurrentZone: finalSnapshot.debug.retailCurrentZone,
       retailLiveObjects: finalSnapshot.debug.retailLiveObjects,
       retailAuthoredSpawnRejections:

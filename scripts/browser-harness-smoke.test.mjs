@@ -189,6 +189,9 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
       retailProcessDrawCount: 123,
       retailRandomSeed: 0x1234_5678,
       retailRandomSeedB: 0x8765_4321,
+      retailHardRestarts: 0,
+      retailLoadStates: 0,
+      retailDeathCameraFrames: 0,
       minRetailExecutions: 1,
     },
   });
@@ -211,6 +214,9 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.expect.retailProcessDrawCount, 123);
   assert.equal(replay.expect.retailRandomSeed, 0x1234_5678);
   assert.equal(replay.expect.retailRandomSeedB, 0x8765_4321);
+  assert.equal(replay.expect.retailHardRestarts, 0);
+  assert.equal(replay.expect.retailLoadStates, 0);
+  assert.equal(replay.expect.retailDeathCameraFrames, 0);
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -389,6 +395,9 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailProcessDrawCount: 64,
         retailRandomSeed: 0x1234,
         retailRandomSeedB: 0x5678,
+        retailHardRestarts: 0,
+        retailLoadStates: 0,
+        retailDeathCameraFrames: 0,
         minFrame: 64,
         minRetailExecutions: 1,
       },
@@ -399,6 +408,9 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
           retailProcessDrawCount: 64,
           retailRandomSeed: 0x1234,
           retailRandomSeedB: 0x5678,
+          retailHardRestarts: 0,
+          retailLoadStates: 0,
+          retailDeathCameraFrames: 0,
           frame: 64,
           retailExecutions: 9,
         },
@@ -408,16 +420,26 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
   );
   assert.match(
     expectationFailures(
-      { currentLid: 8, retailRandomSeedB: 0x5678, minRetailFrame: 65 },
+      {
+        currentLid: 8,
+        retailRandomSeedB: 0x5678,
+        retailHardRestarts: 0,
+        retailLoadStates: 0,
+        retailDeathCameraFrames: 0,
+        minRetailFrame: 65,
+      },
       {
         debug: {
           currentLid: 0x19,
           retailRandomSeedB: 0x9999,
+          retailHardRestarts: 2,
+          retailLoadStates: 1,
+          retailDeathCameraFrames: 17,
           retailFrame: 2,
         },
       },
     ).join("\n"),
-    /currentLid.*retailRandomSeedB.*retailFrame/s,
+    /currentLid.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*retailFrame/s,
   );
 });
 

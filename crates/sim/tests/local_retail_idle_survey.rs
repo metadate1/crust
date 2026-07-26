@@ -215,6 +215,87 @@ fn jungle_rollers_pbak_hard_restart_preserves_crash() {
 }
 
 #[test]
+#[ignore = "temporary legally-local Stormy Ascent catalog census"]
+fn temporary_stormy_ascent_catalog_census() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x22);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Stormy Ascent pair must parse");
+    let graph =
+        graph_for_pair(level, &nsd, &nsf, &nsf_bytes).expect("Stormy Ascent graph must parse");
+    let (zones, _) = zone_catalog(&nsd, &nsf, &nsf_bytes, &graph, level)
+        .expect("Stormy Ascent zone catalog must parse");
+    eprintln!("spawn={:?}", graph.spawn_path());
+    for node in graph.zones() {
+        let entities = &zones[&node.eid].entities;
+        eprintln!(
+            "zone={} origin={:?} paths={} neighbors={:?} entities={}",
+            node.eid,
+            node.origin,
+            node.paths.len(),
+            node.neighbors,
+            entities.len()
+        );
+        for (index, path) in node.paths.iter().enumerate() {
+            eprintln!(
+                "  path={index} points={} first={:?} last={:?} links={:?}",
+                path.points.len(),
+                path.points.first(),
+                path.points.last(),
+                path.neighbors
+            );
+        }
+        for entity in entities {
+            if entity.group == 3 {
+                eprintln!(
+                    "  entity={} exe={} subtype={} init={:?}",
+                    entity.id, entity.executable, entity.subtype, entity.initializer
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x22);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Stormy Ascent pair must parse");
+    let (survey, _) = survey_pair_with_runtime(
+        "Stormy Ascent",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        RetailRuntime::new_for_level(GLOBAL_WORDS, level),
+        LevelContextSource::FreshBoot,
+        SurveyInputProfile::StormyAscentCompletionRoute,
+        500,
+    )
+    .expect("Stormy Ascent's ordinary-pad completion route must execute");
+
+    eprintln!("{}", survey.summary());
+    assert_eq!(
+        survey.next_lid,
+        Some((survey.frames, 0x2d)),
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
+    assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
+    assert!(survey.is_clean(), "{}", survey.summary());
+}
+
+#[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn synthetic_post_castle_session_reaches_ending_and_returns_to_title() {
     let root = PathBuf::from(
@@ -1718,6 +1799,7 @@ enum SurveyInputProfile {
     CastleMachineryCompletionRoute,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
+    StormyAscentCompletionRoute,
     UpstreamCarriedRecovery,
     UpstreamPhaseRobust,
     RollingStonesCheckpoint,
@@ -1822,6 +1904,7 @@ impl SurveyInputProfile {
             Self::CastleMachineryCompletionRoute => "castle-machinery-completion-route",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
+            Self::StormyAscentCompletionRoute => "stormy-ascent-completion-route",
             Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::UpstreamPhaseRobust => "upstream-phase-robust",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
@@ -1890,6 +1973,7 @@ impl SurveyInputProfile {
                 | Self::CastleMachineryCompletionRoute
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
+                | Self::StormyAscentCompletionRoute
                 | Self::UpstreamCarriedRecovery
                 | Self::UpstreamPhaseRobust
                 | Self::RollingStonesCheckpoint
@@ -26012,6 +26096,106 @@ impl CastleMachineryCompletionRouteController {
 ///
 /// Moving-platform handoffs use observed position and direction rather than a
 /// frame schedule so small changes in earlier landing timing do not compound.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StormyAscentCompletionRouteController {
+    horizontal: u32,
+    jump_frames: u8,
+    release_frames: u8,
+    tick: u32,
+}
+
+impl Default for StormyAscentCompletionRouteController {
+    fn default() -> Self {
+        Self {
+            horizontal: PAD_RIGHT,
+            jump_frames: 0,
+            release_frames: 0,
+            tick: 0,
+        }
+    }
+}
+
+impl StormyAscentCompletionRouteController {
+    fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        let Some(player) = player else {
+            return 0;
+        };
+        if matches!(player.state, 22 | 40) {
+            self.jump_frames = 0;
+            return 0;
+        }
+        self.tick = self.tick.saturating_add(1);
+
+        let zone = camera.path.zone.name();
+        let name = zone.as_deref().unwrap_or_default();
+        let opening_vertical = matches!(
+            name,
+            "a1_yZ"
+                | "a2_yZ"
+                | "a3_yZ"
+                | "a4_yZ"
+                | "b1_yZ"
+                | "b2_yZ"
+                | "b3_yZ"
+                | "b4_yZ"
+                | "c1_yZ"
+        ) || (name == "c2_yZ" && camera.path.index == 0);
+        let middle_vertical = (name == "g4_yZ" && camera.path.index == 1)
+            || matches!(name, "g5_yZ" | "h1_yZ")
+            || (name == "h2_yZ" && camera.path.index == 0);
+        let late_vertical = (name == "j1_yZ" && camera.path.index == 1)
+            || matches!(
+                name,
+                "j2_yZ" | "j3_yZ" | "k1_yZ" | "k2_yZ" | "k3_yZ" | "k4_yZ"
+            )
+            || (name == "l1_yZ" && camera.path.index == 0);
+        let final_leftward = (name == "l1_yZ" && camera.path.index == 1)
+            || matches!(
+                name,
+                "l2_yZ" | "l3_yZ" | "l4_yZ" | "m1_yZ" | "m2_yZ" | "m3_yZ"
+                    | "m4_yZ" | "n1_yZ" | "n2_yZ" | "n3_yZ" | "n4_yZ" | "n5_yZ"
+                    | "o1_yZ"
+            );
+
+        if opening_vertical || middle_vertical || late_vertical {
+            if player.translation[0] >= 3_100_000 {
+                self.horizontal = PAD_LEFT;
+            } else if player.translation[0] <= 1_950_000 {
+                self.horizontal = PAD_RIGHT;
+            }
+        } else if final_leftward {
+            self.horizontal = PAD_LEFT;
+        } else {
+            self.horizontal = PAD_RIGHT;
+        }
+
+        let mut held = self.horizontal;
+        let predicted_z = player.translation[2] + player.velocity[2] / 4;
+        if predicted_z > 150_000 {
+            held |= PAD_UP;
+        } else if predicted_z < 40_000 {
+            held |= PAD_DOWN;
+        }
+        if self.tick.is_multiple_of(20) {
+            held |= PAD_SQUARE;
+        }
+        if self.jump_frames > 0 {
+            self.jump_frames -= 1;
+            return held | PAD_CROSS;
+        }
+        if self.release_frames > 0 {
+            self.release_frames -= 1;
+            return held;
+        }
+        if player.status_a & 1 != 0 {
+            self.jump_frames = 17;
+            self.release_frames = 3;
+            return held | PAD_CROSS;
+        }
+        held
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 struct SlipperyClimbCompletionRouteController {
@@ -41570,6 +41754,7 @@ struct SurveyInputController {
     castle_machinery: CastleMachineryCompletionRouteController,
     lights_out: LightsOutCompletionRouteController,
     slippery_climb: SlipperyClimbCompletionRouteController,
+    stormy_ascent: StormyAscentCompletionRouteController,
     upstream: UpstreamRecoveryRouteController,
     rolling_stones: RollingStonesRouteController,
     rolling_stones_brio: RollingStonesBrioBonusRouteController,
@@ -42044,6 +42229,7 @@ impl SurveyInputController {
                 upper_h3_second_jump_armed: false,
                 upper_i2_waited: false,
             },
+            stormy_ascent: StormyAscentCompletionRouteController::default(),
             upstream: UpstreamRecoveryRouteController {
                 stage: UpstreamRecoveryStage::SettleAtSpawn,
                 // With Crash settled at the ordinary post-Map spawn, the
@@ -42555,6 +42741,9 @@ impl SurveyInputController {
             }
             SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 self.slippery_climb.held(camera, player, route_objects)
+            }
+            SurveyInputProfile::StormyAscentCompletionRoute => {
+                self.stormy_ascent.held(camera, player)
             }
             SurveyInputProfile::UpstreamCarriedRecovery => {
                 if frame <= UPSTREAM_PBAK_FRAMES {
@@ -46182,6 +46371,43 @@ fn survey_pair_with_runtime_impl(
                 &route_objects,
             )
         };
+        if input_profile == SurveyInputProfile::StormyAscentCompletionRoute
+            && std::env::var_os("C1_SURVEY_STORMY_TRACE").is_some()
+            && frame.is_multiple_of(5)
+        {
+            let nearby = player_before_frame.map_or_else(Vec::new, |player| {
+                route_objects
+                    .iter()
+                    .filter(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(
+                                    descriptor.id,
+                                    15 | 16 | 23 | 24 | 25 | 27 | 28 | 35 | 69 | 70 | 135
+                                )
+                        ) || (object.translation[0].abs_diff(player.translation[0]) <= 1_500_000
+                            && object.translation[1].abs_diff(player.translation[1]) <= 2_000_000)
+                    })
+                    .map(|object| {
+                        (
+                            object.origin,
+                            object.program.name(),
+                            object.state,
+                            object.translation,
+                            object.bound,
+                            object.frame_bound,
+                            object.state_stamp,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            });
+            eprintln!(
+                "STORMY_TRACE frame={frame} camera={:?} horizontal={:#06x} held={held:#06x} player={player_before_frame:?} nearby={nearby:?}",
+                camera.location(),
+                input_controller.stormy_ascent.horizontal,
+            );
+        }
         if input_profile == SurveyInputProfile::RollingStonesBrioBonus
             && std::env::var_os("C1_SURVEY_ROLLING_BRIO_TRACE").is_some()
             && frame.is_multiple_of(5)
@@ -46617,6 +46843,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
+                    | SurveyInputProfile::StormyAscentCompletionRoute
                     | SurveyInputProfile::RoadToNowhereCompletionRoute
                     | SurveyInputProfile::HeavyMachineryCompletionRoute
                     | SurveyInputProfile::ToxicWasteCompletionRoute

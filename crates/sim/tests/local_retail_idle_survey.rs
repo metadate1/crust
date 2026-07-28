@@ -27451,13 +27451,26 @@ impl StormyAscentCompletionRouteController {
         }
         if name == "e3_yZ" && self.a4_wall_stage == 62 {
             self.b2_upper_wait = self.b2_upper_wait.saturating_add(1);
-            if self.b2_upper_wait >= 8 {
+            let wait = std::env::var("C1_STORMY_E3_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(8);
+            if self.b2_upper_wait >= wait {
                 self.a4_wall_stage = 63;
                 self.jump_frames = 32;
                 self.release_frames = 3;
                 return PAD_RIGHT | PAD_DOWN | PAD_CROSS | PAD_SQUARE;
             }
             return PAD_DOWN;
+        }
+        if name == "e3_yZ"
+            && self.a4_wall_stage == 63
+            && player_collider_entity == Some(99)
+        {
+            self.a4_wall_stage = 64;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS;
         }
         let opening_vertical = matches!(
             name,

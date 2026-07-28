@@ -285,7 +285,7 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        3_050,
+        3_250,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -27468,6 +27468,94 @@ impl StormyAscentCompletionRouteController {
             && player_collider_entity == Some(99)
         {
             self.a4_wall_stage = 64;
+            self.jump_frames = 32;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS;
+        }
+        if matches!(name, "e3_yZ" | "e4_yZ")
+            && self.a4_wall_stage == 64
+            && player_collider_entity == Some(104)
+        {
+            self.a4_wall_stage = 65;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "e3_yZ" | "e4_yZ") && self.a4_wall_stage == 65 {
+            let support = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 104
+                )
+                .then_some(object.bound?)
+            });
+            let target = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 107
+                )
+                .then_some(object.bound?)
+            });
+            let support_offset = std::env::var("C1_STORMY_E4_OFFSET")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(0);
+            let support_center = support.map(|bound| {
+                bound
+                    .min
+                    .x
+                    .saturating_add(bound.max.x.saturating_sub(bound.min.x) / 2)
+                    .saturating_add(support_offset)
+            });
+            let platform_gap = support.zip(target).map(|(support, target)| {
+                target.min.x.saturating_sub(support.max.x)
+            });
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+            let horizontal = if support_center.is_some_and(|center| predicted_x > center + 30_000)
+            {
+                PAD_LEFT
+            } else if support_center.is_some_and(|center| predicted_x < center - 30_000) {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            let target_z = std::env::var("C1_STORMY_E4_Z")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(200_000);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            if predicted_z > target_z {
+                return horizontal | PAD_UP;
+            }
+            let launch_gap = std::env::var("C1_STORMY_E4_GAP")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(500_000);
+            if player_collider_entity == Some(104)
+                && platform_gap.is_some_and(|gap| gap <= launch_gap)
+            {
+                self.a4_wall_stage = 66;
+                self.jump_frames = std::env::var("C1_STORMY_E4_JUMP")
+                    .ok()
+                    .and_then(|value| value.parse::<u8>().ok())
+                    .unwrap_or(17);
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let runup_gap = std::env::var("C1_STORMY_E4_RUNUP_GAP")
+                .ok()
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(700_000);
+            if platform_gap.is_some_and(|gap| gap <= runup_gap) {
+                return PAD_RIGHT;
+            }
+            return horizontal;
+        }
+        if matches!(name, "e4_yZ" | "f1_yZ")
+            && self.a4_wall_stage == 66
+            && player_collider_entity == Some(107)
+        {
+            self.a4_wall_stage = 67;
             self.jump_frames = 32;
             self.release_frames = 3;
             return PAD_RIGHT | PAD_CROSS;

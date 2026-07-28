@@ -1779,6 +1779,7 @@ enum SurveyInputProfile {
     DirectionAndButtonSweepToTransition,
     JungleDeathAkuCompletionRoute,
     NSanityCompletionRoute,
+    NSanityRecordedCompletionRoute,
     ForwardThroughCheckpointThenA8Hit,
     JunglePhaseRobust,
     JungleTawnaBonusRoute,
@@ -1888,6 +1889,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweepToTransition => "direction-and-button-sweep-to-transition",
             Self::JungleDeathAkuCompletionRoute => "jungle-death-aku-completion-route",
             Self::NSanityCompletionRoute => "n-sanity-completion-route",
+            Self::NSanityRecordedCompletionRoute => "n-sanity-recorded-completion-route",
             Self::ForwardThroughCheckpointThenA8Hit => "forward-through-checkpoint-then-a8-hit",
             Self::JunglePhaseRobust => "jungle-phase-robust",
             Self::JungleTawnaBonusRoute => "jungle-tawna-bonus-route",
@@ -1963,6 +1965,7 @@ impl SurveyInputProfile {
             Self::DirectionAndButtonSweepToTransition
                 | Self::JungleDeathAkuCompletionRoute
                 | Self::NSanityCompletionRoute
+                | Self::NSanityRecordedCompletionRoute
                 | Self::JunglePhaseRobust
                 | Self::JungleTawnaBonusRoute
                 | Self::GreatGatePhaseRobust
@@ -14817,6 +14820,22 @@ struct NSanityRouteController {
 
 impl NSanityRouteController {
     fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        self.held_with_recorded_opposition(camera, player, false)
+    }
+
+    /// Reproduces the historical local PBAK characterization in which the
+    /// route's default forward bit remained set during explicit Down actions.
+    /// This is test-only recorded input, not a physically possible live pad.
+    fn held_recorded(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
+        self.held_with_recorded_opposition(camera, player, true)
+    }
+
+    fn held_with_recorded_opposition(
+        &mut self,
+        camera: RetailCameraLocation,
+        player: Option<PlayerTrace>,
+        recorded_opposition: bool,
+    ) -> u32 {
         if let Some(action) = self.active {
             let held = action.held(self.action_tick);
             let adds_forward = action.direction & (PAD_UP | PAD_DOWN) == 0;
@@ -14831,7 +14850,11 @@ impl NSanityRouteController {
                     self.stage = self.stage.saturating_add(1);
                 }
             }
-            return if adds_forward { PAD_UP | held } else { held };
+            return if recorded_opposition || adds_forward {
+                PAD_UP | held
+            } else {
+                held
+            };
         }
 
         let Some(player) = player else {
@@ -14880,7 +14903,7 @@ impl NSanityRouteController {
             self.active = Some(opening_action);
             self.active_is_opening = true;
             self.action_tick = 0;
-            return self.held(camera, Some(player));
+            return self.held_with_recorded_opposition(camera, Some(player), recorded_opposition);
         }
         let action = match self.stage {
             0 if camera.path.zone == a1 && camera.path.index == 0 => RouteAction {
@@ -15358,7 +15381,7 @@ impl NSanityRouteController {
         };
         self.active = Some(action);
         self.action_tick = 0;
-        self.held(camera, Some(player))
+        self.held_with_recorded_opposition(camera, Some(player), recorded_opposition)
     }
 }
 
@@ -45322,6 +45345,9 @@ impl SurveyInputController {
                 }
             }
             SurveyInputProfile::NSanityCompletionRoute => self.n_sanity.held(camera, player),
+            SurveyInputProfile::NSanityRecordedCompletionRoute => {
+                self.n_sanity.held_recorded(camera, player)
+            }
             SurveyInputProfile::ForwardThroughCheckpointThenA8Hit => {
                 let a8 = Eid::from_name("a8_9Z").expect("fixed N. Sanity route EID is valid");
                 if checkpoint_id > 0 && camera.path.zone == a8 {
@@ -49629,6 +49655,7 @@ fn survey_pair_with_runtime_impl(
             || matches!(
                 input_profile,
                 SurveyInputProfile::NSanityCompletionRoute
+                    | SurveyInputProfile::NSanityRecordedCompletionRoute
                     | SurveyInputProfile::RollingStonesCheckpoint
                     | SurveyInputProfile::RollingStonesExactCampaign
                     | SurveyInputProfile::JungleDeathAkuCompletionRoute
@@ -50070,6 +50097,7 @@ fn survey_pair_with_runtime_impl(
             && matches!(
                 input_profile,
                 SurveyInputProfile::NSanityCompletionRoute
+                    | SurveyInputProfile::NSanityRecordedCompletionRoute
                     | SurveyInputProfile::GreatGatePhaseRobust
                     | SurveyInputProfile::GreatGatePublisherPhaseRobust
                     | SurveyInputProfile::GreatGateTawnaBonus
@@ -64568,10 +64596,7 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(n_sanity_survey.frames, 1_996);
     assert_eq!(
         n_sanity_survey.next_lid,
-        Some((
-            1_996,
-            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
-        ))
+        Some((1_996, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
     );
     assert_eq!(n_sanity_survey.zone_transitions, 22);
     assert_eq!(n_sanity_survey.restarts, 0, "{}", n_sanity_survey.summary());
@@ -64673,10 +64698,7 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(jungle_survey.frames, 2_761, "{}", jungle_survey.summary());
     assert_eq!(
         jungle_survey.next_lid,
-        Some((
-            2_761,
-            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
-        ))
+        Some((2_761, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
     );
     assert_eq!(jungle_survey.zone_transitions, 30);
     assert_eq!(jungle_survey.restarts, 0);
@@ -64802,6 +64824,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     );
     assert_eq!(n_sanity_runtime.global_word(LEVEL_COUNT_GLOBAL), Ok(1));
     assert_eq!(n_sanity_runtime.global_word(LEVELS_UNLOCKED_GLOBAL), Ok(1));
+    // Preserve the historical exact-campaign phase as an explicitly recorded
+    // PBAK characterization. The publisher-first regression immediately above
+    // proves the same opening through Jungle with physically possible input.
     let (n_sanity_survey, mut n_sanity_runtime) = survey_pair_with_runtime(
         known_name(n_sanity),
         n_sanity,
@@ -64810,7 +64835,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         &n_sanity_nsf_bytes,
         n_sanity_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::NSanityCompletionRoute,
+        SurveyInputProfile::NSanityRecordedCompletionRoute,
         N_SANITY_FRAMES,
     )
     .expect("N. Sanity authored route must execute");
@@ -64830,6 +64855,13 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         n_sanity_survey.is_clean(),
         "N. Sanity reached a checked runtime boundary: {}",
         n_sanity_survey.summary()
+    );
+    assert!(
+        n_sanity_survey.pad_change_samples.iter().any(|(_, held)| {
+            (held & PAD_UP != 0 && held & PAD_DOWN != 0)
+                || (held & PAD_LEFT != 0 && held & PAD_RIGHT != 0)
+        }),
+        "the legacy full-campaign input must stay visibly classified as recorded"
     );
 
     let n_sanity_draw_count = n_sanity_runtime.draw_count();

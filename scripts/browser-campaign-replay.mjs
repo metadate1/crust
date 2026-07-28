@@ -14,6 +14,10 @@ import { normalizeReplay } from "./browser-harness-smoke.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const TITLE_LID = 0x19;
+const PAD_UP = 0x1000;
+const PAD_DOWN = 0x4000;
+const PAD_LEFT = 0x8000;
+const PAD_RIGHT = 0x2000;
 const LOCAL_OUTPUT_ROOTS = new Set([
   "artifacts",
   "captures",
@@ -342,6 +346,28 @@ function mergeExpectations(left, right, label) {
   return { ...left, ...right };
 }
 
+function validatePhysicalInputWords(normalizedReplay, phase) {
+  const label = `fragment for phase ${JSON.stringify(phase.id)}`;
+  for (const [index, segment] of normalizedReplay.segments.entries()) {
+    if (segment.inputKind !== "physical") continue;
+    for (const [field, held] of [
+      ["held", segment.held],
+      ["settleHeld", segment.settleHeld],
+    ]) {
+      const opposingVertical = (held & PAD_UP) !== 0 && (held & PAD_DOWN) !== 0;
+      const opposingHorizontal =
+        (held & PAD_LEFT) !== 0 && (held & PAD_RIGHT) !== 0;
+      if (opposingVertical || opposingHorizontal) {
+        throw new Error(
+          `${label} segment ${index + 1}.${field} contains opposing physical ` +
+            `directions; use inputKind "recorded" for an exact PBAK word or ` +
+            "export a physically valid route",
+        );
+      }
+    }
+  }
+}
+
 function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
   const label = `fragment for phase ${JSON.stringify(phase.id)}`;
   if (!isObject(fragment)) throw new Error(`${label} must be an object`);
@@ -361,6 +387,7 @@ function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
   if (normalizedReplay.unlockAll !== manifest.unlockAll) {
     throw new Error(`${label}.unlockAll does not match the campaign manifest`);
   }
+  validatePhysicalInputWords(normalizedReplay, phase);
   const initialDrawCount = wholeNumber(
     fragment.initialDrawCount,
     `${label}.initialDrawCount`,

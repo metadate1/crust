@@ -160,6 +160,12 @@ reconstructed from the user's own PBAK may explicitly annotate its segments with
 default for unannotated segments. This opt-in does not make the generated replay distributable;
 the fragment, manifest, and output must remain ignored and local.
 
+Physical fragments must also describe input that a live pad can produce. The composer rejects
+Up+Down or Left+Right in both `held` and `settleHeld`, because the browser's physical-input path
+resolves those impossible pairs before the game sees them. Mark an exact locally reconstructed
+PBAK word as `"recorded"` instead; otherwise native characterization and browser playback would
+silently execute different pad states.
+
 ## What the evidence means
 
 A successful composition proves that the declared fragment metadata forms one exact static chain.

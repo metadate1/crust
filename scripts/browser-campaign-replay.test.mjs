@@ -348,6 +348,39 @@ test("a phase can explicitly opt a local 32-bit fragment into recorded stepping"
   );
 });
 
+test("composer rejects impossible live-pad directions unless explicitly recorded", async () => {
+  const { manifest, fragments } = syntheticCampaign();
+  fragments.get("./n-sanity.json").segments[0].held = 0x5040;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => fragments.get(reference),
+    ),
+    /segment 1\.held contains opposing physical directions/,
+  );
+
+  fragments.get("./n-sanity.json").segments[0].settleHeld = 0xa000;
+  fragments.get("./n-sanity.json").segments[0].held = 0x0040;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => fragments.get(reference),
+    ),
+    /segment 1\.settleHeld contains opposing physical directions/,
+  );
+
+  manifest.phases[0].inputKind = "recorded";
+  fragments.get("./n-sanity.json").segments[0].held = 0x5040;
+  fragments.get("./n-sanity.json").segments[0].settleHeld = 0xa000;
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+  assert.equal(replay.segments[0].inputKind, "recorded");
+  assert.equal(replay.segments[0].held, 0x5040);
+  assert.equal(replay.segments[0].settleHeld, 0xa000);
+});
+
 test("file composition resolves fragments beside an ignored local manifest", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "crust-campaign-composer-"));
   context.after(() => rm(root, { recursive: true, force: true }));

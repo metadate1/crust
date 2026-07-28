@@ -619,7 +619,9 @@ validated ZDAT graph, then draws all ordinary polygons from the current authored
 affect the selected viewport. Backdrop alternatives remain selected by the active authored SLST,
 and a separate bounded presentation texture cache leaves native's eight-slot pager untouched.
 Retail zones can reuse the same world coordinate space, so mutually exclusive zones are never
-drawn simultaneously. The option does not wake off-screen objects or alter gameplay timing.
+drawn simultaneously. Wider modes horizontally overscan only the authored 4:3 backdrop so sky
+continues to cover the new viewport; terrain and objects are not stretched. The option does not
+wake off-screen objects or alter gameplay timing.
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one

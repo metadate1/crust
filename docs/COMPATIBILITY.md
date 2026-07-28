@@ -428,8 +428,10 @@ gameplay path.
   buffers without changing the authoritative 30 Hz simulation. Its extended mode preloads the
   reachable non-backdrop WGEO graph and draws the complete active authored zone; it does not draw
   mutually exclusive zones together because retail levels reuse world coordinate space. Authored
-  backdrop selection and native texture-cache traffic remain unchanged. A triangle crossing the
-  optional presentation near plane is currently culled as a whole rather than split, so an
+  backdrop selection and native texture-cache traffic remain unchanged. The selected authored
+  4:3 backdrop is horizontally overscanned in wider modes so sky covers the revealed viewport
+  without stretching ordinary world geometry. A triangle crossing the optional presentation near
+  plane is currently culled as a whole rather than split, so an
   extreme zoom/camera intersection can show a transient geometry seam. The current builder avoids
   reparsing an unchanged active graph,
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but

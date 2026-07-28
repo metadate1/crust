@@ -1474,7 +1474,7 @@ fn build_retail_scene_cached(
             // Backdrop alternatives remain an authored SLST presentation:
             // keep their original PSX projection and saturation even when the
             // ordinary zone geometry uses the wider unclamped projection.
-            let projected = if presentation.extended_world && !geometry.header.is_backdrop {
+            let mut projected = if presentation.extended_world && !geometry.header.is_backdrop {
                 project_presentation(
                     Vec3i { x, y, z },
                     world_translations[world_index],
@@ -1490,6 +1490,10 @@ fn build_retail_scene_cached(
                     polygon_projection_distance,
                 )
             };
+            if geometry.header.is_backdrop && presentation.viewport != Viewport::PSX {
+                projected.screen =
+                    expand_backdrop_to_viewport(projected.screen, presentation.viewport);
+            }
             if !projected.valid {
                 saturated_vertices = saturated_vertices.saturating_add(1);
             }
@@ -3497,6 +3501,38 @@ fn project_presentation(
     }
 }
 
+/// Backdrop WGEOs are camera-authored to cover the 4:3 retail framebuffer.
+///
+/// Wider presentation viewports reveal real world geometry horizontally, but
+/// there is no additional authored sky beyond those framebuffer bounds.
+/// Expanding backdrop screen X around the viewport center fills that newly
+/// revealed area without changing ordinary world projection or simulation.
+/// A small horizontal overscan keeps the irregular authored triangle boundary
+/// outside 16:9 and 21:9 even when the original sky did not quite reach x=±256.
+fn expand_backdrop_to_viewport(
+    mut screen: crust_renderer::command::ScreenPoint,
+    viewport: Viewport,
+) -> crust_renderer::command::ScreenPoint {
+    let source_center = i64::from(Viewport::PSX.x) + i64::from(Viewport::PSX.width) / 2;
+    let target_center = i64::from(viewport.x) + i64::from(viewport.width) / 2;
+    let centered = i64::from(screen.x).saturating_sub(source_center);
+    let overscan = i64::from(u8::from(viewport.width > Viewport::PSX.width));
+    let scaled = centered
+        .saturating_mul(i64::from(viewport.width))
+        .saturating_mul(8 + overscan)
+        .checked_div(i64::from(Viewport::PSX.width).saturating_mul(8))
+        .unwrap_or(centered)
+        .saturating_add(target_center);
+    screen.x = i32::try_from(scaled).unwrap_or_else(|_| {
+        if scaled.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
+    });
+    screen
+}
+
 fn presentation_project_axis(value: i32, depth: i32, projection_distance: u32) -> (i32, bool) {
     if depth <= 0 {
         return (
@@ -4029,6 +4065,42 @@ mod tests {
                 },
             ]),
             TriangleVisibility::Outside
+        );
+    }
+
+    #[test]
+    fn authored_backdrops_expand_horizontally_to_cover_wider_viewports() {
+        let ultrawide = Viewport {
+            x: -448,
+            y: -120,
+            width: 896,
+            height: 240,
+        };
+        for (retail_x, ultrawide_x) in [(-256, -504), (0, 0), (256, 504)] {
+            let source = crust_renderer::command::ScreenPoint {
+                x: retail_x,
+                y: 37,
+                z: 901,
+            };
+            let expanded = expand_backdrop_to_viewport(source, ultrawide);
+            assert_eq!(expanded.x, ultrawide_x);
+            assert_eq!(expanded.y, source.y);
+            assert_eq!(expanded.z, source.z);
+        }
+        assert_eq!(
+            expand_backdrop_to_viewport(
+                crust_renderer::command::ScreenPoint {
+                    x: 91,
+                    y: -7,
+                    z: 313
+                },
+                Viewport::PSX
+            ),
+            crust_renderer::command::ScreenPoint {
+                x: 91,
+                y: -7,
+                z: 313
+            }
         );
     }
 

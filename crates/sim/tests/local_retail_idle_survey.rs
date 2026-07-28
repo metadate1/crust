@@ -97,6 +97,9 @@ const AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT: u32 = 70_396;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED: u32 = 0xccd8_9975;
 const UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 69_831;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
+const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED: u32 = 0x5944_4b2a;
+const UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT: u32 = 78_796;
+const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B: u32 = 0x2227_f8a8;
 const EXACT_CAMPAIGN_CASTLE_A9_RELEASE_TICK: u32 = 1_301;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
@@ -1796,6 +1799,7 @@ enum SurveyInputProfile {
     HeavyMachineryCompletionRoute,
     ToxicWasteCompletionRoute,
     LabCompletionRoute,
+    LabExactCampaignPhase,
     LightsOutCompletionRoute,
     CastleMachineryCompletionRoute,
     CastleMachineryExactCampaignPhase,
@@ -1903,6 +1907,7 @@ impl SurveyInputProfile {
             Self::HeavyMachineryCompletionRoute => "heavy-machinery-completion-route",
             Self::ToxicWasteCompletionRoute => "toxic-waste-completion-route",
             Self::LabCompletionRoute => "lab-completion-route",
+            Self::LabExactCampaignPhase => "lab-exact-campaign-phase",
             Self::LightsOutCompletionRoute => "lights-out-completion-route",
             Self::CastleMachineryCompletionRoute => "castle-machinery-completion-route",
             Self::CastleMachineryExactCampaignPhase => "castle-machinery-exact-campaign-phase",
@@ -1974,6 +1979,7 @@ impl SurveyInputProfile {
                 | Self::HeavyMachineryCompletionRoute
                 | Self::ToxicWasteCompletionRoute
                 | Self::LabCompletionRoute
+                | Self::LabExactCampaignPhase
                 | Self::LightsOutCompletionRoute
                 | Self::CastleMachineryCompletionRoute
                 | Self::CastleMachineryExactCampaignPhase
@@ -21349,12 +21355,26 @@ impl HeavyMachineryCompletionRouteController {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LabCompletionRouteController {
     authentic_campaign_phase: bool,
+    exact_campaign_phase: bool,
     route_delay: u32,
     first_rods_pre_wait: u8,
     first_rods_waiting: bool,
     first_rods_active_seen: bool,
     first_rods_cleared: bool,
     first_rods_brake_frames: u8,
+    first_rods_landing_brake_frames: u8,
+    first_rods_landing_brake_complete: bool,
+    first_rods_final_jump_started: bool,
+    first_frog_dodge_started: bool,
+    first_frog_dodge_tick: u8,
+    first_frog_dodge_complete: bool,
+    second_rods_waiting: bool,
+    second_rods_active_seen: bool,
+    second_rods_cleared: bool,
+    second_rods_runup_frames: u8,
+    b6_rods_waiting: bool,
+    b6_rods_active_seen: bool,
+    b6_rods_cleared: bool,
     b9_door_waiting: bool,
     b9_door_cleared: bool,
     b9_door_brake_frames: u8,
@@ -21403,11 +21423,12 @@ impl LabCompletionRouteController {
                     && rods.iter().all(|object| object.state == 6);
                 if cycle_finished {
                     self.first_rods_cleared = true;
-                    // Restart the complete characterized leap after braking:
-                    // resuming at the warning frame leaves Cross held for only
-                    // a handful of ticks and drops Crash between the rods.
-                    self.route_delay = frame.saturating_sub(486);
-                    return Self::route_held(486);
+                    // The wait leaves Crash midway through the direct route's
+                    // run-up. Rejoin at that characterized depth so the next
+                    // Cross edge still lands beyond the following gap.
+                    let rejoin_frame = 486;
+                    self.route_delay = frame.saturating_sub(rejoin_frame);
+                    return Self::route_held(rejoin_frame);
                 }
                 self.route_delay = self.route_delay.saturating_add(1);
                 self.first_rods_brake_frames = self.first_rods_brake_frames.saturating_add(1);
@@ -21416,6 +21437,210 @@ impl LabCompletionRouteController {
                 } else {
                     0
                 };
+            }
+        }
+        if self.exact_campaign_phase
+            && self.first_rods_cleared
+            && !self.first_rods_landing_brake_complete
+        {
+            let reached_landing = player.is_some_and(|player| {
+                player.state == 2
+                    && (26_150_000..=26_250_000).contains(&player.translation[2])
+                    && player.velocity[2] < 0
+            });
+            if reached_landing || self.first_rods_landing_brake_frames != 0 {
+                self.first_rods_landing_brake_frames =
+                    self.first_rods_landing_brake_frames.saturating_add(1);
+                self.route_delay = self.route_delay.saturating_add(1);
+                if self.first_rods_landing_brake_frames >= 4 {
+                    self.first_rods_landing_brake_complete = true;
+                    // The short reverse tap leaves Crash at the direct
+                    // route's later grounded depth; re-anchor there so the
+                    // following long jump retains its full hold window.
+                    self.route_delay = frame.saturating_sub(517);
+                }
+                return PAD_DOWN;
+            }
+        }
+        if self.exact_campaign_phase
+            && self.first_rods_landing_brake_complete
+            && !self.first_rods_final_jump_started
+        {
+            let final_jump_ready = player.is_some_and(|player| player.translation[2] <= 25_780_000);
+            if final_jump_ready {
+                self.first_rods_final_jump_started = true;
+                self.route_delay = frame.saturating_sub(546);
+                return Self::route_held(546);
+            }
+            self.route_delay = self.route_delay.saturating_add(1);
+            return PAD_UP;
+        }
+        if self.exact_campaign_phase
+            && self.first_rods_final_jump_started
+            && !self.first_frog_dodge_complete
+        {
+            let frog_approaching = player.is_some_and(|player| {
+                route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 36,
+                            subtype: 3,
+                        }
+                    ) && object.state == 3
+                        && object.translation[2] < player.translation[2]
+                        && player.translation[2].saturating_sub(object.translation[2]) < 900_000
+                })
+            });
+            if !self.first_frog_dodge_started && route_frame >= 590 && frog_approaching {
+                self.first_frog_dodge_started = true;
+            }
+            if self.first_frog_dodge_started {
+                let tick = self.first_frog_dodge_tick;
+                self.first_frog_dodge_tick = self.first_frog_dodge_tick.saturating_add(1);
+                if tick < 61 {
+                    self.route_delay = self.route_delay.saturating_add(1);
+                    return if tick < 4 {
+                        PAD_DOWN
+                    } else if tick < 10 {
+                        0
+                    } else if tick < 18 {
+                        PAD_UP
+                    } else if tick < 45 {
+                        PAD_UP | PAD_CROSS
+                    } else {
+                        PAD_UP
+                    };
+                }
+                self.first_frog_dodge_complete = true;
+                self.route_delay = frame.saturating_sub(632);
+                return Self::route_held(632);
+            }
+        }
+        if self.exact_campaign_phase && !self.second_rods_cleared {
+            let rods = route_objects
+                .iter()
+                .filter(|object| {
+                    object.program.name().as_deref() == Some("PoRoC")
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(descriptor.id, 32 | 38)
+                        )
+                })
+                .collect::<Vec<_>>();
+            let at_rod_approach = player.is_some_and(|player| {
+                (23_300_000..=23_450_000).contains(&player.translation[2])
+                    && (2_100_000..=2_400_000).contains(&player.translation[0])
+            });
+            if at_rod_approach && rods.iter().any(|object| object.state == 7) {
+                self.second_rods_waiting = true;
+            }
+            if self.second_rods_waiting {
+                self.second_rods_active_seen |= rods.iter().any(|object| object.state == 7);
+                let cycle_finished = self.second_rods_active_seen
+                    && rods.len() == 2
+                    && rods.iter().all(|object| object.state == 6);
+                if cycle_finished {
+                    if self.second_rods_runup_frames < 4 {
+                        self.second_rods_runup_frames =
+                            self.second_rods_runup_frames.saturating_add(1);
+                        self.route_delay = self.route_delay.saturating_add(1);
+                        return PAD_UP;
+                    }
+                    self.second_rods_cleared = true;
+                    self.route_delay = frame.saturating_sub(703);
+                    return Self::route_held(703);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                return 0;
+            }
+        }
+        if self.exact_campaign_phase {
+            let second_door_crate_ready = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 34
+                ) && object.program.name().as_deref() == Some("BoxsC")
+                    && object.state == 8
+            });
+            let needs_second_door_alignment = player.is_some_and(|player| {
+                player.state == 2
+                    && (22_200_000..=22_320_000).contains(&player.translation[2])
+                    && player.translation[0] > 2_420_000
+            });
+            if second_door_crate_ready && needs_second_door_alignment {
+                return PAD_LEFT;
+            }
+        }
+        if self.exact_campaign_phase && !self.b6_rods_cleared {
+            let rods = route_objects
+                .iter()
+                .filter(|object| {
+                    object.program.name().as_deref() == Some("PoRoC")
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(descriptor.id, 30 | 31)
+                        )
+                })
+                .collect::<Vec<_>>();
+            let at_rod_approach = player.is_some_and(|player| {
+                route_frame >= 1_465
+                    && (12_000_000..=12_100_000).contains(&player.translation[2])
+                    && (1_800_000..=2_000_000).contains(&player.translation[0])
+            });
+            let barrier_retracted = route_objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 240
+                    )
+                    && object.state == 6
+            });
+            if at_rod_approach
+                && barrier_retracted
+                && rods.len() == 2
+                && rods.iter().all(|object| object.state == 6)
+            {
+                self.b6_rods_cleared = true;
+                self.route_delay = frame.saturating_sub(1_469);
+                return Self::route_held(1_469);
+            }
+            if at_rod_approach && rods.iter().any(|object| object.state == 7) {
+                self.b6_rods_waiting = true;
+            }
+            if self.b6_rods_waiting {
+                self.b6_rods_active_seen |= rods.iter().any(|object| object.state == 7);
+                let cycle_finished = self.b6_rods_active_seen
+                    && rods.len() == 2
+                    && rods.iter().all(|object| object.state == 6);
+                let fresh_landing_floor = route_objects.iter().any(|object| {
+                    object.program.name().as_deref() == Some("CasOC")
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 230
+                        )
+                        && object.state == 3
+                        && frame.saturating_sub(object.state_stamp) <= 45
+                });
+                if cycle_finished && fresh_landing_floor {
+                    self.b6_rods_cleared = true;
+                    self.route_delay = frame.saturating_sub(1_469);
+                    return Self::route_held(1_469);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                let active_phase_age = rods
+                    .iter()
+                    .filter(|object| object.state == 7)
+                    .map(|object| frame.saturating_sub(object.state_stamp))
+                    .min();
+                return PAD_RIGHT
+                    | if active_phase_age.is_some_and(|age| age <= 10) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
             }
         }
         if !self.b9_door_cleared {
@@ -43323,12 +43548,26 @@ impl SurveyInputController {
             lab: LabCompletionRouteController {
                 authentic_campaign_phase: session_globals
                     && initial_draw_count == AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT,
+                exact_campaign_phase: profile == SurveyInputProfile::LabExactCampaignPhase,
                 route_delay: 0,
                 first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
                 first_rods_cleared: false,
                 first_rods_brake_frames: 0,
+                first_rods_landing_brake_frames: 0,
+                first_rods_landing_brake_complete: false,
+                first_rods_final_jump_started: false,
+                first_frog_dodge_started: false,
+                first_frog_dodge_tick: 0,
+                first_frog_dodge_complete: false,
+                second_rods_waiting: false,
+                second_rods_active_seen: false,
+                second_rods_cleared: false,
+                second_rods_runup_frames: 0,
+                b6_rods_waiting: false,
+                b6_rods_active_seen: false,
+                b6_rods_cleared: false,
                 b9_door_waiting: false,
                 b9_door_cleared: false,
                 b9_door_brake_frames: 0,
@@ -43398,16 +43637,34 @@ impl SurveyInputController {
                 ..SlipperyClimbCompletionRouteController::default()
             };
         }
-        if self.profile == SurveyInputProfile::LabCompletionRoute {
+        if matches!(
+            self.profile,
+            SurveyInputProfile::LabCompletionRoute | SurveyInputProfile::LabExactCampaignPhase
+        ) {
             let authentic_campaign_phase = self.lab.authentic_campaign_phase;
+            let exact_campaign_phase = self.lab.exact_campaign_phase;
             self.lab = LabCompletionRouteController {
                 authentic_campaign_phase,
+                exact_campaign_phase,
                 route_delay: 0,
                 first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
                 first_rods_cleared: false,
                 first_rods_brake_frames: 0,
+                first_rods_landing_brake_frames: 0,
+                first_rods_landing_brake_complete: false,
+                first_rods_final_jump_started: false,
+                first_frog_dodge_started: false,
+                first_frog_dodge_tick: 0,
+                first_frog_dodge_complete: false,
+                second_rods_waiting: false,
+                second_rods_active_seen: false,
+                second_rods_cleared: false,
+                second_rods_runup_frames: 0,
+                b6_rods_waiting: false,
+                b6_rods_active_seen: false,
+                b6_rods_cleared: false,
                 b9_door_waiting: false,
                 b9_door_cleared: false,
                 b9_door_brake_frames: 0,
@@ -43577,7 +43834,9 @@ impl SurveyInputController {
             SurveyInputProfile::ToxicWasteCompletionRoute => {
                 self.toxic_waste.held(player, route_objects)
             }
-            SurveyInputProfile::LabCompletionRoute => self.lab.held(frame, player, route_objects),
+            SurveyInputProfile::LabCompletionRoute | SurveyInputProfile::LabExactCampaignPhase => {
+                self.lab.held(frame, player, route_objects)
+            }
             SurveyInputProfile::LightsOutCompletionRoute => self.lights_out.held(route_objects),
             SurveyInputProfile::CastleMachineryCompletionRoute
             | SurveyInputProfile::CastleMachineryExactCampaignPhase => self.castle_machinery.held(
@@ -46996,7 +47255,8 @@ fn survey_pair_with_runtime_impl(
             | SurveyInputProfile::CastleMachineryExactCampaignPhase
             | SurveyInputProfile::SlipperyClimbCompletionRoute
             | SurveyInputProfile::LightsOutCompletionRoute
-            | SurveyInputProfile::LabCompletionRoute => program_object_traces(&runtime, &[])?,
+            | SurveyInputProfile::LabCompletionRoute
+            | SurveyInputProfile::LabExactCampaignPhase => program_object_traces(&runtime, &[])?,
             SurveyInputProfile::RoadToNowhereCompletionRoute => program_object_traces(
                 &runtime,
                 &[Eid::from_name("WarpC").expect("fixed Road warp EID is valid")],
@@ -47660,6 +47920,7 @@ fn survey_pair_with_runtime_impl(
                     | SurveyInputProfile::CastleMachineryCompletionRoute
                     | SurveyInputProfile::CastleMachineryExactCampaignPhase
                     | SurveyInputProfile::LabCompletionRoute
+                    | SurveyInputProfile::LabExactCampaignPhase
                     | SurveyInputProfile::SunsetVistaCompletionRoute
                     | SurveyInputProfile::SunsetVistaCortexBonusRoute
                     | SurveyInputProfile::SlipperyClimbCompletionRoute
@@ -58681,6 +58942,63 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
         "Heavy Machinery end-warp route must remain clean: {}",
         survey.summary()
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lab_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x29);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Lab pair must parse");
+
+    // Exact clocks carried into The Lab by the uninterrupted campaign fixture
+    // after Dr. N. Brio. The focused fixture retains the live rod, assistant,
+    // and enemy phases without replaying all preceding levels on each route
+    // iteration.
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 29),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 29),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("exact post-Brio progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED;
+    carry.draw_count = UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT;
+    carry.set_random_seed_b(UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("The Lab must import the exact uninterrupted campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "The Lab exact uninterrupted campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::LabExactCampaignPhase,
+        4_200,
+    )
+    .expect("The Lab's exact campaign-phase route must execute");
+    let summary = survey.summary();
+
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert!(survey.first_terminal_fall.is_none(), "{summary}");
+    assert_ordinary_completion_input(&survey, "The Lab exact campaign phase");
+    assert!(survey.is_clean(), "{summary}");
 }
 
 #[test]

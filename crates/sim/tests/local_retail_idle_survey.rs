@@ -14819,6 +14819,7 @@ impl NSanityRouteController {
     fn held(&mut self, camera: RetailCameraLocation, player: Option<PlayerTrace>) -> u32 {
         if let Some(action) = self.active {
             let held = action.held(self.action_tick);
+            let adds_forward = action.direction & (PAD_UP | PAD_DOWN) == 0;
             self.action_tick = self.action_tick.saturating_add(1);
             if self.action_tick >= action.total_frames() {
                 self.active = None;
@@ -14830,7 +14831,7 @@ impl NSanityRouteController {
                     self.stage = self.stage.saturating_add(1);
                 }
             }
-            return PAD_UP | held;
+            return if adds_forward { PAD_UP | held } else { held };
         }
 
         let Some(player) = player else {
@@ -63343,16 +63344,16 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
         2_100,
     )
     .expect("N. Sanity Beach fresh completion route must execute");
-    assert_eq!(survey.frames, 1_900, "{}", survey.summary());
+    assert_eq!(survey.frames, 1_996, "{}", survey.summary());
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 1900 requested level transition to 0x2d")
+        Some("frame 1996 requested level transition to 0x2d")
     );
     assert_eq!(
         survey.next_lid,
-        Some((1_900, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+        Some((1_996, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
     );
-    assert_eq!(survey.zone_transitions, 18);
+    assert_eq!(survey.zone_transitions, 22);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
@@ -63362,30 +63363,30 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (861, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
+            (860, 19 << 8, [1_945_600, 4_135_168, 24_165_632]),
         ]
     );
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (207, 0x100),
-            (334, 0x200),
-            (512, 0x300),
-            (644, 0x400),
-            (651, 0x500),
-            (683, 0x600),
-            (685, 0x700),
-            (762, 0x800),
-            (787, 0x900),
-            (861, 0xa00),
+            (206, 0x100),
+            (333, 0x200),
+            (511, 0x300),
+            (643, 0x400),
+            (650, 0x500),
+            (682, 0x600),
+            (684, 0x700),
+            (761, 0x800),
+            (786, 0x900),
+            (860, 0xa00),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(861, 0x900)]);
+    assert_eq!(survey.saved_box_count_samples, [(860, 0x900)]);
     assert_eq!(survey.effect_counts.get("save-state").copied(), Some(1));
     assert_eq!(survey.effect_counts.get("transition").copied(), Some(1));
     assert!(!survey.effect_counts.contains_key("load-state"));
-    for expected in [(207, 7, 3), (312, 14, 3), (334, 12, 3), (861, 19, 9)] {
+    for expected in [(206, 7, 3), (311, 14, 3), (333, 12, 3), (860, 19, 9)] {
         assert!(survey.spawn_flag_samples.contains(&expected));
     }
 
@@ -63404,6 +63405,14 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
             .iter()
             .all(|(_, held)| held & !ordinary_pad_bits == 0),
         "the route must use only ordinary directional, jump, and spin input"
+    );
+    assert!(
+        survey.pad_change_samples.iter().all(|(_, held)| {
+            let opposing_vertical = held & PAD_UP != 0 && held & PAD_DOWN != 0;
+            let opposing_horizontal = held & PAD_LEFT != 0 && held & PAD_RIGHT != 0;
+            !opposing_vertical && !opposing_horizontal
+        }),
+        "the route must not rely on impossible opposing physical directions"
     );
 
     assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(19 << 8));
@@ -63430,14 +63439,14 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
     assert_eq!(final_camera.progress.raw(), 2_017);
     assert_eq!(
         survey.final_player_translation,
-        Some([3_908_352, 9_051_438, 10_669_312])
+        Some([3_908_352, 9_051_441, 10_669_312])
     );
     let player = player_trace(&runtime)
         .expect("N. Sanity completion player trace must resolve")
         .expect("WarpC must retain Crash through its transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(runtime.machine().random_seed(), 0x4258_7668);
-    assert_eq!(runtime.draw_count(), 1_900);
+    assert_eq!(runtime.machine().random_seed(), 0x3c96_3977);
+    assert_eq!(runtime.draw_count(), 1_996);
     assert_eq!(survey.unexpected_spawn_errors, 0);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.faulted_objects, 0);
@@ -63464,8 +63473,8 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
     assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
     assert!(!report.resolved.bonus_return);
     assert!(report.effects.is_empty());
-    assert_eq!(report.carry.random_seed, 0x4258_7668);
-    assert_eq!(report.carry.draw_count, 1_900);
+    assert_eq!(report.carry.random_seed, 0x3c96_3977);
+    assert_eq!(report.carry.draw_count, 1_996);
 }
 
 #[test]
@@ -64467,9 +64476,21 @@ fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
+fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     const TITLE_MAP_REPLAY_IDLE_FRAMES: u32 = 252;
-    const N_SANITY_COMPLETION_REPLAY_FRAMES: u32 = 465;
+    const N_SANITY_COMPLETION_REPLAY_FRAMES: u32 = 600;
+
+    let assert_physical_directions = |survey: &LevelSurvey| {
+        assert!(
+            survey.pad_change_samples.iter().all(|(_, held)| {
+                let opposing_vertical = held & PAD_UP != 0 && held & PAD_DOWN != 0;
+                let opposing_horizontal = held & PAD_LEFT != 0 && held & PAD_RIGHT != 0;
+                !opposing_vertical && !opposing_horizontal
+            }),
+            "{} relies on an impossible opposing-direction pad sample",
+            survey.name
+        );
+    };
 
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
@@ -64544,8 +64565,22 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
         "{}",
         n_sanity_survey.summary()
     );
+    assert_eq!(n_sanity_survey.frames, 1_996);
+    assert_eq!(
+        n_sanity_survey.next_lid,
+        Some((
+            1_996,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+        ))
+    );
+    assert_eq!(n_sanity_survey.zone_transitions, 22);
     assert_eq!(n_sanity_survey.restarts, 0, "{}", n_sanity_survey.summary());
+    assert_eq!(n_sanity_survey.death_camera_frames, 0);
+    assert!(!n_sanity_survey.effect_counts.contains_key("load-state"));
     assert!(n_sanity_survey.is_clean(), "{}", n_sanity_survey.summary());
+    assert_physical_directions(&n_sanity_survey);
+    assert_eq!(n_sanity_runtime.draw_count(), 2_664);
+    assert_eq!(n_sanity_runtime.machine().random_seed(), 0x3a82_e9e4);
     let completion_carry = n_sanity.finish_checked(n_sanity_runtime, LevelId::LEVEL_COMPLETE);
 
     let completion_runtime =
@@ -64582,6 +64617,16 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
         "{}",
         completion_survey.summary()
     );
+    assert_eq!(completion_survey.frames, 601);
+    assert_eq!(
+        completion_survey.next_lid,
+        Some((601, i32::try_from(LevelId::TITLE.get()).unwrap()))
+    );
+    assert_eq!(completion_survey.restarts, 0);
+    assert_eq!(completion_survey.death_camera_frames, 0);
+    assert_physical_directions(&completion_survey);
+    assert_eq!(completion_runtime.draw_count(), 3_265);
+    assert_eq!(completion_runtime.machine().random_seed(), 0xfee7_6dc9);
     let post_beach_title_carry = completion.finish_checked(completion_runtime, LevelId::TITLE);
 
     let mut post_beach_title = PublisherTitleHarness::from_session(
@@ -64595,13 +64640,96 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
         post_beach_title.step(0);
     }
     post_beach_title.step(PAD_CROSS);
-    let (jungle_carry, pad) = post_beach_title.finish_transition(jungle.level);
+    let post_beach_title_frame = post_beach_title.frame;
+    let (jungle_carry, mut pad) = post_beach_title.finish_transition(jungle.level);
+    assert_eq!(post_beach_title_frame, 254);
+    assert_eq!(jungle_carry.draw_count, 3_519);
+    assert_eq!(jungle_carry.random_seed, 0xcf79_1594);
     assert_eq!(
         pad.snapshot.held, PAD_CROSS,
         "the held launch input must survive the second Title mount boundary"
     );
-    RetailRuntime::new_from_session(GLOBAL_WORDS, jungle.level, jungle_carry)
+    let jungle_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, jungle.level, jungle_carry)
         .expect("Jungle Rollers must import the publisher-carried map phase");
+    let (jungle_survey, jungle_runtime) = survey_pair_with_persistent_pad(
+        jungle.name,
+        jungle.level,
+        &jungle.nsd,
+        &jungle.nsf,
+        &jungle.nsf_bytes,
+        jungle_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::JunglePhaseRobust,
+        4_000,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 1,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("publisher-carried Jungle Rollers route must execute");
+    assert_eq!(jungle_survey.frames, 2_761, "{}", jungle_survey.summary());
+    assert_eq!(
+        jungle_survey.next_lid,
+        Some((
+            2_761,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),
+        ))
+    );
+    assert_eq!(jungle_survey.zone_transitions, 30);
+    assert_eq!(jungle_survey.restarts, 0);
+    assert!(jungle_survey.restart_frames.is_empty());
+    assert_eq!(jungle_survey.death_camera_frames, 0);
+    assert!(jungle_survey.first_below_zero.is_none());
+    assert!(jungle_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        jungle_survey.checkpoint_samples,
+        [
+            (1, -1, [1_945_600, 4_135_168, 24_165_632]),
+            (1_273, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
+        ]
+    );
+    assert_eq!(
+        jungle_survey.box_count_samples,
+        [
+            (1, 0),
+            (543, 0x100),
+            (544, 0x200),
+            (1_273, 0x300),
+            (1_304, 0x400),
+            (1_305, 0x500),
+            (1_308, 0x600),
+            (1_309, 0x700),
+            (1_310, 0x800),
+            (1_318, 0x900),
+            (1_324, 0xa00),
+        ]
+    );
+    assert_eq!(jungle_survey.saved_box_count_samples, [(1_273, 0x200)]);
+    assert_eq!(jungle_survey.effect_counts.get("save-state"), Some(&1));
+    assert_eq!(jungle_survey.effect_counts.get("transition"), Some(&1));
+    assert!(!jungle_survey.effect_counts.contains_key("load-state"));
+    assert_eq!(
+        jungle_survey.final_player_translation,
+        Some([2_193_152, 7_732_272, -2_147_072])
+    );
+    let final_camera = jungle_survey
+        .final_camera
+        .expect("publisher-carried Jungle route retains its final camera");
+    assert_eq!(
+        final_camera.path,
+        RetailPathId {
+            zone: Eid::from_name("0O_cZ").expect("fixed Jungle end-zone EID is valid"),
+            index: 0,
+        }
+    );
+    assert_eq!(final_camera.progress.raw(), 17_836);
+    assert!(jungle_survey.is_clean(), "{}", jungle_survey.summary());
+    assert_physical_directions(&jungle_survey);
+    assert_eq!(jungle_runtime.draw_count(), 6_280);
+    assert_eq!(jungle_runtime.machine().random_seed(), 0x7b53_ae02);
 }
 
 #[test]

@@ -27560,6 +27560,75 @@ impl StormyAscentCompletionRouteController {
             self.release_frames = 3;
             return PAD_RIGHT | PAD_CROSS;
         }
+        if name == "f1_yZ"
+            && self.a4_wall_stage == 67
+            && player_collider_entity == Some(107)
+            && player.status_a & 1 != 0
+        {
+            self.a4_wall_stage = 68;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if matches!(name, "e4_yZ" | "f1_yZ") && self.a4_wall_stage == 68 {
+            let support = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 107
+                )
+                .then_some(object.bound?)
+            });
+            let target = route_objects
+                .iter()
+                .filter(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 46,
+                            subtype: 1,
+                        }
+                    ) && object.translation[0] > player.translation[0]
+                        && object.translation[1] <= -7_200_000
+                })
+                .min_by_key(|object| object.translation[0])
+                .map(|object| object.translation);
+            let at_takeoff_edge = support.is_some_and(|bound| {
+                player.translation[0] >= bound.max.x.saturating_sub(45_000)
+            });
+            if player_collider_entity == Some(107)
+                && at_takeoff_edge
+                && target.is_some_and(|translation| translation[0] <= 16_200_000)
+            {
+                self.a4_wall_stage = 69;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 4);
+            return support.map_or(0, |bound| {
+                let takeoff_x = bound.max.x.saturating_sub(40_000);
+                if predicted_x < takeoff_x.saturating_sub(5_000) {
+                    PAD_RIGHT
+                } else if predicted_x > takeoff_x.saturating_add(5_000) {
+                    PAD_LEFT
+                } else {
+                    0
+                }
+            });
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ")
+            && self.a4_wall_stage == 69
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 16_000_000
+        {
+            self.a4_wall_stage = 70;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return 0;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 70 {
+            return 0;
+        }
         let opening_vertical = matches!(
             name,
             "a1_yZ"

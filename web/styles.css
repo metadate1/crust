@@ -461,6 +461,74 @@ select {
 }
 select:disabled { color: #758372; }
 
+.display-upgrades {
+  margin-top: 14px;
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+.display-upgrades > summary {
+  cursor: pointer;
+  color: #b9c5b3;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+}
+.display-upgrades > summary::marker { color: var(--stone); }
+.display-upgrade-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.display-upgrade-grid > label {
+  display: grid;
+  gap: 5px;
+  color: #9eae99;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.display-upgrade-grid > label:last-child { grid-column: 1 / -1; }
+.display-toggle {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  border: 1px solid rgba(255, 216, 115, .15);
+  border-radius: 8px 4px 9px 5px;
+  padding: 10px;
+  background: rgba(2, 13, 7, .35);
+  cursor: pointer;
+}
+.display-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 1px 2px 0 0;
+  accent-color: var(--stone-hot);
+}
+.display-toggle span { display: grid; gap: 3px; }
+.display-toggle strong {
+  color: var(--cream);
+  font-family: var(--display);
+  font-size: 11px;
+  line-height: 1;
+}
+.display-toggle small {
+  color: #83927f;
+  font-family: var(--body);
+  font-size: 8px;
+  letter-spacing: 0;
+  line-height: 1.35;
+  text-transform: none;
+}
+.display-upgrades select { height: 38px; font-size: 9px; }
+.display-upgrades > p {
+  margin: 10px 0 0;
+  color: #71806e;
+  font-size: 8px;
+  line-height: 1.45;
+}
+
 .advanced-import {
   margin: 18px 0 0 62px;
   padding-top: 13px;
@@ -649,6 +717,12 @@ canvas {
 }
 .screen:fullscreen .game-frame-art { display: none; }
 .screen:fullscreen .game-viewport { inset: 0; }
+.screen[data-display-aspect="16:9"] { aspect-ratio: 16 / 9; }
+.screen[data-display-aspect="21:9"] { aspect-ratio: 21 / 9; }
+.screen[data-display-aspect="16:9"] .game-frame-art,
+.screen[data-display-aspect="21:9"] .game-frame-art { display: none; }
+.screen[data-display-aspect="16:9"] .game-viewport,
+.screen[data-display-aspect="21:9"] .game-viewport { inset: 0; }
 
 .runtime-details {
   width: min(760px, calc(100% - 30px));
@@ -801,6 +875,8 @@ noscript { display: block; padding: 20px; color: var(--danger); }
   .dropzone span { max-width: 270px; font-size: 9px; }
   .level-choice label { display: block; }
   .level-choice label small { display: block; margin-top: 3px; text-align: left; }
+  .display-upgrade-grid { grid-template-columns: 1fr; }
+  .display-upgrade-grid > label:last-child { grid-column: auto; }
   .advanced-import, .privacy-note { margin-left: 45px; }
   .source-actions { grid-template-columns: 1fr; }
   .stage { margin-top: 22px; }

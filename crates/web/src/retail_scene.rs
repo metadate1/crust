@@ -143,6 +143,16 @@ pub struct RetailSceneProgressLocation {
     pub draw_count: u32,
 }
 
+/// Presentation-only scene options which never feed back into simulation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RetailScenePresentation {
+    /// Direct GTE-style projection distance. `None` uses the authored FOV.
+    pub projection_distance: Option<u32>,
+    /// Draw every polygon in the active zone's loaded WGEO set instead of the
+    /// camera path's retail SLST subset.
+    pub extended_world: bool,
+}
+
 /// Explicit native camera transform used by non-path camera modes.
 ///
 /// Ordinary gameplay derives this transform from the active ZDAT path. The
@@ -467,6 +477,40 @@ impl RetailSceneBuilder {
             None,
             None,
             None,
+            RetailScenePresentation::default(),
+        )
+    }
+
+    /// Builds an exact camera-path state with presentation-only overrides.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same checked errors as [`Self::build_at_progress`].
+    pub fn build_at_progress_with_presentation(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        presentation: RetailScenePresentation,
+    ) -> Result<RetailScene, RetailSceneError> {
+        build_retail_scene_cached(
+            self,
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            true,
+            &[],
+            None,
+            RETAIL_INITIAL_DISPLAY_FLAGS,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            presentation,
         )
     }
 
@@ -543,6 +587,7 @@ impl RetailSceneBuilder {
             None,
             None,
             None,
+            RetailScenePresentation::default(),
         )
     }
 
@@ -628,6 +673,7 @@ impl RetailSceneBuilder {
             None,
             None,
             None,
+            RetailScenePresentation::default(),
         )
     }
 
@@ -658,6 +704,51 @@ impl RetailSceneBuilder {
         world_shader_snapshot: RetailWorldShaderSnapshot,
         world_shader_render_state: &mut RetailWorldShaderRenderState,
     ) -> Result<RetailScene, RetailSceneError> {
+        self.build_at_progress_with_runtime_snapshots_and_presentation(
+            nsd,
+            nsf,
+            nsf_bytes,
+            location,
+            advance_world_ripple,
+            objects,
+            main_object,
+            world_display_mask,
+            field_of_view,
+            map_path_animation,
+            camera_pose,
+            texture_frame_snapshot,
+            world_shader_snapshot,
+            world_shader_render_state,
+            RetailScenePresentation::default(),
+        )
+    }
+
+    /// Builds the runtime snapshot with opt-in display-only projection and
+    /// visibility upgrades.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same checked scene errors as
+    /// [`Self::build_at_progress_with_runtime_snapshots`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_at_progress_with_runtime_snapshots_and_presentation(
+        &mut self,
+        nsd: &Nsd,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+        location: RetailSceneProgressLocation,
+        advance_world_ripple: bool,
+        objects: &[RetailRenderObject],
+        main_object: Option<RuntimeObjectHandle>,
+        world_display_mask: u32,
+        field_of_view: u32,
+        map_path_animation: Option<RetailMapPathAnimation>,
+        camera_pose: Option<RetailSceneCameraPose>,
+        texture_frame_snapshot: TextureFrameSnapshot,
+        world_shader_snapshot: RetailWorldShaderSnapshot,
+        world_shader_render_state: &mut RetailWorldShaderRenderState,
+        presentation: RetailScenePresentation,
+    ) -> Result<RetailScene, RetailSceneError> {
         build_retail_scene_cached(
             self,
             nsd,
@@ -674,6 +765,7 @@ impl RetailSceneBuilder {
             Some(texture_frame_snapshot),
             Some(world_shader_snapshot),
             Some(world_shader_render_state),
+            presentation,
         )
     }
 }
@@ -790,6 +882,7 @@ fn build_retail_scene_cached(
     texture_frame_snapshot: Option<TextureFrameSnapshot>,
     world_shader_snapshot: Option<RetailWorldShaderSnapshot>,
     world_shader_render_state: Option<&mut RetailWorldShaderRenderState>,
+    presentation: RetailScenePresentation,
 ) -> Result<RetailScene, RetailSceneError> {
     let ldat = nsd
         .ldat()
@@ -855,6 +948,8 @@ fn build_retail_scene_cached(
             .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
         if world_display_mask & 1 == 0 {
             Vec::new()
+        } else if presentation.extended_world {
+            extended_zone_polygons(visibility.visibility(), &graph.worlds)?
         } else {
             visibility.visibility().to_vec()
         }
@@ -888,8 +983,16 @@ fn build_retail_scene_cached(
         object_camera.rotation_z,
     );
     let object_camera_matrix = adjusted_camera_matrix(raw_object_camera_matrix);
-    let projection_distance =
-        projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
+    let projection_distance = if let Some(distance) = presentation.projection_distance {
+        if !(64..=2_048).contains(&distance) {
+            return Err(scene_error(format!(
+                "presentation projection distance {distance} is outside 64..=2048"
+            )));
+        }
+        distance
+    } else {
+        projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?
+    };
     let world_shader_mode = WorldShaderMode::from_flags(graph.zone_header.graphics.flags);
     let world_shader_snapshot = world_shader_snapshot
         .unwrap_or_else(|| RetailWorldShaderSnapshot::initialized_for_level(nsd.level()));
@@ -2574,6 +2677,54 @@ fn validate_visibility(
     Ok(())
 }
 
+fn extended_zone_polygons(
+    retail_visible: &[PolygonId],
+    worlds: &[WorldGeometry],
+) -> Result<Vec<PolygonId>, RetailSceneError> {
+    if worlds.len() > 8 {
+        return Err(scene_error(
+            "extended world render exceeds the packed eight-world ZDAT limit",
+        ));
+    }
+    let capacity = worlds.iter().try_fold(0_usize, |total, world| {
+        total
+            .checked_add(world.polygons.len())
+            .ok_or_else(|| scene_error("extended world polygon count overflows"))
+    })?;
+    let mut polygons = Vec::with_capacity(capacity);
+    let retail_visible = retail_visible
+        .iter()
+        .map(|polygon| ((polygon.world_index, polygon.polygon_index), polygon.flag))
+        .collect::<BTreeMap<_, _>>();
+    for (world_index, world) in worlds.iter().enumerate() {
+        let world_index = u8::try_from(world_index)
+            .map_err(|_| scene_error("extended world index does not fit packed SLST identity"))?;
+        for polygon_index in 0..world.polygons.len() {
+            let polygon_index = u16::try_from(polygon_index).map_err(|_| {
+                scene_error("extended world polygon index does not fit packed SLST identity")
+            })?;
+            if polygon_index >= 0x1000 {
+                return Err(scene_error(
+                    "extended world polygon index exceeds the packed 12-bit SLST limit",
+                ));
+            }
+            let retail_flag = retail_visible.get(&(world_index, polygon_index)).copied();
+            // Backdrop WGEOs contain authored alternatives which SLST swaps
+            // as the camera advances. Revealing all of them produces giant
+            // overlapping sky panels; retain only the active authored subset.
+            if world.header.is_backdrop && retail_flag.is_none() {
+                continue;
+            }
+            polygons.push(PolygonId {
+                world_index,
+                polygon_index,
+                flag: retail_flag.unwrap_or(false),
+            });
+        }
+    }
+    Ok(polygons)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CameraSample {
     translation: Vec3i,
@@ -3524,6 +3675,31 @@ mod tests {
         assert!(!scene.commands.is_empty());
         assert_eq!(scene.stats.unique_textures, scene.textures.len());
 
+        let ldat = nsd.ldat().unwrap();
+        let extended = RetailSceneBuilder::new()
+            .build_at_progress_with_presentation(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                RetailSceneProgressLocation {
+                    zone: ldat.spawn_zone,
+                    path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+                    path_progress: 0,
+                    frame_stamp: 0,
+                    draw_count: 0,
+                },
+                RetailScenePresentation {
+                    projection_distance: Some(425),
+                    extended_world: true,
+                },
+            )
+            .unwrap();
+        assert!(extended.stats.visible_polygons > scene.stats.visible_polygons);
+        assert_eq!(
+            extended.stats.visible_polygons,
+            extended.stats.submitted_polygons
+        );
+
         let first_presented =
             build_retail_scene_at_path_point(&nsd, &nsf, &nsf_bytes, 2, 1).unwrap();
         assert_eq!(first_presented.stats.worlds, 4);
@@ -3532,7 +3708,6 @@ mod tests {
             first_presented.stats.submitted_polygons,
             first_presented.commands.len()
         );
-        let ldat = nsd.ldat().unwrap();
         let explicit = build_retail_scene_at_location(
             &nsd,
             &nsf,

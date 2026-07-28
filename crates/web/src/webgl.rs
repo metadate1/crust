@@ -7,13 +7,14 @@
 )]
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use crust_renderer::cache::TextureHandle;
 use crust_renderer::command::{
-    BlendMode, ColoredQuad, ColoredVertex, OrderingTable, PrimitiveCommand, PrimitiveStyle,
-    ScreenPoint, ScreenRect, SpriteCommand, UvRect,
+    BlendMode, ColoredQuad, ColoredTriangle, ColoredVertex, CommandSource, OrderingTable,
+    PrimitiveCommand, PrimitiveStyle, ScreenPoint, ScreenRect, SpriteCommand, TexturedQuad,
+    TexturedTriangle, TexturedVertex, UvRect,
 };
 use crust_renderer::projection::Viewport;
 use crust_renderer::texture::{DecodedTexture, Rgba8};
@@ -46,6 +47,8 @@ pub struct VisualState {
     pub show_loading_image: bool,
     /// Nonlinear black-overlay alpha selected by the native title fade.
     pub title_overlay_alpha: u8,
+    /// Fixed 0..=65535 blend from the preceding 30 Hz scene to the current one.
+    pub interpolation_alpha: u16,
 }
 
 /// Zone-authored colors painted by native `GLClear` before any OT primitive.
@@ -160,6 +163,8 @@ pub struct GlStage {
     loading_image_dimensions: Option<[i32; 2]>,
     title_image_dimensions: Option<[i32; 2]>,
     retail_scene_commands: Vec<RetailSceneCommand>,
+    retail_scene_location: Option<(u32, u32)>,
+    interpolation_origins: Vec<Option<PrimitiveCommand>>,
     retail_scene_textures: BTreeMap<TextureHandle, Arc<DecodedTexture>>,
     retail_background_fill: Option<RetailBackgroundFill>,
     last_error: u32,
@@ -174,6 +179,8 @@ impl GlStage {
             loading_image_dimensions: None,
             title_image_dimensions: None,
             retail_scene_commands: Vec::new(),
+            retail_scene_location: None,
+            interpolation_origins: Vec::new(),
             retail_scene_textures: BTreeMap::new(),
             retail_background_fill: None,
             last_error: 0,
@@ -281,7 +288,15 @@ impl GlStage {
             .into_iter()
             .chain(plan.incoming_handles.iter().copied())
             .collect::<Vec<_>>();
+        let scene_location = (scene.zone.raw(), scene.path_index);
+        let interpolation_origins = if self.retail_scene_location == Some(scene_location) {
+            interpolation_origins(&self.retail_scene_commands, &scene.commands)
+        } else {
+            vec![None; scene.commands.len()]
+        };
         self.retail_scene_commands = scene.commands;
+        self.retail_scene_location = Some(scene_location);
+        self.interpolation_origins = interpolation_origins;
         self.retail_scene_textures = scene
             .textures
             .into_iter()
@@ -292,13 +307,13 @@ impl GlStage {
         Ok(diagnostics)
     }
 
-    pub fn render(&mut self, state: VisualState) -> Result<(), JsValue> {
+    pub fn render(&mut self, state: VisualState, viewport: Viewport) -> Result<(), JsValue> {
         self.ordering.clear();
 
         if state.show_retail_scene
             && let Some(background_fill) = self.retail_background_fill
         {
-            for primitive in retail_background_commands(background_fill) {
+            for primitive in retail_background_commands(background_fill, viewport) {
                 self.ordering
                     .submit_overlay(RETAIL_BACKGROUND_DEPTH, primitive)
                     .map_err(|error| command_error(&error))?;
@@ -315,9 +330,18 @@ impl GlStage {
         }
 
         if state.show_retail_scene {
-            for command in &self.retail_scene_commands {
+            for (index, command) in self.retail_scene_commands.iter().enumerate() {
+                let primitive = self
+                    .interpolation_origins
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .filter(|_| state.interpolation_alpha < u16::MAX)
+                    .and_then(|origin| {
+                        interpolate_primitive(origin, &command.primitive, state.interpolation_alpha)
+                    })
+                    .unwrap_or_else(|| command.primitive.clone());
                 self.ordering
-                    .submit(command.depth, command.source, command.primitive.clone())
+                    .submit(command.depth, command.source, primitive)
                     .map_err(|error| command_error(&error))?;
             }
         }
@@ -328,7 +352,7 @@ impl GlStage {
             self.submit_image(LOADING_IMAGE_HANDLE, LOADING_IMAGE_DEPTH, width, height)?;
         }
 
-        let frame = self.ordering.generate(Viewport::PSX);
+        let frame = self.ordering.generate(viewport);
         let diagnostics = self
             .backend
             .render(
@@ -390,12 +414,16 @@ fn opaque_rgb([r, g, b]: [u8; 3]) -> Rgba8 {
     Rgba8 { r, g, b, a: 255 }
 }
 
-fn retail_background_commands(fill: RetailBackgroundFill) -> [PrimitiveCommand; 2] {
+fn retail_background_commands(
+    fill: RetailBackgroundFill,
+    viewport: Viewport,
+) -> [PrimitiveCommand; 2] {
     let top_height = i32::from(fill.top_height);
     let bottom_height = i32::from(RETAIL_GAMEPLAY_HEIGHT - fill.top_height);
     [
-        retail_background_quad(RETAIL_GAMEPLAY_TOP, top_height, fill.top_color),
+        retail_background_quad(viewport, RETAIL_GAMEPLAY_TOP, top_height, fill.top_color),
         retail_background_quad(
+            viewport,
             RETAIL_GAMEPLAY_TOP + top_height,
             bottom_height,
             fill.bottom_color,
@@ -403,22 +431,188 @@ fn retail_background_commands(fill: RetailBackgroundFill) -> [PrimitiveCommand; 
     ]
 }
 
-fn retail_background_quad(y: i32, height: i32, color: Rgba8) -> PrimitiveCommand {
+fn retail_background_quad(
+    viewport: Viewport,
+    y: i32,
+    height: i32,
+    color: Rgba8,
+) -> PrimitiveCommand {
     let bottom = y.saturating_add(height);
+    let right = viewport
+        .x
+        .saturating_add(i32::try_from(viewport.width).unwrap_or(i32::MAX));
     let vertex = |x, y| ColoredVertex {
         position: ScreenPoint { x, y, z: -1 },
         color,
     };
     PrimitiveCommand::ColoredQuad(ColoredQuad {
         vertices: [
-            vertex(-256, y),
-            vertex(256, y),
-            vertex(-256, bottom),
-            vertex(256, bottom),
+            vertex(viewport.x, y),
+            vertex(right, y),
+            vertex(viewport.x, bottom),
+            vertex(right, bottom),
         ],
         blend: BlendMode::Opaque,
         style: PrimitiveStyle::Fill,
     })
+}
+
+fn interpolation_origins(
+    previous: &[RetailSceneCommand],
+    current: &[RetailSceneCommand],
+) -> Vec<Option<PrimitiveCommand>> {
+    let mut previous_ordinals = HashMap::<CommandSource, usize>::new();
+    let mut previous_by_key = HashMap::new();
+    for command in previous {
+        let ordinal = previous_ordinals.entry(command.source).or_default();
+        previous_by_key.insert((command.source, *ordinal), &command.primitive);
+        *ordinal = ordinal.saturating_add(1);
+    }
+
+    let mut current_ordinals = HashMap::<CommandSource, usize>::new();
+    current
+        .iter()
+        .map(|command| {
+            let ordinal = current_ordinals.entry(command.source).or_default();
+            let origin = previous_by_key
+                .get(&(command.source, *ordinal))
+                .map(|primitive| (*primitive).clone());
+            *ordinal = ordinal.saturating_add(1);
+            origin
+        })
+        .collect()
+}
+
+fn interpolate_primitive(
+    previous: &PrimitiveCommand,
+    current: &PrimitiveCommand,
+    alpha: u16,
+) -> Option<PrimitiveCommand> {
+    match (previous, current) {
+        (
+            PrimitiveCommand::ColoredTriangle(previous),
+            PrimitiveCommand::ColoredTriangle(current),
+        ) if previous.blend == current.blend && previous.style == current.style => {
+            let mut output: ColoredTriangle = current.clone();
+            output.vertices = std::array::from_fn(|index| {
+                interpolate_colored_vertex(previous.vertices[index], current.vertices[index], alpha)
+            });
+            Some(PrimitiveCommand::ColoredTriangle(output))
+        }
+        (
+            PrimitiveCommand::TexturedTriangle(previous),
+            PrimitiveCommand::TexturedTriangle(current),
+        ) if previous.texture == current.texture && previous.blend == current.blend => {
+            let mut output: TexturedTriangle = current.clone();
+            output.vertices = std::array::from_fn(|index| {
+                interpolate_textured_vertex(
+                    previous.vertices[index],
+                    current.vertices[index],
+                    alpha,
+                )
+            });
+            Some(PrimitiveCommand::TexturedTriangle(output))
+        }
+        (PrimitiveCommand::ColoredQuad(previous), PrimitiveCommand::ColoredQuad(current))
+            if previous.blend == current.blend && previous.style == current.style =>
+        {
+            let mut output: ColoredQuad = current.clone();
+            output.vertices = std::array::from_fn(|index| {
+                interpolate_colored_vertex(previous.vertices[index], current.vertices[index], alpha)
+            });
+            Some(PrimitiveCommand::ColoredQuad(output))
+        }
+        (PrimitiveCommand::TexturedQuad(previous), PrimitiveCommand::TexturedQuad(current))
+            if previous.texture == current.texture && previous.blend == current.blend =>
+        {
+            let mut output: TexturedQuad = current.clone();
+            output.vertices = std::array::from_fn(|index| {
+                interpolate_textured_vertex(
+                    previous.vertices[index],
+                    current.vertices[index],
+                    alpha,
+                )
+            });
+            Some(PrimitiveCommand::TexturedQuad(output))
+        }
+        (PrimitiveCommand::Sprite(previous), PrimitiveCommand::Sprite(current))
+            if previous.texture == current.texture && previous.blend == current.blend =>
+        {
+            let mut output: SpriteCommand = current.clone();
+            output.rect = ScreenRect {
+                x: interpolate_i32(previous.rect.x, current.rect.x, alpha),
+                y: interpolate_i32(previous.rect.y, current.rect.y, alpha),
+                width: interpolate_i32(previous.rect.width, current.rect.width, alpha),
+                height: interpolate_i32(previous.rect.height, current.rect.height, alpha),
+            };
+            output.depth = interpolate_i32(previous.depth, current.depth, alpha);
+            output.color = interpolate_color(previous.color, current.color, alpha);
+            Some(PrimitiveCommand::Sprite(output))
+        }
+        _ => None,
+    }
+}
+
+fn interpolate_colored_vertex(
+    previous: ColoredVertex,
+    current: ColoredVertex,
+    alpha: u16,
+) -> ColoredVertex {
+    ColoredVertex {
+        position: interpolate_point(previous.position, current.position, alpha),
+        color: interpolate_color(previous.color, current.color, alpha),
+    }
+}
+
+fn interpolate_textured_vertex(
+    previous: TexturedVertex,
+    current: TexturedVertex,
+    alpha: u16,
+) -> TexturedVertex {
+    TexturedVertex {
+        position: interpolate_point(previous.position, current.position, alpha),
+        color: interpolate_color(previous.color, current.color, alpha),
+        // Texture animation and page replacement remain authoritative at the
+        // 30 Hz boundary; only geometry and lighting are smoothed.
+        uv: current.uv,
+    }
+}
+
+fn interpolate_point(previous: ScreenPoint, current: ScreenPoint, alpha: u16) -> ScreenPoint {
+    ScreenPoint {
+        x: interpolate_i32(previous.x, current.x, alpha),
+        y: interpolate_i32(previous.y, current.y, alpha),
+        z: interpolate_i32(previous.z, current.z, alpha),
+    }
+}
+
+fn interpolate_color(previous: Rgba8, current: Rgba8, alpha: u16) -> Rgba8 {
+    Rgba8 {
+        r: interpolate_u8(previous.r, current.r, alpha),
+        g: interpolate_u8(previous.g, current.g, alpha),
+        b: interpolate_u8(previous.b, current.b, alpha),
+        a: interpolate_u8(previous.a, current.a, alpha),
+    }
+}
+
+fn interpolate_i32(previous: i32, current: i32, alpha: u16) -> i32 {
+    let previous = i64::from(previous);
+    let delta = i64::from(current).saturating_sub(previous);
+    let scaled = delta.saturating_mul(i64::from(alpha)) / i64::from(u16::MAX);
+    i32::try_from(previous.saturating_add(scaled)).unwrap_or_else(|_| {
+        if delta.is_negative() {
+            i32::MIN
+        } else {
+            i32::MAX
+        }
+    })
+}
+
+fn interpolate_u8(previous: u8, current: u8, alpha: u16) -> u8 {
+    let previous = i32::from(previous);
+    let delta = i32::from(current) - previous;
+    let scaled = delta * i32::from(alpha) / i32::from(u16::MAX);
+    u8::try_from((previous + scaled).clamp(0, 255)).unwrap_or_default()
 }
 
 fn plan_retail_scene_update(
@@ -534,6 +728,70 @@ mod tests {
         }
     }
 
+    fn colored_command(source: CommandSource, x: i32) -> RetailSceneCommand {
+        let vertex = |offset| ColoredVertex {
+            position: ScreenPoint {
+                x: x + offset,
+                y: 4,
+                z: 8,
+            },
+            color: Rgba8 {
+                r: u8::try_from(x.clamp(0, 255)).unwrap(),
+                g: 20,
+                b: 30,
+                a: 255,
+            },
+        };
+        RetailSceneCommand {
+            depth: 7,
+            source,
+            primitive: PrimitiveCommand::ColoredTriangle(ColoredTriangle {
+                vertices: [vertex(0), vertex(1), vertex(2)],
+                blend: BlendMode::Opaque,
+                style: PrimitiveStyle::Fill,
+            }),
+        }
+    }
+
+    #[test]
+    fn interpolation_matches_repeated_sources_by_stable_emission_ordinal() {
+        let source = CommandSource::Object { handle: 9, part: 2 };
+        let previous = [colored_command(source, 10), colored_command(source, 20)];
+        let current = [colored_command(source, 30), colored_command(source, 40)];
+        let origins = interpolation_origins(&previous, &current);
+        assert_eq!(
+            origins,
+            previous
+                .iter()
+                .map(|command| Some(command.primitive.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn interpolation_preserves_authoritative_endpoints_and_smooths_positions() {
+        let source = CommandSource::World {
+            zone: 1,
+            polygon: 2,
+        };
+        let previous = colored_command(source, 10).primitive;
+        let current = colored_command(source, 30).primitive;
+        assert_eq!(
+            interpolate_primitive(&previous, &current, 0),
+            Some(previous.clone())
+        );
+        assert_eq!(
+            interpolate_primitive(&previous, &current, u16::MAX),
+            Some(current.clone())
+        );
+        let midpoint = interpolate_primitive(&previous, &current, u16::MAX / 2).unwrap();
+        let PrimitiveCommand::ColoredTriangle(midpoint) = midpoint else {
+            panic!("colored input must remain colored");
+        };
+        assert_eq!(midpoint.vertices[0].position.x, 19);
+        assert_eq!(midpoint.vertices[2].position.x, 21);
+    }
+
     #[test]
     fn retail_background_fill_matches_native_display_flags_and_bounds() {
         let fill = RetailBackgroundFill::for_zone(
@@ -577,7 +835,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        let [top, bottom] = retail_background_commands(fill);
+        let [top, bottom] = retail_background_commands(fill, Viewport::PSX);
         let vertices = |primitive: PrimitiveCommand| match primitive {
             PrimitiveCommand::ColoredQuad(quad) => quad.vertices,
             _ => panic!("background must use an untextured opaque quad"),
@@ -632,6 +890,20 @@ mod tests {
                 },
             ]
         );
+
+        let ultrawide = Viewport {
+            x: -448,
+            y: -120,
+            width: 896,
+            height: 240,
+        };
+        let [wide_top, wide_bottom] = retail_background_commands(fill, ultrawide);
+        for quad in [wide_top, wide_bottom].map(vertices) {
+            assert_eq!(quad[0].position.x, -448);
+            assert_eq!(quad[1].position.x, 448);
+            assert_eq!(quad[2].position.x, -448);
+            assert_eq!(quad[3].position.x, 448);
+        }
     }
 
     #[test]

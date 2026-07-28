@@ -21,7 +21,7 @@ images, composes image-backed retail title states from MDAT/IPAL/IMAG entries, a
 renderer command backend. Title presentation preserves the source type-zero MDAT category mask,
 latches display/animate through the source `GOOL → TitleUpdate → TitleLoadState → GLUpdate`
 transaction and draws the native 16-level nonlinear black overlay. `RetailRuntime` owns that
-transition; `RetailFlowMirror` is a passive screen mirror and cannot advance a second fade clock. The 4:3
+transition; `RetailFlowMirror` is a passive screen mirror and cannot advance a second fade clock. The default 4:3
 output is authored-scene only: until mounted retail objects produce a scene, it
 shows a loading/error diagnostic with no synthetic menu, password/options UI, or gameplay geometry.
 For the 40 world-bearing playable starts, gameplay presents bounds-checked
@@ -607,6 +607,14 @@ The exact identity is available as `window.__crustBuild` and is used to version 
 JavaScript and Wasm requests, so an already-cached prototype bundle cannot silently reappear. Web
 builds are staged under ignored `target/` storage and replace `dist/` only after compilation,
 binding generation, and source-stability checks succeed.
+
+The collapsed **Optional display upgrades** panel keeps retail presentation as the default and
+offers a presentation-only 60+ Hz interpolation layer, wider 16:9 or 21:9 logical viewports,
+15/30/45% camera zoom-out presets, fixed 720p–2160p internal resolutions, and an extended-world
+mode. Simulation, GOOL, collision, input, audio, and object activation remain authoritative at
+30 Hz. The current extended-world slice removes the active ZDAT world's retail SLST pop-in for
+ordinary geometry while retaining the authored backdrop subset; it does not wake off-screen
+objects or alter gameplay timing.
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one

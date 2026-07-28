@@ -26,6 +26,8 @@ mod browser_spawn;
 mod card_persistence;
 #[cfg(target_arch = "wasm32")]
 mod disc_import;
+#[cfg(any(target_arch = "wasm32", test))]
+mod display;
 #[cfg(target_arch = "wasm32")]
 mod dom;
 #[cfg(any(target_arch = "wasm32", test))]

@@ -67,7 +67,7 @@ use crust_sim::retail_runtime::{
     RetailTraversalBoundary, RetailZoneEnvironment, RuntimeCleanupAction, RuntimeError,
     RuntimeFrame, RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
 };
-use crust_sim::scheduler::{FrameDecision, FrameScheduler};
+use crust_sim::scheduler::{FRAME_US, FrameDecision, FrameScheduler};
 use crust_sim::zone_lifecycle::{
     OrderedZoneLoadList, ZONE_OBJECTS_ACTIVE, ZoneLifecycle, ZoneLifecycleZone,
     ZoneTransitionAction,
@@ -88,14 +88,15 @@ use crate::browser_spawn::{
 };
 use crate::card_persistence::CardPersistIntent;
 use crate::disc_import::discover_disc;
+use crate::display::DisplaySettings;
 use crate::dom::{Dom, window};
 use crate::pbak_runtime::{
     PbakFrameTiming, RetailPbakPlayback, pbak_event_pad_snapshot, prepare_pair_pbak,
 };
 use crate::retail_clock::advance_retail_shader_clock;
 use crate::retail_scene::{
-    RetailMapPathAnimation, RetailSceneBuilder, RetailSceneProgressLocation,
-    RetailWorldShaderRenderState,
+    RetailMapPathAnimation, RetailSceneBuilder, RetailScenePresentation,
+    RetailSceneProgressLocation, RetailWorldShaderRenderState,
 };
 use crate::storage::StorageState;
 use crate::title_runtime::{
@@ -175,6 +176,9 @@ fn round_retail_ticks(ticks: i32) -> i32 {
 
 pub fn boot() -> Result<(), JsValue> {
     let dom = Dom::find()?;
+    let display_settings = dom.display_settings();
+    dom.apply_display_settings(display_settings)?;
+    dom.sync_canvas_resolution(display_settings);
     let debug = Object::new();
     let browser_window = window()?;
     Reflect::set(
@@ -195,6 +199,7 @@ pub fn boot() -> Result<(), JsValue> {
         busy: false,
         locked: false,
         muted: false,
+        display_settings,
         debug,
         #[cfg(feature = "browser-test-harness")]
         browser_test_input: BrowserTestPadInput::default(),
@@ -220,6 +225,7 @@ struct App {
     busy: bool,
     locked: bool,
     muted: bool,
+    display_settings: DisplaySettings,
     debug: Object,
     #[cfg(feature = "browser-test-harness")]
     browser_test_input: BrowserTestPadInput,
@@ -249,6 +255,15 @@ impl App {
     }
 
     fn frame(&mut self, timestamp_ms: f64) -> Result<Option<FormatLevelId>, JsValue> {
+        let display_settings = self.dom.display_settings();
+        if display_settings != self.display_settings {
+            self.display_settings = display_settings;
+            self.dom.apply_display_settings(display_settings)?;
+            if let Some(runtime) = &mut self.runtime {
+                runtime.set_display_settings(display_settings);
+            }
+        }
+        self.dom.sync_canvas_resolution(display_settings);
         #[cfg(not(feature = "browser-test-harness"))]
         let held = self.keyboard_bits | self.mouse_bits() | self.touch_bits() | poll_gamepad()?;
         #[cfg(feature = "browser-test-harness")]
@@ -401,7 +416,14 @@ impl App {
         } else {
             LevelAccessMode::Progression
         };
-        let mut runtime = Runtime::new(pair, storage, physical_held, level_access, &self.dom)?;
+        let mut runtime = Runtime::new(
+            pair,
+            storage,
+            physical_held,
+            level_access,
+            self.display_settings,
+            &self.dom,
+        )?;
         runtime.set_muted(self.muted);
         self.runtime = Some(runtime);
         self.busy = false;
@@ -917,6 +939,7 @@ struct Runtime {
     card: VirtualCard,
     resume: ResumeManager,
     level_access: LevelAccessMode,
+    display_settings: DisplaySettings,
     /// Last payload successfully read from retail GOOL globals. This is the
     /// only persistence fallback used if an impossible fixed-allocation VM
     /// read fails; no high-level mirror state is serialized.
@@ -938,6 +961,7 @@ impl Runtime {
         mut storage: Option<StorageState>,
         physical_held: u16,
         level_access: LevelAccessMode,
+        display_settings: DisplaySettings,
         dom: &Dom,
     ) -> Result<Self, JsValue> {
         let raw_level = u8::try_from(pair.level.get())
@@ -1220,6 +1244,7 @@ impl Runtime {
             card,
             resume,
             level_access,
+            display_settings,
             last_authoritative_save,
             // Even the first authored title screen enters through
             // TitleLoadScreen's flag-two LevelUpdate. `sync_title_card` below
@@ -1246,6 +1271,10 @@ impl Runtime {
             .apply_prepared_retail_music(initial_music, true, initial_zone, dom)
             .map_err(|error| JsValue::from_str(&error))?;
         Ok(runtime)
+    }
+
+    fn set_display_settings(&mut self, settings: DisplaySettings) {
+        self.display_settings = settings;
     }
 
     fn take_asset_request(&mut self) -> Option<FormatLevelId> {
@@ -2416,18 +2445,32 @@ impl Runtime {
                 )
             })
             .unwrap_or_default();
-        self.stage.render(VisualState {
-            show_title_image,
-            // Type-three title screens composite animated GOOL objects over
-            // their MDAT image. Type-zero screens suppress even a scene still
-            // resident from the preceding state before the next 30 Hz step.
-            show_retail_scene: !assets_stalled
-                && (!pbak_draw_suppressed || !pbak_holds_loading_image)
-                && (!show_title_image || show_title_objects),
-            show_loading_image: !assets_stalled
-                && (self.show_loading_image || (pbak_draw_suppressed && pbak_holds_loading_image)),
-            title_overlay_alpha,
-        })?;
+        let interpolation_alpha = if self.display_settings.smooth_motion {
+            self.previous_step_us.map_or(u16::MAX, |previous| {
+                let elapsed = now_us.saturating_sub(previous).min(FRAME_US);
+                let scaled = elapsed.saturating_mul(u64::from(u16::MAX)) / FRAME_US;
+                u16::try_from(scaled).unwrap_or(u16::MAX)
+            })
+        } else {
+            u16::MAX
+        };
+        self.stage.render(
+            VisualState {
+                show_title_image,
+                // Type-three title screens composite animated GOOL objects over
+                // their MDAT image. Type-zero screens suppress even a scene still
+                // resident from the preceding state before the next 30 Hz step.
+                show_retail_scene: !assets_stalled
+                    && (!pbak_draw_suppressed || !pbak_holds_loading_image)
+                    && (!show_title_image || show_title_objects),
+                show_loading_image: !assets_stalled
+                    && (self.show_loading_image
+                        || (pbak_draw_suppressed && pbak_holds_loading_image)),
+                title_overlay_alpha,
+                interpolation_alpha,
+            },
+            self.display_settings.aspect.logical_viewport(),
+        )?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
         Ok(())
@@ -3407,6 +3450,18 @@ impl Runtime {
         let field_of_view = self
             .effective_retail_field_of_view()
             .map_err(|error| JsValue::from_str(&error))?;
+        let authored_projection = retail_screen_projection(field_of_view).ok_or_else(|| {
+            JsValue::from_str(&format!(
+                "retail field of view {field_of_view} has no projection constant"
+            ))
+        })?;
+        let presentation = RetailScenePresentation {
+            projection_distance: Some(
+                self.display_settings
+                    .projection_distance(authored_projection),
+            ),
+            extended_world: self.display_settings.extended_world,
+        };
         let background_fill = retail_background_fill_for_zone(
             &self.retail_zones,
             background_zone,
@@ -3416,7 +3471,7 @@ impl Runtime {
         .map_err(|error| JsValue::from_str(&error))?;
         let scene = self
             .retail_scene_builder
-            .build_at_progress_with_runtime_snapshots(
+            .build_at_progress_with_runtime_snapshots_and_presentation(
                 &self.level_assets.nsd,
                 &self.level_assets.nsf,
                 &self.level_assets.nsf_bytes,
@@ -3437,6 +3492,7 @@ impl Runtime {
                 texture_frame_snapshot,
                 world_shader_snapshot,
                 &mut self.retail_world_shader_render_state,
+                presentation,
             )
             .map_err(|error| {
                 JsValue::from_str(&format!(

@@ -84,6 +84,54 @@
                 </select>
               </div>
             </div>
+
+            <details class="display-upgrades">
+              <summary>Optional display upgrades</summary>
+              <div class="display-upgrade-grid">
+                <label class="display-toggle" for="smoothMotion">
+                  <input id="smoothMotion" type="checkbox">
+                  <span>
+                    <strong>Smooth 60+ Hz motion</strong>
+                    <small>Interpolates display frames; gameplay remains exactly 30 Hz</small>
+                  </span>
+                </label>
+                <label class="display-toggle" for="extendedWorld">
+                  <input id="extendedWorld" type="checkbox">
+                  <span>
+                    <strong>Extended world render</strong>
+                    <small>Draws geometry beyond the retail camera visibility list</small>
+                  </span>
+                </label>
+                <label for="cameraZoom">
+                  <span>Camera view</span>
+                  <select id="cameraZoom">
+                    <option value="100">Retail distance</option>
+                    <option value="85">Zoom out 15%</option>
+                    <option value="70">Zoom out 30%</option>
+                    <option value="55">Zoom out 45%</option>
+                  </select>
+                </label>
+                <label for="outputAspect">
+                  <span>Aspect ratio</span>
+                  <select id="outputAspect">
+                    <option value="4:3">Original 4:3</option>
+                    <option value="16:9">Uncropped 16:9</option>
+                    <option value="21:9">Uncropped 21:9</option>
+                  </select>
+                </label>
+                <label for="renderResolution">
+                  <span>Internal resolution</span>
+                  <select id="renderResolution">
+                    <option value="native">Native display</option>
+                    <option value="720">720p</option>
+                    <option value="1080">1080p</option>
+                    <option value="1440">1440p</option>
+                    <option value="2160">2160p / 4K</option>
+                  </select>
+                </label>
+              </div>
+              <p>These options affect presentation only. Off-screen objects keep retail activation and timing.</p>
+            </details>
           </div>
         </div>
 

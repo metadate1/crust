@@ -5,6 +5,8 @@ use web_sys::{
     HtmlProgressElement, HtmlSelectElement, Window,
 };
 
+use crate::display::{DisplaySettings, OutputAspect, RenderResolution};
+
 pub fn window() -> Result<Window, JsValue> {
     web_sys::window().ok_or_else(|| JsValue::from_str("browser window is unavailable"))
 }
@@ -41,6 +43,11 @@ pub struct Dom {
     pub asset_message: HtmlElement,
     pub boot_level: HtmlSelectElement,
     pub unlock_all: HtmlInputElement,
+    pub smooth_motion: HtmlInputElement,
+    pub extended_world: HtmlInputElement,
+    pub camera_zoom: HtmlSelectElement,
+    pub output_aspect: HtmlSelectElement,
+    pub render_resolution: HtmlSelectElement,
     pub launch: HtmlButtonElement,
     pub clear: HtmlButtonElement,
     pub import_progress: HtmlElement,
@@ -51,6 +58,7 @@ pub struct Dom {
     pub mute: HtmlButtonElement,
     pub fullscreen: HtmlButtonElement,
     pub sim_state: HtmlElement,
+    pub frame_rate: HtmlElement,
     pub current_level: HtmlElement,
     pub audio_state: HtmlElement,
     pub card_state: HtmlElement,
@@ -84,6 +92,11 @@ impl Dom {
             asset_message: by_id(&document, "assetMessage")?,
             boot_level: by_id(&document, "bootLevel")?,
             unlock_all: by_id(&document, "unlockAll")?,
+            smooth_motion: by_id(&document, "smoothMotion")?,
+            extended_world: by_id(&document, "extendedWorld")?,
+            camera_zoom: by_id(&document, "cameraZoom")?,
+            output_aspect: by_id(&document, "outputAspect")?,
+            render_resolution: by_id(&document, "renderResolution")?,
             launch: by_id(&document, "launch")?,
             clear: by_id(&document, "clearData")?,
             import_progress: by_id(&document, "importProgress")?,
@@ -94,6 +107,7 @@ impl Dom {
             mute: by_id(&document, "mute")?,
             fullscreen: by_id(&document, "fullscreen")?,
             sim_state: by_id(&document, "simState")?,
+            frame_rate: by_id(&document, "frameRate")?,
             current_level: by_id(&document, "currentLevel")?,
             audio_state: by_id(&document, "audioState")?,
             card_state: by_id(&document, "cardState")?,
@@ -177,6 +191,73 @@ impl Dom {
         };
         let _ = self.fullscreen.set_attribute("title", fullscreen_hint);
     }
+
+    #[must_use]
+    pub fn display_settings(&self) -> DisplaySettings {
+        let projection_percent = self
+            .camera_zoom
+            .value()
+            .parse::<u32>()
+            .ok()
+            .filter(|value| matches!(*value, 55 | 70 | 85 | 100))
+            .unwrap_or(100);
+        DisplaySettings {
+            smooth_motion: self.smooth_motion.checked(),
+            extended_world: self.extended_world.checked(),
+            projection_percent,
+            aspect: OutputAspect::from_value(&self.output_aspect.value()),
+            resolution: RenderResolution::from_value(&self.render_resolution.value()),
+        }
+    }
+
+    pub fn apply_display_settings(&self, settings: DisplaySettings) -> Result<(), JsValue> {
+        self.screen
+            .set_attribute("data-display-aspect", settings.aspect.value())?;
+        self.frame_rate
+            .set_text_content(Some(if settings.smooth_motion {
+                "30 Hz sim / 60+ Hz display"
+            } else {
+                "30.00 Hz"
+            }));
+        Ok(())
+    }
+
+    pub fn sync_canvas_resolution(&self, settings: DisplaySettings) {
+        let (width, height) = match settings.resolution {
+            RenderResolution::Native => {
+                let scale = window().map_or(1.0, |window| window.device_pixel_ratio());
+                let width = (f64::from(self.canvas.client_width().max(1)) * scale).round();
+                let height = (f64::from(self.canvas.client_height().max(1)) * scale).round();
+                (safe_canvas_dimension(width), safe_canvas_dimension(height))
+            }
+            RenderResolution::Fixed(height) => {
+                let (numerator, denominator) = settings.aspect.ratio();
+                let width = height
+                    .saturating_mul(numerator)
+                    .saturating_add(denominator / 2)
+                    / denominator;
+                (width.clamp(1, 12_288), height.clamp(1, 12_288))
+            }
+        };
+        if self.canvas.width() != width {
+            self.canvas.set_width(width);
+        }
+        if self.canvas.height() != height {
+            self.canvas.set_height(height);
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite value is clamped to the exact positive u32 subrange before conversion"
+)]
+fn safe_canvas_dimension(value: f64) -> u32 {
+    if !value.is_finite() {
+        return 1;
+    }
+    value.clamp(1.0, 12_288.0) as u32
 }
 
 #[allow(dead_code)]

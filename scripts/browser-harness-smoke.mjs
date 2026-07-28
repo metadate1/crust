@@ -347,6 +347,7 @@ function normalizeExpectation(raw, label) {
         "retailHardRestarts",
         "retailLoadStates",
         "retailDeathCameraFrames",
+        "lifeCount",
         "minFrame",
         "minRetailFrame",
         "minRetailExecutions",
@@ -664,6 +665,15 @@ export function expectationFailures(expectation, snapshot) {
           JSON.stringify(debug[debugName]),
       );
     }
+  }
+  if (
+    expectation.lifeCount !== undefined &&
+    debug.browserTestGlobals?.lifeCount !== expectation.lifeCount
+  ) {
+    failures.push(
+      `lifeCount: expected ${expectation.lifeCount}, received ` +
+        JSON.stringify(debug.browserTestGlobals?.lifeCount),
+    );
   }
   if (expectation.liveObject !== undefined) {
     failures.push(

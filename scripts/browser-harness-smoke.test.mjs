@@ -192,6 +192,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
       retailHardRestarts: 0,
       retailLoadStates: 0,
       retailDeathCameraFrames: 0,
+      lifeCount: 3 << 8,
       minRetailExecutions: 1,
     },
   });
@@ -217,6 +218,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
   assert.equal(replay.expect.retailHardRestarts, 0);
   assert.equal(replay.expect.retailLoadStates, 0);
   assert.equal(replay.expect.retailDeathCameraFrames, 0);
+  assert.equal(replay.expect.lifeCount, 3 << 8);
   assert.equal(
     normalizeReplay(
       { schema: 1, bootLid: 0x19, segments: [{ frames: 1, held: 0 }] },
@@ -398,6 +400,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailHardRestarts: 0,
         retailLoadStates: 0,
         retailDeathCameraFrames: 0,
+        lifeCount: 3 << 8,
         minFrame: 64,
         minRetailExecutions: 1,
       },
@@ -411,6 +414,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
           retailHardRestarts: 0,
           retailLoadStates: 0,
           retailDeathCameraFrames: 0,
+          browserTestGlobals: { lifeCount: 3 << 8 },
           frame: 64,
           retailExecutions: 9,
         },
@@ -426,6 +430,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailHardRestarts: 0,
         retailLoadStates: 0,
         retailDeathCameraFrames: 0,
+        lifeCount: 3 << 8,
         minRetailFrame: 65,
       },
       {
@@ -435,11 +440,12 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
           retailHardRestarts: 2,
           retailLoadStates: 1,
           retailDeathCameraFrames: 17,
+          browserTestGlobals: { lifeCount: 4 << 8 },
           retailFrame: 2,
         },
       },
     ).join("\n"),
-    /currentLid.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*retailFrame/s,
+    /currentLid.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*retailFrame.*lifeCount/s,
   );
 });
 

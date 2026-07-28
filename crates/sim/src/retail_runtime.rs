@@ -501,6 +501,9 @@ pub struct BrowserTestLiveObject {
     pub status_b: u32,
     pub status_c: u32,
     pub state_flags: u32,
+    /// Raw GOOL register 65. WillC owns the authoritative 24.8 life stock here
+    /// between stable publications to global 24.
+    pub register_65: u32,
     pub is_player: bool,
     pub collider: Option<RuntimeObjectHandle>,
     pub faulted: bool,
@@ -4940,6 +4943,9 @@ impl RetailRuntime {
                     .map_err(BrowserTestLiveObjectError::Vm)?,
                 state_flags: process
                     .register(process_register::STATE_FLAGS)
+                    .map_err(BrowserTestLiveObjectError::Vm)?,
+                register_65: process
+                    .register(65)
                     .map_err(BrowserTestLiveObjectError::Vm)?,
                 is_player: process.browser_test_is_main_player(),
                 collider,
@@ -10101,6 +10107,7 @@ mod tests {
                 (process_register::STATUS_C, 0x99aa_bbcc),
                 (process_register::STATE_FLAGS, 0xddee_ff00),
                 (process_register::SUBTYPE, 0x123),
+                (65, 0x345),
             ] {
                 process.set_register(register, value).unwrap();
             }
@@ -10157,6 +10164,7 @@ mod tests {
         assert_eq!(obstacle_snapshot.status_b, 0x5566_7788);
         assert_eq!(obstacle_snapshot.status_c, 0x99aa_bbcc);
         assert_eq!(obstacle_snapshot.state_flags, 0xddee_ff00);
+        assert_eq!(obstacle_snapshot.register_65, 0x345);
         assert!(!obstacle_snapshot.is_player);
         assert_eq!(obstacle_snapshot.collider, None);
         assert!(!obstacle_snapshot.faulted);

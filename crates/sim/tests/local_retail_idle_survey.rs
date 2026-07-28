@@ -82,6 +82,7 @@ const CHECKPOINT_ID_GLOBAL: usize = 69;
 const PBAK_STATE_GLOBAL: usize = 105;
 const CHECKPOINT_TRANSLATION_GLOBALS: [usize; 3] = [102, 103, 104];
 const PROCESS_LINK_COLLIDER: usize = 6;
+const PLAYER_LIFE_STOCK_REGISTER: usize = 65;
 const INSTRUCTION_BUDGET: usize = 67;
 const DEFAULT_SURVEY_FRAMES: u32 = 360;
 const DEFAULT_PROGRESSION_FRAMES: u32 = 18_000;
@@ -46301,6 +46302,15 @@ struct DirectSendProgramSample {
     recipient: Option<Eid>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlayerLifeEventSample {
+    frame: u32,
+    event: u32,
+    sender: VmObjectHandle,
+    recipient_program: Option<Eid>,
+    argument: u32,
+}
+
 /// Browser-compatible controller history retained across stream remounts.
 ///
 /// Native calls `PadUpdate` once from `CoreObjectsCreate`, then again at
@@ -46412,6 +46422,8 @@ struct LevelSurvey {
     entity_state_samples: Vec<(u32, u16, u16)>,
     entity_counter_samples: Vec<(u32, u16, u32)>,
     direct_send_program_samples: Vec<DirectSendProgramSample>,
+    player_life_samples: Vec<(u32, u32)>,
+    player_life_event_samples: Vec<PlayerLifeEventSample>,
     first_frame_phase: Option<FirstFramePhase>,
     persistent_pad_frame_samples: Vec<PersistentPadFrameSample>,
     next_lid: Option<(u32, i32)>,
@@ -46477,6 +46489,8 @@ impl LevelSurvey {
             entity_state_samples: Vec::new(),
             entity_counter_samples: Vec::new(),
             direct_send_program_samples: Vec::new(),
+            player_life_samples: Vec::new(),
+            player_life_event_samples: Vec::new(),
             first_frame_phase: None,
             persistent_pad_frame_samples: Vec::new(),
             next_lid: None,
@@ -49361,6 +49375,7 @@ fn survey_pair_with_runtime_impl(
     let mut previous_boss_state = None;
     let mut previous_boss_counter = None;
     let mut previous_pinstripe_boss_state = None;
+    let mut previous_player_life_stock = None;
     for frame in 1..=survey_frames {
         survey.frames = frame;
         runtime.set_frame_timing(34, 34);
@@ -50520,6 +50535,19 @@ fn survey_pair_with_runtime_impl(
             }
         };
         survey.executions += report.executions.len() as u64;
+        if input_profile == SurveyInputProfile::JungleDeathAkuCompletionRoute {
+            let player_life_stock = runtime
+                .arena()
+                .main_object()
+                .and_then(|arena| runtime.object_for_arena(arena))
+                .and_then(|object| runtime.machine().object(object.vm()).ok())
+                .and_then(|object| object.register(PLAYER_LIFE_STOCK_REGISTER).ok())
+                .ok_or_else(|| format!("frame {frame} has no live player life stock"))?;
+            if previous_player_life_stock != Some(player_life_stock) {
+                survey.player_life_samples.push((frame, player_life_stock));
+                previous_player_life_stock = Some(player_life_stock);
+            }
+        }
         if persistent_pad_enabled
             && input_profile == SurveyInputProfile::NSanityCompletionRoute
             && matches!(frame, 1_440 | 1_441 | 1_442 | 1_482 | 1_483 | 1_484)
@@ -50559,6 +50587,30 @@ fn survey_pair_with_runtime_impl(
         }
         for effect in &report.effects {
             survey.record_effect(frame, effect);
+            if input_profile == SurveyInputProfile::JungleDeathAkuCompletionRoute
+                && let VmEffect::SendEvent(request) = effect
+                && request.event == 0x1100
+                && request.argument_count() == 1
+                && let SendEventTarget::Direct { recipient } = request.target
+            {
+                let program = |object| {
+                    runtime
+                        .machine()
+                        .object(object)
+                        .ok()
+                        .and_then(crust_sim::gool::VmObject::program_identity)
+                        .map(GoolProgramIdentity::global_eid)
+                };
+                survey
+                    .player_life_event_samples
+                    .push(PlayerLifeEventSample {
+                        frame,
+                        event: request.event,
+                        sender: request.sender,
+                        recipient_program: program(recipient),
+                        argument: request.arguments()[0],
+                    });
+            }
             if input_profile == SurveyInputProfile::RollingStonesBrioBonus
                 && std::env::var_os("C1_SURVEY_ROLLING_BRIO_TRACE").is_some()
                 && matches!(
@@ -65545,14 +65597,38 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(jungle_survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(jungle_survey.effect_counts.get("transition"), Some(&1));
     assert_eq!(jungle_survey.effect_counts.get("load-state"), Some(&1));
+    assert_eq!(
+        jungle_survey.player_life_samples,
+        [(1, 4 << 8), (199, 3 << 8), (1_992, 4 << 8)],
+        "WillC register 65 must lose one life before LoadState and regain one only at the authored pickup"
+    );
+    assert_eq!(
+        jungle_survey.player_life_event_samples,
+        [PlayerLifeEventSample {
+            frame: 1_992,
+            event: 0x1100,
+            sender: VmObjectHandle::new(44).expect("authored pickup sender handle is valid"),
+            recipient_program: Some(
+                Eid::from_name("WillC").expect("fixed Crash program EID is valid")
+            ),
+            argument: 0x100,
+        }],
+        "the authored extra-life pickup must deliver exactly one stock increment to Crash"
+    );
     let doctor = Eid::from_name("DoctC").expect("fixed Aku program EID is valid");
     assert!(
         jungle_survey.observed_program_states.contains(&(doctor, 1)),
         "Aku must remain collectible after the authored death restart"
     );
+    let final_player = player_trace(&jungle_runtime)
+        .expect("publisher-carried Jungle player trace must remain readable")
+        .expect("publisher-carried Jungle completion must retain Crash");
+    assert_eq!(final_player.state, 32);
+    assert_eq!(final_player.event, 0x1600);
+    assert_eq!(final_player.translation, [2_193_152, 7_732_266, -2_147_072]);
     assert_eq!(
         jungle_survey.final_player_translation,
-        Some([2_193_152, 7_732_266, -2_147_072])
+        Some(final_player.translation)
     );
     let final_camera = jungle_survey
         .final_camera
@@ -65570,7 +65646,7 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(
         jungle_runtime.global_word(LIFE_COUNT_GLOBAL),
         Ok(4 << 8),
-        "characterize the unresolved death-life decrement parity gap"
+        "WillC state 32 must publish the post-pickup life stock at level completion"
     );
     assert_eq!(
         jungle_runtime.draw_count(),

@@ -5168,6 +5168,7 @@ fn browser_test_live_object_value(snapshot: &BrowserTestLiveObject) -> Result<Js
                 .map_err(|_| JsValue::from_str("retail object PC exceeds 32 bits"))?,
         ),
         ("zoneEid", snapshot.zone.raw()),
+        ("register65", snapshot.register_65),
     ] {
         Reflect::set(
             object.as_ref(),

@@ -466,6 +466,7 @@ test("live-object checkpoints match phase, motion, status, and collider identity
           state: 7,
           pc: 81,
           zoneEid: 0x2234_5679,
+          register65: 0x345,
           translation: { x: -1_234, y: 5_678, z: -90 },
           rotationYxz: { y: 111, x: 222, z: 333 },
           velocity: { x: -44, y: 55, z: -66 },
@@ -514,6 +515,7 @@ test("live-object checkpoints match phase, motion, status, and collider identity
         velocityX: -44,
         rotationY: 111,
         statusB: 0x5566_7788,
+        register65: 0x345,
         hasFrameBound: true,
         player: false,
       },
@@ -560,6 +562,7 @@ test("replay validation bounds live-object phase predicates", () => {
           liveObject: {
             executable: 9,
             subtype: 0x123,
+            register65: 0x345,
             minX: -1_300,
             maxX: -1_200,
             player: false,
@@ -572,6 +575,7 @@ test("replay validation bounds live-object phase predicates", () => {
   assert.deepEqual(replay.segments[0].expect.liveObject, {
     executable: 9,
     subtype: 0x123,
+    register65: 0x345,
     minX: -1_300,
     maxX: -1_200,
     player: false,

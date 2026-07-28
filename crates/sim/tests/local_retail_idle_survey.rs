@@ -65,8 +65,9 @@ use crust_sim::{
         CURRENT_ZONE_FLAGS_GLOBAL, CardHostResponse, ISLAND_CAMERA_ROTATION_GLOBAL,
         ISLAND_CAMERA_STATE_GLOBAL, NsfProgramError, NsfProgramHost, PagedNsfProgramHost,
         ProgramBinding, ProgramHost, RetailLevelSnapshot, RetailLevelStateContext,
-        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RetailTitleAction, RuntimeError,
-        RuntimeObjectHandle, StateProgramBinding, ZoneTerminationMode,
+        RetailRestartOutcome, RetailRuntime, RetailSessionCarry, RetailTitleAction,
+        RetailTraversalBoundary, RuntimeError, RuntimeObjectHandle, StateProgramBinding,
+        ZoneTerminationMode,
     },
     zone_lifecycle::{OrderedZoneLoadList, ZoneLifecycle, ZoneLifecycleZone, ZoneTransitionAction},
 };
@@ -45671,6 +45672,18 @@ struct FirstFramePhase {
     player: Option<PlayerTrace>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PersistentPadFrameSample {
+    frame: u32,
+    selected_held: u32,
+    camera_held: u32,
+    published: RetailPadSnapshot,
+    camera: RetailCameraLocation,
+    random_seed: u32,
+    live_objects: usize,
+    executions: usize,
+}
+
 #[derive(Debug)]
 struct LevelSurvey {
     level: LevelId,
@@ -45730,6 +45743,7 @@ struct LevelSurvey {
     entity_counter_samples: Vec<(u32, u16, u32)>,
     direct_send_program_samples: Vec<DirectSendProgramSample>,
     first_frame_phase: Option<FirstFramePhase>,
+    persistent_pad_frame_samples: Vec<PersistentPadFrameSample>,
     next_lid: Option<(u32, i32)>,
     cross_level_restart: Option<(u32, LevelId)>,
 }
@@ -45794,6 +45808,7 @@ impl LevelSurvey {
             entity_counter_samples: Vec::new(),
             direct_send_program_samples: Vec::new(),
             first_frame_phase: None,
+            persistent_pad_frame_samples: Vec::new(),
             next_lid: None,
             cross_level_restart: None,
         }
@@ -49695,23 +49710,37 @@ fn survey_pair_with_runtime_impl(
         {
             survey.pad_change_samples.push((frame, held));
         }
-        let pad_snapshot = if persistent_pad_enabled {
-            active_pad.update(held)
+        let camera_held = if persistent_pad_enabled {
+            // Source CamUpdate runs before traversal reaches Crash and calls
+            // PadUpdate, so it consumes the snapshot published on the prior
+            // frame (or by CoreObjectsCreate at a mount).
+            let published = runtime
+                .machine()
+                .pad_snapshot(0)
+                .map_err(|error| format!("pre-camera pad snapshot: {error:?}"))?;
+            debug_assert_eq!(
+                published, active_pad.snapshot,
+                "the persistent physical-pad mirror must track the VM snapshot"
+            );
+            published.held
         } else {
-            RetailPadSnapshot {
+            held
+        };
+        if !persistent_pad_enabled {
+            let pad_snapshot = RetailPadSnapshot {
                 tapped: held & !held_previous,
                 held,
                 tapped_previous,
                 held_previous,
                 held_previous_2,
-            }
-        };
-        runtime
-            .set_pad_snapshot(0, pad_snapshot)
-            .map_err(|error| format!("pad snapshot: {error:?}"))?;
-        held_previous_2 = held_previous;
-        held_previous = held;
-        tapped_previous = pad_snapshot.tapped;
+            };
+            runtime
+                .set_pad_snapshot(0, pad_snapshot)
+                .map_err(|error| format!("pad snapshot: {error:?}"))?;
+            held_previous_2 = held_previous;
+            held_previous = held;
+            tapped_previous = pad_snapshot.tapped;
+        }
 
         // Native CoreFrame performs one `NSUpdate(-1)` before its object spawn
         // scan. Mirror the browser boundary exactly: the pager promotes the
@@ -49790,14 +49819,29 @@ fn survey_pair_with_runtime_impl(
             &mut runtime,
             &mut host,
             &mut survey,
-            held,
+            camera_held,
         ) {
             survey.record_issue("camera", frame, error.clone());
             survey.terminal = Some(format!("camera boundary: {error}"));
             break;
         }
 
-        let report = match runtime.run_frame(&mut host, INSTRUCTION_BUDGET) {
+        let frame_result = if persistent_pad_enabled {
+            runtime.run_frame_with_traversal_hook(
+                &mut host,
+                INSTRUCTION_BUDGET,
+                |runtime, _host, boundary| {
+                    let RetailTraversalBoundary::BeforeMainObjectUpdate { .. } = boundary;
+                    let pad_snapshot = active_pad.update(held);
+                    runtime
+                        .set_pad_snapshot(0, pad_snapshot)
+                        .map_err(RuntimeError::Vm)
+                },
+            )
+        } else {
+            runtime.run_frame(&mut host, INSTRUCTION_BUDGET)
+        };
+        let report = match frame_result {
             Ok(report) => report,
             Err(error) => {
                 survey.record_issue("runtime-frame", frame, format!("{error:?}"));
@@ -49806,6 +49850,26 @@ fn survey_pair_with_runtime_impl(
             }
         };
         survey.executions += report.executions.len() as u64;
+        if persistent_pad_enabled
+            && input_profile == SurveyInputProfile::NSanityCompletionRoute
+            && matches!(frame, 1_440 | 1_441 | 1_442 | 1_482 | 1_483 | 1_484)
+        {
+            survey
+                .persistent_pad_frame_samples
+                .push(PersistentPadFrameSample {
+                    frame,
+                    selected_held: held,
+                    camera_held,
+                    published: runtime
+                        .machine()
+                        .pad_snapshot(0)
+                        .map_err(|error| format!("published pad snapshot: {error:?}"))?,
+                    camera: camera.location(),
+                    random_seed: runtime.machine().random_seed(),
+                    live_objects: runtime.arena().len(),
+                    executions: report.executions.len(),
+                });
+        }
         for execution in &report.executions {
             if let Ok(vm) = runtime.machine().object(execution.object.vm())
                 && let Some(identity) = vm.program_identity()
@@ -64604,8 +64668,62 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert!(!n_sanity_survey.effect_counts.contains_key("load-state"));
     assert!(n_sanity_survey.is_clean(), "{}", n_sanity_survey.summary());
     assert_physical_directions(&n_sanity_survey);
+    let n_sanity_source_order_sample = |frame| {
+        *n_sanity_survey
+            .persistent_pad_frame_samples
+            .iter()
+            .find(|sample| sample.frame == frame)
+            .unwrap_or_else(|| panic!("N. Sanity source-order sample {frame} must exist"))
+    };
+    let zone_3b = Eid::from_name("3b_9Z").expect("fixed N. Sanity phase zone is valid");
+    let zone_2b = Eid::from_name("2b_9Z").expect("fixed N. Sanity phase zone is valid");
+    for (frame, selected_held, camera_held, zone, path, progress, seed, live) in [
+        (1_440, PAD_UP, PAD_UP, zone_3b, 0, 9_216, 0x5e24_31fc, 26),
+        (
+            1_441,
+            PAD_DOWN | PAD_CROSS,
+            PAD_UP,
+            zone_3b,
+            0,
+            9_728,
+            0x93ca_9c7e,
+            26,
+        ),
+        (
+            1_442,
+            PAD_DOWN,
+            PAD_DOWN | PAD_CROSS,
+            zone_3b,
+            0,
+            9_414,
+            0x4de6_58e2,
+            26,
+        ),
+        (1_482, PAD_DOWN, PAD_DOWN, zone_3b, 0, 685, 0x23ef_3ed0, 26),
+        (1_483, PAD_DOWN, PAD_DOWN, zone_3b, 0, 0, 0x29ae_ca94, 26),
+        (
+            1_484,
+            PAD_DOWN,
+            PAD_DOWN,
+            zone_2b,
+            1,
+            13_055,
+            0x66a2_1283,
+            22,
+        ),
+    ] {
+        let sample = n_sanity_source_order_sample(frame);
+        assert_eq!(sample.selected_held, selected_held, "frame {frame}");
+        assert_eq!(sample.camera_held, camera_held, "frame {frame}");
+        assert_eq!(sample.published.held, selected_held, "frame {frame}");
+        assert_eq!(sample.camera.path, RetailPathId { zone, index: path });
+        assert_eq!(sample.camera.progress.raw(), progress, "frame {frame}");
+        assert_eq!(sample.random_seed, seed, "frame {frame}");
+        assert_eq!(sample.live_objects, live, "frame {frame}");
+        assert_eq!(sample.executions, live, "frame {frame}");
+    }
     assert_eq!(n_sanity_runtime.draw_count(), 2_664);
-    assert_eq!(n_sanity_runtime.machine().random_seed(), 0x3a82_e9e4);
+    assert_eq!(n_sanity_runtime.machine().random_seed(), 0x5daa_f613);
     let completion_carry = n_sanity.finish_checked(n_sanity_runtime, LevelId::LEVEL_COMPLETE);
 
     let completion_runtime =
@@ -64651,7 +64769,7 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(completion_survey.death_camera_frames, 0);
     assert_physical_directions(&completion_survey);
     assert_eq!(completion_runtime.draw_count(), 3_265);
-    assert_eq!(completion_runtime.machine().random_seed(), 0xfee7_6dc9);
+    assert_eq!(completion_runtime.machine().random_seed(), 0xfe73_2cce);
     let post_beach_title_carry = completion.finish_checked(completion_runtime, LevelId::TITLE);
 
     let mut post_beach_title = PublisherTitleHarness::from_session(
@@ -64669,13 +64787,14 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     let (jungle_carry, mut pad) = post_beach_title.finish_transition(jungle.level);
     assert_eq!(post_beach_title_frame, 254);
     assert_eq!(jungle_carry.draw_count, 3_519);
-    assert_eq!(jungle_carry.random_seed, 0xcf79_1594);
+    assert_eq!(jungle_carry.random_seed, 0x7f99_783d);
     assert_eq!(
         pad.snapshot.held, PAD_CROSS,
         "the held launch input must survive the second Title mount boundary"
     );
     let jungle_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, jungle.level, jungle_carry)
         .expect("Jungle Rollers must import the publisher-carried map phase");
+    assert_eq!(jungle_runtime.global_word(LIFE_COUNT_GLOBAL), Ok(4 << 8));
     let (jungle_survey, jungle_runtime) = survey_pair_with_persistent_pad(
         jungle.name,
         jungle.level,
@@ -64684,8 +64803,8 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
         &jungle.nsf_bytes,
         jungle_runtime,
         LevelContextSource::SessionGlobals,
-        SurveyInputProfile::JunglePhaseRobust,
-        4_000,
+        SurveyInputProfile::JungleDeathAkuCompletionRoute,
+        6_000,
         &mut pad,
         PersistentSurveyPlan {
             mount_held: PAD_CROSS,
@@ -64695,47 +64814,59 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
         },
     )
     .expect("publisher-carried Jungle Rollers route must execute");
-    assert_eq!(jungle_survey.frames, 2_761, "{}", jungle_survey.summary());
+    assert_eq!(jungle_survey.frames, 3_387, "{}", jungle_survey.summary());
     assert_eq!(
         jungle_survey.next_lid,
-        Some((2_761, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
+        Some((3_387, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap(),))
     );
-    assert_eq!(jungle_survey.zone_transitions, 30);
-    assert_eq!(jungle_survey.restarts, 0);
-    assert!(jungle_survey.restart_frames.is_empty());
+    assert_eq!(jungle_survey.zone_transitions, 31);
+    assert_eq!(jungle_survey.restarts, 1);
+    assert_eq!(jungle_survey.restart_frames, [199]);
     assert_eq!(jungle_survey.death_camera_frames, 0);
-    assert!(jungle_survey.first_below_zero.is_none());
-    assert!(jungle_survey.first_terminal_fall.is_none());
+    assert_eq!(
+        jungle_survey
+            .first_terminal_fall
+            .as_ref()
+            .map(|(frame, _)| *frame),
+        Some(189),
+    );
     assert_eq!(
         jungle_survey.checkpoint_samples,
         [
             (1, -1, [1_945_600, 4_135_168, 24_165_632]),
-            (1_273, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
+            (1_902, 46 << 8, [-563_968, 2_236_928, 15_717_376]),
         ]
     );
     assert_eq!(
         jungle_survey.box_count_samples,
         [
             (1, 0),
-            (543, 0x100),
-            (544, 0x200),
-            (1_273, 0x300),
-            (1_304, 0x400),
-            (1_305, 0x500),
-            (1_308, 0x600),
-            (1_309, 0x700),
-            (1_310, 0x800),
-            (1_318, 0x900),
-            (1_324, 0xa00),
+            (268, 0x100),
+            (269, 0x200),
+            (1_173, 0x300),
+            (1_174, 0x400),
+            (1_902, 0x500),
+            (1_933, 0x600),
+            (1_934, 0x700),
+            (1_937, 0x800),
+            (1_938, 0x900),
+            (1_939, 0xa00),
+            (1_947, 0xb00),
+            (1_953, 0xc00),
         ]
     );
-    assert_eq!(jungle_survey.saved_box_count_samples, [(1_273, 0x200)]);
+    assert_eq!(jungle_survey.saved_box_count_samples, [(1_902, 0x400)]);
     assert_eq!(jungle_survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(jungle_survey.effect_counts.get("transition"), Some(&1));
-    assert!(!jungle_survey.effect_counts.contains_key("load-state"));
+    assert_eq!(jungle_survey.effect_counts.get("load-state"), Some(&1));
+    let doctor = Eid::from_name("DoctC").expect("fixed Aku program EID is valid");
+    assert!(
+        jungle_survey.observed_program_states.contains(&(doctor, 1)),
+        "Aku must remain collectible after the authored death restart"
+    );
     assert_eq!(
         jungle_survey.final_player_translation,
-        Some([2_193_152, 7_732_272, -2_147_072])
+        Some([2_193_152, 7_732_266, -2_147_072])
     );
     let final_camera = jungle_survey
         .final_camera
@@ -64750,8 +64881,17 @@ fn publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers() {
     assert_eq!(final_camera.progress.raw(), 17_836);
     assert!(jungle_survey.is_clean(), "{}", jungle_survey.summary());
     assert_physical_directions(&jungle_survey);
-    assert_eq!(jungle_runtime.draw_count(), 6_280);
-    assert_eq!(jungle_runtime.machine().random_seed(), 0x7b53_ae02);
+    assert_eq!(
+        jungle_runtime.global_word(LIFE_COUNT_GLOBAL),
+        Ok(4 << 8),
+        "characterize the unresolved death-life decrement parity gap"
+    );
+    assert_eq!(
+        jungle_runtime.draw_count(),
+        3_189,
+        "the authored LoadState resets the process draw phase before the post-restart completion window"
+    );
+    assert_eq!(jungle_runtime.machine().random_seed(), 0xd16b_74f1);
 }
 
 #[test]

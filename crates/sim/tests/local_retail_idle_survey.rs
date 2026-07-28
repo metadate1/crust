@@ -46404,6 +46404,8 @@ struct LevelSurvey {
     last_player_movement: u32,
     first_below_zero: Option<(u32, PlayerTrace)>,
     first_terminal_fall: Option<(u32, PlayerTrace)>,
+    first_terminal_fall_run_frames: u64,
+    first_grounded_after_terminal_fall: Option<(u32, PlayerTrace)>,
     progression_samples: Vec<String>,
     pad_change_samples: Vec<(u32, u32)>,
     player_0x700_samples: Vec<(u32, [i32; 3])>,
@@ -46471,6 +46473,8 @@ impl LevelSurvey {
             last_player_movement: 0,
             first_below_zero: None,
             first_terminal_fall: None,
+            first_terminal_fall_run_frames: 0,
+            first_grounded_after_terminal_fall: None,
             progression_samples: Vec::new(),
             pad_change_samples: Vec::new(),
             player_0x700_samples: Vec::new(),
@@ -46538,6 +46542,14 @@ impl LevelSurvey {
             }
             if player.velocity[1] == -0x2e_e000 {
                 self.first_terminal_fall.get_or_insert((frame, player));
+                if self.first_grounded_after_terminal_fall.is_none() {
+                    self.first_terminal_fall_run_frames += 1;
+                }
+            } else if self.first_terminal_fall.is_some()
+                && self.first_grounded_after_terminal_fall.is_none()
+                && player.status_a & 1 != 0
+            {
+                self.first_grounded_after_terminal_fall = Some((frame, player));
             }
             self.initial_player_translation
                 .get_or_insert(player.translation);
@@ -46623,7 +46635,7 @@ impl LevelSurvey {
 
     fn summary(&self) -> String {
         format!(
-            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} samples={:?} pads={:?} player-0x700={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} entity-counters={:?} direct-program-sends={:?} effects={:?} child-kinds={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
+            "{} ({}): input={} frames={} terminal={:?} live={}/max{} faulted={} spawns={}/{}/{} expected-reject={} executions={} errors={} zone-transitions={} restarts={:?} saves={} next-lid={:?} camera={:?}->{:?} paths={} path-changes={} last-path-change={} last-progress={} death-camera=frames{} changes{} max-count{} {:?}->{:?} player={:?}->{:?} bounds={:?}..{:?} last-movement={} first-below-zero={:?} first-terminal-fall={:?} first-terminal-run={} first-grounded-after={:?} samples={:?} pads={:?} player-0x700={:?} boxes={:?} checkpoints={:?} saved-boxes={:?} spawn-flags={:?} early-direct-sends={:?} entity-states={:?} entity-counters={:?} direct-program-sends={:?} effects={:?} child-kinds={:?} first-effects={:?} issues={:?} first={:?} fault-contexts={:?}",
             self.name,
             self.level,
             self.input_profile.label(),
@@ -46660,6 +46672,8 @@ impl LevelSurvey {
             self.last_player_movement,
             self.first_below_zero,
             self.first_terminal_fall,
+            self.first_terminal_fall_run_frames,
+            self.first_grounded_after_terminal_fall,
             self.progression_samples,
             self.pad_change_samples,
             self.player_0x700_samples,
@@ -51306,6 +51320,46 @@ fn assert_ordinary_completion_input(survey: &LevelSurvey, level_name: &str) {
     );
 }
 
+fn assert_heavy_machinery_authored_shaft_drop(survey: &LevelSurvey, expected_first_cap_frame: u32) {
+    let g2 = Eid::from_name("g2_6Z").expect("fixed Heavy Machinery g2 EID is valid");
+    let (first_frame, first) = survey
+        .first_terminal_fall
+        .as_ref()
+        .expect("Heavy Machinery's authored g1 shaft reaches the vertical speed cap");
+    assert_eq!(
+        *first_frame,
+        expected_first_cap_frame,
+        "{}",
+        survey.summary()
+    );
+    assert_eq!(first.zone, g2);
+    assert_eq!(first.translation, [17_876_160, -1_236_043, 223_232]);
+    assert_eq!(first.velocity, [0, -3_072_000, 0]);
+
+    assert_eq!(
+        survey.first_terminal_fall_run_frames, 2,
+        "the authored shaft must spend exactly two cooperative ticks at the fall-speed cap"
+    );
+
+    let (landing_frame, landing) = survey
+        .first_grounded_after_terminal_fall
+        .as_ref()
+        .expect("the authored shaft must end in a grounded retail landing");
+    assert_eq!(*landing_frame, first_frame + 2);
+    assert_eq!(landing.zone, g2);
+    assert_eq!(landing.translation, [17_876_160, -1_425_610, 223_232]);
+    assert_eq!(landing.velocity, [0, -136_000, 0]);
+    assert_ne!(
+        landing.status_a & 1,
+        0,
+        "the shaft landing must be grounded"
+    );
+    assert!(
+        survey.last_player_movement > *landing_frame,
+        "Crash must continue from the shaft landing to Heavy Machinery's authored exit"
+    );
+}
+
 fn carry_completion_to_title(
     completion: &CampaignPair,
     carry: RetailSessionCarry,
@@ -52536,20 +52590,32 @@ fn carry_boulder_dash_through_heavy_machinery(
         heavy_survey.summary()
     );
     assert_eq!(heavy_survey.restarts, 0, "{}", heavy_survey.summary());
+    assert!(heavy_survey.restart_frames.is_empty());
     assert_eq!(heavy_survey.death_camera_frames, 0);
-    let (fall_frame, fall_player) = heavy_survey
-        .first_terminal_fall
-        .as_ref()
-        .expect("Heavy Machinery's authored g1 drop reaches the vertical speed cap");
-    assert!((1_390..=1_392).contains(fall_frame));
+    assert!(!heavy_survey.effect_counts.contains_key("load-state"));
+    // Heavy Machinery's first speed-cap sample is the mandatory g1 -> g2
+    // shaft. It lands cleanly on g2 two cooperative ticks later and the same
+    // carried player proceeds through the authored WarpC transition.
+    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 1_390);
+    assert_ordinary_completion_input(&heavy_survey, heavy_machinery.name);
+    let warp = Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid");
+    for state in 0..=4 {
+        assert!(
+            heavy_survey
+                .observed_program_states
+                .contains(&(warp, state)),
+            "WarpC state {state} must execute before the authored transition"
+        );
+    }
+    let heavy_player = player_trace(&heavy_runtime)
+        .expect("carried Heavy Machinery player trace must resolve")
+        .expect("WarpC must retain Crash through the carried transition request");
     assert_eq!(
-        fall_player.zone,
-        Eid::from_name("g2_6Z").expect("fixed Heavy Machinery g2 EID is valid")
+        heavy_player.zone,
+        Eid::from_name("j3_6Z").expect("fixed Heavy Machinery end-warp EID is valid")
     );
-    assert_eq!(fall_player.translation[0], 17_876_160);
-    assert!((-1_350_000..=-1_100_000).contains(&fall_player.translation[1]));
-    assert_eq!(fall_player.translation[2], 223_232);
-    assert_eq!(fall_player.velocity, [0, -3_072_000, 0]);
+    assert_eq!(heavy_player.state, 32);
+    assert_eq!(heavy_player.event, 0x1600);
     assert!(heavy_survey.is_clean(), "{}", heavy_survey.summary());
     assert_eq!(
         campaign_progression_globals(&heavy_runtime),
@@ -61843,19 +61909,11 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0);
-    let (fall_frame, fall_player) = survey
-        .first_terminal_fall
-        .as_ref()
-        .expect("Heavy Machinery's authored g1 drop reaches the vertical speed cap");
-    assert!((1_390..=1_392).contains(fall_frame));
-    assert_eq!(
-        fall_player.zone,
-        Eid::from_name("g2_6Z").expect("fixed Heavy Machinery g2 EID is valid")
-    );
-    assert_eq!(fall_player.translation[0], 17_876_160);
-    assert!((-1_350_000..=-1_100_000).contains(&fall_player.translation[1]));
-    assert_eq!(fall_player.translation[2], 223_232);
-    assert_eq!(fall_player.velocity, [0, -3_072_000, 0]);
+    assert!(!survey.effect_counts.contains_key("load-state"));
+    // This is a mandatory retail shaft, not a death or recovery. Crash spends
+    // two ticks at the ordinary fall-speed cap, lands on g2's authored floor
+    // on the immediately following tick, and continues to the real WarpC.
+    assert_heavy_machinery_authored_shaft_drop(&survey, 1_390);
     assert_eq!(survey.zone_transitions, 45);
     assert_eq!(survey.camera_ranges.len(), 77);
     assert_eq!(survey.camera_path_changes, 85);
@@ -61888,7 +61946,13 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
     let player = player_trace(&runtime)
         .expect("Heavy Machinery completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
+    assert_eq!(
+        player.zone,
+        Eid::from_name("j3_6Z").expect("fixed Heavy Machinery end-warp EID is valid")
+    );
     assert_eq!(player.state, 32);
+    assert_eq!(player.event, 0x1600);
+    assert_eq!(player.translation, [19_668_721, 4_853_209, 227_328]);
     assert_eq!(runtime.draw_count(), 5_425);
     assert!(
         survey.is_clean(),

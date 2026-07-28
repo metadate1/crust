@@ -1808,6 +1808,7 @@ enum SurveyInputProfile {
     CastleMachineryExactCampaignPhase,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
+    #[allow(dead_code)]
     UpstreamCarriedRecovery,
     UpstreamPhaseRobust,
     RollingStonesCheckpoint,

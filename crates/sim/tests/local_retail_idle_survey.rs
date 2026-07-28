@@ -31398,12 +31398,10 @@ impl HighRoadCompletionRouteController {
                 {
                     // Align the safe stationary c2 lane before its
                     // moving-support cadence resumes.
-                    return if player.translation[2] < 216_832 {
-                        PAD_DOWN
-                    } else if player.translation[2] > 216_832 {
-                        PAD_UP
-                    } else {
-                        0
+                    return match player.translation[2].cmp(&216_832) {
+                        Ordering::Less => PAD_DOWN,
+                        Ordering::Greater => PAD_UP,
+                        Ordering::Equal => 0,
                     };
                 }
                 if self.sunset_b1_recovery_alignment && self.sunset_stage == 18 {
@@ -31411,12 +31409,10 @@ impl HighRoadCompletionRouteController {
                     // position but settles on the other fixed-point floor
                     // branch. Align the following moving-support route to
                     // the authored stationary lane during the existing wait.
-                    return if player.translation[2] < 231_168 {
-                        PAD_DOWN
-                    } else if player.translation[2] > 231_168 {
-                        PAD_UP
-                    } else {
-                        0
+                    return match player.translation[2].cmp(&231_168) {
+                        Ordering::Less => PAD_DOWN,
+                        Ordering::Greater => PAD_UP,
+                        Ordering::Equal => 0,
                     };
                 }
                 return 0;
@@ -36846,11 +36842,9 @@ impl HighRoadCompletionRouteController {
                 && sunset_var_os("C1_SUNSET_STAGE69_RIDE_EXIT").is_some()
             {
                 if player.translation[1] > -17_100_000 && player.status_a & 1 != 0 {
-                    if self.sunset_b1_recovery_alignment {
-                        if self.sunset_attack_tick < 18 {
-                            self.sunset_attack_tick += 1;
-                            return 0;
-                        }
+                    if self.sunset_b1_recovery_alignment && self.sunset_attack_tick < 18 {
+                        self.sunset_attack_tick += 1;
+                        return 0;
                     }
                     self.sunset_stage = 70;
                     self.sunset_attack_tick = 0;

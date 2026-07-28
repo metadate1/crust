@@ -501,7 +501,7 @@ pub struct BrowserTestLiveObject {
     pub status_b: u32,
     pub status_c: u32,
     pub state_flags: u32,
-    /// Raw GOOL register 65. WillC owns the authoritative 24.8 life stock here
+    /// Raw GOOL register 65. `WillC` owns the authoritative 24.8 life stock here
     /// between stable publications to global 24.
     pub register_65: u32,
     pub is_player: bool,

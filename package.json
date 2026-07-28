@@ -13,6 +13,7 @@
     "dev:browser-harness": "npm run build:browser-harness && npm run serve:browser-harness",
     "serve": "node ./scripts/serve.mjs",
     "serve:browser-harness": "CRUST_WEB_DIST=target/browser-test-dist PORT=4175 node ./scripts/serve.mjs",
+    "compose:browser-campaign-replay": "node ./scripts/compose-browser-campaign-replay.mjs",
     "start": "npm run dev",
     "verify:dist": "node ./scripts/build-info.mjs verify",
     "verify:browser-harness": "node ./scripts/build-info.mjs verify . target/browser-test-dist",

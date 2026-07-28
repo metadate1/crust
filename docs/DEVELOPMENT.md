@@ -112,6 +112,27 @@ level/checkpoint expectations for the whole retail route; the repository does no
 controller oracle. The browser hook intentionally cannot force a transition or mutate GOOL state,
 so the missing trace cannot be replaced by test-only game-state shortcuts.
 
+Opt-in survey exports can be assembled into one ignored campaign replay without copying their
+input into repository source. Keep the ordered manifest and every exported fragment under an
+ignored/local path, then run:
+
+```bash
+npm run compose:browser-campaign-replay -- \
+  --manifest target/local-campaign/manifest.json \
+  --output target/local-campaign/campaign.replay.json
+
+npm run verify:browser-harness:smoke -- \
+  --asset /path/to/owned-disc.bin \
+  --replay target/local-campaign/campaign.replay.json
+```
+
+The composer inserts separately supplied authored Level Complete/Island Map handoff fragments,
+adds current/mounted-LID guards to every run, and asserts an exact carry checkpoint after every
+phase. It rejects missing RNG/draw/restart continuity, mismatched fragment metadata, nonlocal
+exports, and handoffs that bypass the retail Title / Island Map mount. See
+[Local browser campaign replay composition](BROWSER_CAMPAIGN_REPLAY.md) for the manifest contract
+and safety rules.
+
 ## Local-data verification
 
 Legally owned data may be placed under ignored `local-data/` or selected from anywhere on disk.

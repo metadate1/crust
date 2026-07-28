@@ -1,0 +1,614 @@
+import { randomUUID } from "node:crypto";
+import {
+  access,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { normalizeReplay } from "./browser-harness-smoke.mjs";
+
+const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const TITLE_LID = 0x19;
+const LOCAL_OUTPUT_ROOTS = new Set([
+  "artifacts",
+  "captures",
+  "local-data",
+  "recordings",
+  "target",
+]);
+const CHECKPOINT_FIELDS = [
+  "currentLid",
+  "mountedLid",
+  "retailDrawCount",
+  "retailProcessDrawCount",
+  "retailRandomSeed",
+  "retailRandomSeedB",
+  "retailHardRestarts",
+  "retailLoadStates",
+  "retailDeathCameraFrames",
+];
+const OPTIONAL_CHECKPOINT_FIELDS = ["titleState"];
+const ALL_CHECKPOINT_FIELDS = new Set([
+  ...CHECKPOINT_FIELDS,
+  ...OPTIONAL_CHECKPOINT_FIELDS,
+]);
+const PHASE_KEYS = new Set([
+  "entry",
+  "exit",
+  "fragment",
+  "id",
+  "inputKind",
+  "settleFrames",
+]);
+const HANDOFF_KEYS = new Set([
+  "after",
+  "before",
+  "kind",
+  "phases",
+]);
+const MANIFEST_KEYS = new Set([
+  "bootLid",
+  "canonicalCampaign",
+  "localDiagnosticOnly",
+  "phases",
+  "schema",
+  "settleFrames",
+  "titleMapHandoffs",
+  "traceFromPhase",
+  "unlockAll",
+]);
+
+function isObject(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function assertOnlyKeys(value, allowed, label) {
+  const unexpected = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unexpected.length > 0) {
+    throw new Error(`${label} contains unsupported fields: ${unexpected.join(", ")}`);
+  }
+}
+
+function wholeNumber(raw, label, maximum = Number.MAX_SAFE_INTEGER) {
+  const value =
+    typeof raw === "number"
+      ? raw
+      : typeof raw === "string" && /^0x[0-9a-f]+$/i.test(raw)
+        ? Number.parseInt(raw.slice(2), 16)
+        : Number(raw);
+  if (!Number.isSafeInteger(value) || value < 0 || value > maximum) {
+    throw new Error(`${label} must be a whole number from 0 through ${maximum}`);
+  }
+  return value;
+}
+
+function nonEmptyString(raw, label) {
+  if (typeof raw !== "string" || raw.trim() === "") {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return raw;
+}
+
+function normalizeCheckpoint(raw, label) {
+  if (!isObject(raw)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(raw, ALL_CHECKPOINT_FIELDS, label);
+  const missing = CHECKPOINT_FIELDS.filter((field) => raw[field] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `${label} is missing exact continuity fields: ${missing.join(", ")}`,
+    );
+  }
+  const checkpoint = {};
+  for (const field of [...CHECKPOINT_FIELDS, ...OPTIONAL_CHECKPOINT_FIELDS]) {
+    if (raw[field] !== undefined) {
+      checkpoint[field] = wholeNumber(
+        raw[field],
+        `${label}.${field}`,
+        field.endsWith("Lid") ? 0xff : 0xffff_ffff,
+      );
+    }
+  }
+  if (checkpoint.currentLid !== checkpoint.mountedLid) {
+    throw new Error(
+      `${label}.currentLid and ${label}.mountedLid must identify the same completed mount`,
+    );
+  }
+  return checkpoint;
+}
+
+function normalizeInputKind(raw, label) {
+  if (raw === undefined) return undefined;
+  if (raw !== "physical" && raw !== "recorded") {
+    throw new Error(`${label} must be "physical" or "recorded"`);
+  }
+  return raw;
+}
+
+function normalizePhase(raw, label) {
+  if (!isObject(raw)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(raw, PHASE_KEYS, label);
+  const phase = {
+    id: nonEmptyString(raw.id, `${label}.id`),
+    fragment: nonEmptyString(raw.fragment, `${label}.fragment`),
+    entry: normalizeCheckpoint(raw.entry, `${label}.entry`),
+    exit: normalizeCheckpoint(raw.exit, `${label}.exit`),
+    inputKind: normalizeInputKind(raw.inputKind, `${label}.inputKind`),
+    settleFrames:
+      raw.settleFrames === undefined
+        ? undefined
+        : wholeNumber(raw.settleFrames, `${label}.settleFrames`, 10_000),
+  };
+  return phase;
+}
+
+function normalizeHandoff(raw, label) {
+  if (!isObject(raw)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(raw, HANDOFF_KEYS, label);
+  if (raw.kind !== "title-map") {
+    throw new Error(`${label}.kind must equal "title-map"`);
+  }
+  if (!Array.isArray(raw.phases) || raw.phases.length === 0) {
+    throw new Error(`${label}.phases must be a non-empty array`);
+  }
+  const handoff = {
+    kind: "title-map",
+    after: nonEmptyString(raw.after, `${label}.after`),
+    before: nonEmptyString(raw.before, `${label}.before`),
+    phases: raw.phases.map((phase, index) =>
+      normalizePhase(phase, `${label}.phases[${index}]`),
+    ),
+  };
+  if (!handoff.phases.some((phase) => phase.entry.currentLid === TITLE_LID)) {
+    throw new Error(
+      `${label} does not contain an authored Title / Island Map (LID 0x19) phase`,
+    );
+  }
+  return handoff;
+}
+
+function checkpointDifference(left, right) {
+  const fields = new Set([...Object.keys(left), ...Object.keys(right)]);
+  return [...fields]
+    .filter((field) => left[field] !== right[field])
+    .map(
+      (field) =>
+        `${field} ${JSON.stringify(left[field])} != ${JSON.stringify(right[field])}`,
+    );
+}
+
+function assertCheckpointContinuity(leftPhase, rightPhase, label) {
+  const differences = checkpointDifference(leftPhase.exit, rightPhase.entry);
+  if (differences.length > 0) {
+    throw new Error(
+      `${label} is discontinuous between ${JSON.stringify(leftPhase.id)} and ` +
+        `${JSON.stringify(rightPhase.id)}: ${differences.join(", ")}`,
+    );
+  }
+}
+
+export function normalizeCampaignManifest(raw) {
+  if (!isObject(raw)) throw new Error("campaign manifest must be an object");
+  assertOnlyKeys(raw, MANIFEST_KEYS, "campaign manifest");
+  if (raw.schema !== 1) throw new Error("campaign manifest.schema must equal 1");
+  if (raw.localDiagnosticOnly !== true) {
+    throw new Error("campaign manifest.localDiagnosticOnly must equal true");
+  }
+  if (raw.canonicalCampaign !== false) {
+    throw new Error("campaign manifest.canonicalCampaign must equal false");
+  }
+  if (!Array.isArray(raw.phases) || raw.phases.length === 0) {
+    throw new Error("campaign manifest.phases must be a non-empty array");
+  }
+  const phases = raw.phases.map((phase, index) =>
+    normalizePhase(phase, `campaign manifest.phases[${index}]`),
+  );
+  if (
+    raw.titleMapHandoffs !== undefined
+    && !Array.isArray(raw.titleMapHandoffs)
+  ) {
+    throw new Error("campaign manifest.titleMapHandoffs must be an array");
+  }
+  const titleMapHandoffs = (raw.titleMapHandoffs ?? []).map((handoff, index) =>
+    normalizeHandoff(
+      handoff,
+      `campaign manifest.titleMapHandoffs[${index}]`,
+    ),
+  );
+  const bootLid = wholeNumber(
+    raw.bootLid,
+    "campaign manifest.bootLid",
+    0xff,
+  );
+  if (bootLid !== phases[0].entry.currentLid) {
+    throw new Error(
+      "campaign manifest.bootLid must equal the first phase entry LID",
+    );
+  }
+  const unlockAll = raw.unlockAll ?? false;
+  if (typeof unlockAll !== "boolean") {
+    throw new Error("campaign manifest.unlockAll must be a boolean");
+  }
+  const traceFromPhase =
+    raw.traceFromPhase === undefined
+      ? undefined
+      : nonEmptyString(raw.traceFromPhase, "campaign manifest.traceFromPhase");
+  const settleFrames = wholeNumber(
+    raw.settleFrames ?? 0,
+    "campaign manifest.settleFrames",
+    10_000,
+  );
+
+  const basePhaseIndexes = new Map();
+  for (const [index, phase] of phases.entries()) {
+    if (basePhaseIndexes.has(phase.id)) {
+      throw new Error(`duplicate campaign phase id ${JSON.stringify(phase.id)}`);
+    }
+    basePhaseIndexes.set(phase.id, index);
+  }
+  const handoffByAfter = new Map();
+  for (const handoff of titleMapHandoffs) {
+    const afterIndex = basePhaseIndexes.get(handoff.after);
+    const beforeIndex = basePhaseIndexes.get(handoff.before);
+    if (afterIndex === undefined || beforeIndex === undefined) {
+      throw new Error(
+        `title-map handoff ${JSON.stringify(handoff.after)} -> ` +
+          `${JSON.stringify(handoff.before)} references an unknown base phase`,
+      );
+    }
+    if (beforeIndex !== afterIndex + 1) {
+      throw new Error(
+        `title-map handoff ${JSON.stringify(handoff.after)} -> ` +
+          `${JSON.stringify(handoff.before)} must connect adjacent ordered phases`,
+      );
+    }
+    if (handoffByAfter.has(handoff.after)) {
+      throw new Error(
+        `more than one title-map handoff follows ${JSON.stringify(handoff.after)}`,
+      );
+    }
+    handoffByAfter.set(handoff.after, handoff);
+  }
+
+  const orderedPhases = [];
+  const insertedHandoffs = [];
+  for (const [index, phase] of phases.entries()) {
+    orderedPhases.push(phase);
+    const handoff = handoffByAfter.get(phase.id);
+    if (handoff) {
+      orderedPhases.push(...handoff.phases);
+      insertedHandoffs.push({
+        kind: handoff.kind,
+        after: handoff.after,
+        before: handoff.before,
+        phaseIds: handoff.phases.map(({ id }) => id),
+      });
+    }
+    if (index === phases.length - 1 && handoff) {
+      throw new Error("a title-map handoff cannot follow the final campaign phase");
+    }
+  }
+
+  const phaseIds = new Set();
+  for (const phase of orderedPhases) {
+    if (phaseIds.has(phase.id)) {
+      throw new Error(`duplicate composed phase id ${JSON.stringify(phase.id)}`);
+    }
+    phaseIds.add(phase.id);
+  }
+  if (traceFromPhase !== undefined && !phaseIds.has(traceFromPhase)) {
+    throw new Error(
+      `campaign manifest.traceFromPhase references unknown phase ` +
+        JSON.stringify(traceFromPhase),
+    );
+  }
+  for (let index = 1; index < orderedPhases.length; index += 1) {
+    assertCheckpointContinuity(
+      orderedPhases[index - 1],
+      orderedPhases[index],
+      "campaign phase chain",
+    );
+  }
+
+  return {
+    schema: 1,
+    bootLid,
+    unlockAll,
+    traceFromPhase,
+    settleFrames,
+    phases: orderedPhases,
+    insertedHandoffs,
+  };
+}
+
+function expectationConflict(left, right) {
+  return Object.keys(left)
+    .filter((field) => right[field] !== undefined && left[field] !== right[field])
+    .map(
+      (field) =>
+        `${field} ${JSON.stringify(left[field])} != ${JSON.stringify(right[field])}`,
+    );
+}
+
+function mergeExpectations(left, right, label) {
+  const conflicts = expectationConflict(left, right);
+  if (conflicts.length > 0) {
+    throw new Error(`${label} conflicts with exact phase exit: ${conflicts.join(", ")}`);
+  }
+  return { ...left, ...right };
+}
+
+function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
+  const label = `fragment for phase ${JSON.stringify(phase.id)}`;
+  if (!isObject(fragment)) throw new Error(`${label} must be an object`);
+  if (fragment.localDiagnosticOnly !== true) {
+    throw new Error(`${label}.localDiagnosticOnly must equal true`);
+  }
+  if (fragment.canonicalCampaign !== false) {
+    throw new Error(`${label}.canonicalCampaign must equal false`);
+  }
+  const level = wholeNumber(fragment.level, `${label}.level`, 0xff);
+  if (level !== phase.entry.currentLid || normalizedReplay.bootLid !== level) {
+    throw new Error(
+      `${label} level/bootLid must equal the phase entry LID ` +
+        `0x${phase.entry.currentLid.toString(16).padStart(2, "0")}`,
+    );
+  }
+  if (normalizedReplay.unlockAll !== manifest.unlockAll) {
+    throw new Error(`${label}.unlockAll does not match the campaign manifest`);
+  }
+  const initialDrawCount = wholeNumber(
+    fragment.initialDrawCount,
+    `${label}.initialDrawCount`,
+  );
+  if (initialDrawCount !== phase.entry.retailDrawCount) {
+    throw new Error(
+      `${label}.initialDrawCount does not match phase.entry.retailDrawCount`,
+    );
+  }
+  const frames = wholeNumber(fragment.frames, `${label}.frames`, 5_000_000);
+  if (frames !== normalizedReplay.totalFrames) {
+    throw new Error(
+      `${label}.frames (${frames}) does not equal its segment frame sum ` +
+        `(${normalizedReplay.totalFrames})`,
+    );
+  }
+  const fragmentExitConflicts = expectationConflict(
+    normalizedReplay.expect,
+    phase.exit,
+  );
+  if (fragmentExitConflicts.length > 0) {
+    throw new Error(
+      `${label}.expect conflicts with phase.exit: ${fragmentExitConflicts.join(", ")}`,
+    );
+  }
+
+  if (fragment.transition == null) {
+    if (phase.exit.currentLid !== phase.entry.currentLid) {
+      throw new Error(
+        `${label} has no authored transition but its phase changes LID`,
+      );
+    }
+  } else {
+    if (!isObject(fragment.transition)) {
+      throw new Error(`${label}.transition must be an object or null`);
+    }
+    const transitionFrame = wholeNumber(
+      fragment.transition.frame,
+      `${label}.transition.frame`,
+      5_000_000,
+    );
+    const transitionLid = wholeNumber(
+      fragment.transition.lid,
+      `${label}.transition.lid`,
+      0xff,
+    );
+    if (transitionFrame !== frames) {
+      throw new Error(`${label}.transition.frame must equal fragment.frames`);
+    }
+    if (transitionLid !== phase.exit.currentLid) {
+      throw new Error(
+        `${label}.transition.lid does not match the exact phase exit LID`,
+      );
+    }
+  }
+}
+
+function guardedPhaseSegments(fragment, normalizedReplay, phase) {
+  const guard = {
+    currentLid: phase.entry.currentLid,
+    mountedLid: phase.entry.mountedLid,
+  };
+  const segments = normalizedReplay.segments.map((segment, index) => {
+    if (segment.while !== undefined) {
+      const conflicts = expectationConflict(segment.while, guard);
+      if (
+        conflicts.length > 0
+        || Object.keys(segment.while).length !== Object.keys(guard).length
+      ) {
+        throw new Error(
+          `fragment for phase ${JSON.stringify(phase.id)} segment ${index + 1} ` +
+            "has a LID guard that does not match its exact entry mount",
+        );
+      }
+    }
+    return {
+      ...segment,
+      while: { ...guard },
+    };
+  });
+  const last = segments.at(-1);
+  const fragmentExpectation = mergeExpectations(
+    last.expect,
+    normalizedReplay.expect,
+    `fragment for phase ${JSON.stringify(phase.id)} final fragment expectation`,
+  );
+  last.expect = mergeExpectations(
+    fragmentExpectation,
+    phase.exit,
+    `fragment for phase ${JSON.stringify(phase.id)} final expectation`,
+  );
+  const phaseSettleFrames =
+    phase.settleFrames ?? normalizedReplay.settleFrames;
+  const combinedSettleFrames = last.settleFrames + phaseSettleFrames;
+  if (combinedSettleFrames > 10_000) {
+    throw new Error(
+      `fragment for phase ${JSON.stringify(phase.id)} requires more than ` +
+        "10,000 final settle frames",
+    );
+  }
+  last.settleFrames = combinedSettleFrames;
+  return segments;
+}
+
+export async function composeCampaignReplay(rawManifest, loadFragment) {
+  if (typeof loadFragment !== "function") {
+    throw new Error("loadFragment must be a function");
+  }
+  const manifest = normalizeCampaignManifest(rawManifest);
+  const outputSegments = [];
+  let traceFromSegment;
+  for (const phase of manifest.phases) {
+    if (phase.id === manifest.traceFromPhase) {
+      traceFromSegment = outputSegments.length + 1;
+    }
+    const fragment = await loadFragment(phase.fragment, phase);
+    if (!isObject(fragment)) {
+      throw new Error(
+        `fragment loader returned no JSON object for phase ${JSON.stringify(phase.id)}`,
+      );
+    }
+    const fragmentWithInputKind = {
+      ...fragment,
+      segments: Array.isArray(fragment.segments)
+        ? fragment.segments.map((segment) => ({
+            ...segment,
+            inputKind: segment.inputKind ?? phase.inputKind,
+          }))
+        : fragment.segments,
+    };
+    const normalizedReplay = normalizeReplay(fragmentWithInputKind);
+    validateFragmentMetadata(fragment, normalizedReplay, phase, manifest);
+    outputSegments.push(
+      ...guardedPhaseSegments(fragment, normalizedReplay, phase),
+    );
+  }
+  const finalCheckpoint = manifest.phases.at(-1).exit;
+  const replay = {
+    schema: 1,
+    bootLid: manifest.bootLid,
+    unlockAll: manifest.unlockAll,
+    settleFrames: manifest.settleFrames,
+    segments: outputSegments,
+    expect: { ...finalCheckpoint },
+  };
+  if (traceFromSegment !== undefined) {
+    replay.traceFromSegment = traceFromSegment;
+  }
+  const normalized = normalizeReplay(replay);
+  return {
+    schema: 1,
+    localDiagnosticOnly: true,
+    canonicalCampaign: false,
+    bootLid: normalized.bootLid,
+    unlockAll: normalized.unlockAll,
+    ...(normalized.traceFromSegment === undefined
+      ? {}
+      : { traceFromSegment: normalized.traceFromSegment }),
+    settleFrames: normalized.settleFrames,
+    segments: normalized.segments,
+    expect: normalized.expect,
+    composition: {
+      schema: 1,
+      phaseIds: manifest.phases.map(({ id }) => id),
+      insertedHandoffs: manifest.insertedHandoffs,
+    },
+  };
+}
+
+async function readJson(path, label) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    throw new Error(`could not read ${label} ${path}: ${error.message}`);
+  }
+}
+
+export async function composeCampaignReplayFromFile(manifestPath) {
+  const absoluteManifestPath = resolve(manifestPath);
+  const manifest = await readJson(absoluteManifestPath, "campaign manifest");
+  const manifestDirectory = dirname(absoluteManifestPath);
+  const fragmentPaths = new Map();
+  const replay = await composeCampaignReplay(manifest, async (reference) => {
+    const path = isAbsolute(reference)
+      ? resolve(reference)
+      : resolve(manifestDirectory, reference);
+    fragmentPaths.set(reference, path);
+    return readJson(path, "campaign fragment");
+  });
+  return {
+    replay,
+    manifestPath: absoluteManifestPath,
+    fragmentPaths: [...fragmentPaths.values()],
+  };
+}
+
+export function isLocalArtifactPath(path) {
+  const absolutePath = resolve(path);
+  const relativePath = relative(repositoryRoot, absolutePath);
+  if (
+    relativePath === "" ||
+    relativePath === ".." ||
+    relativePath.startsWith(`..${sep}`) ||
+    isAbsolute(relativePath)
+  ) {
+    return relativePath !== "";
+  }
+  return LOCAL_OUTPUT_ROOTS.has(relativePath.split(sep)[0]);
+}
+
+export async function writeComposedReplay(
+  outputPath,
+  replay,
+  { force = false, protectedPaths = [] } = {},
+) {
+  const absoluteOutputPath = resolve(outputPath);
+  if (!isLocalArtifactPath(absoluteOutputPath)) {
+    throw new Error(
+      "composed replay output must be outside the repository or under an " +
+        "ignored local artifact directory",
+    );
+  }
+  for (const protectedPath of protectedPaths) {
+    if (absoluteOutputPath === resolve(protectedPath)) {
+      throw new Error("composed replay output must not overwrite an input file");
+    }
+  }
+  if (!force) {
+    try {
+      await access(absoluteOutputPath);
+      throw new Error(
+        `composed replay output already exists: ${absoluteOutputPath}; use --force to replace it`,
+      );
+    } catch (error) {
+      if (!String(error?.message).includes("ENOENT")) throw error;
+    }
+  }
+  await mkdir(dirname(absoluteOutputPath), { recursive: true });
+  const temporaryPath = `${absoluteOutputPath}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(
+      temporaryPath,
+      `${JSON.stringify(replay, null, 2)}\n`,
+      { encoding: "utf8", mode: 0o600, flag: "wx" },
+    );
+    await rename(temporaryPath, absoluteOutputPath);
+  } finally {
+    await rm(temporaryPath, { force: true });
+  }
+  return absoluteOutputPath;
+}

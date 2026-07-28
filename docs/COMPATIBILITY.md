@@ -423,7 +423,15 @@ gameplay path.
   being discarded against the stale world-page set. World geometry
   separately retains the pre-GOOL display mask, so an authored global-nine write during traversal
   cannot retroactively hide the world or be replaced by the end-of-frame next-mask latch. The
-  current builder avoids reparsing an unchanged active graph,
+  optional display layer can interpolate presentation at the browser refresh rate, zoom out by
+  15/30/45%, use 4:3, 16:9 or 21:9 logical viewports, and select native through 2160p drawing
+  buffers without changing the authoritative 30 Hz simulation. Its extended mode preloads the
+  reachable non-backdrop WGEO graph and draws the complete active authored zone; it does not draw
+  mutually exclusive zones together because retail levels reuse world coordinate space. Authored
+  backdrop selection and native texture-cache traffic remain unchanged. A triangle crossing the
+  optional presentation near plane is currently culled as a whole rather than split, so an
+  extreme zoom/camera intersection can show a transient geometry seam. The current builder avoids
+  reparsing an unchanged active graph,
   bounds its parsed object-frame cache to 256 entries and records decoded-texture cache hits, but
   the projection and command list are still regenerated every presented gameplay frame. No
   low-end/mobile frame-time or long-soak parity is claimed without measurement in those browsers.

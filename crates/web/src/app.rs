@@ -3461,6 +3461,7 @@ impl Runtime {
                     .projection_distance(authored_projection),
             ),
             extended_world: self.display_settings.extended_world,
+            viewport: self.display_settings.aspect.logical_viewport(),
         };
         let background_fill = retail_background_fill_for_zone(
             &self.retail_zones,

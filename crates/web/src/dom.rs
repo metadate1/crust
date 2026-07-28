@@ -201,11 +201,18 @@ impl Dom {
             .ok()
             .filter(|value| matches!(*value, 55 | 70 | 85 | 100))
             .unwrap_or(100);
+        let aspect = OutputAspect::from_value(&self.output_aspect.value());
+        let extended_world = self.extended_world.checked()
+            || projection_percent != 100
+            || aspect != OutputAspect::Retail;
+        if extended_world {
+            self.extended_world.set_checked(true);
+        }
         DisplaySettings {
             smooth_motion: self.smooth_motion.checked(),
-            extended_world: self.extended_world.checked(),
+            extended_world,
             projection_percent,
-            aspect: OutputAspect::from_value(&self.output_aspect.value()),
+            aspect,
             resolution: RenderResolution::from_value(&self.render_resolution.value()),
         }
     }

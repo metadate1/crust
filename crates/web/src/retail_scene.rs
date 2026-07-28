@@ -1,24 +1,27 @@
 //! Safe, pointer-free construction of a retail world path snapshot.
 
 use core::fmt;
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use crust_formats::binary::Eid;
 use crust_formats::stream::structs::ZonePathPoint;
 use crust_formats::stream::{
     Entry, GoolAnimationDescriptor, GoolFontAnimation, GoolFragmentAnimation, GoolSpriteAnimation,
-    GoolTextAnimation, GoolTextureInfo, GoolVertexAnimation, Nsd, Nsf, NsfPage, ObjectMaterial,
-    ObjectModelFrame, ObjectVertexKind, PolygonId, SlstCursor, SlstItem, WorldGeometry,
-    WorldMapPathList, ZoneHeader, ZonePath, ZoneRect, load_object_model_frame,
+    GoolTextAnimation, GoolTextureInfo, GoolVertexAnimation, LevelId, Nsd, Nsf, NsfPage,
+    ObjectMaterial, ObjectModelFrame, ObjectVertexKind, PolygonId, SlstCursor, SlstItem,
+    WorldGeometry, WorldMapPathList, ZoneHeader, ZonePath, ZoneRect, load_object_model_frame,
     parse_gool_animation_descriptor, parse_object_frame, parse_world_geometry,
 };
-use crust_renderer::cache::{TextureCache, TextureHandle};
+use crust_renderer::cache::{TextureCache, TextureHandle, TextureRequest, TextureUvBounds};
 use crust_renderer::command::{
     BlendMode, ColoredTriangle, ColoredVertex, CommandSource, PrimitiveCommand, PrimitiveStyle,
     TexturedQuad, TexturedTriangle, TexturedVertex, Uv,
 };
-use crust_renderer::projection::{Matrix3, Vec3i, project, rotate};
+use crust_renderer::projection::{
+    Matrix3, ProjectionResult, TriangleVisibility, Vec3i, Viewport, project, rotate,
+    rotate_translate,
+};
 use crust_renderer::retail_texture::{
     RetailTextureReference, TextureInfo2, TpagReference, resolve_texture_page,
 };
@@ -49,6 +52,10 @@ const SLST_ENTRY_TYPE: u32 = 4;
 const WGEO_ENTRY_TYPE: u32 = 3;
 const RETAIL_TEXTURE_PAGE_SLOTS: usize = 8;
 const RETAIL_OBJECT_MODEL_CACHE_FRAMES: usize = 256;
+const PRESENTATION_TEXTURE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+const PRESENTATION_TEXTURE_ENTRY_LIMIT: usize = 8_192;
+const PRESENTATION_WORLD_LIMIT: usize = 4_096;
+const PRESENTATION_POLYGON_LIMIT: usize = 131_072;
 #[cfg(test)]
 const ZONE_FLAG_RIPPLE: u32 = crust_renderer::world::ZONE_FLAG_RIPPLE;
 // `LdatInit` initializes the global current/next GOOL display masks to
@@ -80,6 +87,10 @@ pub struct RetailSceneTexture {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct RetailSceneStats {
     pub worlds: usize,
+    /// Non-backdrop WGEOs retained from the complete reachable ZDAT graph by
+    /// the optional presentation preloader. These meshes are not submitted
+    /// simultaneously because retail zones may reuse world coordinate space.
+    pub preloaded_worlds: usize,
     pub visible_polygons: usize,
     pub submitted_polygons: usize,
     pub unique_textures: usize,
@@ -144,13 +155,27 @@ pub struct RetailSceneProgressLocation {
 }
 
 /// Presentation-only scene options which never feed back into simulation.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RetailScenePresentation {
     /// Direct GTE-style projection distance. `None` uses the authored FOV.
     pub projection_distance: Option<u32>,
-    /// Draw every polygon in the active zone's loaded WGEO set instead of the
-    /// camera path's retail SLST subset.
+    /// Preload the reachable non-backdrop WGEO graph, then draw every ordinary
+    /// polygon in the active authored zone instead of its retail SLST subset.
+    /// Mutually exclusive zones and backdrop swaps remain SLST-authored.
     pub extended_world: bool,
+    /// Presentation viewport used to discard complete-level triangles which
+    /// cannot affect this output shape.
+    pub viewport: Viewport,
+}
+
+impl Default for RetailScenePresentation {
+    fn default() -> Self {
+        Self {
+            projection_distance: None,
+            extended_world: false,
+            viewport: Viewport::PSX,
+        }
+    }
 }
 
 /// Explicit native camera transform used by non-path camera modes.
@@ -212,7 +237,8 @@ struct CachedSceneGraph {
     zone_rect: ZoneRect,
     path: ZonePath,
     visibility: Option<SlstCursor>,
-    worlds: Vec<WorldGeometry>,
+    world_eids: Vec<Eid>,
+    worlds: Vec<Arc<WorldGeometry>>,
     map_paths_parsed: bool,
     world_map_paths: Vec<Option<WorldMapPathList>>,
     /// Last masks written by `GfxAnimMapPaths` for this active graph.
@@ -221,6 +247,168 @@ struct CachedSceneGraph {
     /// title-state change until the graph is replaced. Keeping the writes in a
     /// sidecar preserves that lifetime without mutating parsed source data.
     world_map_path_masks: Vec<Vec<Option<u8>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedWorldGeometry {
+    eid: Eid,
+    geometry: Arc<WorldGeometry>,
+}
+
+#[derive(Clone, Debug)]
+struct FullLevelSceneGraph {
+    level: LevelId,
+    worlds: Vec<CachedWorldGeometry>,
+}
+
+#[derive(Clone, Debug)]
+struct SceneWorld {
+    geometry: Arc<WorldGeometry>,
+    active_index: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectedWorldPolygon {
+    world_index: usize,
+    polygon_index: usize,
+    source: CommandSource,
+    retail_authored: bool,
+}
+
+#[derive(Debug)]
+struct PresentationTexture {
+    pixels: Arc<DecodedTexture>,
+    content_uv: TextureUvBounds,
+    byte_len: usize,
+    last_used: u64,
+}
+
+/// Pair-scoped, presentation-only texture cache for complete-level WGEOs.
+///
+/// It is intentionally independent from native's eight live TPAG slots. The
+/// simulation pager remains exact; this cache only leases decoded pixels for
+/// geometry that the optional wider presentation can see.
+#[derive(Debug, Default)]
+struct PresentationTextureCache {
+    entries: HashMap<TextureRequest, PresentationTexture>,
+    resident_bytes: usize,
+    use_clock: u64,
+}
+
+impl PresentationTextureCache {
+    fn load(
+        &mut self,
+        reference: RetailTextureReference,
+        request: TextureRequest,
+        nsf: &Nsf,
+        nsf_bytes: &[u8],
+    ) -> Result<(Arc<DecodedTexture>, TextureUvBounds), RetailSceneError> {
+        self.use_clock = self.use_clock.saturating_add(1);
+        if let Some(cached) = self.entries.get_mut(&request) {
+            cached.last_used = self.use_clock;
+            return Ok((Arc::clone(&cached.pixels), cached.content_uv));
+        }
+
+        let decoded = reference
+            .decode(nsf, nsf_bytes)
+            .map_err(|error| scene_error(format!("extended WGEO texture decode: {error}")))?
+            .with_edge_padding(1)
+            .map_err(|error| scene_error(format!("extended WGEO texture padding: {error}")))?;
+        let byte_len = decoded.byte_len();
+        if byte_len > PRESENTATION_TEXTURE_BUDGET_BYTES || PRESENTATION_TEXTURE_ENTRY_LIMIT == 0 {
+            return Err(scene_error(format!(
+                "extended WGEO texture needs {byte_len} bytes beyond the presentation cache budget"
+            )));
+        }
+        while self.entries.len() >= PRESENTATION_TEXTURE_ENTRY_LIMIT
+            || self.resident_bytes.saturating_add(byte_len) > PRESENTATION_TEXTURE_BUDGET_BYTES
+        {
+            let Some(eviction) = self
+                .entries
+                .iter()
+                .min_by_key(|(key, cached)| (cached.last_used, key.page_id))
+                .map(|(key, _)| *key)
+            else {
+                return Err(scene_error(
+                    "extended WGEO texture cache cannot free enough resident space",
+                ));
+            };
+            if let Some(removed) = self.entries.remove(&eviction) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(removed.byte_len);
+            }
+        }
+
+        let pixels = Arc::new(decoded);
+        let content_uv = presentation_content_uv(request, &pixels);
+        self.resident_bytes = self.resident_bytes.saturating_add(byte_len);
+        self.entries.insert(
+            request,
+            PresentationTexture {
+                pixels: Arc::clone(&pixels),
+                content_uv,
+                byte_len,
+                last_used: self.use_clock,
+            },
+        );
+        Ok((pixels, content_uv))
+    }
+}
+
+fn presentation_content_uv(request: TextureRequest, texture: &DecodedTexture) -> TextureUvBounds {
+    let width = f32::from(u16::try_from(texture.width()).unwrap_or(u16::MAX));
+    let height = f32::from(u16::try_from(texture.height()).unwrap_or(u16::MAX));
+    let region_width = f32::from(u16::try_from(request.region.width).unwrap_or(u16::MAX));
+    let region_height = f32::from(u16::try_from(request.region.height).unwrap_or(u16::MAX));
+    TextureUvBounds {
+        left: 1.5 / width,
+        top: 1.5 / height,
+        right: (region_width + 0.5) / width,
+        bottom: (region_height + 0.5) / height,
+    }
+}
+
+fn stable_scene_texture_handle(
+    request: TextureRequest,
+    by_request: &mut HashMap<TextureRequest, TextureHandle>,
+    by_handle: &mut HashMap<TextureHandle, TextureRequest>,
+) -> Result<TextureHandle, RetailSceneError> {
+    if let Some(handle) = by_request.get(&request) {
+        return Ok(*handle);
+    }
+    // Fixed FNV-1a over every decoded-image identity field. Restricting the
+    // result to the lower 63 bits keeps it disjoint from stage-reserved image
+    // handles. A same-frame collision is rejected instead of aliasing pixels.
+    let clut = request.clut.map_or(u32::MAX, |clut| {
+        u32::from(clut.block_x) | (u32::from(clut.row) << 8)
+    });
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for word in [
+        request.page_id,
+        request.region.x,
+        request.region.y,
+        request.region.width,
+        request.region.height,
+        u32::from(request.color_mode as u8),
+        u32::from(request.blend_mode as u8),
+        clut,
+    ] {
+        for byte in word.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    let handle = TextureHandle::new((hash & 0x7fff_ffff_ffff_ffff).max(1));
+    if let Some(existing) = by_handle.get(&handle)
+        && *existing != request
+    {
+        return Err(scene_error(format!(
+            "stable scene texture handle {} collided across distinct requests",
+            handle.get()
+        )));
+    }
+    by_request.insert(request, handle);
+    by_handle.insert(handle, request);
+    Ok(handle)
 }
 
 /// Cumulative evidence that immutable retail scene data is reused.
@@ -283,9 +471,11 @@ impl RetailRippleState {
 #[derive(Debug)]
 pub struct RetailSceneBuilder {
     active_graph: Option<CachedSceneGraph>,
+    full_level_graph: Option<Arc<FullLevelSceneGraph>>,
     object_models: HashMap<(Eid, u16), Arc<ObjectModelFrame>>,
     object_model_lru: VecDeque<(Eid, u16)>,
     texture_cache: TextureCache,
+    presentation_texture_cache: PresentationTextureCache,
     texture_pages: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
     texture_page_generations: [Option<u32>; RETAIL_TEXTURE_PAGE_SLOTS],
     ripple: Option<RetailRippleState>,
@@ -296,9 +486,11 @@ impl Default for RetailSceneBuilder {
     fn default() -> Self {
         Self {
             active_graph: None,
+            full_level_graph: None,
             object_models: HashMap::new(),
             object_model_lru: VecDeque::new(),
             texture_cache: TextureCache::default(),
+            presentation_texture_cache: PresentationTextureCache::default(),
             texture_pages: [None; RETAIL_TEXTURE_PAGE_SLOTS],
             texture_page_generations: [None; RETAIL_TEXTURE_PAGE_SLOTS],
             ripple: None,
@@ -918,6 +1110,24 @@ fn build_retail_scene_cached(
         builder.texture_page_generations = [None; RETAIL_TEXTURE_PAGE_SLOTS];
         builder.diagnostics.graph_builds = builder.diagnostics.graph_builds.saturating_add(1);
     }
+    if presentation.extended_world
+        && nsd.level() != LevelId::TITLE
+        && builder
+            .full_level_graph
+            .as_ref()
+            .is_none_or(|graph| graph.level != nsd.level())
+    {
+        builder.full_level_graph =
+            Some(Arc::new(parse_full_level_scene_graph(nsd, nsf, nsf_bytes)?));
+        builder.presentation_texture_cache = PresentationTextureCache::default();
+    }
+    let full_level_graph = presentation
+        .extended_world
+        .then(|| builder.full_level_graph.clone())
+        .flatten();
+    let preloaded_worlds = full_level_graph
+        .as_ref()
+        .map_or(0, |graph| graph.worlds.len());
 
     let graph = builder
         .active_graph
@@ -936,7 +1146,7 @@ fn build_retail_scene_cached(
     // worlds. Title, Hog Wild and Whole Hog use this as an external-transition
     // dummy start, and their placeholder SLST EID is absent from this stream.
     // GOOL objects may still be present, so only the world list becomes empty.
-    let visible_polygons = if graph.zone_header.worlds.is_empty() {
+    let retail_visible = if graph.zone_header.worlds.is_empty() {
         Vec::new()
     } else {
         let visibility = graph
@@ -946,17 +1156,21 @@ fn build_retail_scene_cached(
         visibility
             .seek(path_point_index)
             .map_err(|error| scene_error(format!("spawn SLST state: {error}")))?;
-        if world_display_mask & 1 == 0 {
-            Vec::new()
-        } else if presentation.extended_world {
-            extended_zone_polygons(visibility.visibility(), &graph.worlds)?
-        } else {
-            visibility.visibility().to_vec()
-        }
+        visibility.visibility().to_vec()
     };
-    validate_visibility(&visible_polygons, &graph.worlds)?;
+    validate_visibility(&retail_visible, &graph.worlds)?;
     update_persistent_world_map_path_masks(graph, map_path_animation)?;
     let world_map_path_masks = graph.world_map_path_masks.clone();
+    let (scene_worlds, mut visible_polygons) = select_scene_worlds(
+        graph,
+        &retail_visible,
+        full_level_graph.as_deref(),
+        location,
+        presentation.extended_world,
+    )?;
+    if world_display_mask & 1 == 0 {
+        visible_polygons.clear();
+    }
 
     let camera = if let Some(camera_pose) = camera_pose {
         camera_sample_from_pose(camera_pose)
@@ -983,6 +1197,8 @@ fn build_retail_scene_cached(
         object_camera.rotation_z,
     );
     let object_camera_matrix = adjusted_camera_matrix(raw_object_camera_matrix);
+    let authored_projection_distance =
+        projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?;
     let projection_distance = if let Some(distance) = presentation.projection_distance {
         if !(64..=2_048).contains(&distance) {
             return Err(scene_error(format!(
@@ -991,7 +1207,7 @@ fn build_retail_scene_cached(
         }
         distance
     } else {
-        projection_distance(field_of_view_override.unwrap_or(ldat.field_of_view))?
+        authored_projection_distance
     };
     let world_shader_mode = WorldShaderMode::from_flags(graph.zone_header.graphics.flags);
     let world_shader_snapshot = world_shader_snapshot
@@ -1006,7 +1222,7 @@ fn build_retail_scene_cached(
         world_shader_snapshot,
         graph.zone_header.graphics.far_color,
         world_dispatch_active,
-        !visible_polygons.is_empty(),
+        !retail_visible.is_empty(),
     );
     let ripple_wave = if world_shader_mode == WorldShaderMode::Ripple {
         if builder
@@ -1021,7 +1237,11 @@ fn build_retail_scene_cached(
                 .ripple
                 .as_mut()
                 .expect("a ripple world installs pair-scoped wave state")
-                .magnitudes(advance_world_ripple && !visible_polygons.is_empty()),
+                .magnitudes(
+                    advance_world_ripple
+                        && world_display_mask & 1 != 0
+                        && !retail_visible.is_empty(),
+                ),
         )
     } else {
         None
@@ -1042,12 +1262,17 @@ fn build_retail_scene_cached(
     )?;
 
     let mut page_ids = BTreeSet::new();
-    for polygon_id in &visible_polygons {
-        let geometry = &graph.worlds[usize::from(polygon_id.world_index)];
-        let polygon_index = usize::from(polygon_id.polygon_index);
-        let animation_mask = world_map_path_masks
-            .get(usize::from(polygon_id.world_index))
-            .and_then(|world| world.get(polygon_index))
+    for selected in &visible_polygons {
+        if presentation.extended_world && !selected.retail_authored {
+            continue;
+        }
+        let world = &scene_worlds[selected.world_index];
+        let geometry = &world.geometry;
+        let polygon_index = selected.polygon_index;
+        let animation_mask = world
+            .active_index
+            .and_then(|active_index| world_map_path_masks.get(active_index))
+            .and_then(|masks| masks.get(polygon_index))
             .copied()
             .flatten();
         let polygon = polygon_with_map_path_mask(geometry.polygons[polygon_index], animation_mask);
@@ -1111,19 +1336,62 @@ fn build_retail_scene_cached(
         )?;
     }
     builder.texture_cache.begin_frame();
+    let mut extended_retail_texture_leases = HashMap::new();
+    if presentation.extended_world {
+        // Preserve native's backwards SLST texture-request order exactly.
+        // The extended polygon list is geometry-ordered, so deriving these
+        // leases from it would perturb the eight-slot cache's LRU stamps.
+        for polygon_id in retail_visible.iter().rev() {
+            let active_index = usize::from(polygon_id.world_index);
+            let geometry = graph.worlds.get(active_index).ok_or_else(|| {
+                scene_error("SLST texture world slot is outside the active graph")
+            })?;
+            let polygon_index = usize::from(polygon_id.polygon_index);
+            let animation_mask = world_map_path_masks
+                .get(active_index)
+                .and_then(|masks| masks.get(polygon_index))
+                .copied()
+                .flatten();
+            let polygon =
+                polygon_with_map_path_mask(geometry.polygons[polygon_index], animation_mask);
+            let Some(texture) = geometry
+                .texture_for_polygon(polygon, draw_count)
+                .map_err(|error| scene_error(format!("WGEO texture reference: {error}")))?
+            else {
+                continue;
+            };
+            let reference = RetailTextureReference::new(
+                TpagReference::new(texture.texture_page),
+                TextureInfo2 {
+                    color: texture.color,
+                    region: texture.region,
+                },
+            );
+            let Ok(layout) = reference.layout() else {
+                continue;
+            };
+            if let Ok(cached) = builder.texture_cache.load(layout.request) {
+                extended_retail_texture_leases
+                    .entry(layout.request)
+                    .or_insert((cached.pixels, cached.content_uv));
+            }
+        }
+    }
 
-    let world_translations = graph
-        .worlds
+    let world_translations = scene_worlds
         .iter()
         .map(|world| {
-            if world.header.is_backdrop {
+            if world.geometry.header.is_backdrop {
                 Vec3i::default()
             } else {
                 rotate(
                     Vec3i {
-                        x: world.header.translation[0].saturating_sub(camera_translation.x),
-                        y: world.header.translation[1].saturating_sub(camera_translation.y),
-                        z: world.header.translation[2].saturating_sub(camera_translation.z),
+                        x: world.geometry.header.translation[0]
+                            .saturating_sub(camera_translation.x),
+                        y: world.geometry.header.translation[1]
+                            .saturating_sub(camera_translation.y),
+                        z: world.geometry.header.translation[2]
+                            .saturating_sub(camera_translation.z),
                     },
                     camera_matrix,
                 )
@@ -1135,8 +1403,7 @@ fn build_retail_scene_cached(
         world_shader_mode,
         WorldShaderMode::Fog | WorldShaderMode::Dark
     ) {
-        graph
-            .worlds
+        scene_worlds
             .iter()
             .map(|world| {
                 fog_cutoff(
@@ -1144,7 +1411,7 @@ fn build_retail_scene_cached(
                     graph.zone_header.graphics.visibility_depth,
                     0,
                     graph.zone_header.graphics.unknown_b_to_e[0],
-                    world.header.is_backdrop,
+                    world.geometry.header.is_backdrop,
                     world_shader_mode == WorldShaderMode::Fog,
                 )
                 .map_err(|error| scene_error(format!("WGEO fog parameters: {error}")))
@@ -1156,6 +1423,9 @@ fn build_retail_scene_cached(
 
     let mut textures = BTreeMap::new();
     let mut texture_handles = HashMap::new();
+    let mut texture_requests_by_handle = HashMap::new();
+    let mut presentation_frame_requests = HashSet::new();
+    let mut presentation_frame_bytes = 0_usize;
     let mut prepared = vec![None; visible_polygons.len()];
     let mut minimum_depth = 0x07ff_i32;
     let mut saturated_vertices = 0_usize;
@@ -1164,20 +1434,31 @@ fn build_retail_scene_cached(
     // Retail transforms SLST entries backwards, applies a running minimum OT
     // depth, and head-inserts. We prepare backwards but later submit forwards
     // to compensate for the Rust ordering table's FIFO buckets.
-    for (visible_index, polygon_id) in visible_polygons.iter().copied().enumerate().rev() {
-        let world_index = usize::from(polygon_id.world_index);
-        let geometry = &graph.worlds[world_index];
-        let polygon_index = usize::from(polygon_id.polygon_index);
-        let animation_mask = world_map_path_masks
-            .get(world_index)
-            .and_then(|world| world.get(polygon_index))
+    for (visible_index, selected) in visible_polygons.iter().copied().enumerate().rev() {
+        let world_index = selected.world_index;
+        let world = &scene_worlds[world_index];
+        let geometry = &world.geometry;
+        let polygon_projection_distance = if geometry.header.is_backdrop {
+            authored_projection_distance
+        } else {
+            projection_distance
+        };
+        let polygon_index = selected.polygon_index;
+        let animation_mask = world
+            .active_index
+            .and_then(|active_index| world_map_path_masks.get(active_index))
+            .and_then(|masks| masks.get(polygon_index))
             .copied()
             .flatten();
         let polygon = polygon_with_map_path_mask(geometry.polygons[polygon_index], animation_mask);
+        let vertices = polygon
+            .vertex_indices
+            .map(|index| geometry.vertices[usize::from(index)]);
         let mut screens = [crust_renderer::command::ScreenPoint::default(); 3];
-        let mut colors = [Rgba8::default(); 3];
+        let mut camera_depths = [0_i32; 3];
+        let mut projection_valid = [true; 3];
         for vertex_index in 0..3 {
-            let vertex = geometry.vertices[usize::from(polygon.vertex_indices[vertex_index])];
+            let vertex = vertices[vertex_index];
             let [x, mut y, z] = vertex.expanded_position();
             if vertex.effect
                 && let Some(wave) = ripple_wave.as_ref()
@@ -1190,53 +1471,81 @@ fn build_retail_scene_cached(
                     .expect("a masked ripple-wave index fits usize");
                 y = y.saturating_add(wave[wave_index]);
             }
-            let projected = project(
-                Vec3i { x, y, z },
-                world_translations[world_index],
-                camera_matrix,
-                [0, 0],
-                projection_distance,
-            );
+            // Backdrop alternatives remain an authored SLST presentation:
+            // keep their original PSX projection and saturation even when the
+            // ordinary zone geometry uses the wider unclamped projection.
+            let projected = if presentation.extended_world && !geometry.header.is_backdrop {
+                project_presentation(
+                    Vec3i { x, y, z },
+                    world_translations[world_index],
+                    camera_matrix,
+                    polygon_projection_distance,
+                )
+            } else {
+                project(
+                    Vec3i { x, y, z },
+                    world_translations[world_index],
+                    camera_matrix,
+                    [0, 0],
+                    polygon_projection_distance,
+                )
+            };
             if !projected.valid {
                 saturated_vertices = saturated_vertices.saturating_add(1);
             }
             screens[vertex_index] = projected.screen;
-            let clear_channel = LightningChannel {
-                color: world_shader_snapshot.clear_color,
-                t: world_shader_snapshot.clear_t,
-            };
-            let effect_channel = LightningChannel {
-                color: world_shader_snapshot.effect_color,
-                t: world_shader_snapshot.effect_t,
-            };
+            camera_depths[vertex_index] = projected.camera.z;
+            projection_valid[vertex_index] = projected.valid;
+        }
+        if presentation.extended_world && !geometry.header.is_backdrop {
+            let near = i32::try_from(polygon_projection_distance / 2).unwrap_or(i32::MAX);
+            if projection_valid.contains(&false)
+                || camera_depths.iter().any(|depth| *depth <= near)
+                || presentation.viewport.classify_triangle(screens) == TriangleVisibility::Outside
+            {
+                continue;
+            }
+        }
+        let clear_channel = LightningChannel {
+            color: world_shader_snapshot.clear_color,
+            t: world_shader_snapshot.clear_t,
+        };
+        let effect_channel = LightningChannel {
+            color: world_shader_snapshot.effect_color,
+            t: world_shader_snapshot.effect_t,
+        };
+        let mut colors = [Rgba8::default(); 3];
+        let mut shader_failed = false;
+        for vertex_index in 0..3 {
+            let vertex = vertices[vertex_index];
             let color = match world_shader_mode {
-                WorldShaderMode::Plain | WorldShaderMode::Ripple => vertex.color,
+                WorldShaderMode::Plain | WorldShaderMode::Ripple => Ok(vertex.color),
                 WorldShaderMode::Fog => apply_fog(
                     vertex.color,
-                    projected.screen.z,
+                    screens[vertex_index].z,
                     world_fog_cutoffs[world_index],
                     graph.zone_header.graphics.unknown_b_to_e[0],
                     graph.zone_header.graphics.far_color,
                 )
-                .map_err(|error| scene_error(format!("WGEO fog shader: {error}")))?,
+                .map_err(|error| scene_error(format!("WGEO fog shader: {error}"))),
                 WorldShaderMode::Lightning => {
                     apply_lightning(vertex.color, vertex.effect, clear_channel, effect_channel)
-                        .map_err(|error| scene_error(format!("WGEO lightning shader: {error}")))?
+                        .map_err(|error| scene_error(format!("WGEO lightning shader: {error}")))
                 }
                 WorldShaderMode::Dark => apply_dark(
                     vertex.color,
                     vertex.effect,
-                    projected.screen.z,
+                    screens[vertex_index].z,
                     world_fog_cutoffs[world_index],
                     graph.zone_header.graphics.unknown_b_to_e[0],
                     clear_channel,
                     effect_channel,
                 )
-                .map_err(|error| scene_error(format!("WGEO dark shader: {error}")))?,
+                .map_err(|error| scene_error(format!("WGEO dark shader: {error}"))),
                 WorldShaderMode::Dark2 => apply_dark2(
                     vertex.color,
                     vertex.effect,
-                    projected.screen,
+                    screens[vertex_index],
                     world_translations[world_index],
                     Dark2Parameters {
                         illumination: world_shader_snapshot.dark2_illumination,
@@ -1247,7 +1556,15 @@ fn build_retail_scene_cached(
                         target: world_shader_render_state.far_color1,
                     },
                 )
-                .map_err(|error| scene_error(format!("WGEO Dark2 shader: {error}")))?,
+                .map_err(|error| scene_error(format!("WGEO Dark2 shader: {error}"))),
+            };
+            let color = match color {
+                Ok(color) => color,
+                Err(_) if presentation.extended_world && !selected.retail_authored => {
+                    shader_failed = true;
+                    break;
+                }
+                Err(error) => return Err(error),
             };
             colors[vertex_index] = Rgba8 {
                 r: color[0],
@@ -1255,6 +1572,9 @@ fn build_retail_scene_cached(
                 b: color[2],
                 a: u8::MAX,
             };
+        }
+        if shader_failed {
+            continue;
         }
 
         let texture = geometry
@@ -1272,29 +1592,51 @@ fn build_retail_scene_cached(
                 skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
                 continue;
             };
-            let Ok(cached) = builder.texture_cache.load(layout.request) else {
+            let presentation_texture = presentation.extended_world && !selected.retail_authored;
+            let cached = if presentation_texture {
+                if presentation_frame_requests.len() >= PRESENTATION_TEXTURE_ENTRY_LIMIT
+                    && !presentation_frame_requests.contains(&layout.request)
+                {
+                    None
+                } else {
+                    builder
+                        .presentation_texture_cache
+                        .load(reference, layout.request, nsf, nsf_bytes)
+                        .ok()
+                }
+            } else if presentation.extended_world {
+                extended_retail_texture_leases
+                    .get(&layout.request)
+                    .map(|(pixels, content_uv)| (Arc::clone(pixels), *content_uv))
+            } else {
+                builder
+                    .texture_cache
+                    .load(layout.request)
+                    .ok()
+                    .map(|cached| (cached.pixels, cached.content_uv))
+            };
+            let Some((pixels, content_uv)) = cached else {
                 skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
                 continue;
             };
-            // TextureCache handles intentionally live for the whole pair, but
-            // RetailScene handles remain deterministic build-local IDs. This
-            // preserves byte-for-byte scene equality with the static builder
-            // while still reusing the expensive decoded pixels underneath.
-            let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
-                *handle
-            } else {
-                let next = u64::try_from(texture_handles.len())
-                    .ok()
-                    .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
-                let handle = TextureHandle::new(next);
-                texture_handles.insert(layout.request, handle);
-                handle
-            };
+            if presentation_texture && presentation_frame_requests.insert(layout.request) {
+                let next_bytes = presentation_frame_bytes.saturating_add(pixels.byte_len());
+                if next_bytes > PRESENTATION_TEXTURE_BUDGET_BYTES {
+                    presentation_frame_requests.remove(&layout.request);
+                    skipped_textured_polygons = skipped_textured_polygons.saturating_add(1);
+                    continue;
+                }
+                presentation_frame_bytes = next_bytes;
+            }
+            let output_handle = stable_scene_texture_handle(
+                layout.request,
+                &mut texture_handles,
+                &mut texture_requests_by_handle,
+            )?;
             textures
                 .entry(output_handle)
-                .or_insert_with(|| Arc::clone(&cached.pixels));
-            let uvs = layout.coordinates.cache_uvs(cached.content_uv);
+                .or_insert_with(|| Arc::clone(&pixels));
+            let uvs = layout.coordinates.cache_uvs(content_uv);
             PrimitiveCommand::TexturedTriangle(TexturedTriangle {
                 vertices: std::array::from_fn(|index| TexturedVertex {
                     position: screens[index],
@@ -1324,19 +1666,28 @@ fn build_retail_scene_cached(
         let z_sum = screens
             .iter()
             .fold(0_i32, |sum, point| sum.saturating_add(point.z));
-        let raw_depth = (0x0800_i32 - i32::try_from(projection_distance / 2).unwrap_or(i32::MAX))
-            .saturating_sub(z_sum / 32)
-            .clamp(0, 0x07ff);
-        let depth = raw_depth.min(minimum_depth);
-        minimum_depth = depth;
+        let raw_depth = (0x0800_i32
+            - i32::try_from(polygon_projection_distance / 2).unwrap_or(i32::MAX))
+        .saturating_sub(z_sum / 32)
+        .clamp(0, 0x07ff);
+        let depth = if presentation.extended_world {
+            if geometry.header.is_backdrop {
+                0
+            } else {
+                // Reserve the farthest bucket for the authored backdrop so a
+                // distant ordinary polygon cannot be overpainted by sky.
+                raw_depth.max(1)
+            }
+        } else {
+            let depth = raw_depth.min(minimum_depth);
+            minimum_depth = depth;
+            depth
+        };
         let depth = u16::try_from(depth)
             .map_err(|_| scene_error("clamped ordering depth does not fit u16"))?;
         prepared[visible_index] = Some(RetailSceneCommand {
             depth,
-            source: CommandSource::World {
-                zone: location.zone.raw(),
-                polygon: u32::from(polygon_id.raw()),
-            },
+            source: selected.source,
             primitive,
         });
     }
@@ -1415,20 +1766,11 @@ fn build_retail_scene_cached(
                                 skipped_object_textured_polygons.saturating_add(1);
                             continue;
                         };
-                        let output_handle =
-                            if let Some(handle) = texture_handles.get(&layout.request) {
-                                *handle
-                            } else {
-                                let next = u64::try_from(texture_handles.len())
-                                    .ok()
-                                    .and_then(|value| value.checked_add(1))
-                                    .ok_or_else(|| {
-                                        scene_error("retail texture handle count overflows")
-                                    })?;
-                                let handle = TextureHandle::new(next);
-                                texture_handles.insert(layout.request, handle);
-                                handle
-                            };
+                        let output_handle = stable_scene_texture_handle(
+                            layout.request,
+                            &mut texture_handles,
+                            &mut texture_requests_by_handle,
+                        )?;
                         textures
                             .entry(output_handle)
                             .or_insert_with(|| Arc::clone(&cached.pixels));
@@ -1484,17 +1826,11 @@ fn build_retail_scene_cached(
                     skipped_object_textured_polygons.saturating_add(1);
                 continue;
             };
-            let output_handle = if let Some(handle) = texture_handles.get(&layout.request) {
-                *handle
-            } else {
-                let next = u64::try_from(texture_handles.len())
-                    .ok()
-                    .and_then(|value| value.checked_add(1))
-                    .ok_or_else(|| scene_error("retail texture handle count overflows"))?;
-                let handle = TextureHandle::new(next);
-                texture_handles.insert(layout.request, handle);
-                handle
-            };
+            let output_handle = stable_scene_texture_handle(
+                layout.request,
+                &mut texture_handles,
+                &mut texture_requests_by_handle,
+            )?;
             textures
                 .entry(output_handle)
                 .or_insert_with(|| Arc::clone(&cached.pixels));
@@ -1557,7 +1893,8 @@ fn build_retail_scene_cached(
         .saturating_add(cache_frame.misses);
     Ok(RetailScene {
         stats: RetailSceneStats {
-            worlds: graph.worlds.len(),
+            worlds: scene_worlds.len(),
+            preloaded_worlds,
             visible_polygons: visible_polygons.len(),
             submitted_polygons,
             unique_textures: textures.len(),
@@ -2341,6 +2678,7 @@ fn parse_scene_graph(
             zone_rect,
             path,
             visibility: None,
+            world_eids: Vec::new(),
             worlds: Vec::new(),
             map_paths_parsed: parse_map_paths,
             world_map_paths: Vec::new(),
@@ -2382,6 +2720,7 @@ fn parse_scene_graph(
         .collect::<Result<Vec<_>, _>>()?;
 
     let mut worlds = Vec::with_capacity(zone_header.worlds.len());
+    let mut world_eids = Vec::with_capacity(zone_header.worlds.len());
     let mut world_map_paths = Vec::with_capacity(zone_header.worlds.len());
     for (world_index, world) in zone_header.worlds.iter().enumerate() {
         let entry = typed_entry(nsf, nsd, world.geometry, WGEO_ENTRY_TYPE, "spawn WGEO")?;
@@ -2401,7 +2740,8 @@ fn parse_scene_graph(
         } else {
             None
         };
-        worlds.push(geometry);
+        world_eids.push(world.geometry);
+        worlds.push(Arc::new(geometry));
         world_map_paths.push(map_paths);
     }
     let world_polygon_counts = worlds
@@ -2418,11 +2758,226 @@ fn parse_scene_graph(
         zone_rect,
         path,
         visibility: Some(visibility),
+        world_eids,
         worlds,
         map_paths_parsed: parse_map_paths,
         world_map_paths,
         world_map_path_masks,
     })
+}
+
+fn parse_full_level_scene_graph(
+    nsd: &Nsd,
+    nsf: &Nsf,
+    nsf_bytes: &[u8],
+) -> Result<FullLevelSceneGraph, RetailSceneError> {
+    let ldat = nsd
+        .ldat()
+        .ok_or_else(|| scene_error("index-only NSD has no complete level graph"))?;
+    let mut queued = BTreeSet::from([ldat.spawn_zone]);
+    let mut queue = VecDeque::from([ldat.spawn_zone]);
+    let mut world_eids = BTreeSet::new();
+    let mut worlds = Vec::new();
+    let mut polygon_count = 0_usize;
+
+    while let Some(zone_eid) = queue.pop_front() {
+        let zone_entry = typed_entry(nsf, nsd, zone_eid, ZDAT_ENTRY_TYPE, "complete-level ZDAT")?;
+        let zone_header = ZoneHeader::parse(entry_item(
+            zone_entry,
+            nsf_bytes,
+            0,
+            "complete-level ZDAT header",
+        )?)
+        .map_err(|error| scene_error(format!("complete-level ZDAT {zone_eid} header: {error}")))?;
+        for neighbor in zone_header.neighbors.iter().copied() {
+            if queued.insert(neighbor) {
+                queue.push_back(neighbor);
+            }
+        }
+        for zone_world in &zone_header.worlds {
+            if !world_eids.insert(zone_world.geometry) {
+                continue;
+            }
+            if world_eids.len() > PRESENTATION_WORLD_LIMIT {
+                return Err(scene_error(format!(
+                    "complete level references more than {PRESENTATION_WORLD_LIMIT} unique WGEOs"
+                )));
+            }
+            let entry = typed_entry(
+                nsf,
+                nsd,
+                zone_world.geometry,
+                WGEO_ENTRY_TYPE,
+                "complete-level WGEO",
+            )?;
+            let geometry = parse_world_geometry(
+                entry_item(entry, nsf_bytes, 0, "complete-level WGEO header")?,
+                entry_item(entry, nsf_bytes, 1, "complete-level WGEO polygons")?,
+                entry_item(entry, nsf_bytes, 2, "complete-level WGEO vertices")?,
+            )
+            .map_err(|error| {
+                scene_error(format!(
+                    "complete-level WGEO {}: {error}",
+                    zone_world.geometry
+                ))
+            })?;
+            // A backdrop WGEO contains camera-authored alternatives. Those
+            // continue to come from the active SLST below; including every
+            // backdrop in the complete graph would overlap unrelated skies.
+            if geometry.header.is_backdrop {
+                continue;
+            }
+            polygon_count = polygon_count
+                .checked_add(geometry.polygons.len())
+                .ok_or_else(|| scene_error("complete-level polygon count overflows"))?;
+            if polygon_count > PRESENTATION_POLYGON_LIMIT {
+                return Err(scene_error(format!(
+                    "complete level exceeds the {PRESENTATION_POLYGON_LIMIT}-polygon presentation limit"
+                )));
+            }
+            worlds.push(CachedWorldGeometry {
+                eid: zone_world.geometry,
+                geometry: Arc::new(geometry),
+            });
+        }
+    }
+    Ok(FullLevelSceneGraph {
+        level: nsd.level(),
+        worlds,
+    })
+}
+
+fn select_scene_worlds(
+    graph: &CachedSceneGraph,
+    retail_visible: &[PolygonId],
+    full_level_graph: Option<&FullLevelSceneGraph>,
+    location: RetailSceneProgressLocation,
+    extended_world: bool,
+) -> Result<(Vec<SceneWorld>, Vec<SelectedWorldPolygon>), RetailSceneError> {
+    if !extended_world {
+        let worlds = graph
+            .worlds
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(active_index, geometry)| SceneWorld {
+                geometry,
+                active_index: Some(active_index),
+            })
+            .collect::<Vec<_>>();
+        let polygons = retail_visible
+            .iter()
+            .copied()
+            .map(|polygon| SelectedWorldPolygon {
+                world_index: usize::from(polygon.world_index),
+                polygon_index: usize::from(polygon.polygon_index),
+                source: CommandSource::World {
+                    zone: location.zone.raw(),
+                    polygon: u32::from(polygon.raw()),
+                },
+                retail_authored: true,
+            })
+            .collect();
+        return Ok((worlds, polygons));
+    }
+
+    // Retail ZDAT zones may deliberately reuse the same world coordinate
+    // space. The full reachable graph is therefore retained as a preload, but
+    // only the active authored zone is submitted. Within that zone we ignore
+    // the ordinary SLST polygon subset so a wider viewport can reveal all
+    // local geometry without waking objects or mixing future course sections.
+    let worlds = graph
+        .world_eids
+        .iter()
+        .copied()
+        .zip(graph.worlds.iter())
+        .enumerate()
+        .map(|(active_index, (eid, geometry))| SceneWorld {
+            geometry: full_level_graph
+                .and_then(|full_graph| {
+                    full_graph
+                        .worlds
+                        .iter()
+                        .find(|cached| cached.eid == eid)
+                        .map(|cached| Arc::clone(&cached.geometry))
+                })
+                .unwrap_or_else(|| Arc::clone(geometry)),
+            active_index: Some(active_index),
+        })
+        .collect::<Vec<_>>();
+
+    let retail_authored = retail_visible
+        .iter()
+        .filter_map(|polygon| {
+            let active_index = usize::from(polygon.world_index);
+            let geometry = graph.worlds.get(active_index)?;
+            (!geometry.header.is_backdrop)
+                .then(|| (active_index, usize::from(polygon.polygon_index)))
+        })
+        .collect::<BTreeSet<_>>();
+    let mut polygons = Vec::new();
+    for (world_index, world) in worlds.iter().enumerate() {
+        if world.geometry.header.is_backdrop {
+            continue;
+        }
+        for polygon_index in 0..world.geometry.polygons.len() {
+            let source_polygon = presentation_polygon_source(world_index, polygon_index)?;
+            polygons.push(SelectedWorldPolygon {
+                world_index,
+                polygon_index,
+                source: CommandSource::World {
+                    zone: location.zone.raw(),
+                    polygon: source_polygon,
+                },
+                retail_authored: retail_authored.contains(&(world_index, polygon_index)),
+            });
+        }
+    }
+
+    for polygon in retail_visible {
+        let active_index = usize::from(polygon.world_index);
+        let geometry = graph
+            .worlds
+            .get(active_index)
+            .ok_or_else(|| scene_error("SLST references an inactive backdrop world slot"))?;
+        if !geometry.header.is_backdrop {
+            continue;
+        }
+        polygons.push(SelectedWorldPolygon {
+            world_index: active_index,
+            polygon_index: usize::from(polygon.polygon_index),
+            source: CommandSource::World {
+                zone: location.zone.raw(),
+                polygon: presentation_polygon_source(
+                    active_index,
+                    usize::from(polygon.polygon_index),
+                )?,
+            },
+            retail_authored: true,
+        });
+    }
+    if polygons.len() > PRESENTATION_POLYGON_LIMIT {
+        return Err(scene_error(format!(
+            "complete level exceeds the {PRESENTATION_POLYGON_LIMIT}-polygon presentation limit"
+        )));
+    }
+    Ok((worlds, polygons))
+}
+
+fn presentation_polygon_source(
+    active_world_index: usize,
+    polygon_index: usize,
+) -> Result<u32, RetailSceneError> {
+    let world = u32::try_from(active_world_index)
+        .map_err(|_| scene_error("presentation world slot does not fit u32"))?;
+    let polygon = u32::try_from(polygon_index)
+        .map_err(|_| scene_error("presentation polygon index does not fit u32"))?;
+    if world > u32::from(u8::MAX) || polygon > 0x00ff_ffff {
+        return Err(scene_error(
+            "presentation world/polygon identity exceeds its checked packing",
+        ));
+    }
+    Ok((world << 24) | polygon)
 }
 
 fn update_persistent_world_map_path_masks(
@@ -2664,7 +3219,7 @@ fn entry_item<'a>(
 
 fn validate_visibility(
     visible: &[PolygonId],
-    worlds: &[WorldGeometry],
+    worlds: &[Arc<WorldGeometry>],
 ) -> Result<(), RetailSceneError> {
     for polygon in visible {
         let world = worlds
@@ -2675,54 +3230,6 @@ fn validate_visibility(
         }
     }
     Ok(())
-}
-
-fn extended_zone_polygons(
-    retail_visible: &[PolygonId],
-    worlds: &[WorldGeometry],
-) -> Result<Vec<PolygonId>, RetailSceneError> {
-    if worlds.len() > 8 {
-        return Err(scene_error(
-            "extended world render exceeds the packed eight-world ZDAT limit",
-        ));
-    }
-    let capacity = worlds.iter().try_fold(0_usize, |total, world| {
-        total
-            .checked_add(world.polygons.len())
-            .ok_or_else(|| scene_error("extended world polygon count overflows"))
-    })?;
-    let mut polygons = Vec::with_capacity(capacity);
-    let retail_visible = retail_visible
-        .iter()
-        .map(|polygon| ((polygon.world_index, polygon.polygon_index), polygon.flag))
-        .collect::<BTreeMap<_, _>>();
-    for (world_index, world) in worlds.iter().enumerate() {
-        let world_index = u8::try_from(world_index)
-            .map_err(|_| scene_error("extended world index does not fit packed SLST identity"))?;
-        for polygon_index in 0..world.polygons.len() {
-            let polygon_index = u16::try_from(polygon_index).map_err(|_| {
-                scene_error("extended world polygon index does not fit packed SLST identity")
-            })?;
-            if polygon_index >= 0x1000 {
-                return Err(scene_error(
-                    "extended world polygon index exceeds the packed 12-bit SLST limit",
-                ));
-            }
-            let retail_flag = retail_visible.get(&(world_index, polygon_index)).copied();
-            // Backdrop WGEOs contain authored alternatives which SLST swaps
-            // as the camera advances. Revealing all of them produces giant
-            // overlapping sky panels; retain only the active authored subset.
-            if world.header.is_backdrop && retail_flag.is_none() {
-                continue;
-            }
-            polygons.push(PolygonId {
-                world_index,
-                polygon_index,
-                flag: retail_flag.unwrap_or(false),
-            });
-        }
-    }
-    Ok(polygons)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2970,6 +3477,52 @@ fn blend_mode(raw: u8) -> BlendMode {
     }
 }
 
+/// Modern presentation projection without the PSX screen/depth saturation
+/// registers. The camera transform remains the same fixed-point transform;
+/// only the final quotient retains the full logical output range so far WGEOs
+/// cannot collapse into giant `±1024` panels before viewport classification.
+fn project_presentation(
+    point: Vec3i,
+    translation: Vec3i,
+    matrix: Matrix3,
+    projection_distance: u32,
+) -> ProjectionResult {
+    let camera = rotate_translate(point, translation, matrix).point;
+    let (x, x_valid) = presentation_project_axis(camera.x, camera.z, projection_distance);
+    let (y, y_valid) = presentation_project_axis(camera.y, camera.z, projection_distance);
+    ProjectionResult {
+        camera,
+        screen: crust_renderer::command::ScreenPoint { x, y, z: camera.z },
+        valid: camera.z > 0 && x_valid && y_valid,
+    }
+}
+
+fn presentation_project_axis(value: i32, depth: i32, projection_distance: u32) -> (i32, bool) {
+    if depth <= 0 {
+        return (
+            if value.is_negative() {
+                i32::MIN
+            } else {
+                i32::MAX
+            },
+            false,
+        );
+    }
+    let projected =
+        i64::from(value).saturating_mul(i64::from(projection_distance)) / i64::from(depth);
+    match i32::try_from(projected) {
+        Ok(projected) => (projected, true),
+        Err(_) => (
+            if projected.is_negative() {
+                i32::MIN
+            } else {
+                i32::MAX
+            },
+            false,
+        ),
+    }
+}
+
 fn raw_camera_matrix(rotation_y: i32, rotation_x: i32, rotation_z: i32) -> Matrix3 {
     let angle = |value: i32| Angle12::new(-value);
     let z = angle(rotation_z);
@@ -3037,6 +3590,7 @@ mod tests {
         KNOWN_LEVELS, LevelId, RetailPathId, RetailZoneGraph, StreamKind, StreamName, ZoneEntity,
         parse_nsd, parse_nsf,
     };
+    use crust_renderer::texture::{ColorMode, TextureRegion};
     use crust_sim::camera::{
         RetailCameraEffect, RetailCameraFollowInput, RetailCameraInput, RetailCameraLocation,
         RetailCameraRuntime, RetailCameraStep,
@@ -3411,6 +3965,74 @@ mod tests {
     }
 
     #[test]
+    fn scene_texture_handles_are_stable_across_visibility_order() {
+        let first = TextureRequest {
+            page_id: 0x1234,
+            region: TextureRegion::new(8, 12, 16, 20).unwrap(),
+            color_mode: ColorMode::Direct15,
+            blend_mode: BlendMode::Opaque,
+            clut: None,
+        };
+        let second = TextureRequest {
+            page_id: 0x5678,
+            region: TextureRegion::new(4, 6, 8, 10).unwrap(),
+            color_mode: ColorMode::Indexed4,
+            blend_mode: BlendMode::Average,
+            clut: Some(crust_renderer::texture::ClutLocation { block_x: 2, row: 3 }),
+        };
+        let mut first_order = HashMap::new();
+        let mut first_handles = HashMap::new();
+        let first_handle =
+            stable_scene_texture_handle(first, &mut first_order, &mut first_handles).unwrap();
+        let second_handle =
+            stable_scene_texture_handle(second, &mut first_order, &mut first_handles).unwrap();
+
+        let mut reverse_order = HashMap::new();
+        let mut reverse_handles = HashMap::new();
+        assert_eq!(
+            stable_scene_texture_handle(second, &mut reverse_order, &mut reverse_handles).unwrap(),
+            second_handle
+        );
+        assert_eq!(
+            stable_scene_texture_handle(first, &mut reverse_order, &mut reverse_handles).unwrap(),
+            first_handle
+        );
+        assert_ne!(first_handle, second_handle);
+        assert!(first_handle.get() < (1_u64 << 63));
+        assert!(second_handle.get() < (1_u64 << 63));
+    }
+
+    #[test]
+    fn presentation_projection_retains_offscreen_coordinates_for_safe_culling() {
+        let point = Vec3i {
+            x: 100_000,
+            y: 0,
+            z: 10_000,
+        };
+        let retail = project(point, Vec3i::default(), Matrix3::IDENTITY, [0, 0], 500);
+        assert!(!retail.valid);
+        assert_eq!(retail.screen.x, 1_023);
+
+        let modern = project_presentation(point, Vec3i::default(), Matrix3::IDENTITY, 500);
+        assert!(modern.valid);
+        assert_eq!(modern.screen.x, 5_000);
+        assert_eq!(
+            Viewport::PSX.classify_triangle([
+                modern.screen,
+                crust_renderer::command::ScreenPoint {
+                    x: 5_001,
+                    ..modern.screen
+                },
+                crust_renderer::command::ScreenPoint {
+                    x: 5_002,
+                    ..modern.screen
+                },
+            ]),
+            TriangleVisibility::Outside
+        );
+    }
+
+    #[test]
     fn ripple_state_matches_source_seed_advance_wrap_pause_and_level_rates() {
         for (level, speed, period) in [
             (LevelId::new_const(0x0f), 10_i32, 127_i32),
@@ -3691,13 +4313,77 @@ mod tests {
                 RetailScenePresentation {
                     projection_distance: Some(425),
                     extended_world: true,
+                    viewport: Viewport::PSX,
                 },
             )
             .unwrap();
+        eprintln!("N. Sanity Beach complete-level scene: {:?}", extended.stats);
+        let full_graph = parse_full_level_scene_graph(&nsd, &nsf, &nsf_bytes).unwrap();
+        assert_eq!(extended.stats.worlds, scene.stats.worlds);
+        assert_eq!(extended.stats.preloaded_worlds, full_graph.worlds.len());
+        assert!(extended.stats.preloaded_worlds > extended.stats.worlds);
         assert!(extended.stats.visible_polygons > scene.stats.visible_polygons);
+        assert!(extended.stats.submitted_polygons > scene.stats.submitted_polygons);
+        assert!(extended.stats.submitted_polygons <= extended.stats.visible_polygons);
+        assert_eq!(extended.stats.unique_textures, extended.textures.len());
+
+        let spawn_location = RetailSceneProgressLocation {
+            zone: ldat.spawn_zone,
+            path_index: u32::try_from(ldat.spawn_path_index).unwrap(),
+            path_progress: 0,
+            frame_stamp: 0,
+            draw_count: 0,
+        };
+        let mut retail_cache_builder = RetailSceneBuilder::new();
+        retail_cache_builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, spawn_location)
+            .unwrap();
+        retail_cache_builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, spawn_location)
+            .unwrap();
+        let retail_cache_frame = retail_cache_builder.texture_cache.metrics().frame;
+        let mut toggle_cache_builder = RetailSceneBuilder::new();
+        toggle_cache_builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, spawn_location)
+            .unwrap();
+        toggle_cache_builder
+            .build_at_progress_with_presentation(
+                &nsd,
+                &nsf,
+                &nsf_bytes,
+                spawn_location,
+                RetailScenePresentation {
+                    projection_distance: Some(425),
+                    extended_world: true,
+                    viewport: Viewport::PSX,
+                },
+            )
+            .unwrap();
         assert_eq!(
-            extended.stats.visible_polygons,
-            extended.stats.submitted_polygons
+            toggle_cache_builder.texture_cache.metrics().frame,
+            retail_cache_frame,
+            "presentation-only WGEO requests must not perturb the native texture cache"
+        );
+        let retail_after_toggle = retail_cache_builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, spawn_location)
+            .unwrap();
+        let toggled_after_toggle = toggle_cache_builder
+            .build_at_progress(&nsd, &nsf, &nsf_bytes, spawn_location)
+            .unwrap();
+        assert_eq!(
+            toggled_after_toggle, retail_after_toggle,
+            "returning to retail presentation must reproduce the untouched native scene"
+        );
+        assert_eq!(
+            toggle_cache_builder.texture_cache.metrics().frame,
+            retail_cache_builder.texture_cache.metrics().frame,
+            "returning to retail presentation must preserve native LRU behavior"
+        );
+        assert!(
+            !toggle_cache_builder
+                .presentation_texture_cache
+                .entries
+                .is_empty()
         );
 
         let first_presented =
@@ -3853,6 +4539,87 @@ mod tests {
             .unwrap();
         assert_eq!(cached_after_return, cached_first);
         assert_eq!(builder.diagnostics().graph_builds, 3);
+    }
+
+    #[test]
+    #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+    fn every_local_gameplay_pair_preloads_a_bounded_graph_and_builds_extended_presentation() {
+        let root = PathBuf::from(
+            std::env::var_os("C1_STREAM_DIR")
+                .expect("C1_STREAM_DIR must name local extracted retail streams"),
+        );
+        let mut built = 0_usize;
+        let mut total_worlds = 0_usize;
+        let mut total_preloaded_worlds = 0_usize;
+        let mut total_candidates = 0_usize;
+        let mut total_submitted = 0_usize;
+
+        for known in KNOWN_LEVELS
+            .iter()
+            .filter(|known| known.bootable && known.id != LevelId::TITLE)
+        {
+            let nsd_path = root.join(known.nsd_filename());
+            let nsf_path = root.join(known.nsf_filename());
+            let nsd_bytes = std::fs::read(&nsd_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsd_path.display()));
+            let nsf_bytes = std::fs::read(&nsf_path)
+                .unwrap_or_else(|error| panic!("{}: {error}", nsf_path.display()));
+            let nsd = parse_nsd(&nsd_bytes, known.id).unwrap();
+            let nsf = parse_nsf(&nsf_bytes, &nsd).unwrap();
+            let ldat = nsd.ldat().expect("bootable gameplay pair has LDAT");
+            let scene = RetailSceneBuilder::new()
+                .build_at_progress_with_presentation(
+                    &nsd,
+                    &nsf,
+                    &nsf_bytes,
+                    RetailSceneProgressLocation {
+                        zone: ldat.spawn_zone,
+                        path_index: u32::try_from(ldat.spawn_path_index)
+                            .expect("retail spawn path index is non-negative"),
+                        path_progress: 0,
+                        frame_stamp: 0,
+                        draw_count: 0,
+                    },
+                    RetailScenePresentation {
+                        projection_distance: None,
+                        extended_world: true,
+                        viewport: Viewport {
+                            x: -448,
+                            y: -120,
+                            width: 896,
+                            height: 240,
+                        },
+                    },
+                )
+                .unwrap_or_else(|error| {
+                    panic!("{} complete-level presentation: {error}", known.name)
+                });
+            assert!(scene.stats.worlds <= PRESENTATION_WORLD_LIMIT);
+            assert!(scene.stats.preloaded_worlds <= PRESENTATION_WORLD_LIMIT);
+            assert!(
+                scene.stats.preloaded_worlds > 0,
+                "{} preloaded no reachable non-backdrop worlds",
+                known.name
+            );
+            assert!(scene.stats.visible_polygons <= PRESENTATION_POLYGON_LIMIT);
+            assert!(scene.stats.submitted_polygons <= scene.stats.visible_polygons);
+            assert_eq!(scene.stats.unique_textures, scene.textures.len());
+            built = built.saturating_add(1);
+            total_worlds = total_worlds.saturating_add(scene.stats.worlds);
+            total_preloaded_worlds =
+                total_preloaded_worlds.saturating_add(scene.stats.preloaded_worlds);
+            total_candidates = total_candidates.saturating_add(scene.stats.visible_polygons);
+            total_submitted = total_submitted.saturating_add(scene.stats.submitted_polygons);
+        }
+
+        assert_eq!(built, 42);
+        assert!(total_worlds > 0);
+        assert!(total_preloaded_worlds > 0);
+        assert!(total_candidates > 0);
+        assert!(total_submitted > 0);
+        eprintln!(
+            "extended-presentation corpus: pairs={built}, active_worlds={total_worlds}, preloaded_worlds={total_preloaded_worlds}, candidates={total_candidates}, submitted={total_submitted}"
+        );
     }
 
     #[test]

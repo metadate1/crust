@@ -612,9 +612,12 @@ The collapsed **Optional display upgrades** panel keeps retail presentation as t
 offers a presentation-only 60+ Hz interpolation layer, wider 16:9 or 21:9 logical viewports,
 15/30/45% camera zoom-out presets, fixed 720p–2160p internal resolutions, and an extended-world
 mode. Simulation, GOOL, collision, input, audio, and object activation remain authoritative at
-30 Hz. The current extended-world slice removes the active ZDAT world's retail SLST pop-in for
-ordinary geometry while retaining the authored backdrop subset; it does not wake off-screen
-objects or alter gameplay timing.
+30 Hz. Extended mode preloads every unique non-backdrop WGEO reachable through the level's
+validated ZDAT graph, then draws all ordinary polygons from the current authored zone which can
+affect the selected viewport. Backdrop alternatives remain selected by the active authored SLST,
+and a separate bounded presentation texture cache leaves native's eight-slot pager untouched.
+Retail zones can reuse the same world coordinate space, so mutually exclusive zones are never
+drawn simultaneously. The option does not wake off-screen objects or alter gameplay timing.
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one

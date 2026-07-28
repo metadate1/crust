@@ -19328,6 +19328,21 @@ mod tests {
             Some(0x09),
             "LevelUpdate flag one clears spawn bits one and two"
         );
+        assert_eq!(
+            runtime.finish_deferred_display_frame(),
+            Ok(Some(INITIAL_DISPLAY_MASK)),
+            "the source frame still reaches GLUpdate after synchronous LevelRestart"
+        );
+        assert_eq!(
+            runtime.draw_count(),
+            1,
+            "LevelRestart resets draw_count before same-frame GLUpdate republishes one"
+        );
+        assert_eq!(
+            runtime.machine.global_word(crate::gool::DRAW_COUNT_GLOBAL),
+            Ok(1),
+            "GOOL observes the same post-GLUpdate draw count"
+        );
     }
 
     #[test]

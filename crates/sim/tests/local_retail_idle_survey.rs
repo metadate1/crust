@@ -50246,6 +50246,22 @@ fn survey_pair_with_runtime_impl(
                     break;
                 }
                 Ok(None) => {
+                    // `LevelRestart` runs synchronously inside
+                    // `GoolUpdateObjects`, then the same source CoreLoop
+                    // iteration still reaches `GLUpdate`. The restart resets
+                    // draw_count to zero; that trailing display boundary
+                    // publishes one when display is enabled. `run_frame`
+                    // deliberately suppressed its ordinary display latch
+                    // while the restart request was pending, so complete it
+                    // only after the structural restart clears that request.
+                    runtime
+                        .finish_deferred_display_frame()
+                        .map_err(|error| {
+                            format!("frame {frame} post-restart display boundary: {error:?}")
+                        })?
+                        .ok_or_else(|| {
+                            format!("frame {frame} post-restart display boundary remained deferred")
+                        })?;
                     death_camera = RetailDeathCameraState::default();
                     death_camera_pose = None;
                     input_controller.on_restart();

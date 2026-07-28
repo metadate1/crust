@@ -445,12 +445,14 @@ restarts, load-state effects, faults, or checked issues. Terminal globals are
 `[0x500,15,15,14,1,15,0]`, RNG is `0xa2cc489a`/`0x654cb6a6`, and draw is 10,239. This is
 deterministic native-engine characterization, not a browser playthrough.
 
-The current native schedule therefore includes deterministic normal-route completions for
-N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders, Upstream, Rolling Stones, Hog Wild,
-Native Fortress, Temple Ruins, Road to Nowhere, The High Road, Cortex Power, and Up the Creek, plus
-authored Papu Papu and later boss completions. These are not a full retail playthrough or a
-browser-playthrough claim.
-Broader progression, several GOOL host
+That same fixture now continues from Road to Nowhere through Boulder Dash and every remaining
+authored main-map level and boss. It retains the characterized carried machinery and hazard phases
+for Jaws of Darkness, Castle Machinery, and The Lab, crosses Great Hall, defeats Cortex, executes
+the complete Ending stream, and remounts Title with level 32 unlocked. This is a complete native
+main-map session-carry proof over user-supplied local streams. Its documented PBAK-assisted
+Boulders, Upstream, and Lost City sections and Lost City's six recovery restarts remain part of the
+fixture; a zero-recovery browser playthrough is still a separate parity gate.
+Several GOOL host
 operations, pixel-level rendering edge cases, later same-level restart cases, and uncharacterized
 mechanical-CD seek, error and retry edges remain incomplete. Stream-backed paging now validates each
 page's one-to-thirty-two-sector NSD span, reserves a source-contiguous physical run transactionally,

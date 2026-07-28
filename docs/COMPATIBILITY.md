@@ -795,9 +795,9 @@ gameplay path.
   completes that real operation-two handshake, and the shared `0e` Password selection bypasses it
   as authored. These paths and damaged-card behavior are heavily model-tested, but a complete
   authored save/load playthrough across every title and level transition is not yet certified.
-- Thirteen deterministic retail-authored levels now reach their real end warps and request Level
-  Complete, including the independent N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog,
-  Boulder Dash, Native Fortress, and Rolling Stones routes. N. Sanity's fresh ordinary-pad golden
+- Independent deterministic routes now reach the real authored exits throughout the retail
+  campaign, including N. Sanity Beach, Jungle Rollers, Hog Wild, Whole Hog, Boulder Dash, Native
+  Fortress, and Rolling Stones. N. Sanity's fresh ordinary-pad golden
   activates checkpoint 19, reaches `0xa00` counted boxes, executes `WarpC` states zero through four,
   and resolves the checked Level Complete handoff at frame 1,900 without a restart or fault. The
   carried chain executes the complete legally local Upstream PBAK input, completes Upstream's
@@ -808,6 +808,11 @@ gameplay path.
   carried frame 5,041 through its authored Level Complete request. Temple's completion graph
   requests Title on frame 633, the next Map selects Road to Nowhere on frame 253, and Road reaches
   its authored Level Complete request on frame 2,449 with zero deaths or restarts. The independent
+  carried fixture then continues through Boulder Dash and every remaining main-map level and boss,
+  retains the exact inherited Jaws, Castle Machinery, and Lab phases, crosses Great Hall, defeats
+  Cortex, executes Ending, and remounts Title with level 32 unlocked. This complete native
+  main-map chain still includes its documented legally local PBAK-assisted sections and Lost
+  City's six recovery restarts; it is not a zero-recovery browser-playthrough claim. The independent
   Rolling Stones direct boot reaches the same end on its own deterministic phase, and the exact
   raw-BIN browser-derived post-Papu carry now reaches it independently. A later owned-raw-BIN
   Chromium run joined the publisher/title-to-Rolling mount, exact Rolling route, 425-frame Level
@@ -828,9 +833,9 @@ gameplay path.
   Representative Tawna, Brio, second-Tawna, and Cortex bonus layouts have complete ordinary-pad
   native parent-entry/portal/return coverage, including protected parent remounts where asserted.
   Other parent-specific bonus layouts and an uninterrupted browser bonus round trip remain open.
-  Remaining gates include every unfinished normal route and bonus-layout variant, broader
-  death/checkpoint sequences, a complete browser-driven endgame, long soak, mobile audio sessions,
-  and a multiple physical-gamepad matrix.
+  Remaining gates include Stormy Ascent, carried key-unlock integration for the secret levels,
+  every unfinished bonus-layout variant, broader death/checkpoint sequences, a complete
+  browser-driven endgame, long soak, mobile audio sessions, and a multiple physical-gamepad matrix.
 
 ## Automated coverage
 

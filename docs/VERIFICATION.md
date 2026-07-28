@@ -1589,7 +1589,7 @@ C1_STREAM_DIR=/path/to/streams \
 # on the platform-specific libtest default.
 RUST_MIN_STACK=33554432 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \
-  authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry \
+  authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry \
   -- --ignored --exact --nocapture
 C1_STREAM_DIR=/path/to/streams \
   cargo test -p crust-sim --test local_retail_idle_survey --locked \

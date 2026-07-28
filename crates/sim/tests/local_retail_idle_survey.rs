@@ -50431,8 +50431,25 @@ fn carry_boulder_dash_through_heavy_machinery(
         lab.level,
         [0, 15, 15, 29, 1, 29, 1],
     );
+    assert_eq!(
+        (
+            lab_carry.random_seed,
+            lab_carry.draw_count,
+            lab_carry.random_seed_b(),
+            lab_carry.respawn_count,
+            lab_carry.death_count,
+        ),
+        (
+            UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED,
+            UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT,
+            UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B,
+            0,
+            0,
+        ),
+        "the uninterrupted campaign must retain The Lab's characterized hazard phase"
+    );
     let (lab_survey, lab_runtime) =
-        lab.run_carried(lab_carry, SurveyInputProfile::LabCompletionRoute, 3_500);
+        lab.run_carried(lab_carry, SurveyInputProfile::LabExactCampaignPhase, 4_200);
     assert_eq!(
         lab_survey.next_lid.map(|(_, lid)| lid),
         Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
@@ -50524,6 +50541,10 @@ fn carry_boulder_dash_through_heavy_machinery(
     assert_eq!(ending_survey.restarts, 0, "{}", ending_survey.summary());
     assert_eq!(ending_survey.faulted_objects, 0);
     assert!(ending_survey.is_clean(), "{}", ending_survey.summary());
+    assert_eq!(
+        campaign_progression_globals(&ending_runtime),
+        [0, 15, 15, 31, 1, 32, 0]
+    );
     let title_after_ending_carry = ending.finish_checked(ending_runtime, LevelId::TITLE);
     let title_after_ending =
         RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, title_after_ending_carry)
@@ -50531,7 +50552,7 @@ fn carry_boulder_dash_through_heavy_machinery(
     assert_eq!(title_after_ending.faulted_object_count(), 0);
     assert_eq!(
         campaign_progression_globals(&title_after_ending),
-        [0x300, 15, 15, 31, 1, 31, 0]
+        [0, 15, 15, 31, 1, 32, 0]
     );
 }
 
@@ -62479,7 +62500,7 @@ fn publisher_first_persistent_pad_reaches_jungle_mount_after_n_sanity() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_first_five_levels_and_papu_reach_rolling_stones_with_session_carry() {
+fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry() {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 

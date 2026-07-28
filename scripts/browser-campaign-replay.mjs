@@ -479,6 +479,15 @@ function guardedPhaseSegments(fragment, normalizedReplay, phase) {
     phase.exit,
     `fragment for phase ${JSON.stringify(phase.id)} final expectation`,
   );
+  if (phase.entry.currentLid !== phase.exit.currentLid) {
+    // A standalone exported fragment asks for one destination execution so
+    // its smoke test proves that the newly mounted stream is runnable. In a
+    // composed campaign that extra frame belongs to the following phase and
+    // would shift every native-origin input by one frame. Exact phase exit
+    // checkpoint fields remain authoritative and may still advance the
+    // destination deliberately when they describe a later checkpoint.
+    delete last.expect.minRetailExecutions;
+  }
   const phaseSettleFrames =
     phase.settleFrames ?? normalizedReplay.settleFrames;
   const combinedSettleFrames = last.settleFrames + phaseSettleFrames;
@@ -551,6 +560,7 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
     expect: normalized.expect,
     composition: {
       schema: 1,
+      crossLidExitPolicy: "exact-checkpoint-at-destination-mount",
       phaseIds: manifest.phases.map(({ id }) => id),
       insertedHandoffs: manifest.insertedHandoffs,
     },

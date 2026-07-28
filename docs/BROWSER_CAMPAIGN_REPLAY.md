@@ -127,6 +127,25 @@ does not synthesize their inputs or skip either mount.
 `settleFrames` is the final replay settle budget. A phase may specify its own `settleFrames` to
 override the fragment's root settle budget at that boundary.
 
+Standalone exported fragments require at least one destination GOOL execution after a cross-LID
+transition. The composer removes that generic smoke-test requirement at campaign handoffs so the
+next phase owns destination frame 1. The manifest's exact exit checkpoint remains authoritative:
+if its draw/RNG/counter fields describe a later destination frame, settlement advances to that
+frame; if they describe the completed mount at frame zero, no following-phase input is consumed.
+This prevents a map handoff from shifting a frame-exact boss route while retaining fail-closed
+continuity checks.
+
+Settlement is a bounded number of ordinary cooperative destination frames, not wall-clock waiting
+and not an engine timing correction. It is therefore allowed to advance the newly mounted stream.
+For example, the publisher-first Jungle Rollers completion reaches its exact level-end request on
+route frame 3,387, then needs 119 zero-input Level Complete frames before the stable destination
+checkpoint. Those 119 frames belong to the harness settlement budget. A following phase's
+`while` guard prevents stale source-phase input from leaking after an already-advanced destination
+transitions. The runner reports per-trace `settleFramesUsed`, total `segmentSettleFramesUsed`, and
+`skippedReplayFrames`, so an overlapped local fragment is visible and can be regenerated or
+trimmed at the exact post-settlement checkpoint instead of being misreported as browser/native
+simulation lag.
+
 ## Fragment contract
 
 Each referenced document must be a schema-1 run-length replay emitted to a local directory by the
@@ -172,6 +191,11 @@ A successful composition proves that the declared fragment metadata forms one ex
 A successful browser-harness run is the stronger evidence: it proves the real Wasm runtime
 actually executed every supplied pad segment, acknowledged every authored remount, and reached
 every exact checkpoint without runtime, GOOL, WebGL, console, or network failure.
+
+The harness retains cumulative evidence that GOOL executed during the campaign. A replay may end
+at a valid asynchronous destination mount whose final snapshot is frame zero and has no per-frame
+executions yet; that final snapshot no longer erases execution evidence from the levels that led
+to it.
 
 Neither result alone proves an unrepresented campaign branch. Bonus returns, deaths/checkpoint
 reloads, secret paths, password/card flows, and alternate endings need their own local phases and

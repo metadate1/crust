@@ -11,6 +11,7 @@ import {
   parseArguments,
   replayLidConditionMatches,
   replayStepMethod,
+  retailExecutionObserved,
   snapshotFailures,
 } from "./browser-harness-smoke.mjs";
 
@@ -130,6 +131,32 @@ test("replay batches cap constant-held runs and can isolate the launch frame", (
       nextReplayBatchFrameCount(1, {
         isolateFirstFrame: "yes",
       }),
+    /must be a boolean/,
+  );
+});
+
+test("campaign execution evidence survives a destination mount at frame zero", () => {
+  assert.equal(retailExecutionObserved(false, undefined), false);
+  assert.equal(
+    retailExecutionObserved(false, {
+      debug: { retailExecutions: 0 },
+    }),
+    false,
+  );
+  assert.equal(
+    retailExecutionObserved(false, {
+      debug: { retailExecutions: 37 },
+    }),
+    true,
+  );
+  assert.equal(
+    retailExecutionObserved(true, {
+      debug: { retailExecutions: 0 },
+    }),
+    true,
+  );
+  assert.throws(
+    () => retailExecutionObserved("yes", { debug: { retailExecutions: 1 } }),
     /must be a boolean/,
   );
 });

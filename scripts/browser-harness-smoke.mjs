@@ -144,6 +144,15 @@ export function destinationMountReady(
   );
 }
 
+export function retailExecutionObserved(previouslyObserved, snapshot) {
+  if (typeof previouslyObserved !== "boolean") {
+    throw new Error("previouslyObserved must be a boolean");
+  }
+  const executions = snapshot?.debug?.retailExecutions;
+  return previouslyObserved
+    || (Number.isSafeInteger(executions) && executions > 0);
+}
+
 export function usage() {
   return `Usage:
   node scripts/browser-harness-smoke.mjs --asset PATH [--asset PATH ...] [options]
@@ -1211,6 +1220,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     // continue far enough to spend a life legitimately.
     let allLevelsLaunchChecked = !replay.unlockAll;
     let finalSnapshot = await browserSnapshot(cdp, sessionId);
+    let observedRetailExecution = retailExecutionObserved(false, finalSnapshot);
     let replayCurrentLid = finalSnapshot.debug?.currentLid;
     let replayMountedLid = finalSnapshot.debug?.mountedLid;
     const stepReplayBatch = async (inputKind, held, frameCount, label) => {
@@ -1248,6 +1258,10 @@ async function runBrowser(options, replay, chromeExecutable) {
         );
       }
       finalSnapshot = result.snapshot;
+      observedRetailExecution = retailExecutionObserved(
+        observedRetailExecution,
+        finalSnapshot,
+      );
       if (Number.isSafeInteger(finalSnapshot.debug?.currentLid)) {
         replayCurrentLid = finalSnapshot.debug.currentLid;
       }
@@ -1291,6 +1305,10 @@ async function runBrowser(options, replay, chromeExecutable) {
             destinationMountReady(snapshot, requestedLid, previousRuntimeLog),
           failures,
           120_000,
+        );
+        observedRetailExecution = retailExecutionObserved(
+          observedRetailExecution,
+          finalSnapshot,
         );
         replayCurrentLid = requestedLid;
         replayMountedLid = requestedLid;
@@ -1348,13 +1366,14 @@ async function runBrowser(options, replay, chromeExecutable) {
         );
         remainingFrames -= executed;
       }
-      segmentSettleFramesUsed += await settleExpectation(
+      const settleFramesUsed = await settleExpectation(
         segment.expect,
         segment.settleFrames,
         segment.inputKind,
         segment.settleHeld,
         `browser replay segment ${segmentIndex + 1} settle`,
       );
+      segmentSettleFramesUsed += settleFramesUsed;
       assertExpected(
         segment.expect,
         finalSnapshot,
@@ -1367,6 +1386,7 @@ async function runBrowser(options, replay, chromeExecutable) {
         segmentTrace.push({
           segment: segmentIndex + 1,
           stepped,
+          settleFramesUsed,
           held: segment.held,
           retailFrame: finalSnapshot.debug?.retailFrame,
           retailDrawCount: finalSnapshot.debug?.retailDrawCount,
@@ -1384,6 +1404,10 @@ async function runBrowser(options, replay, chromeExecutable) {
       }
     }
     finalSnapshot = await browserSnapshot(cdp, sessionId);
+    observedRetailExecution = retailExecutionObserved(
+      observedRetailExecution,
+      finalSnapshot,
+    );
     const settleFramesUsed = await settleExpectation(
       replay.expect,
       replay.settleFrames,
@@ -1412,7 +1436,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     if (!(finalSnapshot.debug.mountedEntries > 0)) {
       throw new Error("mounted stream did not expose any indexed entries");
     }
-    if (!(finalSnapshot.debug.retailExecutions > 0)) {
+    if (!observedRetailExecution) {
       throw new Error("retail GOOL runtime did not execute any objects");
     }
     if (replay.unlockAll) {
@@ -1460,6 +1484,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       currentLid: finalSnapshot.debug.currentLid,
       mountedLid: finalSnapshot.debug.mountedLid,
       retailExecutions: finalSnapshot.debug.retailExecutions,
+      retailExecutionObserved: observedRetailExecution,
       retailFrame: finalSnapshot.debug.retailFrame,
       retailDrawCount: finalSnapshot.debug.retailDrawCount,
       retailProcessDrawCount: finalSnapshot.debug.retailProcessDrawCount,

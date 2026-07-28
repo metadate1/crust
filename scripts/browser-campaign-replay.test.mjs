@@ -220,7 +220,15 @@ test("composer inserts authored title-map fragments with guards and exact exits"
     ),
     checkpoints.jungleEntry,
   );
-  assert.equal(replay.segments[4].expect.minRetailExecutions, 1);
+  assert.equal(
+    replay.segments[4].expect.minRetailExecutions,
+    undefined,
+    "the map handoff stops at its exact destination checkpoint without consuming Jungle frame 1",
+  );
+  assert.equal(
+    replay.composition.crossLidExitPolicy,
+    "exact-checkpoint-at-destination-mount",
+  );
   assert.equal(
     replay.segments[4].settleFrames,
     3,
@@ -231,6 +239,42 @@ test("composer inserts authored title-map fragments with guards and exact exits"
   assert.equal(replay.canonicalCampaign, false);
   assert.ok(
     replay.segments.every((segment) => segment.inputKind === "physical"),
+  );
+});
+
+test("composer consumes destination frames only when the exact exit checkpoint requires them", async () => {
+  const { manifest, fragments } = syntheticCampaign();
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+  for (const segmentIndex of [1, 2, 4, 5]) {
+    assert.equal(
+      replay.segments[segmentIndex].expect.minRetailExecutions,
+      undefined,
+      `cross-LID segment ${segmentIndex + 1} must not consume the next phase's frame 1`,
+    );
+  }
+
+  const idle = checkpoint(0x09, 11, 1);
+  const idleManifest = {
+    schema: 1,
+    localDiagnosticOnly: true,
+    canonicalCampaign: false,
+    bootLid: 0x09,
+    unlockAll: false,
+    phases: [
+      phase("same-mount-idle", "./idle.json", idle, idle),
+    ],
+  };
+  const idleReplay = await composeCampaignReplay(
+    idleManifest,
+    async () => fragment(idle, idle, [{ frames: 1, held: 0 }]),
+  );
+  assert.equal(
+    idleReplay.segments[0].expect.minRetailExecutions,
+    1,
+    "a phase that stays on the same mount retains its standalone execution proof",
   );
 });
 

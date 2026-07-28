@@ -285,7 +285,7 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        3_250,
+        3_500,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -26125,6 +26125,7 @@ struct StormyAscentCompletionRouteController {
     d1_platform_last_top: Option<i32>,
     d3_platform_last_y: Option<i32>,
     d3_phase_complete: bool,
+    f1_platform_wait: u8,
 }
 
 impl Default for StormyAscentCompletionRouteController {
@@ -26150,6 +26151,7 @@ impl Default for StormyAscentCompletionRouteController {
             d1_platform_last_top: None,
             d3_platform_last_y: None,
             d3_phase_complete: false,
+            f1_platform_wait: 0,
         }
     }
 }
@@ -27624,9 +27626,82 @@ impl StormyAscentCompletionRouteController {
             self.a4_wall_stage = 70;
             self.jump_frames = 0;
             self.release_frames = 0;
-            return 0;
+            self.f1_platform_wait = 2;
+            return PAD_RIGHT;
         }
         if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 70 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+                return PAD_RIGHT;
+            }
+            self.a4_wall_stage = 71;
+            self.jump_frames = 17;
+            self.release_frames = 3;
+            return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ")
+            && self.a4_wall_stage == 71
+            && player.status_a & 1 != 0
+            && player.translation[1] >= -7_400_000
+        {
+            self.a4_wall_stage = 72;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.f1_platform_wait = 0;
+            return 0;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 72 {
+            self.f1_platform_wait = self.f1_platform_wait.saturating_add(1);
+            let wait = std::env::var("C1_STORMY_F1_SECOND_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(50);
+            if self.f1_platform_wait >= wait {
+                self.a4_wall_stage = 73;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                self.f1_platform_wait = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 73 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+            } else if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 74;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                self.f1_platform_wait = 0;
+                return 0;
+            }
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 74 {
+            self.f1_platform_wait = self.f1_platform_wait.saturating_add(1);
+            let wait = std::env::var("C1_STORMY_F1_THIRD_WAIT")
+                .ok()
+                .and_then(|value| value.parse::<u8>().ok())
+                .unwrap_or(3);
+            if self.f1_platform_wait >= wait {
+                self.a4_wall_stage = 75;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                self.f1_platform_wait = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 75 {
+            if self.f1_platform_wait != 0 {
+                self.f1_platform_wait -= 1;
+            } else if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 76;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if matches!(name, "f1_yZ" | "f2_yZ") && self.a4_wall_stage == 76 {
             return 0;
         }
         let opening_vertical = matches!(

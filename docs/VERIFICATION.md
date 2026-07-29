@@ -1546,6 +1546,27 @@ is 1,322,866 bytes with SHA-256
   pad words produced the clean result above. Replay files, screenshots, and user data remain
   ignored local artifacts; only the generic opt-in segment-trace harness is tracked.
 
+### Live owned-BIN UI checkpoint (2026-07-29)
+
+- The clean optional-display build at `http://127.0.0.1:4174/` was opened in a fresh
+  Chrome-compatible in-app browser tab. The real file chooser selected the user's legally local
+  632,083,536-byte raw BIN; the app reported 43 playable pairs plus the Cave archive and enabled
+  the full-game launch, all-levels/999-lives option, and individual-level selector. The file
+  remained local to the loopback tab.
+- Full-game launch visibly rendered the Naughty Dog publisher presentation and the retail title
+  menu. Choosing Start ran the opening laboratory cutscene and returned to the title as authored.
+  A second Start entered the island map and then mounted Jungle Rollers from the browser's existing
+  persistent campaign state. This checkpoint deliberately did not clear or rewrite the user's
+  virtual memory card to force an N. Sanity Beach selection.
+- The gameplay canvas was 1,494×964 physical pixels at the observed window size. Space produced a
+  visible Crash jump, and a primary canvas click produced a visible spin. Pause changed runtime
+  telemetry from `RUNNING` to `PAUSED`; resume restored `RUNNING`; mute changed the control to
+  `Unmute`, and unmute restored the original state. Browser warning/error logs remained empty
+  through publisher, title, cutscene, map, level mount, gameplay input, pause, and audio-control
+  checks.
+- This is a live boot/control regression check, not an opening-to-ending completion claim. The
+  uninterrupted owned-data campaign replay remains the authoritative completion gate.
+
 ## Reproducible commands
 
 ```bash

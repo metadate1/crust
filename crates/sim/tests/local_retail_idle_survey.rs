@@ -16379,6 +16379,7 @@ struct GreatGateRouteController {
     b6_hazard_released: bool,
     c4_hazard_high_seen: bool,
     c4_hazard_released: bool,
+    c4_entry_log_released: bool,
     c4_second_hazard_high_seen: bool,
     c4_second_hazard_released: bool,
     c4_third_hazard_released: bool,
@@ -16842,6 +16843,13 @@ impl GreatGateRouteController {
                     };
                 }
             }
+            // The carried Yellow-Gem phase reaches the lower b7 ledge while
+            // the retained moving-log bound is live. Use the same ordinary
+            // jump window as the retail route rather than walking off its
+            // near edge.
+            if self.yellow_gem_route && self.stage == 76 && (18..34).contains(&self.action_tick) {
+                held |= PAD_CROSS | PAD_SQUARE;
+            }
             if !self.yellow_gem_route
                 && self.stage == 76
                 && ((18..34).contains(&self.action_tick)
@@ -17200,6 +17208,7 @@ impl GreatGateRouteController {
             }
             if self.stage == 102
                 && self.c4_hazard_released
+                && self.c4_entry_log_released
                 && !self.c4_second_hazard_released
                 && player.translation[0] > 7_400_000
             {
@@ -17304,6 +17313,38 @@ impl GreatGateRouteController {
                 } else {
                     0
                 };
+            }
+            if self.yellow_gem_route
+                && self.c4_anchored
+                && self.c4_hazard_released
+                && !self.c4_entry_log_released
+                && !self.c4_second_hazard_released
+                && player.translation[0] <= 7_550_000
+            {
+                // The first c4 takeoff now lands on WalOC 96's retained
+                // moving bound. Brake over its centre until Crash has a true
+                // grounded jump edge, then cross the next log from the
+                // authored platform instead of carrying a stale Cross hold.
+                const TARGET_X: i32 = 7_480_000;
+                held = if player.velocity[0] < -80_000 || player.translation[0] < TARGET_X - 50_000
+                {
+                    PAD_RIGHT
+                } else if player.velocity[0] > 80_000 || player.translation[0] > TARGET_X + 50_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if player.translation[2] > 86_000 {
+                    held |= PAD_UP;
+                }
+                if grounded
+                    && route_objects.iter().any(|object| {
+                        matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 96)
+                    })
+                {
+                    self.c4_entry_log_released = true;
+                    held = PAD_LEFT | PAD_CROSS | PAD_SQUARE;
+                }
             }
             if self.stage == 102
                 && self.c4_third_hazard_released
@@ -18107,10 +18148,13 @@ impl GreatGateRouteController {
             },
             87 => RouteAction {
                 direction: PAD_LEFT,
-                direction_frames: 16,
+                direction_frames: if self.yellow_gem_route { 19 } else { 16 },
                 button: PAD_CROSS,
+                // Three ground frames align the carried c2 approach before
+                // taking the ordinary jump; without them the live retained
+                // bound clips the left edge.
+                button_start: if self.yellow_gem_route { 3 } else { 0 },
                 button_frames: 16,
-                ..RouteAction::default()
             },
             88 => RouteAction {
                 direction: PAD_LEFT,
@@ -48335,6 +48379,7 @@ impl SurveyInputController {
                 b6_hazard_released: false,
                 c4_hazard_high_seen: false,
                 c4_hazard_released: false,
+                c4_entry_log_released: false,
                 c4_second_hazard_high_seen: false,
                 c4_second_hazard_released: false,
                 c4_third_hazard_released: false,
@@ -77311,8 +77356,8 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
     assert_eq!(
         survey.camera_ranges.get(&c8_path),
         Some(&CameraProgressRange {
-            first_frame: 2_748,
-            last_frame: 3_008,
+            first_frame: 2_749,
+            last_frame: 3_009,
             minimum: 89,
             maximum: 21_407,
         })
@@ -77323,8 +77368,8 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
             index: 1,
         }),
         Some(&CameraProgressRange {
-            first_frame: 2_790,
-            last_frame: 2_961,
+            first_frame: 2_791,
+            last_frame: 2_962,
             minimum: 160,
             maximum: 15_453,
         })
@@ -77336,8 +77381,8 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
     assert_eq!(
         survey.camera_ranges.get(&c9_path),
         Some(&CameraProgressRange {
-            first_frame: 2_863,
-            last_frame: 2_900,
+            first_frame: 2_864,
+            last_frame: 2_901,
             minimum: 116,
             maximum: 6_122,
         })
@@ -77352,19 +77397,19 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
             index: 0,
         }
     );
-    assert_eq!(final_camera.progress.raw(), 4_832);
+    assert_eq!(final_camera.progress.raw(), 5_292);
     assert_eq!(
         survey.final_player_translation,
-        Some([3_501_824, -4_780_684, 132_864])
+        Some([3_483_392, -4_780_681, 132_864])
     );
-    assert_eq!(survey.frames, 3_209);
+    assert_eq!(survey.frames, 3_210);
     assert_eq!(
         survey.next_lid,
-        Some((3_209, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
+        Some((3_210, i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()))
     );
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 3209 requested level transition to 0x2d")
+        Some("frame 3210 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -77394,7 +77439,7 @@ fn great_gate_yellow_gem_card_route_reaches_authored_end_warp() {
         .expect("Yellow Gem completion player trace must resolve")
         .expect("WarpC must retain Crash through the transition request");
     assert_eq!(player.state, 32);
-    assert_eq!(player.translation, [3_501_824, -4_780_684, 132_864]);
+    assert_eq!(player.translation, [3_483_392, -4_780_681, 132_864]);
     assert_eq!(runtime.global_word(ITEM_POOL_1_GLOBAL), Ok(YELLOW_GEM_BIT));
     assert_eq!(runtime.global_word(ITEM_POOL_2_GLOBAL), Ok(0));
     assert_eq!(runtime.global_word(GEM_COUNT_GLOBAL), Ok(1));

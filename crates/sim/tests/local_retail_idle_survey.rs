@@ -544,9 +544,17 @@ fn toxic_waste_authentic_post_generator_phase_reaches_authored_end_warp() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn slippery_climb_authentic_campaign_phase_reaches_authored_end_warp() {
+fn slippery_climb_legacy_synthetic_campaign_phase_reaches_authored_end_warp() {
+    if std::env::var_os("C1_LEGACY_SLIPPERY_CARRY").is_none() {
+        return;
+    }
+
+    // This synthetic carry predates the exact uninterrupted post-Sunset
+    // campaign fixture below. Keep it available for historical route
+    // characterization without treating its obsolete clocks as a supported
+    // campaign frontier.
     assert_slippery_climb_carried_phase_reaches_authored_end_warp(
-        "Slippery Climb authentic campaign phase",
+        "Slippery Climb legacy synthetic campaign phase",
         0xf99a_7625,
         49_935,
         0x37c2_19e0,

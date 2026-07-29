@@ -24457,7 +24457,6 @@ impl HeavyMachineryCompletionRouteController {
             (4_939, 4_971, false, PAD_LEFT),
             (4_972, 5_005, false, PAD_RIGHT),
             (5_006, 5_040, false, PAD_LEFT),
-            (5_041, 5_041, false, PAD_RIGHT | PAD_DOWN),
             (5_042, 6_000, false, PAD_RIGHT),
             (5_071, 5_087, false, PAD_CROSS),
             (5_071, 5_072, false, PAD_DOWN),
@@ -24581,13 +24580,16 @@ impl HeavyMachineryCompletionRouteController {
                 if tick <= 20 {
                     return PAD_CROSS;
                 }
-                if camera.path.zone == h3
+                if (camera.path.zone == h3
                     && camera.path.index == 0
-                    && player.is_some_and(|player| player.status_a & 1 != 0)
+                    && player.is_some_and(|player| player.status_a & 1 != 0))
+                    || player.is_some_and(|player| {
+                        player.status_a & 1 != 0 && player.translation[0] <= 3_400_000
+                    })
                 {
                     self.h1_complete = true;
                 } else {
-                    return 0;
+                    return PAD_LEFT;
                 }
             } else if camera.path.zone == h1
                 && camera.path.index == 4
@@ -24907,6 +24909,38 @@ impl HeavyMachineryCompletionRouteController {
                 }
                 held |= buttons;
             }
+        }
+
+        // The final bounce starts when Crash contacts entity 65, but a
+        // carried phase can reach it one route tick later than a direct boot.
+        // Pulse depth on the second contact pose instead of on an absolute
+        // route frame so both phases leave the bank on the same lane.
+        if self.j3_zero_entry_frame.is_none()
+            && player_collider_entity == Some(65)
+            && player.is_some_and(|player| player.translation[1] >= -50_000)
+        {
+            held = (held & !PAD_UP) | PAD_DOWN;
+        }
+
+        // The h3 burner and its neighboring horizontal rollers have
+        // independent retained phases. Replace the old sustained jump window
+        // with distinct live edges as entities 188 and 191 enter range, so a
+        // landing between them can trigger the second jump.
+        if (3_664..=3_684).contains(&route_frame) {
+            held &= !PAD_CROSS;
+        }
+        if player.is_some_and(|player| player.status_a & 1 != 0)
+            && objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if matches!(descriptor.id, 188 | 191)
+                ) && player.is_some_and(|player| {
+                    object.translation[0] >= player.translation[0]
+                        && object.translation[0].abs_diff(player.translation[0]) <= 300_000
+                })
+            })
+        {
+            held |= PAD_CROSS;
         }
 
         // The source platform's inherited phase changes Crash's exact launch
@@ -56665,7 +56699,7 @@ fn authentic_post_sunset_session_reaches_ending_and_returns_to_title() {
         "{heavy_summary}"
     );
     assert_no_campaign_recovery(&heavy_survey, heavy_machinery.name);
-    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 2_430);
+    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 2_638);
     assert_ordinary_completion_input(&heavy_survey, heavy_machinery.name);
     assert!(heavy_survey.is_clean(), "{heavy_summary}");
     assert_eq!(
@@ -67643,7 +67677,7 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
     assert_eq!(survey.camera_ranges.len(), 77);
     assert_eq!(survey.camera_path_changes, 85);
     assert_eq!(survey.successful_spawns, 228);
-    assert_eq!(survey.executions, 123_403);
+    assert_eq!(survey.executions, 123_227);
     assert_eq!(survey.final_live_objects, 19);
     assert_eq!(survey.max_live_objects, 49);
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
@@ -67677,7 +67711,7 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
     );
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [19_668_721, 4_853_209, 227_328]);
+    assert_eq!(player.translation, [19_668_808, 4_853_209, 227_328]);
     assert_eq!(runtime.draw_count(), 5_425);
     assert!(
         survey.is_clean(),

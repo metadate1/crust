@@ -171,9 +171,11 @@ copying a pointer through EARG or an owned host request therefore cannot retarge
 handle reuse. Linked address-taking now uses a separate validated 32-bit physical-pool storage tag:
 it remains readable and writable while a slot is free and retargets only when that exact slot is
 reused. The separately allocated player/main address is non-null from machine initialization,
-persists through Title teardown, and remains outside the ordinary free list. Exact retention of an
-ordinary replacement's preexisting local-bound bytes and the dedicated allocation's extra 0x100
-stack-tail bytes remain open; legal-corpus audits have not yet observed either boundary in use.
+persists through Title teardown, and remains outside the ordinary free list. Once initialized, an
+object's six local-bound words now remain in the same physical allocation across kill and reuse;
+never-used `malloc` storage stays explicitly uninitialized instead of inventing bytes. The
+dedicated allocation's extra 0x100 stack-tail bytes remain open; legal-corpus audits have not yet
+observed that boundary in use.
 Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
 deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
 The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and

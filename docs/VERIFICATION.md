@@ -1567,6 +1567,18 @@ is 1,322,866 bytes with SHA-256
 - This is a live boot/control regression check, not an opening-to-ending completion claim. The
   uninterrupted owned-data campaign replay remains the authoritative completion gate.
 
+### Physical-slot local-bound retention (2026-07-29)
+
+- Native `GoolObjectInit` does not clear the six `gool_object.bound` words. The checked pool
+  tombstone now retains a bound only after runtime execution has initialized it, then seeds that
+  exact value into the next occupant before selective process initialization. Initial allocator
+  storage retains `None`, preserving the distinction between defined retained bytes and
+  indeterminate `malloc` contents.
+- Focused simulation-library tests prove both directions: a killed/reused physical slot keeps its
+  initialized bound while source-reset process words are still cleared, and a never-used slot does
+  not overwrite a replacement's checked bound with invented data. The dedicated player's extra
+  0x100-byte allocation tail remains separately open.
+
 ## Reproducible commands
 
 ```bash

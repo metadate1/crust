@@ -261,10 +261,11 @@ reused slot storage is seeded. Linked address translation uses a disjoint aligne
 contains the physical slot and complete 508-word register index. It can address retained storage
 while the slot is free, follows only same-slot reuse, and preflights complete vector writes before
 mutation. The dedicated player allocation has initialized slot-96 backing before its first logical
-main object and every live object's link five retains that address across Title teardown. Still
-outside this model are retained local-bound bytes on successful ordinary-slot reuse and the
-dedicated allocation's extra 0x100 bytes beyond `gool_object`; legal traces have not demonstrated
-either boundary in use.
+main object and every live object's link five retains that address across Title teardown. The six
+initialized `gool_object.bound` words are retained beside that process storage and seed the next
+occupant before selective initialization; a never-used slot retains no invented bound value. Still
+outside this model are the dedicated allocation's extra 0x100 bytes beyond `gool_object`; legal
+traces have not demonstrated that boundary in use.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and

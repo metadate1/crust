@@ -13267,8 +13267,21 @@ mod tests {
     fn reclaimed_runtime_slot_starts_from_retained_process_storage() {
         let mut runtime = RetailRuntime::new(0);
         let original = spawn_test_object(&mut runtime, ZONE, 280, 2, 0);
+        let retained_local_bound = Bounds3 {
+            min: Vec3 {
+                x: -0x1234,
+                y: -0x2345,
+                z: -0x3456,
+            },
+            max: Vec3 {
+                x: 0x4567,
+                y: 0x5678,
+                z: 0x6789,
+            },
+        };
         {
             let object = runtime.machine.object_mut(original.vm).unwrap();
+            object.set_retail_local_bound(retained_local_bound);
             object
                 .set_register(process_register::MISC_VALUE, 0x1234_5600)
                 .unwrap();
@@ -13296,6 +13309,7 @@ mod tests {
             Ok(0x2345_6700)
         );
         assert_eq!(object.register(process_register::STATUS_B), Ok(0));
+        assert_eq!(object.retail_local_bound(), retained_local_bound);
     }
 
     #[test]

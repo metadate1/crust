@@ -3130,7 +3130,11 @@ pub struct VmObject {
     /// and the machine owns the corresponding path lifetime.
     pending_entity_path: Option<Arc<RetailEntityPath>>,
     solid_environment: Option<RetailSolidEnvironment>,
-    local_bound: Bounds3,
+    /// `None` preserves the indeterminate state of bound bytes in a
+    /// never-used `malloc` allocation. Checked consumers observe the
+    /// historical zero fallback until native-compatible execution writes a
+    /// real bound; physical-slot reuse retains only that initialized value.
+    local_bound: Option<Bounds3>,
     solid_zone_eid: Option<Eid>,
     is_main_player: bool,
     page_count: u32,
@@ -3184,7 +3188,7 @@ impl VmObject {
             entity_spawn_flags: None,
             pending_entity_path: None,
             solid_environment: None,
-            local_bound: Bounds3::default(),
+            local_bound: None,
             solid_zone_eid: None,
             is_main_player: false,
             page_count: 0,
@@ -3500,6 +3504,9 @@ impl VmObject {
                 .copied()
                 .and_then(CollisionObjectReference::from_word)
                 .map(CollisionObjectReference::object);
+        }
+        if let Some(local_bound) = storage.local_bound {
+            self.local_bound = Some(local_bound);
         }
     }
 
@@ -3952,12 +3959,16 @@ impl VmObject {
     /// retail animation. Native solid motion consumes this after the
     /// interpreter, while the frame-bound list keeps the separate world AABB.
     pub fn set_retail_local_bound(&mut self, bound: Bounds3) {
-        self.local_bound = bound;
+        self.local_bound = Some(bound);
     }
 
     /// Returns the persistent object-local AABB consumed by retail solid motion.
     #[must_use]
-    pub const fn retail_local_bound(&self) -> Bounds3 {
+    pub fn retail_local_bound(&self) -> Bounds3 {
+        self.local_bound.unwrap_or_default()
+    }
+
+    const fn initialized_retail_local_bound(&self) -> Option<Bounds3> {
         self.local_bound
     }
 
@@ -4511,6 +4522,11 @@ struct RetiredRetailProcessStorage {
     /// Initial malloc storage only has allocator links; reclaimed process
     /// storage and authored free-slot writes initialize their complete cells.
     initialized_registers: Box<[bool]>,
+    /// Native `gool_object.bound` lives immediately before the process union
+    /// and is not touched by `GoolObjectInit`. Once written, its six words
+    /// therefore survive kill and physical-slot reuse just like process
+    /// storage.
+    local_bound: Option<Bounds3>,
 }
 
 impl RetiredRetailProcessStorage {
@@ -4530,6 +4546,7 @@ impl RetiredRetailProcessStorage {
             registers,
             register_pool_slots,
             initialized_registers,
+            local_bound: None,
         }
     }
 
@@ -4551,6 +4568,7 @@ impl RetiredRetailProcessStorage {
             registers,
             register_pool_slots,
             initialized_registers,
+            local_bound: None,
         }
     }
 
@@ -5448,7 +5466,7 @@ impl Machine {
             })
         };
         let translated_bound = |object: &VmObject| -> Result<Bounds3, VmError> {
-            Ok(object.local_bound.translated(translation(object)?))
+            Ok(object.retail_local_bound().translated(translation(object)?))
         };
 
         Ok(match mode {
@@ -5829,7 +5847,7 @@ impl Machine {
                 self.current_solid_environment
                     .clone()
                     .ok_or(VmError::MissingSolidEnvironment(handle))?,
-                object.local_bound,
+                object.retail_local_bound(),
                 object_zone_context,
                 self.solid_smooth_stop,
                 object.register(process_register::STATUS_C)?,
@@ -6988,6 +7006,7 @@ impl Machine {
                     registers: removed.registers.clone().into_boxed_slice(),
                     register_pool_slots: removed.register_pool_slots.clone().into_boxed_slice(),
                     initialized_registers: vec![true; REGISTER_COUNT].into_boxed_slice(),
+                    local_bound: removed.initialized_retail_local_bound(),
                 });
         }
         self.retail_pool_slots_by_object[usize::from(handle.get())] = None;
@@ -10461,7 +10480,8 @@ impl Machine {
     ) -> Result<(), VmError> {
         let direction = self.object(handle)?.process_vector(input_vector)?;
         let mut translation = self.object(handle)?.process_vector(0)?;
-        translation[1] = translation[1].wrapping_add(self.object(handle)?.local_bound.max.y / 2);
+        translation[1] =
+            translation[1].wrapping_add(self.object(handle)?.retail_local_bound().max.y / 2);
         let environment = self
             .current_solid_environment
             .clone()
@@ -11716,16 +11736,17 @@ impl Machine {
                 let point = self.read_storage_span3(input)?.map(|value| value as i32);
                 let target_object = self.object(target)?;
                 let translation = target_object.process_vector(0)?;
+                let local_bound = target_object.retail_local_bound();
                 let bound = Bounds3 {
                     min: Vec3 {
-                        x: target_object.local_bound.min.x.wrapping_add(translation[0]),
-                        y: target_object.local_bound.min.y.wrapping_add(translation[1]),
-                        z: target_object.local_bound.min.z.wrapping_add(translation[2]),
+                        x: local_bound.min.x.wrapping_add(translation[0]),
+                        y: local_bound.min.y.wrapping_add(translation[1]),
+                        z: local_bound.min.z.wrapping_add(translation[2]),
                     },
                     max: Vec3 {
-                        x: target_object.local_bound.max.x.wrapping_add(translation[0]),
-                        y: target_object.local_bound.max.y.wrapping_add(translation[1]),
-                        z: target_object.local_bound.max.z.wrapping_add(translation[2]),
+                        x: local_bound.max.x.wrapping_add(translation[0]),
+                        y: local_bound.max.y.wrapping_add(translation[1]),
+                        z: local_bound.max.z.wrapping_add(translation[2]),
                     },
                 };
                 self.push(
@@ -21677,6 +21698,18 @@ mod tests {
     fn reclaimed_pool_storage_is_selectively_initialized_in_place() {
         let original = handle(0);
         let replacement = handle(1);
+        let retained_local_bound = Bounds3 {
+            min: Vec3 {
+                x: -0x1111,
+                y: -0x2222,
+                z: -0x3333,
+            },
+            max: Vec3 {
+                x: 0x4444,
+                y: 0x5555,
+                z: 0x6666,
+            },
+        };
         let retained = [
             (process_register::TRANSLATION_X, 0x1111_1100),
             (process_register::MISC_VALUE, 0x2222_2200),
@@ -21711,6 +21744,7 @@ mod tests {
             process_register::HOTSPOT_SIZE,
         ];
         let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        original_object.set_retail_local_bound(retained_local_bound);
         for (register, value) in retained {
             original_object.set_register(register, value).unwrap();
         }
@@ -21725,6 +21759,14 @@ mod tests {
             .unwrap();
 
         let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object.set_retail_local_bound(Bounds3 {
+            min: Vec3 {
+                x: -1,
+                y: -2,
+                z: -3,
+            },
+            max: Vec3 { x: 4, y: 5, z: 6 },
+        });
         replacement_object
             .set_register(process_register::STATUS_C, 0x1234)
             .unwrap();
@@ -21769,6 +21811,40 @@ mod tests {
         assert_eq!(
             replacement_object.register(process_register::VOICE_ID),
             Ok((-2_i32) as u32)
+        );
+        assert_eq!(
+            replacement_object.retail_local_bound(),
+            retained_local_bound,
+            "GoolObjectInit must not clear the six bound words retained by the physical slot"
+        );
+    }
+
+    #[test]
+    fn never_used_pool_slot_does_not_invent_initialized_local_bound_bytes() {
+        let object = handle(0);
+        let expected = Bounds3 {
+            min: Vec3 {
+                x: -7,
+                y: -8,
+                z: -9,
+            },
+            max: Vec3 {
+                x: 10,
+                y: 11,
+                z: 12,
+            },
+        };
+        let mut replacement = VmObject::new(object, vec![0]).unwrap();
+        replacement.set_retail_local_bound(expected);
+
+        Machine::new(0)
+            .seed_retail_pool_slot_storage(0, &mut replacement)
+            .unwrap();
+
+        assert_eq!(
+            replacement.retail_local_bound(),
+            expected,
+            "initial malloc storage has no defined bound bytes to seed"
         );
     }
 

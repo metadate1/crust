@@ -301,12 +301,13 @@ gameplay path.
   rebind, synchronous send, and reused-slot child initialization. Complete vector writes are
   preflighted so a rejected allocator-link mutation cannot partially update retained storage. The
   96-slot ordinary free list is modeled; slot 96 represents the separately allocated player from
-  initialization onward and link five stays non-null through Title teardown. Retained local-bound
-  bytes on ordinary-slot reuse and the dedicated allocation's extra 0x100 stack-tail bytes remain
-  unmodeled, but a legal-corpus audit has not observed either boundary being consumed. Colors and
-  animation are overwritten/reset on successful source initialization and are not retained-state
-  gaps. Synthetic non-retail VM teardown deliberately retains its older checked inbound-link
-  clearing contract.
+  initialization onward and link five stays non-null through Title teardown. Initialized
+  local-bound bytes survive physical-slot reuse without assigning a value to never-written
+  `malloc` storage. The dedicated allocation's extra 0x100 stack-tail bytes remain unmodeled, but a
+  legal-corpus audit has not observed that boundary being consumed. Colors and animation are
+  overwritten/reset on successful source initialization and are not retained-state gaps.
+  Synthetic non-retail VM teardown deliberately retains its older checked inbound-link clearing
+  contract.
 - The browser retail runtime now instantiates displayed group-three zone entities and integrates
   the bounded arena and VM through explicit typed mappings, but it is not the complete object graph
   or GOOL host. Initial ZDAT objects now receive checked zone/path transforms, scale, rotation/mode

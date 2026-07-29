@@ -106,6 +106,9 @@ const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
 const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED: u32 = 0x9c11_0f6a;
 const ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT: u32 = 110_454;
 const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED_B: u32 = 0x99dc_97b1;
+const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED: u32 = 0xa610_ddea;
+const ACTUAL_POST_SUNSET_GENERATOR_DRAW_COUNT: u32 = 80_335;
+const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED_B: u32 = 0x8523_b805;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED: u32 = 0x5944_4b2a;
 const UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT: u32 = 78_796;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B: u32 = 0x2227_f8a8;
@@ -56699,6 +56702,23 @@ fn authentic_post_sunset_session_reaches_ending_and_returns_to_title() {
         generator_room.level,
         [0, 15, 15, 20, 1, 20, 1],
     );
+    assert_eq!(
+        (
+            generator_carry.random_seed,
+            generator_carry.draw_count,
+            generator_carry.random_seed_b(),
+            generator_carry.respawn_count,
+            generator_carry.death_count,
+        ),
+        (
+            ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED,
+            ACTUAL_POST_SUNSET_GENERATOR_DRAW_COUNT,
+            ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED_B,
+            0,
+            0,
+        ),
+        "the post-Sunset chain must retain Generator Room's characterized machinery phase"
+    );
     let generator_completion = run_clean_carried_campaign_step(
         &generator_room,
         generator_carry,
@@ -67049,6 +67069,67 @@ fn temporary_generator_room_carried_phase_census() {
             campaign_progression_globals(&runtime),
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn generator_room_actual_post_sunset_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x05);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Generator Room pair must parse");
+
+    // Exact clocks carried into Generator Room after the post-Sunset fixture
+    // completes Cortex Power and traverses both retail Title boundaries.
+    // Keeping them in a focused fixture preserves the inherited machinery
+    // phase without replaying the whole late campaign for each route change.
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 20),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 20),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("actual post-Sunset Generator progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED;
+    carry.draw_count = ACTUAL_POST_SUNSET_GENERATOR_DRAW_COUNT;
+    carry.set_random_seed_b(ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED_B);
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Generator Room must import the actual post-Sunset campaign phase");
+    let (survey, runtime) = survey_pair_with_runtime(
+        "Generator Room actual post-Sunset campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::GeneratorRoomCompletionRoute,
+        4_200,
+    )
+    .expect("Generator Room's actual post-Sunset route must execute");
+    let summary = survey.summary();
+
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_no_campaign_recovery(&survey, "Generator Room actual post-Sunset phase");
+    assert!(survey.first_terminal_fall.is_none(), "{summary}");
+    assert_ordinary_completion_input(&survey, "Generator Room actual post-Sunset phase");
+    assert_eq!(
+        campaign_progression_globals(&runtime),
+        [0x500, 15, 15, 20, 1, 21, 0],
+        "{summary}"
+    );
+    assert!(survey.is_clean(), "{summary}");
 }
 
 #[test]

@@ -109,6 +109,9 @@ const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED_B: u32 = 0x99dc_97b1;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED: u32 = 0x5944_4b2a;
 const UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT: u32 = 78_796;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B: u32 = 0x2227_f8a8;
+const ACTUAL_POST_SUNSET_LAB_RANDOM_SEED: u32 = 0xc6ec_1f12;
+const ACTUAL_POST_SUNSET_LAB_DRAW_COUNT: u32 = 120_426;
+const ACTUAL_POST_SUNSET_LAB_RANDOM_SEED_B: u32 = 0x26ab_67f0;
 const EXACT_CAMPAIGN_CASTLE_A9_RELEASE_TICK: u32 = 1_301;
 const TITLE_DIRECT_ZONES: [&str; 10] = [
     "0a_pZ", "0b_pZ", "0c_pZ", "0d_pZ", "0e_pZ", "0f_pZ", "1a_pZ", "1e_pZ", "2b_pZ", "3a_pZ",
@@ -25087,7 +25090,16 @@ impl HeavyMachineryCompletionRouteController {
 struct LabCompletionRouteController {
     authentic_campaign_phase: bool,
     exact_campaign_phase: bool,
+    actual_post_sunset_phase: bool,
     route_delay: u32,
+    opening_gate_waiting: bool,
+    opening_gate_cleared: bool,
+    opening_gate_brake_frames: u8,
+    a4_gate_waiting: bool,
+    a4_trigger_box_cleared: bool,
+    a4_retreat_frames: u8,
+    a4_gate_cleared: bool,
+    a4_jump_started: bool,
     first_rods_pre_wait: u8,
     first_rods_waiting: bool,
     first_rods_active_seen: bool,
@@ -25099,6 +25111,7 @@ struct LabCompletionRouteController {
     first_frog_dodge_started: bool,
     first_frog_dodge_tick: u8,
     first_frog_dodge_complete: bool,
+    second_rods_joint_runup: bool,
     second_rods_waiting: bool,
     second_rods_active_seen: bool,
     second_rods_cleared: bool,
@@ -25106,9 +25119,21 @@ struct LabCompletionRouteController {
     b6_rods_waiting: bool,
     b6_rods_active_seen: bool,
     b6_rods_cleared: bool,
+    b7_jump_sync_frames: u8,
     b9_door_waiting: bool,
     b9_door_cleared: bool,
     b9_door_brake_frames: u8,
+    c1_lab_waiting: bool,
+    c1_lab_retreat_complete: bool,
+    c1_lab_alignment_complete: bool,
+    c1_lab_door_cleared: bool,
+    c1_lab_dodge_complete: bool,
+    c2_route_sync_frames: u8,
+    c2_route_sync_complete: bool,
+    c3_floor_waiting: bool,
+    c3_floor_cleared: bool,
+    c5_jump_sync_released: bool,
+    c5_jump_sync_complete: bool,
 }
 
 impl LabCompletionRouteController {
@@ -25119,6 +25144,137 @@ impl LabCompletionRouteController {
         route_objects: &[ProgramObjectTrace],
     ) -> u32 {
         let route_frame = frame.saturating_sub(self.route_delay);
+        if self.actual_post_sunset_phase && !self.opening_gate_cleared {
+            let gate = route_objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 22
+                    )
+            });
+            let at_gate_approach = player.is_some_and(|player| {
+                player.state == 2 && (30_750_000..=30_900_000).contains(&player.translation[2])
+            });
+            if at_gate_approach && gate.is_some_and(|object| object.state == 2) {
+                self.opening_gate_waiting = true;
+            }
+            if self.opening_gate_waiting {
+                if gate.is_some_and(|object| object.state == 3) {
+                    self.opening_gate_cleared = true;
+                    self.route_delay = frame.saturating_sub(181);
+                    return Self::route_held(181);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                self.opening_gate_brake_frames = self.opening_gate_brake_frames.saturating_add(1);
+                return if self.opening_gate_brake_frames <= 6 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+            }
+        }
+        if self.actual_post_sunset_phase && !self.a4_gate_waiting && !self.a4_gate_cleared {
+            let gate = route_objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 140
+                    )
+            });
+            let at_gate_approach = player.is_some_and(|player| {
+                player.state == 2 && (27_150_000..=27_250_000).contains(&player.translation[2])
+            });
+            if at_gate_approach && gate.is_some_and(|object| object.state == 2) {
+                self.a4_gate_waiting = true;
+                self.route_delay = self.route_delay.saturating_add(1);
+                return PAD_UP | PAD_LEFT | PAD_SQUARE;
+            }
+        }
+        if self.actual_post_sunset_phase
+            && self.a4_gate_waiting
+            && !self.a4_gate_cleared
+            && !self.a4_jump_started
+        {
+            let trigger_box_cleared = route_objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("BoxsC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 19
+                    )
+                    && object.state == 10
+            });
+            self.a4_trigger_box_cleared |= trigger_box_cleared;
+            self.route_delay = self.route_delay.saturating_add(1);
+            if !self.a4_trigger_box_cleared {
+                return PAD_UP | PAD_LEFT | PAD_SQUARE;
+            }
+
+            let gate_is_closed = route_objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 140
+                    )
+                    && object.state == 3
+            });
+            let ready_to_jump = player.is_some_and(|player| {
+                gate_is_closed
+                    && matches!(player.state, 1 | 2)
+                    && (27_120_000..=27_300_000).contains(&player.translation[2])
+                    && (2_050_000..=2_150_000).contains(&player.translation[0])
+            });
+            if ready_to_jump {
+                self.a4_jump_started = true;
+                return PAD_UP | PAD_CROSS;
+            }
+
+            self.a4_retreat_frames = self.a4_retreat_frames.saturating_add(1);
+            if self.a4_retreat_frames <= 6 {
+                return PAD_DOWN | PAD_RIGHT;
+            }
+            let mut held = 0;
+            if player.is_some_and(|player| {
+                player.translation[2] < 27_120_000 || player.velocity[2] < -80_000
+            }) {
+                held |= PAD_DOWN;
+            }
+            if player.is_some_and(|player| {
+                player.translation[0] < 2_050_000 || player.velocity[0] < -80_000
+            }) {
+                held |= PAD_RIGHT;
+            }
+            return held;
+        }
+        if self.actual_post_sunset_phase && self.a4_jump_started {
+            let gate_covers_player = player.is_some_and(|player| {
+                route_objects.iter().any(|object| {
+                    object.program.name().as_deref() == Some("CasOC")
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 140
+                        )
+                        && object.state == 3
+                        && object.frame_bound.is_some_and(|bound| {
+                            (bound.min.x..=bound.max.x).contains(&player.translation[0])
+                                && (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                        })
+                })
+            });
+            self.a4_gate_cleared |= gate_covers_player;
+            let landed_beyond_gate = player.is_some_and(|player| {
+                self.a4_gate_cleared
+                    && matches!(player.state, 1 | 2)
+                    && player.translation[2] <= 26_400_000
+            });
+            if landed_beyond_gate {
+                self.a4_jump_started = false;
+                self.a4_gate_waiting = false;
+                self.route_delay = frame.saturating_sub(486);
+                return Self::route_held(486);
+            }
+            self.route_delay = self.route_delay.saturating_add(1);
+            return PAD_UP | PAD_CROSS;
+        }
         if self.authentic_campaign_phase && route_frame == 440 && self.first_rods_pre_wait < 70 {
             // The authentic campaign carry reaches the first door just as its
             // inherited rod cycle begins. Wait on the preceding solid floor,
@@ -25150,8 +25306,25 @@ impl LabCompletionRouteController {
             if self.first_rods_waiting {
                 self.first_rods_active_seen |= rods.iter().any(|object| object.state == 7);
                 let cycle_finished = self.first_rods_active_seen
-                    && rods.len() == 2
-                    && rods.iter().all(|object| object.state == 6);
+                    && if self.actual_post_sunset_phase {
+                        // The split floor under this wait reopens before the
+                        // carried rods fully retract. Leave during a live
+                        // geometric gap: neither moving rod may overlap
+                        // Crash's swept forward corridor.
+                        rods.len() >= 2
+                            && player.is_some_and(|player| {
+                                let corridor = player.translation[0].saturating_sub(60_000)
+                                    ..=player.translation[0].saturating_add(60_000);
+                                rods.iter().all(|object| {
+                                    object.frame_bound.is_none_or(|bound| {
+                                        bound.max.x < *corridor.start()
+                                            || bound.min.x > *corridor.end()
+                                    })
+                                })
+                            })
+                    } else {
+                        rods.len() == 2 && rods.iter().all(|object| object.state == 6)
+                    };
                 if cycle_finished {
                     self.first_rods_cleared = true;
                     // The wait leaves Crash midway through the direct route's
@@ -25163,7 +25336,9 @@ impl LabCompletionRouteController {
                 }
                 self.route_delay = self.route_delay.saturating_add(1);
                 self.first_rods_brake_frames = self.first_rods_brake_frames.saturating_add(1);
-                return if self.first_rods_brake_frames <= 12 {
+                return if self.first_rods_brake_frames
+                    <= if self.actual_post_sunset_phase { 4 } else { 12 }
+                {
                     PAD_DOWN
                 } else {
                     0
@@ -25176,7 +25351,9 @@ impl LabCompletionRouteController {
         {
             let reached_landing = player.is_some_and(|player| {
                 player.state == 2
-                    && (26_150_000..=26_250_000).contains(&player.translation[2])
+                    && ((26_150_000..=26_250_000).contains(&player.translation[2])
+                        || (self.actual_post_sunset_phase
+                            && (25_900_000..=26_100_000).contains(&player.translation[2])))
                     && player.velocity[2] < 0
             });
             if reached_landing || self.first_rods_landing_brake_frames != 0 {
@@ -25261,10 +25438,85 @@ impl LabCompletionRouteController {
                 })
                 .collect::<Vec<_>>();
             let at_rod_approach = player.is_some_and(|player| {
-                (23_300_000..=23_450_000).contains(&player.translation[2])
+                (23_300_000..=if self.actual_post_sunset_phase {
+                    23_500_000
+                } else {
+                    23_450_000
+                })
+                    .contains(&player.translation[2])
                     && (2_100_000..=2_400_000).contains(&player.translation[0])
+                    && matches!(player.state, 1 | 2)
             });
-            if at_rod_approach && rods.iter().any(|object| object.state == 7) {
+            let fresh_door_window = route_objects.iter().any(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 150
+                    )
+                    && object.state == 6
+                    && frame.saturating_sub(object.state_stamp) <= 24
+                    && object.frame_bound.is_none()
+            });
+            if self.actual_post_sunset_phase
+                && at_rod_approach
+                && fresh_door_window
+                && rods.len() == 2
+                && rods.iter().all(|object| object.state == 6)
+            {
+                // This carry reaches the second rods during the joint opening
+                // immediately before their inward sweep. Preserve the proven
+                // jump's launch depth while using this window; jumping from
+                // the back of the approach descends before the far floor.
+                self.second_rods_joint_runup = true;
+            }
+            if self.actual_post_sunset_phase && self.second_rods_joint_runup {
+                let mut bounds = rods
+                    .iter()
+                    .filter_map(|object| object.frame_bound)
+                    .collect::<Vec<_>>();
+                bounds.sort_by_key(|bound| bound.min.x);
+                let horizontal = player
+                    .zip(
+                        (bounds.len() == 2)
+                            .then(|| bounds[0].max.x.saturating_add(bounds[1].min.x) / 2),
+                    )
+                    .map_or(0, |(player, gap_center)| {
+                        let predicted_x = player.translation[0]
+                            .saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                        if predicted_x < gap_center.saturating_sub(8_000) {
+                            PAD_RIGHT
+                        } else if predicted_x > gap_center.saturating_add(8_000) {
+                            PAD_LEFT
+                        } else {
+                            0
+                        }
+                    });
+                let ready_to_jump = player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2) && player.translation[2] <= 23_360_000
+                });
+                if ready_to_jump && rods.iter().all(|object| object.state == 6) {
+                    self.second_rods_joint_runup = false;
+                    self.second_rods_cleared = true;
+                    self.route_delay = frame.saturating_sub(703);
+                    return Self::route_held(703) | horizontal;
+                }
+                if rods.iter().any(|object| object.state == 7) {
+                    self.second_rods_joint_runup = false;
+                    self.second_rods_waiting = true;
+                    self.route_delay = self.route_delay.saturating_add(1);
+                    return 0;
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                return PAD_UP | horizontal;
+            }
+            if at_rod_approach
+                && rods.len() == 2
+                && (self.actual_post_sunset_phase || rods.iter().any(|object| object.state == 7))
+            {
+                // The actual post-Sunset carry reaches this approach during
+                // the tail of the retracted state, too late to clear the
+                // swept corridor before the next inward cycle. Observe one
+                // complete live cycle before taking the characterized run-up.
                 self.second_rods_waiting = true;
             }
             if self.second_rods_waiting {
@@ -25277,7 +25529,33 @@ impl LabCompletionRouteController {
                         self.second_rods_runup_frames =
                             self.second_rods_runup_frames.saturating_add(1);
                         self.route_delay = self.route_delay.saturating_add(1);
-                        return PAD_UP;
+                        let horizontal = if self.actual_post_sunset_phase {
+                            let mut bounds = rods
+                                .iter()
+                                .filter_map(|object| object.frame_bound)
+                                .collect::<Vec<_>>();
+                            bounds.sort_by_key(|bound| bound.min.x);
+                            player
+                                .zip(
+                                    (bounds.len() == 2).then(|| {
+                                        bounds[0].max.x.saturating_add(bounds[1].min.x) / 2
+                                    }),
+                                )
+                                .map_or(0, |(player, gap_center)| {
+                                    if player.translation[0] < gap_center.saturating_sub(8_000) {
+                                        PAD_RIGHT
+                                    } else if player.translation[0]
+                                        > gap_center.saturating_add(8_000)
+                                    {
+                                        PAD_LEFT
+                                    } else {
+                                        0
+                                    }
+                                })
+                        } else {
+                            0
+                        };
+                        return PAD_UP | horizontal;
                     }
                     self.second_rods_cleared = true;
                     self.route_delay = frame.saturating_sub(703);
@@ -25285,6 +25563,40 @@ impl LabCompletionRouteController {
                 }
                 self.route_delay = self.route_delay.saturating_add(1);
                 return 0;
+            }
+        }
+        if self.actual_post_sunset_phase
+            && self.second_rods_cleared
+            && player.is_some_and(|player| player.translation[2] >= 22_950_000)
+        {
+            let mut bounds = route_objects
+                .iter()
+                .filter(|object| {
+                    object.program.name().as_deref() == Some("PoRoC")
+                        && matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(descriptor.id, 32 | 38)
+                        )
+                })
+                .filter_map(|object| object.frame_bound)
+                .collect::<Vec<_>>();
+            bounds.sort_by_key(|bound| bound.min.x);
+            if let Some((player, gap_center)) = player.zip(
+                (bounds.len() == 2).then(|| bounds[0].max.x.saturating_add(bounds[1].min.x) / 2),
+            ) {
+                let predicted_x =
+                    player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                let horizontal = if predicted_x < gap_center.saturating_sub(8_000) {
+                    PAD_RIGHT
+                } else if predicted_x > gap_center.saturating_add(8_000) {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if horizontal != 0 {
+                    return Self::route_held(route_frame) | horizontal;
+                }
             }
         }
         if self.exact_campaign_phase {
@@ -25374,6 +25686,35 @@ impl LabCompletionRouteController {
                     };
             }
         }
+        if self.actual_post_sunset_phase
+            && route_frame == 1_541
+            && player.is_some_and(|player| {
+                matches!(player.state, 1 | 2)
+                    && (10_600_000..=10_900_000).contains(&player.translation[2])
+            })
+        {
+            if self.b7_jump_sync_frames < 6 {
+                // The actual carry arrives six simulation ticks ahead of the
+                // proven b7 landing-floor phase. Brake on the last solid
+                // support, then rebuild the characterized launch velocity.
+                self.b7_jump_sync_frames = self.b7_jump_sync_frames.saturating_add(1);
+                self.route_delay = self.route_delay.saturating_add(1);
+                return if self.b7_jump_sync_frames <= 4 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+            }
+            let ready_to_jump = player.is_some_and(|player| {
+                player.translation[2] <= 10_760_000 && player.velocity[2] <= -500_000
+            });
+            if ready_to_jump {
+                self.route_delay = frame.saturating_sub(1_542);
+                return Self::route_held(1_542);
+            }
+            self.route_delay = self.route_delay.saturating_add(1);
+            return PAD_UP;
+        }
         if !self.b9_door_cleared {
             let door = route_objects.iter().find(|object| {
                 matches!(
@@ -25407,12 +25748,31 @@ impl LabCompletionRouteController {
                 }
             }
             if self.b9_door_waiting {
+                let crossed_carried_pair = self.actual_post_sunset_phase
+                    && player.is_some_and(|player| {
+                        matches!(player.state, 1 | 2) && player.translation[2] <= 7_420_000
+                    });
+                if crossed_carried_pair {
+                    // The inherited b9 pair can remain logically out of phase
+                    // even after its live geometry has admitted Crash. Rebase
+                    // at the characterized c0 landing so the next spin opens
+                    // the barrier directly ahead.
+                    self.b9_door_cleared = true;
+                    self.route_delay = frame.saturating_sub(1_779);
+                    return Self::route_held(1_779);
+                }
                 if fresh_open_pair {
                     self.b9_door_cleared = true;
                     self.route_delay = frame.saturating_sub(1_676);
                     return Self::route_held(1_676);
                 }
                 self.route_delay = self.route_delay.saturating_add(1);
+                if self.actual_post_sunset_phase {
+                    // Stay pressed against the trigger-box/barrier pair while
+                    // the carried door phase catches up. Retreating here
+                    // shortens the following landing enough to miss b10.
+                    return PAD_UP;
+                }
                 self.b9_door_brake_frames = self.b9_door_brake_frames.saturating_add(1);
                 return if self.b9_door_brake_frames <= 12 {
                     PAD_DOWN
@@ -25422,6 +25782,162 @@ impl LabCompletionRouteController {
                     0
                 };
             }
+        }
+        if self.actual_post_sunset_phase && route_frame < 1_899 && !self.c1_lab_dodge_complete {
+            let lab_hazard = route_objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("LabAC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 56
+                    )
+            });
+            let approaching_lab_hazard = player.is_some_and(|player| {
+                lab_hazard.is_some_and(|object| {
+                    object.program.name().as_deref() == Some("LabAC")
+                        && object.state == 2
+                        && object.frame_bound.is_some_and(|bound| {
+                            bound.max.z <= player.translation[2]
+                                && player.translation[2].saturating_sub(bound.max.z) <= 450_000
+                                && bound.min.x <= player.translation[0].saturating_add(200_000)
+                                && bound.max.x >= player.translation[0].saturating_sub(200_000)
+                        })
+                })
+            });
+            self.c1_lab_waiting |= approaching_lab_hazard;
+            if self.c1_lab_waiting {
+                self.c1_lab_retreat_complete |=
+                    player.is_some_and(|player| player.translation[2] >= 7_000_000);
+                if !self.c1_lab_retreat_complete {
+                    // Pull the carried attack out of the narrow c1 approach
+                    // until the assistant freezes beyond its activation band.
+                    self.route_delay = self.route_delay.saturating_add(1);
+                    return PAD_DOWN;
+                }
+                if !self.c1_lab_alignment_complete {
+                    if player.is_some_and(|player| player.translation[0] < 2_340_000) {
+                        // Align with the narrow c0 doorway while the assistant
+                        // is inactive.
+                        self.route_delay = self.route_delay.saturating_add(1);
+                        return PAD_RIGHT;
+                    }
+                    self.c1_lab_alignment_complete = true;
+                }
+                if !self.c1_lab_door_cleared {
+                    if player.is_some_and(|player| player.translation[2] > 6_100_000) {
+                        self.route_delay = self.route_delay.saturating_add(1);
+                        return PAD_UP | PAD_SQUARE;
+                    }
+                    self.c1_lab_door_cleared = true;
+                }
+                if player.is_some_and(|player| player.translation[0] < 2_420_000) {
+                    // Build the right-hand passing lane after the doorway.
+                    self.route_delay = self.route_delay.saturating_add(1);
+                    return PAD_RIGHT;
+                }
+                if player.is_some_and(|player| player.translation[2] > 6_100_000) {
+                    // Recover the distance spent retreating before rejoining
+                    // the authored lateral phase near the assistant.
+                    self.route_delay = self.route_delay.saturating_add(1);
+                    return PAD_UP | PAD_SQUARE;
+                }
+                self.c1_lab_waiting = false;
+                self.c1_lab_dodge_complete = true;
+                self.route_delay = frame.saturating_sub(1_884);
+                return Self::route_held(1_884);
+            }
+        }
+        if self.actual_post_sunset_phase
+            && self.c1_lab_dodge_complete
+            && !self.c2_route_sync_complete
+            && route_frame == 1_930
+        {
+            if self.c2_route_sync_frames < 17 {
+                // Recover the distance spent on the c1 lure while staying on
+                // the broad floor before the next authored jump sequence.
+                self.c2_route_sync_frames = self.c2_route_sync_frames.saturating_add(1);
+                self.route_delay = self.route_delay.saturating_add(1);
+                return PAD_UP;
+            }
+            self.c2_route_sync_complete = true;
+            return Self::route_held(1_930);
+        }
+        if self.actual_post_sunset_phase && !self.c3_floor_cleared {
+            let floor = route_objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("CasOC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 253
+                    )
+            });
+            let left_floor_box = route_objects.iter().find(|object| {
+                object.program.name().as_deref() == Some("BoxsC")
+                    && matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 58
+                    )
+            });
+            let at_floor_approach = player.is_some_and(|player| {
+                route_frame >= 1_999
+                    && player.translation[1] >= 950_000
+                    && (4_100_000..=4_250_000).contains(&player.translation[2])
+            });
+            self.c3_floor_waiting |=
+                at_floor_approach && floor.is_some_and(|object| object.state == 2);
+            if self.c3_floor_waiting {
+                if floor.is_some_and(|object| object.state == 3) {
+                    if let Some(player) = player {
+                        self.route_delay = self.route_delay.saturating_add(1);
+                        if player.translation[0] < 2_042_000 || player.velocity[0] < -100_000 {
+                            return PAD_RIGHT;
+                        }
+                        if player.translation[0] > 2_054_000 || player.velocity[0] > 100_000 {
+                            return PAD_LEFT;
+                        }
+                    }
+                    self.c3_floor_waiting = false;
+                    self.c3_floor_cleared = true;
+                    self.route_delay = frame.saturating_sub(1_999);
+                    return Self::route_held(1_999);
+                }
+                self.route_delay = self.route_delay.saturating_add(1);
+                if left_floor_box.is_some_and(|object| object.state == 10) {
+                    return if player.is_some_and(|player| {
+                        player.translation[0] < 2_042_000 || player.velocity[0] < -100_000
+                    }) {
+                        PAD_RIGHT
+                    } else if player.is_some_and(|player| {
+                        player.translation[0] > 2_054_000 || player.velocity[0] > 100_000
+                    }) {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                }
+                return if player.is_some_and(|player| player.translation[0] > 2_000_000) {
+                    PAD_LEFT | PAD_SQUARE
+                } else if frame % 16 < 4 {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+            }
+        }
+        if self.actual_post_sunset_phase
+            && !self.c5_jump_sync_complete
+            && (2_190..=2_200).contains(&route_frame)
+            && player.is_some_and(|player| {
+                player.state == 2
+                    && player.translation[1] >= 1_000_000
+                    && (1_750_000..=1_820_000).contains(&player.translation[2])
+            })
+        {
+            self.route_delay = frame.saturating_sub(2_190);
+            if !self.c5_jump_sync_released {
+                self.c5_jump_sync_released = true;
+                return PAD_RIGHT;
+            }
+            self.c5_jump_sync_complete = true;
+            return Self::route_held(2_190);
         }
         Self::route_held(route_frame)
     }
@@ -49149,7 +49665,16 @@ impl SurveyInputController {
                 authentic_campaign_phase: session_globals
                     && initial_draw_count == AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT,
                 exact_campaign_phase: profile == SurveyInputProfile::LabExactCampaignPhase,
+                actual_post_sunset_phase: false,
                 route_delay: 0,
+                opening_gate_waiting: false,
+                opening_gate_cleared: false,
+                opening_gate_brake_frames: 0,
+                a4_gate_waiting: false,
+                a4_trigger_box_cleared: false,
+                a4_retreat_frames: 0,
+                a4_gate_cleared: false,
+                a4_jump_started: false,
                 first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
@@ -49161,6 +49686,7 @@ impl SurveyInputController {
                 first_frog_dodge_started: false,
                 first_frog_dodge_tick: 0,
                 first_frog_dodge_complete: false,
+                second_rods_joint_runup: false,
                 second_rods_waiting: false,
                 second_rods_active_seen: false,
                 second_rods_cleared: false,
@@ -49168,9 +49694,21 @@ impl SurveyInputController {
                 b6_rods_waiting: false,
                 b6_rods_active_seen: false,
                 b6_rods_cleared: false,
+                b7_jump_sync_frames: 0,
                 b9_door_waiting: false,
                 b9_door_cleared: false,
                 b9_door_brake_frames: 0,
+                c1_lab_waiting: false,
+                c1_lab_retreat_complete: false,
+                c1_lab_alignment_complete: false,
+                c1_lab_door_cleared: false,
+                c1_lab_dodge_complete: false,
+                c2_route_sync_frames: 0,
+                c2_route_sync_complete: false,
+                c3_floor_waiting: false,
+                c3_floor_cleared: false,
+                c5_jump_sync_released: false,
+                c5_jump_sync_complete: false,
             },
             cortex: CortexCompletionRouteController {
                 hit_count: 0,
@@ -49247,10 +49785,20 @@ impl SurveyInputController {
         ) {
             let authentic_campaign_phase = self.lab.authentic_campaign_phase;
             let exact_campaign_phase = self.lab.exact_campaign_phase;
+            let actual_post_sunset_phase = self.lab.actual_post_sunset_phase;
             self.lab = LabCompletionRouteController {
                 authentic_campaign_phase,
                 exact_campaign_phase,
+                actual_post_sunset_phase,
                 route_delay: 0,
+                opening_gate_waiting: false,
+                opening_gate_cleared: false,
+                opening_gate_brake_frames: 0,
+                a4_gate_waiting: false,
+                a4_trigger_box_cleared: false,
+                a4_retreat_frames: 0,
+                a4_gate_cleared: false,
+                a4_jump_started: false,
                 first_rods_pre_wait: 0,
                 first_rods_waiting: false,
                 first_rods_active_seen: false,
@@ -49262,6 +49810,7 @@ impl SurveyInputController {
                 first_frog_dodge_started: false,
                 first_frog_dodge_tick: 0,
                 first_frog_dodge_complete: false,
+                second_rods_joint_runup: false,
                 second_rods_waiting: false,
                 second_rods_active_seen: false,
                 second_rods_cleared: false,
@@ -49269,9 +49818,21 @@ impl SurveyInputController {
                 b6_rods_waiting: false,
                 b6_rods_active_seen: false,
                 b6_rods_cleared: false,
+                b7_jump_sync_frames: 0,
                 b9_door_waiting: false,
                 b9_door_cleared: false,
                 b9_door_brake_frames: 0,
+                c1_lab_waiting: false,
+                c1_lab_retreat_complete: false,
+                c1_lab_alignment_complete: false,
+                c1_lab_door_cleared: false,
+                c1_lab_dodge_complete: false,
+                c2_route_sync_frames: 0,
+                c2_route_sync_complete: false,
+                c3_floor_waiting: false,
+                c3_floor_cleared: false,
+                c5_jump_sync_released: false,
+                c5_jump_sync_complete: false,
             };
         }
         if self.profile == SurveyInputProfile::TawnaBonusCompletionRoute {
@@ -53453,6 +54014,10 @@ fn survey_pair_with_runtime_impl(
         && input_profile == SurveyInputProfile::CastleMachineryExactCampaignPhase
         && runtime.machine().random_seed() == ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED
         && runtime.draw_count() == ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT;
+    let actual_post_sunset_lab_phase = context_source == LevelContextSource::SessionGlobals
+        && input_profile == SurveyInputProfile::LabExactCampaignPhase
+        && runtime.machine().random_seed() == ACTUAL_POST_SUNSET_LAB_RANDOM_SEED
+        && runtime.draw_count() == ACTUAL_POST_SUNSET_LAB_DRAW_COUNT;
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
@@ -53677,6 +54242,7 @@ fn survey_pair_with_runtime_impl(
     input_controller.slippery_climb.actual_post_sunset_phase = actual_post_sunset_slippery_phase;
     input_controller.lights_out.actual_post_sunset_phase = actual_post_sunset_lights_phase;
     input_controller.castle_machinery.actual_post_sunset_phase = actual_post_sunset_castle_phase;
+    input_controller.lab.actual_post_sunset_phase = actual_post_sunset_lab_phase;
     let mut empty_frames = 0_u32;
     let mut held_previous = active_pad.snapshot.held;
     let mut held_previous_2 = active_pad.snapshot.held_previous;
@@ -66957,6 +67523,62 @@ fn heavy_machinery_direct_boot_reaches_authored_end_warp() {
         "Heavy Machinery end-warp route must remain clean: {}",
         survey.summary()
     );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lab_actual_post_sunset_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x29);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Lab pair must parse");
+
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 29),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 29),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("actual post-Sunset Lab progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = ACTUAL_POST_SUNSET_LAB_RANDOM_SEED;
+    carry.draw_count = ACTUAL_POST_SUNSET_LAB_DRAW_COUNT;
+    carry.set_random_seed_b(ACTUAL_POST_SUNSET_LAB_RANDOM_SEED_B);
+    carry.level_spawn_tags[0] = 11_294;
+    carry.level_spawn_tags[1] = 11_355;
+    carry.level_spawn_tags[2] = 20_522;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("The Lab must import the actual post-Sunset campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "The Lab actual post-Sunset campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::LabExactCampaignPhase,
+        4_200,
+    )
+    .expect("The Lab's actual post-Sunset route must execute");
+    let summary = survey.summary();
+
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert!(survey.first_terminal_fall.is_none(), "{summary}");
+    assert_ordinary_completion_input(&survey, "The Lab actual post-Sunset phase");
+    assert!(survey.is_clean(), "{summary}");
 }
 
 #[test]

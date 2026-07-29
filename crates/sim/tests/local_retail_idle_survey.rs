@@ -1020,6 +1020,31 @@ fn lights_out_direct_boot_reaches_authored_end_warp() {
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn lights_out_authentic_post_slippery_phase_reaches_authored_end_warp() {
+    assert_lights_out_carried_phase_reaches_authored_end_warp(
+        "Lights Out authentic post-Slippery phase",
+        0x0453_a2f1,
+        62_218,
+        0x1bd5_35c3,
+    );
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_actual_post_sunset_phase_reaches_authored_end_warp() {
+    assert_lights_out_carried_phase_reaches_authored_end_warp(
+        "Lights Out actual post-Sunset campaign phase",
+        0xe5ca_6605,
+        99_446,
+        0x9b47_a83c,
+    );
+}
+
+fn assert_lights_out_carried_phase_reaches_authored_end_warp(
+    label: &'static str,
+    random_seed: u32,
+    draw_count: u32,
+    random_seed_b: u32,
+) {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -1045,13 +1070,13 @@ fn lights_out_authentic_post_slippery_phase_reaches_authored_end_warp() {
             .expect("authentic post-Slippery progression global is writable");
     }
     let mut carry = title_runtime.export_session_carry();
-    carry.random_seed = 0x0453_a2f1;
-    carry.draw_count = 62_218;
-    carry.set_random_seed_b(0x1bd5_35c3);
+    carry.random_seed = random_seed;
+    carry.draw_count = draw_count;
+    carry.set_random_seed_b(random_seed_b);
     let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
         .expect("Lights Out must import the authentic post-Slippery phase");
     let (survey, _) = survey_pair_with_runtime(
-        "Lights Out authentic post-Slippery phase",
+        label,
         level,
         &nsd,
         &nsf,
@@ -25443,12 +25468,18 @@ enum LightsOutOpeningPhase {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct LightsOutCompletionRouteController {
     session_globals: bool,
+    actual_post_sunset_phase: bool,
     route_frame: u32,
     first_platform_previous_z: Option<i32>,
     opening_phase: LightsOutOpeningPhase,
     first_platform_released: bool,
     first_platform_runup_remaining: u8,
     first_platform_dismount_released: bool,
+    second_platform_phase_ready: bool,
+    c3_platform_previous_z: Option<i32>,
+    c3_platform_phase_ready: bool,
+    d0_platform_previous_z: Option<i32>,
+    d0_platform_phase_ready: bool,
     c0_platform_wait_elapsed: u8,
     late_phase_wait_elapsed: u8,
 }
@@ -25456,10 +25487,32 @@ struct LightsOutCompletionRouteController {
 impl LightsOutCompletionRouteController {
     fn held(&mut self, objects: &[ProgramObjectTrace]) -> u32 {
         let next_frame = self.route_frame.saturating_add(1);
+        let player = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 6)
+                && object.program.name().as_deref() == Some("WillC")
+        });
         let first_platform = objects.iter().find(|object| {
             matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 24)
                 && object.program
                     == Eid::from_name("PoPlC").expect("fixed Lights Out platform EID is valid")
+        });
+        let c3_platform = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 40)
+                && object.program
+                    == Eid::from_name("PoPlC").expect("fixed Lights Out platform EID is valid")
+        });
+        let d0_platform = objects.iter().find(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 52)
+                && object.program
+                    == Eid::from_name("PoPlC").expect("fixed Lights Out platform EID is valid")
+        });
+        let c3_platform_approaching = c3_platform.is_some_and(|platform| {
+            self.c3_platform_previous_z
+                .is_some_and(|previous_z| platform.translation[2] > previous_z)
+        });
+        let d0_platform_approaching = d0_platform.is_some_and(|platform| {
+            self.d0_platform_previous_z
+                .is_some_and(|previous_z| platform.translation[2] > previous_z)
         });
         let first_platform_approaching = first_platform.is_some_and(|platform| {
             self.first_platform_previous_z
@@ -25471,6 +25524,12 @@ impl LightsOutCompletionRouteController {
         });
         if let Some(platform) = first_platform {
             self.first_platform_previous_z = Some(platform.translation[2]);
+        }
+        if let Some(platform) = c3_platform {
+            self.c3_platform_previous_z = Some(platform.translation[2]);
+        }
+        if let Some(platform) = d0_platform {
+            self.d0_platform_previous_z = Some(platform.translation[2]);
         }
         if self.session_globals && next_frame == 798 && !self.first_platform_released {
             // The uninterrupted campaign reaches this gate after the safe
@@ -25506,6 +25565,19 @@ impl LightsOutCompletionRouteController {
             }
             self.first_platform_dismount_released = true;
         }
+        if self.actual_post_sunset_phase && next_frame == 1_766 && !self.second_platform_phase_ready
+        {
+            let departure_platform_ready = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 29)
+                    && object.program.name().as_deref() == Some("PoPlC")
+                    && object.translation[1] >= 1_020_000
+            });
+            if departure_platform_ready {
+                self.second_platform_phase_ready = true;
+            } else {
+                return PAD_RIGHT;
+            }
+        }
         let c0_platform_phase_late = objects.iter().any(|object| {
             matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 36)
                 && object.program.name().as_deref() == Some("PoPlC")
@@ -25530,6 +25602,103 @@ impl LightsOutCompletionRouteController {
             self.late_phase_wait_elapsed += 1;
             return 0;
         }
+        let actual_phase_box_blocking = self.actual_post_sunset_phase
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 38
+                    ) && object.program.name().as_deref() == Some("BoxsC")
+                        && object.translation[0].abs_diff(player.translation[0]) < 100_000
+                        && object.translation[2].abs_diff(player.translation[2]) < 220_000
+                })
+            });
+        if actual_phase_box_blocking {
+            return PAD_UP
+                | PAD_SQUARE
+                | if player.is_some_and(|player| player.translation[2] <= 5_430_000) {
+                    PAD_CROSS
+                } else {
+                    0
+                };
+        }
+        if self.actual_post_sunset_phase && next_frame == 2_210 && !self.c3_platform_phase_ready {
+            let approach_positioned = player.is_some_and(|player| {
+                matches!(player.state, 1 | 2) && player.translation[2] <= 4_060_000
+            });
+            if !approach_positioned {
+                return PAD_UP;
+            }
+            let platform_ready = c3_platform.is_some_and(|platform| {
+                (3_270_000..=3_290_000).contains(&platform.translation[2])
+                    && c3_platform_approaching
+            });
+            if platform_ready {
+                self.c3_platform_phase_ready = true;
+            } else {
+                // Wait on c2's safe floor for the moving c3 platform to
+                // return on the same authored approach used by the nominal
+                // route, then rebuild the nominal running takeoff speed.
+                return if c3_platform_approaching
+                    && c3_platform.is_some_and(|platform| platform.translation[2] >= 3_170_000)
+                {
+                    PAD_UP
+                } else {
+                    0
+                };
+            }
+        }
+        let c9_hazard_armed = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 49
+            ) && object.program.name().as_deref() == Some("CasOC")
+                && object.event == 7_424
+        });
+        if self.actual_post_sunset_phase && next_frame == 3_265 && c9_hazard_armed {
+            // Recenter after the live c9 hazard dodge below. Freeze the
+            // authored route clock until ordinary directional input has
+            // returned Crash to its nominal takeoff band at low velocity.
+            let Some(player) = player else {
+                return 0;
+            };
+            let mut held = 0;
+            if player.translation[2] > -4_640_000 {
+                held |= PAD_UP;
+            } else if player.translation[2] < -4_720_000 {
+                held |= PAD_DOWN;
+            } else if player.velocity[2] < -100_000 {
+                held |= PAD_DOWN;
+            } else if player.velocity[2] > 100_000 {
+                held |= PAD_UP;
+            }
+            if player.translation[0] > 2_110_000 {
+                held |= PAD_LEFT;
+            } else if player.translation[0] < 2_040_000 {
+                held |= PAD_RIGHT;
+            } else if player.velocity[0] < -100_000 {
+                held |= PAD_RIGHT;
+            } else if player.velocity[0] > 100_000 {
+                held |= PAD_LEFT;
+            }
+            if held != 0 {
+                return held;
+            }
+        }
+        if self.actual_post_sunset_phase && next_frame == 3_490 && !self.d0_platform_phase_ready {
+            let platform_ready = d0_platform.is_some_and(|platform| {
+                (-5_245_000..=-5_220_000).contains(&platform.translation[2])
+                    && d0_platform_approaching
+            });
+            if platform_ready {
+                self.d0_platform_phase_ready = true;
+            } else {
+                // The uninterrupted campaign reaches d0 with this platform
+                // already retreating from the takeoff ledge. Wait safely for
+                // the same approaching band used by the nominal route.
+                return 0;
+            }
+        }
         self.route_frame = next_frame;
         let mut held = Self::held_at(next_frame);
         if self.session_globals {
@@ -25542,16 +25711,27 @@ impl LightsOutCompletionRouteController {
             ) {
                 held |= PAD_CROSS;
             }
+            if self.actual_post_sunset_phase && (1_850..=1_853).contains(&next_frame) {
+                held &= !PAD_LEFT;
+            }
+            if self.actual_post_sunset_phase && (2_076..=2_079).contains(&next_frame) {
+                held |= PAD_RIGHT | PAD_CROSS;
+            }
+            if self.actual_post_sunset_phase
+                && player.is_some_and(|player| {
+                    matches!(player.state, 1 | 2)
+                        && (2_400_000..=2_650_000).contains(&player.translation[0])
+                        && (5_200_000..=5_450_000).contains(&player.translation[2])
+                })
+            {
+                held |= PAD_CROSS;
+            }
             if (1_988..=1_990).contains(&next_frame) {
                 held &= !PAD_CROSS;
             }
             if (1_991..=2_002).contains(&next_frame) {
                 held |= PAD_CROSS;
             }
-            let player = objects.iter().find(|object| {
-                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 6)
-                    && object.program.name().as_deref() == Some("WillC")
-            });
             // A live carried clock can put a second rolling pillar directly
             // into this jump. Spin only while that active pillar is close.
             let carried_rolling_obstacle_close = player.is_some_and(|player| {
@@ -25576,6 +25756,21 @@ impl LightsOutCompletionRouteController {
             }
             if (2_298..=2_309).contains(&next_frame) {
                 held |= PAD_CROSS;
+            }
+            if self.actual_post_sunset_phase
+                && (3_229..=3_240).contains(&next_frame)
+                && c9_hazard_armed
+            {
+                // In this retained campaign phase entity 49 arms the adjacent
+                // CasOC death sender. Sidestep its live sweep, then counter-
+                // steer before the recenter gate resumes the nominal route.
+                held |= PAD_LEFT;
+            }
+            if self.actual_post_sunset_phase
+                && (3_241..=3_255).contains(&next_frame)
+                && c9_hazard_armed
+            {
+                held |= PAD_RIGHT;
             }
             if (2_554..=2_563).contains(&next_frame) {
                 held = 0;
@@ -48151,12 +48346,18 @@ impl SurveyInputController {
             },
             lights_out: LightsOutCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
+                actual_post_sunset_phase: false,
                 route_frame: 0,
                 first_platform_previous_z: None,
                 opening_phase: LightsOutOpeningPhase::Nominal,
                 first_platform_released: false,
                 first_platform_runup_remaining: 0,
                 first_platform_dismount_released: false,
+                second_platform_phase_ready: false,
+                c3_platform_previous_z: None,
+                c3_platform_phase_ready: false,
+                d0_platform_previous_z: None,
+                d0_platform_phase_ready: false,
                 c0_platform_wait_elapsed: 0,
                 late_phase_wait_elapsed: 0,
             },
@@ -49043,6 +49244,7 @@ struct ProgramObjectTrace {
     code_address: CodeAddress,
     event: u32,
     translation: [i32; 3],
+    velocity: [i32; 3],
     frame_bound: Option<Bounds3>,
     bound: Option<Bounds3>,
     animation_counter: u32,
@@ -52029,6 +52231,11 @@ fn program_object_traces(
             code_address: vm.code_address(),
             event: register(process_register::EVENT)?,
             translation,
+            velocity: [
+                register(process_register::MISC_A_X)?.cast_signed(),
+                register(process_register::MISC_A_Y)?.cast_signed(),
+                register(process_register::MISC_A_Z)?.cast_signed(),
+            ],
             frame_bound,
             bound: frame_bound.or_else(|| {
                 Some(vm.retail_local_bound().translated(crust_sim::Vec3 {
@@ -52862,6 +53069,10 @@ fn survey_pair_with_runtime_impl(
         && input_profile == SurveyInputProfile::SlipperyClimbCompletionRoute
         && runtime.machine().random_seed() == 0xf54b_9431
         && runtime.draw_count() == 92_213;
+    let actual_post_sunset_lights_phase = context_source == LevelContextSource::SessionGlobals
+        && input_profile == SurveyInputProfile::LightsOutCompletionRoute
+        && runtime.machine().random_seed() == 0xe5ca_6605
+        && runtime.draw_count() == 99_446;
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
@@ -53084,6 +53295,7 @@ fn survey_pair_with_runtime_impl(
         SurveyInputController::new(input_profile, context_source, runtime.draw_count());
     input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     input_controller.slippery_climb.actual_post_sunset_phase = actual_post_sunset_slippery_phase;
+    input_controller.lights_out.actual_post_sunset_phase = actual_post_sunset_lights_phase;
     let mut empty_frames = 0_u32;
     let mut held_previous = active_pad.snapshot.held;
     let mut held_previous_2 = active_pad.snapshot.held_previous;

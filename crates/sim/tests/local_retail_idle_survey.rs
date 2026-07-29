@@ -45306,7 +45306,9 @@ impl TempleRuinsCompletionRouteController {
             self.b8_lift_stage = 2;
             self.complete_platform(157);
             self.active_platform = None;
-            self.jump_frames = if self.session_globals { 30 } else { 10 };
+            // Both fresh and carried routes need the full lift-exit hold to
+            // reach the authored b8 landing.
+            self.jump_frames = 30;
             self.release_frames = 5;
             return PAD_UP | PAD_CROSS | PAD_SQUARE;
         }
@@ -46700,7 +46702,11 @@ impl TempleRuinsCompletionRouteController {
             })
         {
             self.a2_fire_crossing_stage = 2;
-            self.jump_frames = 30;
+            // The authentic carried phase needs the longer hold introduced by
+            // its shifted fire cycle. Preserve the characterized ten-frame
+            // direct-boot launch instead of carrying that phase correction
+            // into the fresh route.
+            self.jump_frames = if self.session_globals { 30 } else { 10 };
             self.release_frames = 5;
             return PAD_UP | PAD_CROSS;
         }
@@ -57656,26 +57662,28 @@ fn hog_wild_direct_boot_reaches_level_complete() {
     .expect("Hog Wild's ordinary-pad completion route must execute");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_950);
+    // The native-atomic post-spawn configuration tail starts the mounted
+    // route one cooperative frame sooner than the old watchdog boundary.
+    assert_eq!(survey.frames, 1_949);
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 1950 requested level transition to 0x2d")
+        Some("frame 1949 requested level transition to 0x2d")
     );
-    assert_eq!(survey.next_lid, Some((1_950, 0x2d)));
+    assert_eq!(survey.next_lid, Some((1_949, 0x2d)));
     assert_eq!(survey.final_live_objects, 17);
     assert_eq!(survey.max_live_objects, 18);
     assert_eq!(survey.successful_spawns, 39);
-    assert_eq!(survey.spawn_attempts, 5_857);
-    assert_eq!(survey.expected_spawn_rejections, 5_818);
+    assert_eq!(survey.spawn_attempts, 5_856);
+    assert_eq!(survey.expected_spawn_rejections, 5_817);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 24_311);
+    assert_eq!(survey.executions, 24_302);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 57);
     assert_eq!(survey.camera_ranges.len(), 67);
     assert_eq!(survey.camera_path_changes, 66);
-    assert_eq!(survey.last_camera_path_change, 1_813);
-    assert_eq!(survey.last_camera_progress_change, 1_836);
-    assert_eq!(survey.last_player_movement, 1_946);
+    assert_eq!(survey.last_camera_path_change, 1_812);
+    assert_eq!(survey.last_camera_progress_change, 1_835);
+    assert_eq!(survey.last_player_movement, 1_945);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.save_handshakes, 1);
@@ -57716,45 +57724,45 @@ fn hog_wild_direct_boot_reaches_level_complete() {
         survey.pad_change_samples,
         [
             (1, 0),
-            (153, PAD_CROSS),
-            (161, 0),
-            (195, PAD_CROSS),
-            (203, 0),
-            (260, PAD_CROSS),
-            (268, 0),
-            (400, PAD_CROSS),
-            (408, 0),
-            (435, PAD_CROSS),
-            (443, 0),
-            (475, PAD_RIGHT),
-            (515, 0),
-            (530, PAD_LEFT | PAD_CROSS),
-            (560, 0),
-            (705, PAD_CROSS),
-            (713, 0),
-            (810, PAD_RIGHT),
-            (835, 0),
-            (840, PAD_LEFT),
-            (865, 0),
-            (910, PAD_RIGHT | PAD_CROSS),
-            (931, 0),
-            (1_020, PAD_CROSS),
-            (1_041, 0),
-            (1_090, PAD_RIGHT | PAD_CROSS),
-            (1_111, 0),
-            (1_410, PAD_LEFT),
-            (1_430, PAD_RIGHT | PAD_CROSS),
-            (1_461, 0),
-            (1_490, PAD_RIGHT | PAD_CROSS),
-            (1_511, 0),
-            (1_540, PAD_LEFT),
-            (1_581, 0),
-            (1_650, PAD_RIGHT),
-            (1_691, 0),
-            (1_730, PAD_CROSS),
-            (1_741, 0),
-            (1_755, PAD_CROSS),
-            (1_771, 0),
+            (152, PAD_CROSS),
+            (160, 0),
+            (194, PAD_CROSS),
+            (202, 0),
+            (259, PAD_CROSS),
+            (267, 0),
+            (399, PAD_CROSS),
+            (407, 0),
+            (434, PAD_CROSS),
+            (442, 0),
+            (474, PAD_RIGHT),
+            (514, 0),
+            (529, PAD_LEFT | PAD_CROSS),
+            (559, 0),
+            (704, PAD_CROSS),
+            (712, 0),
+            (809, PAD_RIGHT),
+            (834, 0),
+            (839, PAD_LEFT),
+            (864, 0),
+            (909, PAD_RIGHT | PAD_CROSS),
+            (930, 0),
+            (1_019, PAD_CROSS),
+            (1_040, 0),
+            (1_089, PAD_RIGHT | PAD_CROSS),
+            (1_110, 0),
+            (1_409, PAD_LEFT),
+            (1_429, PAD_RIGHT | PAD_CROSS),
+            (1_460, 0),
+            (1_489, PAD_RIGHT | PAD_CROSS),
+            (1_510, 0),
+            (1_539, PAD_LEFT),
+            (1_580, 0),
+            (1_649, PAD_RIGHT),
+            (1_690, 0),
+            (1_729, PAD_CROSS),
+            (1_740, 0),
+            (1_754, PAD_CROSS),
+            (1_770, 0),
         ]
     );
     assert!(
@@ -57774,49 +57782,49 @@ fn hog_wild_direct_boot_reaches_level_complete() {
         survey.checkpoint_samples,
         [
             (1, -1, [0, 0, 0]),
-            (657, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
-            (1_143, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
+            (656, 13 << 8, [1_996_032, 3_688_192, 11_827_200]),
+            (1_142, 30 << 8, [1_996_544, 6_153_728, -5_786_112]),
         ]
     );
     assert_eq!(
         survey.saved_box_count_samples,
-        [(657, 0x100), (1_143, 0x300)]
+        [(656, 0x100), (1_142, 0x300)]
     );
     assert_eq!(
         survey.box_count_samples,
         [
             (1, 0),
-            (530, 0x100),
-            (657, 0x200),
-            (1_082, 0x300),
-            (1_143, 0x400),
-            (1_340, 0x500),
-            (1_588, 0x600),
-            (1_724, 0x700),
+            (529, 0x100),
+            (656, 0x200),
+            (1_081, 0x300),
+            (1_142, 0x400),
+            (1_339, 0x500),
+            (1_587, 0x600),
+            (1_723, 0x700),
         ]
     );
     assert_eq!(
         survey.spawn_flag_samples,
         [
-            (530, 16, 3),
-            (530, 16, 3),
-            (531, 0, 2),
-            (531, 16, 11),
-            (657, 13, 9),
-            (1_082, 28, 3),
-            (1_082, 28, 3),
-            (1_083, 0, 2),
-            (1_143, 30, 9),
-            (1_340, 22, 3),
-            (1_340, 22, 3),
-            (1_341, 0, 2),
-            (1_341, 22, 11),
-            (1_588, 41, 3),
-            (1_588, 41, 3),
-            (1_589, 0, 2),
-            (1_724, 9, 3),
-            (1_724, 9, 3),
-            (1_725, 0, 2),
+            (529, 16, 3),
+            (529, 16, 3),
+            (530, 0, 2),
+            (530, 16, 11),
+            (656, 13, 9),
+            (1_081, 28, 3),
+            (1_081, 28, 3),
+            (1_082, 0, 2),
+            (1_142, 30, 9),
+            (1_339, 22, 3),
+            (1_339, 22, 3),
+            (1_340, 0, 2),
+            (1_340, 22, 11),
+            (1_587, 41, 3),
+            (1_587, 41, 3),
+            (1_588, 0, 2),
+            (1_723, 9, 3),
+            (1_723, 9, 3),
+            (1_724, 0, 2),
         ]
     );
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
@@ -57832,8 +57840,8 @@ fn hog_wild_direct_boot_reaches_level_complete() {
             "WarpC state {state} must execute before the authored transition"
         );
     }
-    assert_eq!(runtime.machine().random_seed(), 0xc344_8148);
-    assert_eq!(runtime.draw_count(), 1_950);
+    assert_eq!(runtime.machine().random_seed(), 0x258c_6fc7);
+    assert_eq!(runtime.draw_count(), 1_949);
     assert!(
         survey.is_clean(),
         "Hog Wild completion must remain clean: {}",
@@ -57865,26 +57873,28 @@ fn whole_hog_direct_boot_reaches_level_complete() {
     .expect("Whole Hog's ordinary-pad completion route must execute");
     eprintln!("{}", survey.summary());
 
-    assert_eq!(survey.frames, 1_785);
+    // As in Hog Wild, the mounted route now starts on the native-atomic
+    // child-configuration frame rather than yielding at the watchdog edge.
+    assert_eq!(survey.frames, 1_784);
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 1785 requested level transition to 0x2d")
+        Some("frame 1784 requested level transition to 0x2d")
     );
-    assert_eq!(survey.next_lid, Some((1_785, 0x2d)));
+    assert_eq!(survey.next_lid, Some((1_784, 0x2d)));
     assert_eq!(survey.final_live_objects, 17);
     assert_eq!(survey.max_live_objects, 21);
     assert_eq!(survey.successful_spawns, 43);
-    assert_eq!(survey.spawn_attempts, 6_199);
-    assert_eq!(survey.expected_spawn_rejections, 6_156);
+    assert_eq!(survey.spawn_attempts, 6_198);
+    assert_eq!(survey.expected_spawn_rejections, 6_155);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 23_436);
+    assert_eq!(survey.executions, 23_427);
     assert_eq!(survey.execution_errors, 0);
     assert_eq!(survey.zone_transitions, 51);
     assert_eq!(survey.camera_ranges.len(), 62);
     assert_eq!(survey.camera_path_changes, 61);
-    assert_eq!(survey.last_camera_path_change, 1_648);
-    assert_eq!(survey.last_camera_progress_change, 1_670);
-    assert_eq!(survey.last_player_movement, 1_781);
+    assert_eq!(survey.last_camera_path_change, 1_647);
+    assert_eq!(survey.last_camera_progress_change, 1_669);
+    assert_eq!(survey.last_player_movement, 1_780);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.save_handshakes, 1);
@@ -57945,43 +57955,43 @@ fn whole_hog_direct_boot_reaches_level_complete() {
         survey.pad_change_samples,
         [
             (1, 0),
-            (274, PAD_CROSS),
-            (285, 0),
-            (289, PAD_RIGHT),
-            (299, PAD_RIGHT | PAD_CROSS),
-            (314, PAD_LEFT),
-            (339, PAD_LEFT | PAD_CROSS),
-            (340, PAD_LEFT),
-            (368, PAD_RIGHT),
-            (419, 0),
-            (426, PAD_CROSS),
-            (438, 0),
-            (456, PAD_CROSS),
-            (463, 0),
-            (485, PAD_CROSS),
-            (514, 0),
-            (530, PAD_CROSS),
-            (612, 0),
-            (782, PAD_LEFT),
-            (813, 0),
-            (820, PAD_CROSS),
-            (835, PAD_RIGHT),
-            (870, PAD_RIGHT | PAD_CROSS),
-            (887, 0),
-            (1_045, PAD_LEFT),
-            (1_073, 0),
-            (1_131, PAD_CROSS),
-            (1_149, 0),
-            (1_177, PAD_RIGHT),
-            (1_206, 0),
-            (1_229, PAD_CROSS),
-            (1_250, 0),
-            (1_416, PAD_CROSS),
-            (1_422, 0),
-            (1_442, PAD_CROSS),
-            (1_452, 0),
-            (1_477, PAD_LEFT | PAD_CROSS),
-            (1_496, 0),
+            (273, PAD_CROSS),
+            (284, 0),
+            (288, PAD_RIGHT),
+            (298, PAD_RIGHT | PAD_CROSS),
+            (313, PAD_LEFT),
+            (338, PAD_LEFT | PAD_CROSS),
+            (339, PAD_LEFT),
+            (367, PAD_RIGHT),
+            (418, 0),
+            (425, PAD_CROSS),
+            (437, 0),
+            (455, PAD_CROSS),
+            (462, 0),
+            (484, PAD_CROSS),
+            (513, 0),
+            (529, PAD_CROSS),
+            (611, 0),
+            (781, PAD_LEFT),
+            (812, 0),
+            (819, PAD_CROSS),
+            (834, PAD_RIGHT),
+            (869, PAD_RIGHT | PAD_CROSS),
+            (886, 0),
+            (1_044, PAD_LEFT),
+            (1_072, 0),
+            (1_130, PAD_CROSS),
+            (1_148, 0),
+            (1_176, PAD_RIGHT),
+            (1_205, 0),
+            (1_228, PAD_CROSS),
+            (1_249, 0),
+            (1_415, PAD_CROSS),
+            (1_421, 0),
+            (1_441, PAD_CROSS),
+            (1_451, 0),
+            (1_476, PAD_LEFT | PAD_CROSS),
+            (1_495, 0),
         ]
     );
     assert!(
@@ -58002,16 +58012,16 @@ fn whole_hog_direct_boot_reaches_level_complete() {
         survey.box_count_samples,
         [
             (1, 0),
-            (680, 0x100),
-            (688, 0x200),
-            (705, 0x300),
-            (925, 0x400),
-            (1_183, 0x500),
-            (1_319, 0x600),
-            (1_354, 0x700),
-            (1_392, 0x800),
-            (1_461, 0x900),
-            (1_627, 0xa00),
+            (679, 0x100),
+            (687, 0x200),
+            (704, 0x300),
+            (924, 0x400),
+            (1_182, 0x500),
+            (1_318, 0x600),
+            (1_353, 0x700),
+            (1_391, 0x800),
+            (1_460, 0x900),
+            (1_626, 0xa00),
         ]
     );
     assert_eq!(survey.effect_counts.get("send-event"), Some(&79));
@@ -58027,7 +58037,7 @@ fn whole_hog_direct_boot_reaches_level_complete() {
         );
     }
     assert_eq!(runtime.machine().random_seed(), 0xa49c_ade2);
-    assert_eq!(runtime.draw_count(), 1_785);
+    assert_eq!(runtime.draw_count(), 1_784);
     assert!(
         survey.is_clean(),
         "Whole Hog completion must remain clean: {}",

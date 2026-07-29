@@ -25466,6 +25466,7 @@ enum LightsOutOpeningPhase {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 struct LightsOutCompletionRouteController {
     session_globals: bool,
     actual_post_sunset_phase: bool,
@@ -25665,18 +25666,14 @@ impl LightsOutCompletionRouteController {
             let mut held = 0;
             if player.translation[2] > -4_640_000 {
                 held |= PAD_UP;
-            } else if player.translation[2] < -4_720_000 {
-                held |= PAD_DOWN;
-            } else if player.velocity[2] < -100_000 {
+            } else if player.translation[2] < -4_720_000 || player.velocity[2] < -100_000 {
                 held |= PAD_DOWN;
             } else if player.velocity[2] > 100_000 {
                 held |= PAD_UP;
             }
             if player.translation[0] > 2_110_000 {
                 held |= PAD_LEFT;
-            } else if player.translation[0] < 2_040_000 {
-                held |= PAD_RIGHT;
-            } else if player.velocity[0] < -100_000 {
+            } else if player.translation[0] < 2_040_000 || player.velocity[0] < -100_000 {
                 held |= PAD_RIGHT;
             } else if player.velocity[0] > 100_000 {
                 held |= PAD_LEFT;

@@ -51504,6 +51504,7 @@ fn run_clean_carried_campaign_step(
     expected_destination: LevelId,
     expected_globals: [u32; 7],
 ) -> RetailSessionCarry {
+    assert_unassisted_campaign_carry(&carry, pair.name);
     let (survey, runtime) = pair.run_carried(carry, input, frame_budget);
     let summary = survey.summary();
     assert_eq!(
@@ -51511,8 +51512,7 @@ fn run_clean_carried_campaign_step(
         Some(i32::try_from(expected_destination.get()).unwrap()),
         "{summary}"
     );
-    assert_eq!(survey.restarts, 0, "{summary}");
-    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert_no_campaign_recovery(&survey, pair.name);
     assert!(survey.first_terminal_fall.is_none(), "{summary}");
     assert!(survey.is_clean(), "{summary}");
     assert_eq!(
@@ -51520,7 +51520,33 @@ fn run_clean_carried_campaign_step(
         expected_globals,
         "{summary}"
     );
-    pair.finish_checked(runtime, expected_destination)
+    let carry = pair.finish_checked(runtime, expected_destination);
+    assert_unassisted_campaign_carry(&carry, pair.name);
+    carry
+}
+
+fn assert_unassisted_campaign_carry(carry: &RetailSessionCarry, boundary: &str) {
+    assert_eq!(
+        (carry.respawn_count, carry.death_count),
+        (0, 0),
+        "{boundary} must preserve a zero-recovery campaign carry"
+    );
+}
+
+fn assert_no_campaign_recovery(survey: &LevelSurvey, level_name: &str) {
+    let summary = survey.summary();
+    assert_eq!(survey.restarts, 0, "{level_name}: {summary}");
+    assert!(
+        survey.restart_frames.is_empty(),
+        "{level_name}: unexpected restart frames {:?}: {summary}",
+        survey.restart_frames
+    );
+    assert_eq!(survey.death_camera_frames, 0, "{level_name}: {summary}");
+    assert_eq!(
+        survey.effect_counts.get("load-state").copied().unwrap_or(0),
+        0,
+        "{level_name}: the campaign route must not use checkpoint recovery: {summary}"
+    );
 }
 
 fn campaign_progression_globals(runtime: &RetailRuntime) -> [u32; 7] {
@@ -51600,6 +51626,7 @@ fn carry_completion_to_title(
     carry: RetailSessionCarry,
     expected_globals: [u32; 7],
 ) -> RetailSessionCarry {
+    assert_unassisted_campaign_carry(&carry, completion.name);
     // Late campaign screens can spend more than 700 draws counting the
     // authored box total before they accept the ordinary acknowledgement.
     // Keep the route bounded, but give that retail graph enough time to
@@ -51615,11 +51642,13 @@ fn carry_completion_to_title(
         "{}",
         survey.summary()
     );
-    assert_eq!(survey.restarts, 0, "{}", survey.summary());
+    assert_no_campaign_recovery(&survey, completion.name);
     assert_eq!(survey.faulted_objects, 0);
     assert!(survey.is_clean(), "{}", survey.summary());
     assert_eq!(campaign_progression_globals(&runtime), expected_globals);
-    completion.finish_checked(runtime, LevelId::TITLE)
+    let carry = completion.finish_checked(runtime, LevelId::TITLE);
+    assert_unassisted_campaign_carry(&carry, completion.name);
+    carry
 }
 
 fn carry_map_to_next_level(
@@ -51628,12 +51657,15 @@ fn carry_map_to_next_level(
     expected: LevelId,
     expected_globals: [u32; 7],
 ) -> RetailSessionCarry {
+    assert_unassisted_campaign_carry(&carry, title.name);
     let mut map =
         AuthoredTitleMapHarness::from_session(&title.nsd, &title.nsf, &title.nsf_bytes, carry);
     map.select_next_unlocked(expected);
     assert_eq!(campaign_progression_globals(&map.runtime), expected_globals);
     assert_eq!(map.runtime.faulted_object_count(), 0);
-    title.finish_checked(map.runtime, expected)
+    let carry = title.finish_checked(map.runtime, expected);
+    assert_unassisted_campaign_carry(&carry, title.name);
+    carry
 }
 
 fn synthetic_title_map_carry(
@@ -51776,6 +51808,342 @@ fn post_sunset_and_koala_carried_map_handoffs_use_isldc_selection() {
         );
         assert_eq!(map.runtime.faulted_object_count(), 0, "{case}");
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let koala_kong = CampaignPair::parse(&root, LevelId::new_const(0x21));
+    let heavy_machinery = CampaignPair::parse(&root, LevelId::new_const(0x06));
+    let cortex_power = CampaignPair::parse(&root, LevelId::new_const(0x03));
+    let generator_room = CampaignPair::parse(&root, LevelId::new_const(0x05));
+    let toxic_waste = CampaignPair::parse(&root, LevelId::new_const(0x07));
+    let pinstripe = CampaignPair::parse(&root, LevelId::new_const(0x08));
+    let high_road = CampaignPair::parse(&root, LevelId::new_const(0x16));
+    let slippery_climb = CampaignPair::parse(&root, LevelId::new_const(0x2e));
+    let lights_out = CampaignPair::parse(&root, LevelId::new_const(0x28));
+    let jaws_of_darkness = CampaignPair::parse(&root, LevelId::new_const(0x1d));
+    let castle_machinery = CampaignPair::parse(&root, LevelId::new_const(0x37));
+    let dr_n_brio = CampaignPair::parse(&root, LevelId::new_const(0x1b));
+    let lab = CampaignPair::parse(&root, LevelId::new_const(0x29));
+    let great_hall = CampaignPair::parse(&root, LevelId::new_const(0x2c));
+    let dr_neo_cortex = CampaignPair::parse(&root, LevelId::new_const(0x1f));
+    let ending = CampaignPair::parse(&root, LevelId::ENDING);
+
+    // Start at the authored map contract after Sunset Vista. These clocks are
+    // exported by `sunset_vista_authentic_campaign_phase_reaches_authored_end_warp`
+    // after its real Level Complete graph requests Title. The focused chain
+    // proves every later mount without replaying the still-evolving prefix.
+    let post_sunset_title = synthetic_title_map_carry(16, 17, 0x9210_119b, 24_074, 0x4987_cf9b);
+    let koala_carry = carry_map_to_next_level(
+        &title,
+        post_sunset_title,
+        koala_kong.level,
+        [0, 15, 15, 17, 1, 17, 1],
+    );
+    let post_koala_title = run_clean_carried_campaign_step(
+        &koala_kong,
+        koala_carry,
+        SurveyInputProfile::KoalaKongCompletionRoute,
+        7_000,
+        LevelId::TITLE,
+        [0x300, 15, 15, 17, 1, 18, 0],
+    );
+
+    let heavy_carry = carry_map_to_next_level(
+        &title,
+        post_koala_title,
+        heavy_machinery.level,
+        [0, 15, 15, 18, 1, 18, 1],
+    );
+    let (heavy_survey, heavy_runtime) = heavy_machinery.run_carried(
+        heavy_carry,
+        SurveyInputProfile::HeavyMachineryCompletionRoute,
+        5_600,
+    );
+    let heavy_summary = heavy_survey.summary();
+    assert_eq!(
+        heavy_survey.next_lid,
+        Some((heavy_survey.frames, 0x2d)),
+        "{heavy_summary}"
+    );
+    assert_no_campaign_recovery(&heavy_survey, heavy_machinery.name);
+    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 1_390);
+    assert_ordinary_completion_input(&heavy_survey, heavy_machinery.name);
+    assert!(heavy_survey.is_clean(), "{heavy_summary}");
+    assert_eq!(
+        campaign_progression_globals(&heavy_runtime),
+        [0x500, 15, 15, 18, 1, 19, 0]
+    );
+    let heavy_completion = heavy_machinery.finish_checked(heavy_runtime, LevelId::LEVEL_COMPLETE);
+    let post_heavy_title =
+        carry_completion_to_title(&completion, heavy_completion, [0x300, 15, 15, 18, 1, 19, 0]);
+
+    let cortex_power_carry = carry_map_to_next_level(
+        &title,
+        post_heavy_title,
+        cortex_power.level,
+        [0, 15, 15, 19, 1, 19, 1],
+    );
+    let cortex_power_completion = run_clean_carried_campaign_step(
+        &cortex_power,
+        cortex_power_carry,
+        SurveyInputProfile::CortexPowerCompletionRoute,
+        4_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 19, 1, 20, 0],
+    );
+    let post_cortex_power_title = carry_completion_to_title(
+        &completion,
+        cortex_power_completion,
+        [0x300, 15, 15, 19, 1, 20, 0],
+    );
+
+    let generator_carry = carry_map_to_next_level(
+        &title,
+        post_cortex_power_title,
+        generator_room.level,
+        [0, 15, 15, 20, 1, 20, 1],
+    );
+    let generator_completion = run_clean_carried_campaign_step(
+        &generator_room,
+        generator_carry,
+        SurveyInputProfile::GeneratorRoomCompletionRoute,
+        4_200,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 20, 1, 21, 0],
+    );
+    let post_generator_title = carry_completion_to_title(
+        &completion,
+        generator_completion,
+        [0x300, 15, 15, 20, 1, 21, 0],
+    );
+
+    let toxic_carry = carry_map_to_next_level(
+        &title,
+        post_generator_title,
+        toxic_waste.level,
+        [0, 15, 15, 21, 1, 21, 1],
+    );
+    let toxic_completion = run_clean_carried_campaign_step(
+        &toxic_waste,
+        toxic_carry,
+        SurveyInputProfile::ToxicWasteCompletionRoute,
+        3_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 21, 1, 22, 0],
+    );
+    let post_toxic_title =
+        carry_completion_to_title(&completion, toxic_completion, [0x300, 15, 15, 21, 1, 22, 0]);
+
+    let pinstripe_carry = carry_map_to_next_level(
+        &title,
+        post_toxic_title,
+        pinstripe.level,
+        [0, 15, 15, 22, 1, 22, 1],
+    );
+    let post_pinstripe_title = run_clean_carried_campaign_step(
+        &pinstripe,
+        pinstripe_carry,
+        SurveyInputProfile::PinstripeCompletionRoute,
+        2_200,
+        LevelId::TITLE,
+        [0x300, 15, 15, 22, 1, 23, 0],
+    );
+
+    let high_road_carry = carry_map_to_next_level(
+        &title,
+        post_pinstripe_title,
+        high_road.level,
+        [0, 15, 15, 23, 1, 23, 1],
+    );
+    let high_road_completion = run_clean_carried_campaign_step(
+        &high_road,
+        high_road_carry,
+        SurveyInputProfile::HighRoadCompletionRoute,
+        3_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 23, 1, 24, 0],
+    );
+    let post_high_road_title = carry_completion_to_title(
+        &completion,
+        high_road_completion,
+        [0x300, 15, 15, 23, 1, 24, 0],
+    );
+
+    let slippery_carry = carry_map_to_next_level(
+        &title,
+        post_high_road_title,
+        slippery_climb.level,
+        [0, 15, 15, 24, 1, 24, 1],
+    );
+    let slippery_completion = run_clean_carried_campaign_step(
+        &slippery_climb,
+        slippery_carry,
+        SurveyInputProfile::SlipperyClimbCompletionRoute,
+        8_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 24, 1, 25, 0],
+    );
+    let post_slippery_title = carry_completion_to_title(
+        &completion,
+        slippery_completion,
+        [0x300, 15, 15, 24, 1, 25, 0],
+    );
+
+    let lights_out_carry = carry_map_to_next_level(
+        &title,
+        post_slippery_title,
+        lights_out.level,
+        [0, 15, 15, 25, 1, 25, 1],
+    );
+    let lights_out_completion = run_clean_carried_campaign_step(
+        &lights_out,
+        lights_out_carry,
+        SurveyInputProfile::LightsOutCompletionRoute,
+        6_000,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 25, 1, 26, 0],
+    );
+    let post_lights_title = carry_completion_to_title(
+        &completion,
+        lights_out_completion,
+        [0x300, 15, 15, 25, 1, 26, 0],
+    );
+
+    let jaws_carry = carry_map_to_next_level(
+        &title,
+        post_lights_title,
+        jaws_of_darkness.level,
+        [0, 15, 15, 26, 1, 26, 1],
+    );
+    let jaws_completion = run_clean_carried_campaign_step(
+        &jaws_of_darkness,
+        jaws_carry,
+        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
+        5_600,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 26, 1, 27, 0],
+    );
+    let post_jaws_title =
+        carry_completion_to_title(&completion, jaws_completion, [0x300, 15, 15, 26, 1, 27, 0]);
+
+    let castle_carry = carry_map_to_next_level(
+        &title,
+        post_jaws_title,
+        castle_machinery.level,
+        [0, 15, 15, 27, 1, 27, 1],
+    );
+    let (castle_survey, castle_runtime) = castle_machinery.run_carried(
+        castle_carry,
+        SurveyInputProfile::CastleMachineryExactCampaignPhase,
+        7_500,
+    );
+    let castle_summary = castle_survey.summary();
+    assert_eq!(
+        castle_survey.next_lid,
+        Some((castle_survey.frames, 0x2d)),
+        "{castle_summary}"
+    );
+    assert_no_campaign_recovery(&castle_survey, castle_machinery.name);
+    assert!(castle_survey.is_clean(), "{castle_summary}");
+    assert_eq!(
+        campaign_progression_globals(&castle_runtime),
+        [0x500, 15, 15, 27, 1, 28, 0]
+    );
+    let castle_completion =
+        castle_machinery.finish_checked(castle_runtime, LevelId::LEVEL_COMPLETE);
+    let post_castle_title = carry_completion_to_title(
+        &completion,
+        castle_completion,
+        [0x300, 15, 15, 27, 1, 28, 0],
+    );
+
+    let brio_carry = carry_map_to_next_level(
+        &title,
+        post_castle_title,
+        dr_n_brio.level,
+        [0, 15, 15, 28, 1, 28, 1],
+    );
+    let post_brio_title = run_clean_carried_campaign_step(
+        &dr_n_brio,
+        brio_carry,
+        SurveyInputProfile::BrioCompletionRoute,
+        3_000,
+        LevelId::TITLE,
+        [0x300, 15, 15, 28, 1, 29, 0],
+    );
+
+    let lab_carry = carry_map_to_next_level(
+        &title,
+        post_brio_title,
+        lab.level,
+        [0, 15, 15, 29, 1, 29, 1],
+    );
+    let lab_completion = run_clean_carried_campaign_step(
+        &lab,
+        lab_carry,
+        SurveyInputProfile::LabExactCampaignPhase,
+        4_200,
+        LevelId::LEVEL_COMPLETE,
+        [0x500, 15, 15, 29, 1, 30, 0],
+    );
+    let post_lab_title =
+        carry_completion_to_title(&completion, lab_completion, [0x300, 15, 15, 29, 1, 30, 0]);
+
+    let great_hall_carry = carry_map_to_next_level(
+        &title,
+        post_lab_title,
+        great_hall.level,
+        [0, 15, 15, 30, 1, 30, 1],
+    );
+    let post_great_hall_title = run_clean_carried_campaign_step(
+        &great_hall,
+        great_hall_carry,
+        SurveyInputProfile::GreatHallCortexRoute,
+        1_200,
+        LevelId::TITLE,
+        [0x300, 15, 15, 30, 1, 31, 0],
+    );
+
+    let cortex_carry = carry_map_to_next_level(
+        &title,
+        post_great_hall_title,
+        dr_neo_cortex.level,
+        [0, 15, 15, 31, 1, 31, 1],
+    );
+    let ending_carry = run_clean_carried_campaign_step(
+        &dr_neo_cortex,
+        cortex_carry,
+        SurveyInputProfile::CortexCompletionRoute,
+        4_500,
+        LevelId::ENDING,
+        [0x100, 15, 15, 31, 1, 32, 0],
+    );
+    let final_title_carry = run_clean_carried_campaign_step(
+        &ending,
+        ending_carry,
+        SurveyInputProfile::Idle,
+        3_600,
+        LevelId::TITLE,
+        [0, 15, 15, 31, 1, 32, 0],
+    );
+    assert_unassisted_campaign_carry(&final_title_carry, "final Title");
+    let final_title =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, final_title_carry)
+            .expect("Title must import the post-Sunset Ending carry");
+    assert_eq!(final_title.level(), Some(LevelId::TITLE));
+    assert_eq!(final_title.faulted_object_count(), 0);
+    assert_eq!(
+        campaign_progression_globals(&final_title),
+        [0, 15, 15, 31, 1, 32, 0]
+    );
 }
 
 #[test]

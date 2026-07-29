@@ -578,6 +578,20 @@ fn slippery_climb_actual_post_sunset_phase_reaches_authored_end_warp() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn slippery_climb_continuous_post_pinstripe_phase_reaches_authored_end_warp() {
+    // These clocks are the phase produced by the uninterrupted synthetic
+    // campaign chain. The controller deliberately keys the upper transfer to
+    // live platform bounds and position rather than these exact values.
+    assert_slippery_climb_carried_phase_reaches_authored_end_warp(
+        "Slippery Climb continuous post-Pinstripe campaign phase",
+        0x9416_0491,
+        54_978,
+        0x2468_ace0,
+    );
+}
+
 fn assert_slippery_climb_carried_phase_reaches_authored_end_warp(
     label: &'static str,
     random_seed: u32,
@@ -32639,14 +32653,10 @@ impl SlipperyClimbCompletionRouteController {
             && let Some(platform) = objects.iter().find(|object| {
                 object.program.name().as_deref() == Some("RWaOC")
                     && matches!(object.origin, ObjectOrigin::Runtime { .. })
-                    && object.bound.is_some_and(|bound| {
-                        (if player.translation[0] >= 19_000_000 {
-                            (bound.min.x.saturating_sub(100_000)
-                                ..=bound.max.x.saturating_add(100_000))
-                                .contains(&player.translation[0])
-                        } else {
-                            (bound.min.x..=bound.max.x).contains(&player.translation[0])
-                        }) && player.translation[1].abs_diff(bound.max.y) <= 8_192
+                    && object.frame_bound.or(object.bound).is_some_and(|bound| {
+                        (bound.min.x.saturating_sub(100_000)..=bound.max.x.saturating_add(100_000))
+                            .contains(&player.translation[0])
+                            && player.translation[1].abs_diff(bound.max.y) <= 8_192
                     })
             })
         {
@@ -32986,14 +32996,15 @@ impl SlipperyClimbCompletionRouteController {
                     })
             });
             let walk_window = matches!(transfer_phase, Some((12, age)) if age >= 38);
-            if self.tower_b2_row_tick < 6 && (self.tower_b2_row_tick > 0 || walk_window) {
+            let transfer_runup_ready = player.translation[0] >= 12_930_000;
+            if !transfer_runup_ready && (self.tower_b2_row_tick > 0 || walk_window) {
                 self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
                 self.jump_hold = 0;
                 self.vertical_jump_released = true;
                 return PAD_RIGHT;
             }
             let transfer_cycle_started = matches!(transfer_phase, Some((11, age)) if age <= 1);
-            if self.tower_b2_row_tick < 6 || !transfer_cycle_started {
+            if !transfer_runup_ready || !transfer_cycle_started {
                 self.jump_hold = 0;
                 self.vertical_jump_released = true;
                 return 0;
@@ -33026,11 +33037,12 @@ impl SlipperyClimbCompletionRouteController {
             self.vertical_jump_released = true;
             return PAD_RIGHT;
         }
-        if self.post_high_road_phase
+        if self.session_globals
             && self.tower_b2_row_stage == 21
             && player.status_a & 1 != 0
             && ((14_800_000..15_200_000).contains(&player.translation[0])
-                || (18_450_000..18_750_000).contains(&player.translation[0]))
+                || (self.post_high_road_phase
+                    && (18_450_000..18_750_000).contains(&player.translation[0])))
             && player.velocity[0].unsigned_abs() > 100_000
         {
             self.jump_hold = 0;
@@ -33183,7 +33195,9 @@ impl SlipperyClimbCompletionRouteController {
                 } else {
                     120_000
                 };
-                let upper_depth_start = if self.session_globals && tick < 20 {
+                let upper_depth_start = if self.session_globals
+                    && ((!self.actual_post_sunset_phase && !self.post_high_road_phase) || tick < 20)
+                {
                     14_900_000
                 } else {
                     15_000_000

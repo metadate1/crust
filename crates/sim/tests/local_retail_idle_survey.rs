@@ -20436,11 +20436,15 @@ impl GeneratorRoomCompletionRouteController {
             }
             self.jump_frames = 0;
             self.release_frames = 0;
-            // Usually the fresh route lands at the characterized rear-left
-            // offset already.  A carried phase can reach the same platform
-            // class from its opposite edge, though, so use the live parent
-            // offset below for both cases rather than assuming the stance
-            // from an earlier platform phase.
+            if !self.session_globals && self.b4_fresh_phase_stance == Some(true) {
+                // The fresh route remains parented at its characterized
+                // rear-left landing offset until entity 102 reaches the
+                // departure window above.
+                return 0;
+            }
+            // A carried phase can reach the same platform class from its
+            // opposite edge, so use the live parent offset instead of
+            // assuming the stance from an earlier platform phase.
             let velocity = player.map_or([0; 3], |player| player.velocity);
             let mut held = match relative.map(|(x, _)| x) {
                 Some(x) if x > -60_000 && velocity[0] >= -100_000 => PAD_LEFT,

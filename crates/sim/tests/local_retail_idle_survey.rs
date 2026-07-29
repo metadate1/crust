@@ -13427,10 +13427,9 @@ struct RollingStonesRouteController {
     checkpoint_phase_wait: u8,
     checkpoint_route_retimed: bool,
     exact_zero_u_right_platform_phase: bool,
+    exact_zero_y_boundary_jump_done: bool,
     exact_zero_y_boundary_jump_hold: u8,
     exact_zero_x_late_platform_phase: bool,
-    exact_zero_x_platform_jump_done: bool,
-    exact_zero_x_platform_jump_hold: u8,
     exact_zero_b_wall_jump_done: bool,
     exact_zero_b_wall_jump_hold: u8,
     exact_zero_b_wall_exit_jump_done: bool,
@@ -13547,10 +13546,9 @@ impl RollingStonesRouteController {
         self.checkpoint_phase_wait = 0;
         self.checkpoint_route_retimed = false;
         self.exact_zero_u_right_platform_phase = false;
+        self.exact_zero_y_boundary_jump_done = false;
         self.exact_zero_y_boundary_jump_hold = 0;
         self.exact_zero_x_late_platform_phase = false;
-        self.exact_zero_x_platform_jump_done = false;
-        self.exact_zero_x_platform_jump_hold = 0;
         self.exact_zero_b_wall_jump_done = false;
         self.exact_zero_b_wall_jump_hold = 0;
         self.exact_zero_b_wall_exit_jump_done = false;
@@ -13640,7 +13638,15 @@ impl RollingStonesRouteController {
                 // the following JunOC corridor. Recenter on the flat approach
                 // before those converging walls own Crash's collision.
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                let held = if matches!(tick, 295..=296) {
+                let held = if self.exact_zero_x_late_platform_phase
+                    && tick == 295
+                    && player.status_a & 1 != 0
+                {
+                    // This phase crosses into 0y before the direct schedule's
+                    // tick-297 jump. Raise the same fresh edge on the final
+                    // grounded sample instead of walking off the path lip.
+                    PAD_UP | PAD_CROSS
+                } else if matches!(tick, 295..=296) {
                     // Do not idle in the exact campaign's converging wall
                     // lane; that historical landing pause lets the pair
                     // close around Crash after he has entered their depth.
@@ -13648,6 +13654,14 @@ impl RollingStonesRouteController {
                 } else {
                     Self::carried_checkpoint_pad(tick)
                 };
+                if self.exact_zero_x_late_platform_phase && tick == 270 && player.status_a & 1 != 0
+                {
+                    // The left-cycle entity-78 carry reaches the launch line
+                    // one sample before the ordinary carried schedule. Take a
+                    // fresh forward edge here; spending that sample turning
+                    // left leaves the following shelf just out of reach.
+                    return PAD_UP | PAD_CROSS;
+                }
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
                 if predicted_x < 2_280_000 {
@@ -13659,6 +13673,7 @@ impl RollingStonesRouteController {
                 return held & !(PAD_LEFT | PAD_RIGHT);
             }
             if self.exact_zero_u_right_platform_phase
+                && !self.exact_zero_y_boundary_jump_done
                 && camera.path.zone == zero_y
                 && camera.path.index == 0
                 && camera.progress.raw() >= 18_000
@@ -13669,6 +13684,24 @@ impl RollingStonesRouteController {
                 // airborne. Create the ordinary jump edge on that grounded
                 // boundary so Crash enters the live wall gap instead of the
                 // stationary path-transition state.
+                self.exact_zero_y_boundary_jump_done = true;
+                self.exact_zero_y_boundary_jump_hold = 5;
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            if self.exact_zero_u_right_platform_phase
+                && !self.exact_zero_y_boundary_jump_done
+                && camera.path.zone == zero_y
+                && camera.path.index == 1
+                && camera.progress.raw() <= 4_096
+                && player.is_some_and(|player| {
+                    matches!(player.state, 2 | 10 | 13) && player.status_a & 1 != 0
+                })
+            {
+                // Live gap centering can carry Crash across the path boundary
+                // before his landing sample. Create the same physical jump
+                // edge from that grounded path-one entrance.
+                self.exact_zero_y_boundary_jump_done = true;
                 self.exact_zero_y_boundary_jump_hold = 5;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
                 return PAD_UP | PAD_RIGHT | PAD_CROSS;
@@ -13680,6 +13713,58 @@ impl RollingStonesRouteController {
                 self.exact_zero_y_boundary_jump_hold -= 1;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
                 return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            if self.exact_zero_u_right_platform_phase
+                && self.exact_zero_x_late_platform_phase
+                && self.checkpoint_phase_recovered
+                && camera.path.zone == zero_y
+                && camera.path.index == 0
+                && let Some(player) = player
+                && matches!(player.state, 1 | 2 | 3 | 10 | 13)
+                && let Some(left_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 77
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(right_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 76
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && left_wall.max.x < right_wall.min.x
+                && player.translation[2] <= left_wall.max.z + 500_000
+                && player.translation[2] >= right_wall.min.z - 64_000
+            {
+                // The zero-pause campaign boards entity 9 on its right cycle.
+                // That reaches this pair as its opening sweeps right, so
+                // follow the live center during the ordinary scheduled jump.
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                let target_x = left_wall.max.x + (right_wall.min.x - left_wall.max.x) / 2;
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < target_x - 16_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 16_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                return (Self::direct_checkpoint_pad(tick) & !(PAD_LEFT | PAD_RIGHT | PAD_UP))
+                    | PAD_UP
+                    | lateral;
             }
             if self.exact_zero_x_late_platform_phase
                 && self.checkpoint_phase_recovered
@@ -13887,7 +13972,19 @@ impl RollingStonesRouteController {
                     // Keep the airborne line over the live platform center
                     // while retaining any already-scheduled Cross hold.
                     self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                    return PAD_UP | lateral | (Self::direct_checkpoint_pad(tick) & PAD_CROSS);
+                    let jump = if self.exact_zero_u_right_platform_phase
+                        && self.exact_zero_x_late_platform_phase
+                        && player.translation[2] <= platform_bound.max.z + 64_000
+                    {
+                        // This carry reaches the landing exactly as the
+                        // direct schedule raises Cross. Suppress that late
+                        // edge so it cannot buffer a second jump off
+                        // platform 50 before the moving-wall wait begins.
+                        0
+                    } else {
+                        Self::direct_checkpoint_pad(tick) & PAD_CROSS
+                    };
+                    return PAD_UP | lateral | jump;
                 }
             }
             if self.exact_campaign_phase
@@ -13945,15 +14042,23 @@ impl RollingStonesRouteController {
                 let platform_target =
                     platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
                 let open_gap = gap;
-                let target_x = open_gap.map_or(platform_target, |(left, right)| {
-                    // Crash reaches the pair about twenty-seven samples
-                    // after leaving platform 50. The live midpoint starts
-                    // on the right and then sweeps left while he is in
-                    // flight, so cap the early target at the midpoint he
-                    // will meet at the wall instead of chasing its stale
-                    // takeoff position.
-                    (left + (right - left) / 2).min(3_145_000)
-                });
+                let target_x = if self.exact_zero_x_late_platform_phase && tick < 450 {
+                    // This carry meets an opening before it has reached the
+                    // live platform. Track platform 50 while waiting for the
+                    // usable post-crossing opening; steering at that first
+                    // gap walks Crash off the platform's moving right edge.
+                    platform_target
+                } else {
+                    open_gap.map_or(platform_target, |(left, right)| {
+                        // Crash reaches the pair about twenty-seven samples
+                        // after leaving platform 50. The live midpoint starts
+                        // on the right and then sweeps left while he is in
+                        // flight, so cap the early target at the midpoint he
+                        // will meet at the wall instead of chasing its stale
+                        // takeoff position.
+                        (left + (right - left) / 2).min(3_145_000)
+                    })
+                };
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(6) / 34);
                 let lateral = if predicted_x > target_x + 24_000 {
@@ -13963,6 +14068,14 @@ impl RollingStonesRouteController {
                 } else {
                     0
                 };
+                if self.exact_zero_u_right_platform_phase && tick < 422 && player.status_a & 1 != 0
+                {
+                    // The live 0y release reaches platform 50 five route
+                    // samples early. Release Cross on its grounded collision
+                    // and rejoin the existing live-wall wait.
+                    self.checkpoint_tick = 423;
+                    return 0;
+                }
                 if tick == 422 && !self.exact_zero_x_late_platform_phase {
                     // The exact phase lands while Cross is still held from
                     // the platform-50 approach. Release it on the grounded
@@ -13971,6 +14084,7 @@ impl RollingStonesRouteController {
                 }
                 if !self.exact_zero_b_wall_jump_done
                     && open_gap.is_some()
+                    && (!self.exact_zero_x_late_platform_phase || tick >= 450)
                     && player.status_a & 1 != 0
                 {
                     // The pair crosses in front of platform 50. Wait on its
@@ -13987,6 +14101,18 @@ impl RollingStonesRouteController {
                 }
                 if self.exact_zero_b_wall_jump_done {
                     return PAD_UP | lateral;
+                }
+                if self.exact_zero_u_right_platform_phase && self.exact_zero_x_late_platform_phase {
+                    // Keep this earlier carry on the live platform until the
+                    // moving walls reach their later opening, then build the
+                    // same ordinary run-up used by the characterized route.
+                    // Starting from rest when the gap first opens cannot
+                    // reach platform 53.
+                    return if tick >= 445 {
+                        PAD_UP | lateral
+                    } else {
+                        lateral
+                    };
                 }
                 // Build a short ordinary run-up across platform 50 before
                 // the opening appears. Jumping from rest reaches entity 52
@@ -14063,6 +14189,14 @@ impl RollingStonesRouteController {
                 // pair reaches this shelf, while keeping the route clock live.
                 self.checkpoint_phase_recovered = true;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                if self.exact_zero_x_late_platform_phase && player.status_a & 1 == 0 {
+                    // The late entity-78 phase already enters this corridor
+                    // inside the characterized lane. Preserve its forward
+                    // air speed until collision confirms the landing; lateral
+                    // correction here turns that speed across the path and
+                    // leaves Crash short of the safe shelf.
+                    return PAD_UP;
+                }
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
                 let (minimum_x, maximum_x) = if self.exact_campaign_phase {
@@ -14177,26 +14311,16 @@ impl RollingStonesRouteController {
                             + (platform_bound.max.x - platform_bound.min.x) / 2;
                         self.exact_zero_x_late_platform_phase = platform_center_x < 2_400_000;
                     }
-                    let forward_gap = player.translation[2].saturating_sub(platform_bound.max.z);
-                    let jump_gap = if self.exact_zero_x_late_platform_phase {
-                        370_000
-                    } else {
-                        425_000
-                    };
-                    if self.exact_zero_x_platform_jump_hold > 0 {
-                        self.exact_zero_x_platform_jump_hold -= 1;
-                        PAD_UP | PAD_CROSS
-                    } else if !self.exact_zero_x_platform_jump_done
-                        && player.status_a & 1 != 0
-                        && (0..=jump_gap).contains(&forward_gap)
-                    {
-                        // The carried phases approach entity 78 at different
-                        // longitudinal offsets. Start the same eight-sample
-                        // jump from the live grounded gap: the historical
-                        // phase triggers at tick 205, while the current
-                        // publisher campaign reaches it two samples later.
-                        self.exact_zero_x_platform_jump_done = true;
-                        self.exact_zero_x_platform_jump_hold = 7;
+                    if self.exact_zero_x_late_platform_phase {
+                        match tick {
+                            201..=203 => PAD_UP | PAD_RIGHT,
+                            205..=207 => PAD_UP | PAD_RIGHT | PAD_CROSS,
+                            208..=212 => PAD_UP | PAD_CROSS,
+                            216 | 218 | 220 | 222 | 224 => PAD_UP | PAD_LEFT,
+                            204 | 213..=226 => PAD_UP,
+                            _ => 0,
+                        }
+                    } else if (205..=212).contains(&tick) {
                         PAD_UP | PAD_CROSS
                     } else if tick <= 226 {
                         PAD_UP
@@ -14213,6 +14337,9 @@ impl RollingStonesRouteController {
                     platform_bound.min.x + (platform_bound.max.x - platform_bound.min.x) / 2;
                 let predicted_x =
                     player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+                if self.exact_zero_x_late_platform_phase && tick <= 226 {
+                    return held;
+                }
                 let lateral = if predicted_x < target_x - 16_000 {
                     PAD_RIGHT
                 } else if predicted_x > target_x + 16_000 {
@@ -14305,7 +14432,13 @@ impl RollingStonesRouteController {
                 }
                 if self.exact_zero_b_wall_jump_hold > 0 {
                     self.exact_zero_b_wall_jump_hold -= 1;
-                    return PAD_UP | lateral | PAD_CROSS;
+                    return PAD_UP
+                        | if self.exact_zero_x_late_platform_phase {
+                            lateral
+                        } else {
+                            PAD_RIGHT
+                        }
+                        | PAD_CROSS;
                 }
                 return PAD_UP | lateral;
             }
@@ -14518,18 +14651,38 @@ impl RollingStonesRouteController {
                 }
                 if self.exact_zero_e_wall_jump_done {
                     self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                    let landing_target_x = 3_100_000;
+                    let landing_target_x = if self.exact_zero_u_right_platform_phase
+                        && self.exact_zero_x_late_platform_phase
+                    {
+                        target_x
+                    } else {
+                        3_100_000
+                    };
                     let landing_predicted_x = player.translation[0]
                         .saturating_add(player.velocity[0].saturating_mul(4) / 34);
-                    let landing_lateral = if landing_predicted_x < landing_target_x {
+                    let landing_lateral = if landing_predicted_x
+                        < landing_target_x
+                            - if self.exact_zero_x_late_platform_phase {
+                                24_000
+                            } else {
+                                0
+                            } {
                         PAD_RIGHT
+                    } else if self.exact_zero_u_right_platform_phase
+                        && self.exact_zero_x_late_platform_phase
+                        && landing_predicted_x > landing_target_x + 24_000
+                    {
+                        PAD_LEFT
                     } else {
                         0
                     };
                     return PAD_UP | landing_lateral;
                 }
-                let carried_platform_takeoff =
-                    self.exact_zero_x_late_platform_phase && walls_takeoff;
+                let carried_platform_takeoff = self.exact_zero_x_late_platform_phase
+                    && walls_takeoff
+                    || self.exact_zero_u_right_platform_phase
+                        && self.exact_zero_x_late_platform_phase
+                        && wall_center_separation <= 300_000;
                 if near_platform
                     && (walls_crossing || reversed_gap.is_some() || carried_platform_takeoff)
                     && player.status_a & 1 != 0
@@ -14638,7 +14791,7 @@ impl RollingStonesRouteController {
                     return PAD_UP | lateral | jump;
                 }
                 if self.session_globals
-                    && (364..=385).contains(&post_bank_tick)
+                    && (364..=386).contains(&post_bank_tick)
                     && let Some(player) = player
                     && let Some(platform_bound) = objects.iter().find_map(|object| {
                         matches!(
@@ -14654,10 +14807,12 @@ impl RollingStonesRouteController {
                     // the landing instead of falling left of the collision.
                     let predicted_x = player.translation[0]
                         .saturating_add(player.velocity[0].saturating_mul(3) / 34);
-                    if predicted_x < platform_bound.min.x + 64_000 {
-                        return PAD_UP | PAD_RIGHT;
-                    }
-                    return PAD_UP;
+                    let lateral = if predicted_x < platform_bound.min.x + 64_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    return PAD_UP | lateral;
                 }
                 if self.session_globals && matches!(post_bank_tick, 24..=25) {
                     // Session carry enters this diagonal shelf one movement
@@ -15455,10 +15610,9 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         checkpoint_phase_wait: 2,
         checkpoint_route_retimed: true,
         exact_zero_u_right_platform_phase: true,
+        exact_zero_y_boundary_jump_done: true,
         exact_zero_y_boundary_jump_hold: 4,
         exact_zero_x_late_platform_phase: true,
-        exact_zero_x_platform_jump_done: true,
-        exact_zero_x_platform_jump_hold: 5,
         exact_zero_b_wall_jump_done: true,
         exact_zero_b_wall_jump_hold: 3,
         exact_zero_b_wall_exit_jump_done: true,
@@ -15479,10 +15633,9 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert_eq!(controller.checkpoint_phase_wait, 0);
     assert!(!controller.checkpoint_route_retimed);
     assert!(!controller.exact_zero_u_right_platform_phase);
+    assert!(!controller.exact_zero_y_boundary_jump_done);
     assert_eq!(controller.exact_zero_y_boundary_jump_hold, 0);
     assert!(!controller.exact_zero_x_late_platform_phase);
-    assert!(!controller.exact_zero_x_platform_jump_done);
-    assert_eq!(controller.exact_zero_x_platform_jump_hold, 0);
     assert!(!controller.exact_zero_b_wall_exit_jump_done);
     assert!(!controller.exact_zero_e_wall_jump_done);
     assert_eq!(controller.exact_zero_e_wall_jump_hold, 0);
@@ -32150,12 +32303,11 @@ impl HighRoadCompletionRouteController {
                     } else {
                         0
                     };
-                    let attack =
-                        if tick >= spin_delay && (tick - spin_delay).is_multiple_of(2) {
-                            PAD_SQUARE
-                        } else {
-                            0
-                        };
+                    let attack = if tick >= spin_delay && (tick - spin_delay).is_multiple_of(2) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    };
                     return horizontal | lane | attack;
                 }
                 if self.sunset_b1_recovery_alignment
@@ -47013,10 +47165,9 @@ impl SurveyInputController {
                 checkpoint_phase_wait: 0,
                 checkpoint_route_retimed: false,
                 exact_zero_u_right_platform_phase: false,
+                exact_zero_y_boundary_jump_done: false,
                 exact_zero_y_boundary_jump_hold: 0,
                 exact_zero_x_late_platform_phase: false,
-                exact_zero_x_platform_jump_done: false,
-                exact_zero_x_platform_jump_hold: 0,
                 exact_zero_b_wall_jump_done: false,
                 exact_zero_b_wall_jump_hold: 0,
                 exact_zero_b_wall_exit_jump_done: false,
@@ -47038,10 +47189,9 @@ impl SurveyInputController {
                     checkpoint_phase_wait: 0,
                     checkpoint_route_retimed: false,
                     exact_zero_u_right_platform_phase: false,
+                    exact_zero_y_boundary_jump_done: false,
                     exact_zero_y_boundary_jump_hold: 0,
                     exact_zero_x_late_platform_phase: false,
-                    exact_zero_x_platform_jump_done: false,
-                    exact_zero_x_platform_jump_hold: 0,
                     exact_zero_b_wall_jump_done: false,
                     exact_zero_b_wall_jump_hold: 0,
                     exact_zero_b_wall_exit_jump_done: false,

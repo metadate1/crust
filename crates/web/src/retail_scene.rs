@@ -5991,8 +5991,12 @@ mod tests {
         eprintln!(
             "N. Sanity browser-order Crash frame {boot_frame}: model frame {model_frame}, {command_count}/732 authored TGEO triangles, command fingerprint {command_fingerprint:#018x}"
         );
-        assert_eq!((boot_frame, model_frame, command_count), (2, 0, 322));
-        assert_eq!(command_fingerprint, 0xc193_51b9_ca5b_0c36);
+        // `GoolObjectInterpret` completes the synchronous CHLD/CHLF
+        // configuration tail before yielding. Crash is therefore configured
+        // and displayed during the first browser-order update, rather than
+        // leaking the temporary child link across a frame boundary.
+        assert_eq!((boot_frame, model_frame, command_count), (1, 0, 337));
+        assert_eq!(command_fingerprint, 0xbd06_bad0_815d_91c9);
         assert_eq!(command_count, source_parts.len());
         assert!(source_parts.iter().all(|part| usize::from(*part) < 732));
     }

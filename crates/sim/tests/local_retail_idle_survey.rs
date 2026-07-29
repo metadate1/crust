@@ -71906,7 +71906,10 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("send-event").copied(),
-        Some(197)
+        // Native leaves the local bound in reclaimed pool storage. Retaining
+        // that value restores one carried-phase event that the zeroed Rust
+        // slot previously suppressed.
+        Some(198)
     );
     assert_eq!(
         great_gate_survey.effect_counts.get("transition").copied(),
@@ -72373,7 +72376,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
         );
         assert_eq!(
             great_gate_survey.effect_counts.get("send-event").copied(),
-            Some(205)
+            Some(206)
         );
         assert_eq!(
             great_gate_survey.effect_counts.get("transition").copied(),

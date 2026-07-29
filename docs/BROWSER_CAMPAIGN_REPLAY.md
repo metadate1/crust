@@ -107,14 +107,15 @@ all of these exact integer fields:
   "retailRandomSeedB": 2271560481,
   "retailHardRestarts": 0,
   "retailLoadStates": 0,
-  "retailDeathCameraFrames": 0
+  "retailDeathCameraFrames": 0,
+  "titleState": 15
 }
 ```
 
-`titleState` may also be pinned. `currentLid` and `mountedLid` must be equal because a phase
-boundary describes a completed mount, not an asynchronous request in flight. Every field of one
-phase's `exit` must exactly equal the following phase's `entry`; missing fields are rejected rather
-than treated as wildcards. `bootLid` must equal the first entry LID.
+`currentLid` and `mountedLid` must be equal because a phase boundary describes a completed mount,
+not an asynchronous request in flight. Every field of one phase's `exit` must exactly equal the
+following phase's `entry`; missing fields are rejected rather than treated as wildcards. `bootLid`
+must equal the first entry LID.
 
 Base phases remain in the manifest's listed order. A `title-map` handoff names two adjacent base
 phases and supplies one or more ordinary authored fragments to run between them. At least one of
@@ -161,7 +162,8 @@ opt-in survey export path. In addition to ordinary `bootLid`, `segments`, `expec
 - `transition.lid` and the fragment's root LID expectations agree with the phase exit; and
 - `unlockAll` agrees with the manifest.
 
-Publisher/title and authored island-map harnesses also emit exact observer metadata:
+Every publisher/title, authored island-map, ordinary gameplay, and Level Complete survey fragment
+emits exact observer metadata:
 
 - `entryCheckpoint` and `exitCheckpoint` contain the same complete checkpoint shape used by the
   manifest, including `titleState`;
@@ -170,16 +172,19 @@ Publisher/title and authored island-map harnesses also emit exact observer metad
   `islandCameraState`;
 - `initialPad` and `finalPad` contain `tapped`, `held`, `tappedPrevious`, `heldPrevious`, and
   `heldPrevious2`; and
-- every emitted segment explicitly has `"inputKind": "physical"`.
+- every emitted segment explicitly has `"inputKind": "physical"` or `"recorded"`.
 
-The composer treats these fields as a paired, optional strengthening of schema 1 so older
-legally-local gameplay fragments remain usable. When present, checkpoints must equal the
-manifest exactly, progression must be continuous between adjacent captured fragments, and
-replaying the ordered physical runs from `initialPad` must reproduce `finalPad`. Across a
-cross-LID phase, the composer applies the real `CoreObjectsCreate` pad update before comparing the
-next fragment's initial history. The first captured phase must begin with the browser's zeroed
-physical boot pad. This catches a missing mount-held sample or a fabricated tap before a long
-browser run begins.
+The checked composer requires all six metadata objects. Checkpoints must equal the manifest
+exactly, progression must be continuous between adjacent captured fragments, and replaying every
+ordered run from `initialPad` must reproduce `finalPad`. Across a cross-LID phase, the composer
+applies the real `CoreObjectsCreate` pad update before comparing the next fragment's initial
+history. The first captured phase must begin with the browser's zeroed boot pad. This catches a
+missing mount-held sample, a fabricated tap, a dropped gameplay/Level Complete pad history, or a
+legacy fragment whose only metadata was its draw count.
+
+Survey export refuses a session-carried phase unless its caller supplies the same
+`PersistentPadState` that crossed the preceding mount. This is intentional: silently restarting
+the five-word pad history at zero would create a replay that cannot be the browser campaign.
 
 Set `C1_BROWSER_REPLAY_EXPORT` to an ignored local directory while running a legally-local
 characterization test to opt in:
@@ -188,14 +193,17 @@ characterization test to opt in:
 C1_STREAM_DIR=/path/to/local/streams \
 C1_BROWSER_REPLAY_EXPORT=target/local-campaign/fragments \
 cargo test -p crust-sim --test local_retail_idle_survey \
-  publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers \
+  exported_publisher_opening_composes_through_jungle_mount \
   -- --ignored --exact
 ```
 
-The Rust exporter refuses a repository-local destination unless it is under `target/`,
-`local-data/`, `artifacts/`, `captures/`, or `recordings/`. It observes harness frames and the
-authored transition only; it does not write globals, alter RNG state, request a transition, or
-mount a destination.
+That focused legally-local test exports and checks the complete Publisher Title → N. Sanity Beach
+→ Level Complete → Title / Island Map → Jungle Rollers mount chain. The Rust exporter refuses a
+repository-local destination unless it is under `target/`, `local-data/`, `artifacts/`,
+`captures/`, or `recordings/`. It observes harness frames and the authored transition, then builds
+an isolated destination session-import snapshot solely for boundary metadata. It does not mutate
+the source runtime, request a transition, load destination assets, spawn pair objects, or execute
+a destination frame.
 
 Every composed segment receives:
 
@@ -209,11 +217,12 @@ leaking old-level input into the new stream. The final segment of every phase re
 exit expectation and its bounded settle budget. A transition that is missing, late, points to the
 wrong LID, or reaches the right LID with the wrong draw/RNG/counter state therefore fails closed.
 
-Fragments default to 16-bit `"physical"` input. A local fragment containing complete 32-bit words
-reconstructed from the user's own PBAK may explicitly annotate its segments with
-`"inputKind": "recorded"`, or its local manifest phase may set `"inputKind": "recorded"` as a
-default for unannotated segments. This opt-in does not make the generated replay distributable;
-the fragment, manifest, and output must remain ignored and local.
+Fragments default to 16-bit `"physical"` input. Export profiles containing complete 32-bit words
+reconstructed from the user's own PBAK annotate their segments as `"inputKind": "recorded"`; a
+local manifest phase may still supply that classification for older unannotated diagnostic input.
+The complete five-word pad history supports 32-bit recorded words, while physical segments remain
+strictly 16-bit. This opt-in does not make the generated replay distributable; the fragment,
+manifest, and output must remain ignored and local.
 
 Physical fragments must also describe input that a live pad can produce. The composer rejects
 Up+Down or Left+Right in both `held` and `settleHeld`, because the browser's physical-input path

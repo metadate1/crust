@@ -27,6 +27,7 @@ function checkpoint(lid, draw, salt) {
     retailHardRestarts: 0,
     retailLoadStates: 0,
     retailDeathCameraFrames: 0,
+    titleState: 15,
   };
 }
 
@@ -36,6 +37,9 @@ function phase(id, fragment, entry, exit, extra = {}) {
 
 function fragment(entry, exit, segments, extra = {}) {
   const frames = segments.reduce((sum, segment) => sum + segment.frames, 0);
+  const initialPad = extra.initialPad ?? pad(0);
+  const finalPad =
+    extra.finalPad ?? replayPadSnapshot(initialPad, segments);
   return {
     schema: 1,
     localDiagnosticOnly: true,
@@ -58,6 +62,26 @@ function fragment(entry, exit, segments, extra = {}) {
       mountedLid: exit.mountedLid,
       minRetailExecutions: 1,
     },
+    entryCheckpoint: structuredClone(entry),
+    exitCheckpoint: structuredClone(exit),
+    entryProgression:
+      extra.entryProgression ?? progressionForCheckpoint(entry),
+    exitProgression:
+      extra.exitProgression ?? progressionForCheckpoint(exit),
+    initialPad,
+    finalPad,
+  };
+}
+
+function progressionForCheckpoint(value) {
+  return {
+    gameState: value.currentLid << 8,
+    titleState: value.titleState ?? 15,
+    savedTitleState: value.titleState ?? 15,
+    currentMapLevel: value.retailDrawCount & 0xff,
+    levelCount: 1,
+    levelsUnlocked: value.retailDrawCount & 0xff,
+    islandCameraState: value.currentLid & 1,
   };
 }
 
@@ -89,6 +113,26 @@ function pad(
     heldPrevious,
     heldPrevious2,
   };
+}
+
+function advancePadSnapshot(previous, held) {
+  return {
+    tapped: ((~previous.held & held) & 0xf9ff) >>> 0,
+    held,
+    tappedPrevious: previous.tapped,
+    heldPrevious: previous.held,
+    heldPrevious2: previous.heldPrevious,
+  };
+}
+
+function replayPadSnapshot(initial, segments) {
+  let snapshot = initial;
+  for (const segment of segments) {
+    for (let index = 0; index < Math.min(segment.frames, 3); index += 1) {
+      snapshot = advancePadSnapshot(snapshot, segment.held);
+    }
+  }
+  return snapshot;
 }
 
 function syntheticCampaign() {
@@ -141,10 +185,22 @@ function syntheticCampaign() {
       },
     ],
   };
+  let currentPad = pad(0);
+  const capturedFragment = (entry, exit, segments, extra = {}) => {
+    const document = fragment(entry, exit, segments, {
+      ...extra,
+      initialPad: currentPad,
+    });
+    currentPad = document.finalPad;
+    if (entry.currentLid !== exit.currentLid) {
+      currentPad = advancePadSnapshot(currentPad, currentPad.held);
+    }
+    return document;
+  };
   const fragments = new Map([
     [
       "./n-sanity.json",
-      fragment(
+      capturedFragment(
         beachEntry,
         completionEntry,
         [
@@ -155,7 +211,7 @@ function syntheticCampaign() {
     ],
     [
       "./complete.json",
-      fragment(
+      capturedFragment(
         completionEntry,
         titleEntry,
         [{ frames: 2, held: 0x0800 }],
@@ -163,7 +219,7 @@ function syntheticCampaign() {
     ],
     [
       "./map.json",
-      fragment(
+      capturedFragment(
         titleEntry,
         jungleEntry,
         [
@@ -175,7 +231,7 @@ function syntheticCampaign() {
     ],
     [
       "./jungle.json",
-      fragment(
+      capturedFragment(
         jungleEntry,
         finalCompletion,
         [{ frames: 4, held: 0x0010 }],
@@ -313,7 +369,7 @@ test("composer accepts ordered native title capture metadata and exact mount pad
       manifest,
       async (reference) => wrongFinalPad.get(reference),
     ),
-    /finalPad does not match its ordered physical segments.*heldPrevious/s,
+    /finalPad does not match its ordered input segments.*heldPrevious/s,
   );
 
   const discontinuousPad = structuredClone(fragments);
@@ -384,7 +440,7 @@ test("composer inserts authored title-map fragments with guards and exact exits"
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(replay.segments[1].expect).filter(([key]) =>
-        key.startsWith("retail") || key.endsWith("Lid"),
+        key.startsWith("retail") || key.endsWith("Lid") || key === "titleState",
       ),
     ),
     checkpoints.completionEntry,
@@ -392,7 +448,7 @@ test("composer inserts authored title-map fragments with guards and exact exits"
   assert.deepEqual(
     Object.fromEntries(
       Object.entries(replay.segments[4].expect).filter(([key]) =>
-        key.startsWith("retail") || key.endsWith("Lid"),
+        key.startsWith("retail") || key.endsWith("Lid") || key === "titleState",
       ),
     ),
     checkpoints.jungleEntry,
@@ -478,6 +534,13 @@ test("manifest requires complete exact checkpoints and an authored title phase",
     /missing exact continuity fields: retailProcessDrawCount/,
   );
 
+  const missingTitleState = syntheticCampaign().manifest;
+  delete missingTitleState.phases[0].entry.titleState;
+  assert.throws(
+    () => normalizeCampaignManifest(missingTitleState),
+    /missing exact continuity fields: titleState/,
+  );
+
   const withoutTitle = syntheticCampaign().manifest;
   withoutTitle.titleMapHandoffs[0].phases =
     withoutTitle.titleMapHandoffs[0].phases.filter(
@@ -546,12 +609,30 @@ test("composer rejects non-local fragments and inconsistent export metadata", as
     ),
     /LID guard that does not match/,
   );
+
+  const incompleteCapture = syntheticCampaign();
+  delete incompleteCapture.fragments.get("./complete.json").initialPad;
+  await assert.rejects(
+    composeCampaignReplay(
+      incompleteCapture.manifest,
+      async (reference) => incompleteCapture.fragments.get(reference),
+    ),
+    /missing exact capture metadata: initialPad/,
+  );
 });
 
 test("a phase can explicitly opt a local 32-bit fragment into recorded stepping", async () => {
   const { manifest, fragments } = syntheticCampaign();
+  manifest.phases = [manifest.phases[0]];
+  manifest.titleMapHandoffs = [];
+  delete manifest.traceFromPhase;
   manifest.phases[0].inputKind = "recorded";
-  fragments.get("./n-sanity.json").segments[0].held = 0x0010_0040;
+  const recordedFragment = fragments.get("./n-sanity.json");
+  recordedFragment.segments[0].held = 0x0010_0040;
+  recordedFragment.finalPad = replayPadSnapshot(
+    recordedFragment.initialPad,
+    recordedFragment.segments,
+  );
   const replay = await composeCampaignReplay(
     manifest,
     async (reference) => fragments.get(reference),
@@ -571,6 +652,9 @@ test("a phase can explicitly opt a local 32-bit fragment into recorded stepping"
 
 test("composer rejects impossible live-pad directions unless explicitly recorded", async () => {
   const { manifest, fragments } = syntheticCampaign();
+  manifest.phases = [manifest.phases[0]];
+  manifest.titleMapHandoffs = [];
+  delete manifest.traceFromPhase;
   fragments.get("./n-sanity.json").segments[0].held = 0x5040;
   await assert.rejects(
     composeCampaignReplay(
@@ -591,8 +675,13 @@ test("composer rejects impossible live-pad directions unless explicitly recorded
   );
 
   manifest.phases[0].inputKind = "recorded";
-  fragments.get("./n-sanity.json").segments[0].held = 0x5040;
-  fragments.get("./n-sanity.json").segments[0].settleHeld = 0xa000;
+  const recordedFragment = fragments.get("./n-sanity.json");
+  recordedFragment.segments[0].held = 0x5040;
+  recordedFragment.segments[0].settleHeld = 0xa000;
+  recordedFragment.finalPad = replayPadSnapshot(
+    recordedFragment.initialPad,
+    recordedFragment.segments,
+  );
   const replay = await composeCampaignReplay(
     manifest,
     async (reference) => fragments.get(reference),

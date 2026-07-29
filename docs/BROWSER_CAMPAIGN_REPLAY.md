@@ -228,7 +228,7 @@ the preceding map phase. Bosses and ending phases later in the campaign remain s
 until an unforced, controller-authentic route closes this boundary and the subsequent exact
 checkpoints. Do not describe those separate fragments as one continuous browser campaign.
 
-Every composed segment receives:
+Every composed gameplay, completion, and island-map segment receives:
 
 ```json
 "while": { "currentLid": 25, "mountedLid": 25 }
@@ -239,6 +239,11 @@ harness stops at the mount request and skips the remainder after the destination
 leaking old-level input into the new stream. The final segment of every phase receives the exact
 exit expectation and its bounded settle budget. A transition that is missing, late, points to the
 wrong LID, or reaches the right LID with the wrong draw/RNG/counter state therefore fails closed.
+
+Publisher/title captures are the deliberate exception: their segments omit the entry-LID guard
+because the authored opening temporarily mounts Intro before returning to Title. Their final exact
+checkpoint still requires the expected destination mount, so this does not synthesize or skip a
+phase boundary.
 
 Fragments default to 16-bit `"physical"` input. Export profiles containing complete 32-bit words
 reconstructed from the user's own PBAK annotate their segments as `"inputKind": "recorded"`; a

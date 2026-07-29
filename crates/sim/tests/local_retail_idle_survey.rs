@@ -47615,8 +47615,10 @@ impl SurveyInputController {
             });
         match self.profile {
             SurveyInputProfile::Idle => 0,
-            SurveyInputProfile::DirectionAndButtonSweep
-            | SurveyInputProfile::DirectionAndButtonSweepToTransition => active_survey_held(frame),
+            SurveyInputProfile::DirectionAndButtonSweep => active_survey_held(frame),
+            SurveyInputProfile::DirectionAndButtonSweepToTransition => {
+                transition_survey_held(frame)
+            }
             SurveyInputProfile::JungleDeathAkuCompletionRoute => {
                 const MASK_X: i32 = 2_098_944;
                 const SPIN_START_Z: i32 = 31_890_000;
@@ -51418,6 +51420,35 @@ fn active_survey_held(frame: u32) -> u32 {
         104 => 0x0800,
         _ => 0,
     }
+}
+
+fn transition_survey_held(frame: u32) -> u32 {
+    let held = active_survey_held(frame);
+    if held & PAD_START == 0 {
+        held
+    } else {
+        // Level Complete accepts either button on this exact authored frame.
+        // Use the gameplay-safe face button so a browser replay cannot turn
+        // the acknowledgement into a host pause while preserving the runtime
+        // phase.
+        (held & !PAD_START) | PAD_CROSS
+    }
+}
+
+#[test]
+fn transition_sweep_preserves_button_frames_without_pressing_start() {
+    for frame in 1..=480 {
+        let active = active_survey_held(frame);
+        let transition = transition_survey_held(frame);
+        assert_eq!(transition & PAD_START, 0, "frame {frame}");
+        if active & PAD_START == 0 {
+            assert_eq!(transition, active, "frame {frame}");
+        } else {
+            assert_eq!(transition, PAD_CROSS, "frame {frame}");
+        }
+    }
+    assert_eq!(active_survey_held(105), PAD_START);
+    assert_eq!(transition_survey_held(105), PAD_CROSS);
 }
 
 fn apply_restart(
@@ -55522,10 +55553,70 @@ fn lights_out_post_slippery_carried_matrix_reaches_authored_end_warp() {
     }
 }
 
-fn carry_boulder_dash_through_heavy_machinery(
+fn carry_boulder_dash_to_sunset_vista_mount(
     root: &Path,
     boulder_completion_carry: RetailSessionCarry,
     mut pad: PersistentPadState,
+) -> (RetailSessionCarry, PersistentPadState) {
+    let completion = CampaignPair::parse(root, LevelId::LEVEL_COMPLETE);
+    let title = CampaignPair::parse(root, LevelId::TITLE);
+    let sunset_vista = CampaignPair::parse(root, LevelId::new_const(0x23));
+    let post_boulder_title = carry_completion_to_title_with_pad(
+        &completion,
+        boulder_completion_carry,
+        [0x300, 15, 15, 15, 1, 16, 0],
+        &mut pad,
+    );
+    let sunset_carry = carry_map_to_next_level_with_pad(
+        &title,
+        post_boulder_title,
+        sunset_vista.level,
+        [0, 15, 15, 16, 1, 16, 1],
+        &mut pad,
+    );
+    assert_eq!(
+        (
+            sunset_carry.random_seed,
+            sunset_carry.draw_count,
+            sunset_carry.random_seed_b(),
+            sunset_carry.respawn_count,
+            sunset_carry.death_count,
+        ),
+        (0xd8f0_8ec4, 55_777, 0xdff3_7021, 0, 0),
+        "the exact no-reset prefix must retain Sunset Vista's process-lifetime phase"
+    );
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| sunset_carry.globals[index]),
+        [0, 15, 15, 16, 1, 16, 1]
+    );
+    assert_eq!(
+        pad.snapshot,
+        RetailPadSnapshot {
+            tapped: PAD_CROSS,
+            held: PAD_CROSS,
+            tapped_previous: 0,
+            held_previous: 0,
+            held_previous_2: 0,
+        },
+        "the exact prefix must export Sunset Vista's physical carried pad epoch"
+    );
+    (sunset_carry, pad)
+}
+
+fn carry_boulder_dash_through_heavy_machinery(
+    root: &Path,
+    boulder_completion_carry: RetailSessionCarry,
+    pad: PersistentPadState,
+    continue_after_sunset_mount: bool,
 ) {
     let completion = CampaignPair::parse(root, LevelId::LEVEL_COMPLETE);
     let title = CampaignPair::parse(root, LevelId::TITLE);
@@ -55547,19 +55638,11 @@ fn carry_boulder_dash_through_heavy_machinery(
     let dr_neo_cortex = CampaignPair::parse(root, LevelId::new_const(0x1f));
     let ending = CampaignPair::parse(root, LevelId::ENDING);
 
-    let post_boulder_title = carry_completion_to_title_with_pad(
-        &completion,
-        boulder_completion_carry,
-        [0x300, 15, 15, 15, 1, 16, 0],
-        &mut pad,
-    );
-    let sunset_carry = carry_map_to_next_level_with_pad(
-        &title,
-        post_boulder_title,
-        sunset_vista.level,
-        [0, 15, 15, 16, 1, 16, 1],
-        &mut pad,
-    );
+    let (sunset_carry, mut pad) =
+        carry_boulder_dash_to_sunset_vista_mount(root, boulder_completion_carry, pad);
+    if !continue_after_sunset_mount {
+        return;
+    }
     eprintln!(
         "authentic Sunset carry: rng={:#010x} draw={} rng-b={:#010x} respawns={} deaths={}",
         sunset_carry.random_seed,
@@ -69660,9 +69743,7 @@ fn exported_publisher_opening_composes_through_jungle_mount() {
     assert!(stdout.contains("\"finalLid\":12"), "{stdout}");
 }
 
-#[test]
-#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry() {
+fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bool) {
     const N_SANITY_FRAMES: u32 = 2_100;
     const COMPLETION_FRAMES: u32 = 600;
 
@@ -69817,6 +69898,13 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         Some((465, i32::try_from(LevelId::TITLE.get()).unwrap())),
         "authored completion input must request Title: {}",
         completion_survey.summary()
+    );
+    assert!(
+        completion_survey
+            .pad_change_samples
+            .iter()
+            .all(|(_, held)| held & PAD_START == 0),
+        "browser campaign completion input must not invoke host pause"
     );
     assert!(
         completion_survey.is_clean(),
@@ -72510,11 +72598,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             };
             let (rolling_stones_nsd, rolling_stones_nsf, rolling_stones_nsf_bytes) =
                 parse_local_pair(root, rolling_stones).expect("Rolling Stones pair must parse");
-            // The existing exact Rolling Stones controller is characterized from a
-            // neutral pad epoch. A carried post-Papu map history currently misses the
-            // final route jump, so keep this honest seam explicit: replay composition
-            // must not claim continuity across the mismatched checkpoints.
-            *pad = PersistentPadState::default();
+            let mount_held = pad.snapshot.held;
             let mut rolling_stones_result = Box::new(
                 survey_pair_with_persistent_pad(
                     known_name(rolling_stones),
@@ -72532,7 +72616,10 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     SurveyInputProfile::RollingStonesExactCampaign,
                     3_200,
                     pad,
-                    PersistentSurveyPlan::default(),
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Rolling Stones' carried ordinary-pad route must execute"),
             );
@@ -72743,6 +72830,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     &rolling_stones_root,
                     completion_carry,
                     pad,
+                    continue_after_sunset_mount,
                 );
             })
             .expect("the carried Rolling Stones route worker must start")
@@ -72756,6 +72844,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             root: &Path,
             rolling_stones_completion_carry: RetailSessionCarry,
             mut pad: PersistentPadState,
+            continue_after_sunset_mount: bool,
         ) {
             let known_name = |level| {
                 KNOWN_LEVELS
@@ -73571,10 +73660,10 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(up_survey.final_live_objects, 22);
             assert_eq!(up_survey.max_live_objects, 46);
             assert_eq!(up_survey.successful_spawns, 192);
-            assert_eq!(up_survey.spawn_attempts, 66_975);
-            assert_eq!(up_survey.expected_spawn_rejections, 66_783);
+            assert_eq!(up_survey.spawn_attempts, 66_978);
+            assert_eq!(up_survey.expected_spawn_rejections, 66_786);
             assert_eq!(up_survey.unexpected_spawn_errors, 0);
-            assert_eq!(up_survey.executions, 125_898);
+            assert_eq!(up_survey.executions, 125_902);
             assert_eq!(up_survey.execution_errors, 0);
             assert_eq!(up_survey.zone_transitions, 36);
             assert_eq!(up_survey.restarts, 0);
@@ -75198,7 +75287,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     .expect("Boulder Dash replay export must finish at Level Complete");
                 report.carry
             };
-            carry_boulder_dash_through_heavy_machinery(root, boulder_completion_carry, pad);
+            carry_boulder_dash_through_heavy_machinery(
+                root,
+                boulder_completion_carry,
+                pad,
+                continue_after_sunset_mount,
+            );
         }
 
         eprintln!(
@@ -75269,6 +75363,18 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             upstream_runtime.draw_count(),
         );
     }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_main_campaign_exact_no_reset_prefix_reaches_sunset_vista_mount() {
+    run_authored_main_campaign_with_session_carry(false);
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry() {
+    run_authored_main_campaign_with_session_carry(true);
 }
 
 #[test]

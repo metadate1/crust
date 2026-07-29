@@ -768,6 +768,7 @@ function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
 }
 
 function guardedPhaseSegments(fragment, normalizedReplay, phase) {
+  const permitsIntermediateMounts = fragment.captureKind === "publisher-title";
   const guard = {
     currentLid: phase.entry.currentLid,
     mountedLid: phase.entry.mountedLid,
@@ -785,10 +786,13 @@ function guardedPhaseSegments(fragment, normalizedReplay, phase) {
         );
       }
     }
-    return {
-      ...segment,
-      while: { ...guard },
-    };
+    const composed = { ...segment };
+    if (permitsIntermediateMounts) {
+      delete composed.while;
+    } else {
+      composed.while = { ...guard };
+    }
+    return composed;
   });
   const last = segments.at(-1);
   const fragmentExpectation = mergeExpectations(

@@ -364,6 +364,7 @@ test("composer accepts ordered native title capture metadata and exact mount pad
             { frames: 1, held: 0x0040, inputKind: "physical" },
           ],
         ),
+        captureKind: "publisher-title",
         entryCheckpoint: titleEntry,
         exitCheckpoint: beachEntry,
         entryProgression: titleProgression,
@@ -412,6 +413,16 @@ test("composer accepts ordered native title capture metadata and exact mount pad
     ],
     "native capture run order must survive composition",
   );
+  assert.equal(
+    replay.segments[0].while,
+    undefined,
+    "publisher/title input must survive authored intermediate Intro mounts",
+  );
+  assert.equal(replay.segments[1].while, undefined);
+  assert.deepEqual(replay.segments[2].while, {
+    currentLid: 0x09,
+    mountedLid: 0x09,
+  });
 
   const wrongCheckpoint = structuredClone(fragments);
   wrongCheckpoint

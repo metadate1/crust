@@ -188,6 +188,13 @@ test("the Rust DOM contract and original interface artwork stay packaged", async
     "assetMessage",
     "unlockAll",
     "bootLevel",
+    "smoothMotion",
+    "extendedWorld",
+    "cameraZoom",
+    "outputAspect",
+    "renderResolution",
+    "customRenderWidth",
+    "customRenderHeight",
     "launch",
     "clearData",
     "importProgress",
@@ -215,6 +222,8 @@ test("the Rust DOM contract and original interface artwork stay packaged", async
       `expected exactly one #${id}`,
     );
   }
+  assert.match(html, /<option value="screen">Screen \/ Auto<\/option>/);
+  assert.match(html, /<option value="custom">Custom dimensions…<\/option>/);
 
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   assert.deepEqual(wordmark.subarray(0, pngSignature.length), pngSignature);

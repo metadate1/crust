@@ -91,15 +91,15 @@
                 <label class="display-toggle" for="smoothMotion">
                   <input id="smoothMotion" type="checkbox">
                   <span>
-                    <strong>Smooth 60+ Hz motion</strong>
-                    <small>Interpolates display frames; gameplay remains exactly 30 Hz</small>
+                    <strong>Refresh-rate smoothing</strong>
+                    <small>Interpolates each browser display refresh; gameplay remains exactly 30 Hz</small>
                   </span>
                 </label>
                 <label class="display-toggle" for="extendedWorld">
                   <input id="extendedWorld" type="checkbox">
                   <span>
                     <strong>Extended draw distance</strong>
-                    <small>Preloads gameplay geometry and draws the complete active zone</small>
+                    <small>Preloads level geometry and extends visibility across the active zone</small>
                   </span>
                 </label>
                 <label for="cameraZoom">
@@ -117,9 +117,10 @@
                     <option value="4:3">Original 4:3</option>
                     <option value="16:9">Uncropped 16:9</option>
                     <option value="21:9">Uncropped 21:9</option>
+                    <option value="screen">Screen / Auto</option>
                   </select>
                 </label>
-                <label for="renderResolution">
+                <label class="render-resolution" for="renderResolution">
                   <span>Internal resolution</span>
                   <select id="renderResolution">
                     <option value="native">Native display</option>
@@ -127,10 +128,26 @@
                     <option value="1080">1080p</option>
                     <option value="1440">1440p</option>
                     <option value="2160">2160p / 4K</option>
+                    <option value="custom">Custom dimensions…</option>
                   </select>
                 </label>
+                <details class="custom-resolution">
+                  <summary>Custom drawing buffer</summary>
+                  <div>
+                    <label for="customRenderWidth">
+                      <span>Width</span>
+                      <input id="customRenderWidth" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1920">
+                    </label>
+                    <span aria-hidden="true">×</span>
+                    <label for="customRenderHeight">
+                      <span>Height</span>
+                      <input id="customRenderHeight" type="number" inputmode="numeric" min="1" max="12288" step="1" value="1080">
+                    </label>
+                  </div>
+                  <small>Used only when “Custom dimensions” is selected.</small>
+                </details>
               </div>
-              <p>Zoom and wider views enable extended draw distance automatically. Off-screen objects keep retail activation and timing.</p>
+              <p>Screen / Auto follows the live browser shape, including 32:9, 3:2, and portrait views. Zoom and non-4:3 views enable extended visibility automatically; off-screen objects keep retail activation and timing.</p>
             </details>
           </div>
         </div>

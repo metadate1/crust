@@ -2469,7 +2469,7 @@ impl Runtime {
                 title_overlay_alpha,
                 interpolation_alpha,
             },
-            self.display_settings.aspect.logical_viewport(),
+            self.display_settings.logical_viewport(),
         )?;
         self.last_gl_error = self.stage.error();
         self.render_ui(dom)?;
@@ -3461,7 +3461,7 @@ impl Runtime {
                     .projection_distance(authored_projection),
             ),
             extended_world: self.display_settings.extended_world,
-            viewport: self.display_settings.aspect.logical_viewport(),
+            viewport: self.display_settings.logical_viewport(),
         };
         let background_fill = retail_background_fill_for_zone(
             &self.retail_zones,

@@ -611,17 +611,19 @@ builds are staged under ignored `target/` storage and replace `dist/` only after
 binding generation, and source-stability checks succeed.
 
 The collapsed **Optional display upgrades** panel keeps retail presentation as the default and
-offers a presentation-only 60+ Hz interpolation layer, wider 16:9 or 21:9 logical viewports,
-15/30/45% camera zoom-out presets, fixed 720p–2160p internal resolutions, and an extended-world
-mode. Simulation, GOOL, collision, input, audio, and object activation remain authoritative at
-30 Hz. Extended mode preloads every unique non-backdrop WGEO reachable through the level's
-validated ZDAT graph, then draws all ordinary polygons from the current authored zone which can
-affect the selected viewport. Backdrop alternatives remain selected by the active authored SLST,
-and a separate bounded presentation texture cache leaves native's eight-slot pager untouched.
-Retail zones can reuse the same world coordinate space, so mutually exclusive zones are never
-drawn simultaneously. Wider modes horizontally overscan only the authored 4:3 backdrop so sky
-continues to cover the new viewport; terrain and objects are not stretched. The option does not
-wake off-screen objects or alter gameplay timing.
+offers presentation interpolation at the browser's actual refresh cadence, 4:3, 16:9, and 21:9
+presets, a Screen / Auto mode which follows arbitrary browser shapes such as 32:9 or 3:2,
+15/30/45% camera zoom-out presets, native, fixed 720p–2160p, or custom internal drawing buffers,
+and an extended-world mode. Simulation, GOOL, collision, input, audio, and object activation remain
+authoritative at 30 Hz. Extended mode preloads every unique non-backdrop WGEO reachable through the
+level's validated ZDAT graph, then draws ordinary geometry from the current authored zone which can
+affect the selected viewport. This extends visibility and avoids native SLST pop-in inside that
+zone; it does not render an entire mutually exclusive course at once. Backdrop alternatives remain
+selected by the active authored SLST, and a separate bounded presentation texture cache leaves
+native's eight-slot pager untouched. Retail zones can reuse the same world coordinate space, so
+mutually exclusive zones are never drawn simultaneously. Wider modes horizontally overscan only
+the authored 4:3 backdrop so sky continues to cover the new viewport; terrain and objects are not
+stretched. The option does not wake off-screen objects or alter gameplay timing.
 
 The 44 retail pairs are recognized. Cave (`0x04`) is mounted as a shared index/archive but is not
 a boot target; the other 43 pairs are selectable. Partial stream sets containing at least one

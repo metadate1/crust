@@ -5,7 +5,7 @@ use web_sys::{
     HtmlProgressElement, HtmlSelectElement, Window,
 };
 
-use crate::display::{DisplaySettings, OutputAspect, RenderResolution};
+use crate::display::{DisplaySettings, OutputAspect, OutputRatio, RenderResolution};
 
 pub fn window() -> Result<Window, JsValue> {
     web_sys::window().ok_or_else(|| JsValue::from_str("browser window is unavailable"))
@@ -48,6 +48,8 @@ pub struct Dom {
     pub camera_zoom: HtmlSelectElement,
     pub output_aspect: HtmlSelectElement,
     pub render_resolution: HtmlSelectElement,
+    pub custom_render_width: HtmlInputElement,
+    pub custom_render_height: HtmlInputElement,
     pub launch: HtmlButtonElement,
     pub clear: HtmlButtonElement,
     pub import_progress: HtmlElement,
@@ -97,6 +99,8 @@ impl Dom {
             camera_zoom: by_id(&document, "cameraZoom")?,
             output_aspect: by_id(&document, "outputAspect")?,
             render_resolution: by_id(&document, "renderResolution")?,
+            custom_render_width: by_id(&document, "customRenderWidth")?,
+            custom_render_height: by_id(&document, "customRenderHeight")?,
             launch: by_id(&document, "launch")?,
             clear: by_id(&document, "clearData")?,
             import_progress: by_id(&document, "importProgress")?,
@@ -202,6 +206,9 @@ impl Dom {
             .filter(|value| matches!(*value, 55 | 70 | 85 | 100))
             .unwrap_or(100);
         let aspect = OutputAspect::from_value(&self.output_aspect.value());
+        let output_ratio = aspect
+            .fixed_ratio()
+            .unwrap_or_else(|| self.automatic_output_ratio());
         let extended_world = self.extended_world.checked()
             || projection_percent != 100
             || aspect != OutputAspect::Retail;
@@ -213,16 +220,29 @@ impl Dom {
             extended_world,
             projection_percent,
             aspect,
-            resolution: RenderResolution::from_value(&self.render_resolution.value()),
+            output_ratio,
+            resolution: RenderResolution::from_values(
+                &self.render_resolution.value(),
+                &self.custom_render_width.value(),
+                &self.custom_render_height.value(),
+            ),
         }
     }
 
     pub fn apply_display_settings(&self, settings: DisplaySettings) -> Result<(), JsValue> {
         self.screen
             .set_attribute("data-display-aspect", settings.aspect.value())?;
+        self.screen.style().set_property(
+            "--crust-output-aspect",
+            &format!(
+                "{} / {}",
+                settings.output_ratio.numerator(),
+                settings.output_ratio.denominator()
+            ),
+        )?;
         self.frame_rate
             .set_text_content(Some(if settings.smooth_motion {
-                "30 Hz sim / 60+ Hz display"
+                "30 Hz sim / refresh-smoothed display"
             } else {
                 "30.00 Hz"
             }));
@@ -238,13 +258,10 @@ impl Dom {
                 (safe_canvas_dimension(width), safe_canvas_dimension(height))
             }
             RenderResolution::Fixed(height) => {
-                let (numerator, denominator) = settings.aspect.ratio();
-                let width = height
-                    .saturating_mul(numerator)
-                    .saturating_add(denominator / 2)
-                    / denominator;
+                let width = settings.output_ratio.width_for_height(height);
                 (width.clamp(1, 12_288), height.clamp(1, 12_288))
             }
+            RenderResolution::Custom { width, height } => (width, height),
         };
         if self.canvas.width() != width {
             self.canvas.set_width(width);
@@ -252,6 +269,20 @@ impl Dom {
         if self.canvas.height() != height {
             self.canvas.set_height(height);
         }
+    }
+
+    fn automatic_output_ratio(&self) -> OutputRatio {
+        let dimensions = window().ok().and_then(|window| {
+            let width = window.inner_width().ok()?.as_f64()?;
+            let height = window.inner_height().ok()?.as_f64()?;
+            Some((
+                safe_canvas_dimension(width.round()),
+                safe_canvas_dimension(height.round()),
+            ))
+        });
+        dimensions
+            .and_then(|(width, height)| OutputRatio::from_dimensions(width, height))
+            .unwrap_or(OutputRatio::WIDE)
     }
 }
 

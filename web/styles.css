@@ -491,6 +491,7 @@ select:disabled { color: #758372; }
   text-transform: uppercase;
 }
 .display-upgrade-grid > label:last-child { grid-column: 1 / -1; }
+.display-upgrade-grid > .render-resolution { grid-column: 1 / -1; }
 .display-toggle {
   grid-template-columns: auto minmax(0, 1fr);
   align-items: start;
@@ -522,6 +523,54 @@ select:disabled { color: #758372; }
   text-transform: none;
 }
 .display-upgrades select { height: 38px; font-size: 9px; }
+.custom-resolution {
+  grid-column: 1 / -1;
+  border: 1px solid rgba(255, 216, 115, .12);
+  border-radius: 8px 4px 9px 5px;
+  padding: 9px 10px;
+  background: rgba(2, 13, 7, .25);
+  color: #83927f;
+  font-family: var(--mono);
+  font-size: 8px;
+}
+.custom-resolution > summary {
+  cursor: pointer;
+  color: #aebba8;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.custom-resolution > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: end;
+  gap: 8px;
+  margin-top: 9px;
+}
+.custom-resolution label {
+  display: grid;
+  gap: 4px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+.custom-resolution input {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  border: 1px solid rgba(255, 216, 115, .24);
+  border-radius: 7px 4px 8px 5px;
+  padding: 0 9px;
+  background: rgba(2, 13, 7, .72);
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 9px;
+}
+.custom-resolution > small {
+  display: block;
+  margin-top: 7px;
+  color: #71806e;
+  font-family: var(--body);
+  line-height: 1.35;
+}
 .display-upgrades > p {
   margin: 10px 0 0;
   color: #71806e;
@@ -719,10 +768,13 @@ canvas {
 .screen:fullscreen .game-viewport { inset: 0; }
 .screen[data-display-aspect="16:9"] { aspect-ratio: 16 / 9; }
 .screen[data-display-aspect="21:9"] { aspect-ratio: 21 / 9; }
+.screen[data-display-aspect="screen"] { aspect-ratio: var(--crust-output-aspect, 16 / 9); }
 .screen[data-display-aspect="16:9"] .game-frame-art,
-.screen[data-display-aspect="21:9"] .game-frame-art { display: none; }
+.screen[data-display-aspect="21:9"] .game-frame-art,
+.screen[data-display-aspect="screen"] .game-frame-art { display: none; }
 .screen[data-display-aspect="16:9"] .game-viewport,
-.screen[data-display-aspect="21:9"] .game-viewport { inset: 0; }
+.screen[data-display-aspect="21:9"] .game-viewport,
+.screen[data-display-aspect="screen"] .game-viewport { inset: 0; }
 
 .runtime-details {
   width: min(760px, calc(100% - 30px));

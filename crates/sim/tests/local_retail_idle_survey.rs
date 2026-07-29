@@ -103,6 +103,9 @@ const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B: u32 = 0x9b47_a83c;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED: u32 = 0xccd8_9975;
 const UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 69_831;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
+const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED: u32 = 0x9c11_0f6a;
+const ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT: u32 = 110_454;
+const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED_B: u32 = 0x99dc_97b1;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED: u32 = 0x5944_4b2a;
 const UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT: u32 = 78_796;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B: u32 = 0x2227_f8a8;
@@ -1309,6 +1312,70 @@ fn castle_machinery_exact_uninterrupted_campaign_phase_reaches_authored_end_warp
         "{summary}"
     );
     assert_ordinary_completion_input(&survey, "Castle Machinery exact campaign phase");
+    assert!(survey.is_clean(), "{summary}");
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn castle_machinery_actual_post_sunset_phase_reaches_authored_end_warp() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let level = LevelId::new_const(0x37);
+    let (nsd, nsf, nsf_bytes) =
+        parse_local_pair(&root, level).expect("the legally local Castle Machinery pair must parse");
+
+    let mut title_runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0),
+        (TITLE_STATE_GLOBAL, 15),
+        (SAVED_TITLE_STATE_GLOBAL, 15),
+        (CURRENT_MAP_LEVEL_GLOBAL, 27),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 27),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        title_runtime
+            .set_global_word(index, value)
+            .expect("actual post-Sunset progression global is writable");
+    }
+    let mut carry = title_runtime.export_session_carry();
+    carry.random_seed = ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED;
+    carry.draw_count = ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT;
+    carry.set_random_seed_b(ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED_B);
+    carry.level_spawn_tags[0] = 11_294;
+    carry.level_spawn_tags[1] = 11_355;
+    carry.level_spawn_tags[2] = 20_522;
+    let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
+        .expect("Castle Machinery must import the actual post-Sunset campaign phase");
+    let (survey, _) = survey_pair_with_runtime(
+        "Castle Machinery actual post-Sunset campaign phase",
+        level,
+        &nsd,
+        &nsf,
+        &nsf_bytes,
+        runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::CastleMachineryExactCampaignPhase,
+        7_500,
+    )
+    .expect("Castle Machinery's actual post-Sunset route must execute");
+    let summary = survey.summary();
+
+    assert_eq!(survey.next_lid, Some((survey.frames, 0x2d)), "{summary}");
+    assert_eq!(survey.restarts, 0, "{summary}");
+    assert_eq!(survey.death_camera_frames, 0, "{summary}");
+    assert_eq!(
+        survey.first_terminal_fall.as_ref().map(|(frame, player)| (
+            *frame,
+            player.state,
+            player.translation
+        )),
+        Some((93, 11, [11_816_960, -1_140_975, 102_400])),
+        "Castle Machinery's authored opening shaft reaches the retail fall-speed cap \
+         without entering a death or restart: {summary}"
+    );
     assert!(survey.is_clean(), "{summary}");
 }
 
@@ -27894,11 +27961,13 @@ impl UpstreamRecoveryRouteController {
 struct CastleMachineryCompletionRouteController {
     authentic_campaign_phase: bool,
     exact_campaign_phase: bool,
+    actual_post_sunset_phase: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
     a6_rod_wait_started: bool,
     a6_rod_low_seen: bool,
+    a6_rod_peak_seen: bool,
     a6_rod_released: bool,
     a6_rod_jump_pending: bool,
     a7_entered: bool,
@@ -27946,6 +28015,7 @@ struct CastleMachineryCompletionRouteController {
     c9_upper_walkway_departed: bool,
     a2_drop_side_cleared: bool,
     d0_hot_platform_stage: u8,
+    d6_upper_lift_last_y: Option<i32>,
     d1_pipe_low_seen: bool,
     d1_pipe_high_seen: bool,
     d1_pipe_vertical_frames: u8,
@@ -28332,11 +28402,17 @@ impl CastleMachineryCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 177)
                     .then_some(object.translation[1])
             });
+            let upper_lift_descending = upper_lift_y.is_some_and(|y| {
+                self.d6_upper_lift_last_y
+                    .is_some_and(|previous_y| y < previous_y)
+            });
+            self.d6_upper_lift_last_y = upper_lift_y;
             if matches!(name.as_str(), "d6_TZ" | "d7_TZ")
                 && upper_lift_y.is_some_and(|y| {
                     (-2_750_000..=-2_550_000).contains(&y)
                         && player.translation[1] >= -2_900_000
                         && (y - player.translation[1]).unsigned_abs() <= 150_000
+                        && (!self.actual_post_sunset_phase || upper_lift_descending)
                 })
             {
                 self.d0_hot_platform_stage = 20;
@@ -29069,7 +29145,7 @@ impl CastleMachineryCompletionRouteController {
                 if player.translation[0] <= 4_340_000 && player.status_a & 1 != 0 {
                     self.a9_side_route_stage = 3;
                     self.jump_frames = 0;
-                    self.release_frames = 5;
+                    self.release_frames = if self.actual_post_sunset_phase { 1 } else { 5 };
                     return PAD_LEFT | PAD_UP;
                 }
                 let held = PAD_LEFT | depth;
@@ -29588,7 +29664,9 @@ impl CastleMachineryCompletionRouteController {
         ) && self.b7_electric_gate_released
             && self.b7_platform_stage <= 12
         {
-            self.jump_frames = 0;
+            if !(self.actual_post_sunset_phase && self.b7_platform_stage == 4) {
+                self.jump_frames = 0;
+            }
             self.release_frames = 0;
             let player = player.expect("Castle Machinery first platform chain keeps Crash live");
             if self.b7_platform_stage == 0 {
@@ -29649,7 +29727,11 @@ impl CastleMachineryCompletionRouteController {
                 {
                     self.b7_platform_stage = 4;
                     self.jump_frames = 29;
-                    return PAD_RIGHT | PAD_CROSS;
+                    return (if self.actual_post_sunset_phase {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    }) | PAD_CROSS;
                 }
                 let predicted_x =
                     i64::from(player.translation[0]) + i64::from(player.velocity[0]) * 3 / 34;
@@ -29671,7 +29753,11 @@ impl CastleMachineryCompletionRouteController {
                 }
                 if self.jump_frames != 0 {
                     self.jump_frames -= 1;
-                    return PAD_RIGHT | PAD_CROSS;
+                    return (if self.actual_post_sunset_phase {
+                        PAD_LEFT
+                    } else {
+                        PAD_RIGHT
+                    }) | PAD_CROSS;
                 }
                 return PAD_LEFT | PAD_CROSS;
             }
@@ -30603,7 +30689,44 @@ impl CastleMachineryCompletionRouteController {
                 return horizontal | PAD_UP;
             }
         }
-        if self.authentic_campaign_phase && name == "a6_TZ" && self.a6_rod_jump_pending {
+        if self.actual_post_sunset_phase && name == "a6_TZ" && !self.a6_rod_released {
+            let player =
+                player.expect("Castle Machinery post-Sunset rod corridor keeps Crash live");
+            self.a6_rod_wait_started |= player.translation[0] <= 10_350_000;
+            if self.a6_rod_wait_started {
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                let rod_y = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 62)
+                        .then_some(object.translation[1])
+                });
+                self.a6_rod_peak_seen |= rod_y.is_some_and(|y| y >= -7_070_000);
+                if self.a6_rod_peak_seen && rod_y.is_some_and(|y| y <= -7_074_000) {
+                    // The real post-Sunset carry reaches this rod while it is
+                    // rising into the ordinary jump cadence. Brake on the
+                    // authored runway, then depart just after its upper turn
+                    // so the physical run-up reaches it at the low point.
+                    self.a6_rod_released = true;
+                    self.a6_rod_jump_pending = true;
+                    self.jump_frames = 0;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_UP | PAD_SQUARE;
+                }
+                let horizontal =
+                    if player.translation[0] < 10_220_000 || player.velocity[0] < -80_000 {
+                        PAD_RIGHT
+                    } else if player.translation[0] > 10_280_000 || player.velocity[0] > 80_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                return horizontal | PAD_UP;
+            }
+        }
+        if (self.authentic_campaign_phase || self.actual_post_sunset_phase)
+            && name == "a6_TZ"
+            && self.a6_rod_jump_pending
+        {
             let player = player.expect("Castle Machinery first reactor approach keeps Crash live");
             if player.translation[0] <= 9_980_000 && player.status_a & 1 != 0 {
                 self.a6_rod_jump_pending = false;
@@ -30659,13 +30782,16 @@ impl CastleMachineryCompletionRouteController {
         }
         if name == "a8_TZ"
             && player.is_some_and(|player| {
-                (7_000_000..7_300_000).contains(&player.translation[0])
-            })
-            && route_objects.iter().any(|object| {
-                object.state != 3
-                    && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 68)
-            })
-        {
+                (if self.actual_post_sunset_phase {
+                    6_200_000
+                } else {
+                    7_000_000
+                }..7_300_000)
+                    .contains(&player.translation[0])
+            }) && route_objects.iter().any(|object| {
+            object.state != 3
+                && matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 68)
+        }) {
             self.jump_frames = 0;
             self.release_frames = 0;
             return movement
@@ -48485,11 +48611,13 @@ impl SurveyInputController {
                     profile,
                     SurveyInputProfile::CastleMachineryExactCampaignPhase
                 ),
+                actual_post_sunset_phase: false,
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
                 a6_rod_wait_started: false,
                 a6_rod_low_seen: false,
+                a6_rod_peak_seen: false,
                 a6_rod_released: false,
                 a6_rod_jump_pending: false,
                 a7_entered: false,
@@ -48537,6 +48665,7 @@ impl SurveyInputController {
                 c9_upper_walkway_departed: false,
                 a2_drop_side_cleared: false,
                 d0_hot_platform_stage: 0,
+                d6_upper_lift_last_y: None,
                 d1_pipe_low_seen: false,
                 d1_pipe_high_seen: false,
                 d1_pipe_vertical_frames: 0,
@@ -49052,9 +49181,11 @@ impl SurveyInputController {
         ) {
             let authentic_campaign_phase = self.castle_machinery.authentic_campaign_phase;
             let exact_campaign_phase = self.castle_machinery.exact_campaign_phase;
+            let actual_post_sunset_phase = self.castle_machinery.actual_post_sunset_phase;
             self.castle_machinery = CastleMachineryCompletionRouteController {
                 authentic_campaign_phase,
                 exact_campaign_phase,
+                actual_post_sunset_phase,
                 ..CastleMachineryCompletionRouteController::default()
             };
         }
@@ -53273,6 +53404,10 @@ fn survey_pair_with_runtime_impl(
         && input_profile == SurveyInputProfile::LightsOutCompletionRoute
         && runtime.machine().random_seed() == 0xe5ca_6605
         && runtime.draw_count() == 99_446;
+    let actual_post_sunset_castle_phase = context_source == LevelContextSource::SessionGlobals
+        && input_profile == SurveyInputProfile::CastleMachineryExactCampaignPhase
+        && runtime.machine().random_seed() == ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED
+        && runtime.draw_count() == ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT;
     let graph = graph_for_pair(level, nsd, nsf, nsf_bytes)?;
     let (zones, mut lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, level)?;
     let bonus_return_snapshot = if context_source == LevelContextSource::BonusReturn {
@@ -53496,6 +53631,7 @@ fn survey_pair_with_runtime_impl(
     input_controller.slippery_climb.post_high_road_phase = post_high_road_slippery_phase;
     input_controller.slippery_climb.actual_post_sunset_phase = actual_post_sunset_slippery_phase;
     input_controller.lights_out.actual_post_sunset_phase = actual_post_sunset_lights_phase;
+    input_controller.castle_machinery.actual_post_sunset_phase = actual_post_sunset_castle_phase;
     let mut empty_frames = 0_u32;
     let mut held_previous = active_pad.snapshot.held;
     let mut held_previous_2 = active_pad.snapshot.held_previous;

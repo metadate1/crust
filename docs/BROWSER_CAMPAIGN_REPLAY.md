@@ -205,6 +205,29 @@ an isolated destination session-import snapshot solely for boundary metadata. It
 the source runtime, request a transition, load destination assets, spawn pair objects, or execute
 a destination frame.
 
+`discoverLongestCampaignManifest` can build a manifest from an unordered set of those local
+capture documents. It chooses only a path that begins with the browser's zeroed physical pad and
+matches checkpoint, progression, and post-mount pad history exactly. It never fills a missing
+edge. Tests cover a hybrid PBAK/physical fragment and prove that a one-word pad-history mismatch
+terminates discovery rather than being bridged.
+
+The current legally-local full-campaign export proves an 18-phase, 16,369-frame exact chain from
+the authored Title map through N. Sanity Beach, Jungle Rollers, The Great Gate, Boulders,
+Upstream, Papu Papu, and the authored map selection of Rolling Stones. Tracing begins at Jungle
+Rollers. The chain includes Boulders' locally reconstructed PBAK prefix as `"recorded"` input and
+Papu Papu as an ordinary physical boss route. A separate nine-phase, 9,477-frame exact branch
+proves The Great Gate's physical Tawna path, Bonus 2, its `-2` save-state return, and the remounted
+Great Gate checkpoint.
+
+The next exact edge is intentionally still open. Rolling Stones' existing controller completes
+under the older same-frame camera/input survey ordering, but with the browser-faithful persistent
+pad path it misses the final route jump, reloads its checkpoint at frame 1,610, and therefore does
+not reach its authored transition within the 3,200-frame budget. The exporter records the failed
+Rolling Stones attempt as an isolated local fragment, but the composer refuses to attach it to
+the preceding map phase. Bosses and ending phases later in the campaign remain separate evidence
+until an unforced, controller-authentic route closes this boundary and the subsequent exact
+checkpoints. Do not describe those separate fragments as one continuous browser campaign.
+
 Every composed segment receives:
 
 ```json

@@ -416,6 +416,173 @@ export function normalizeCampaignManifest(raw) {
   };
 }
 
+function exactMetadataMatch(left, right) {
+  return checkpointDifference(left, right).length === 0;
+}
+
+function discoveredPathOrder(left, right) {
+  if (left.length !== right.length) return left.length - right.length;
+  const leftFrames = left.reduce((sum, node) => sum + node.frames, 0);
+  const rightFrames = right.reduce((sum, node) => sum + node.frames, 0);
+  if (leftFrames !== rightFrames) return leftFrames - rightFrames;
+  return right
+    .map((node) => node.fragment)
+    .join("\0")
+    .localeCompare(left.map((node) => node.fragment).join("\0"));
+}
+
+// Discovers the longest exactly composable path among legally local capture
+// fragments. This deliberately does not bridge a discontinuity: checkpoint,
+// progression, and physical-pad history must all match the same rules used by
+// `composeCampaignReplay`.
+export function discoverLongestCampaignManifest(
+  fragmentEntries,
+  { traceInputProfile } = {},
+) {
+  if (!Array.isArray(fragmentEntries) || fragmentEntries.length === 0) {
+    throw new Error("fragmentEntries must be a non-empty array");
+  }
+  const fragmentNames = new Set();
+  const nodes = fragmentEntries.map((entry, index) => {
+    if (!isObject(entry)) {
+      throw new Error(`fragmentEntries[${index}] must be an object`);
+    }
+    const fragment = nonEmptyString(
+      entry.fragment,
+      `fragmentEntries[${index}].fragment`,
+    );
+    if (fragmentNames.has(fragment)) {
+      throw new Error(`duplicate campaign fragment ${JSON.stringify(fragment)}`);
+    }
+    fragmentNames.add(fragment);
+    const document = entry.document;
+    if (!isObject(document)) {
+      throw new Error(`fragmentEntries[${index}].document must be an object`);
+    }
+    if (
+      document.localDiagnosticOnly !== true
+      || document.canonicalCampaign !== false
+    ) {
+      throw new Error(
+        `fragmentEntries[${index}].document must opt in as a local, noncanonical capture`,
+      );
+    }
+    const entryCheckpoint = normalizeCheckpoint(
+      document.entryCheckpoint,
+      `fragmentEntries[${index}].document.entryCheckpoint`,
+    );
+    const exitCheckpoint = normalizeCheckpoint(
+      document.exitCheckpoint,
+      `fragmentEntries[${index}].document.exitCheckpoint`,
+    );
+    return {
+      fragment,
+      document,
+      entry: entryCheckpoint,
+      exit: exitCheckpoint,
+      entryProgression: normalizeProgression(
+        document.entryProgression,
+        `fragmentEntries[${index}].document.entryProgression`,
+      ),
+      exitProgression: normalizeProgression(
+        document.exitProgression,
+        `fragmentEntries[${index}].document.exitProgression`,
+      ),
+      initialPad: normalizePadSnapshot(
+        document.initialPad,
+        `fragmentEntries[${index}].document.initialPad`,
+      ),
+      finalPad: normalizePadSnapshot(
+        document.finalPad,
+        `fragmentEntries[${index}].document.finalPad`,
+      ),
+      frames: wholeNumber(
+        document.frames,
+        `fragmentEntries[${index}].document.frames`,
+        10_000_000,
+      ),
+      inputProfile:
+        document.inputProfile === undefined
+          ? "captured"
+          : nonEmptyString(
+              document.inputProfile,
+              `fragmentEntries[${index}].document.inputProfile`,
+            ),
+    };
+  });
+  const bootPad = {
+    tapped: 0,
+    held: 0,
+    tappedPrevious: 0,
+    heldPrevious: 0,
+    heldPrevious2: 0,
+  };
+  const follows = (left, right) => {
+    if (!exactMetadataMatch(left.exit, right.entry)) return false;
+    if (!exactMetadataMatch(left.exitProgression, right.entryProgression)) {
+      return false;
+    }
+    const expectedPad =
+      left.entry.currentLid === left.exit.currentLid
+        ? left.finalPad
+        : advancePadSnapshot(left.finalPad, left.finalPad.held);
+    return exactMetadataMatch(expectedPad, right.initialPad);
+  };
+  const longestFrom = (node, seen) => {
+    let best = [node];
+    for (const candidate of nodes) {
+      if (seen.has(candidate.fragment) || !follows(node, candidate)) continue;
+      const path = [
+        node,
+        ...longestFrom(
+          candidate,
+          new Set([...seen, candidate.fragment]),
+        ),
+      ];
+      if (discoveredPathOrder(path, best) > 0) best = path;
+    }
+    return best;
+  };
+  const roots = nodes.filter((node) =>
+    exactMetadataMatch(node.initialPad, bootPad),
+  );
+  if (roots.length === 0) {
+    throw new Error("no fragment begins with the browser's physical boot pad");
+  }
+  let longest = [];
+  for (const root of roots) {
+    const path = longestFrom(root, new Set([root.fragment]));
+    if (discoveredPathOrder(path, longest) > 0) longest = path;
+  }
+  const phases = longest.map((node, index) => ({
+    id:
+      `phase-${String(index + 1).padStart(2, "0")}-` +
+      node.inputProfile.replaceAll(/[^a-z0-9]+/gi, "-").replaceAll(/^-|-$/g, ""),
+    fragment: node.fragment,
+    entry: node.entry,
+    exit: node.exit,
+  }));
+  const tracedIndex =
+    traceInputProfile === undefined
+      ? -1
+      : longest.findIndex((node) => node.inputProfile === traceInputProfile);
+  if (traceInputProfile !== undefined && tracedIndex === -1) {
+    throw new Error(
+      `longest exact path does not contain input profile ${JSON.stringify(traceInputProfile)}`,
+    );
+  }
+  return {
+    schema: 1,
+    localDiagnosticOnly: true,
+    canonicalCampaign: false,
+    bootLid: longest[0].entry.currentLid,
+    unlockAll: false,
+    ...(tracedIndex === -1 ? {} : { traceFromPhase: phases[tracedIndex].id }),
+    phases,
+    titleMapHandoffs: [],
+  };
+}
+
 function expectationConflict(left, right) {
   return Object.keys(left)
     .filter((field) => right[field] !== undefined && left[field] !== right[field])

@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   composeCampaignReplay,
   composeCampaignReplayFromFile,
+  discoverLongestCampaignManifest,
   isLocalArtifactPath,
   normalizeCampaignManifest,
   writeComposedReplay,
@@ -250,6 +251,68 @@ function syntheticCampaign() {
     },
   };
 }
+
+test("longest-path discovery preserves exact native handoffs and hybrid input classifications", async () => {
+  const { fragments } = syntheticCampaign();
+  fragments.get("./jungle.json").inputProfile = "boulders-completion-route";
+  fragments.get("./jungle.json").segments = [
+    { frames: 2, held: 0x0010, inputKind: "recorded" },
+    { frames: 2, held: 0x0010, inputKind: "physical" },
+  ];
+  const manifest = discoverLongestCampaignManifest(
+    [...fragments].map(([fragment, document]) => ({ fragment, document })),
+    { traceInputProfile: "boulders-completion-route" },
+  );
+  assert.deepEqual(
+    manifest.phases.map(({ fragment }) => fragment),
+    ["./n-sanity.json", "./complete.json", "./map.json", "./jungle.json"],
+  );
+  assert.equal(manifest.traceFromPhase, manifest.phases[3].id);
+  assert.deepEqual(manifest.titleMapHandoffs, []);
+
+  const composed = await composeCampaignReplay(
+    manifest,
+    async (fragmentPath) => fragments.get(fragmentPath),
+  );
+  assert.deepEqual(
+    [...new Set(composed.segments.map(({ inputKind }) => inputKind))],
+    ["physical", "recorded"],
+  );
+  assert.deepEqual(
+    composed.segments.slice(-2).map(({ inputKind }) => inputKind),
+    ["recorded", "physical"],
+  );
+});
+
+test("longest-path discovery refuses to bridge a physical-pad seam", () => {
+  const { fragments } = syntheticCampaign();
+  const disconnected = structuredClone(fragments.get("./jungle.json"));
+  disconnected.initialPad.heldPrevious ^= 0x1000;
+  disconnected.inputProfile = "ending";
+  const manifest = discoverLongestCampaignManifest([
+    ...[...fragments].map(([fragment, document]) => ({ fragment, document })),
+    { fragment: "./disconnected-ending.json", document: disconnected },
+  ]);
+  assert.equal(manifest.phases.length, 4);
+  assert.ok(
+    !manifest.phases.some(
+      ({ fragment }) => fragment === "./disconnected-ending.json",
+    ),
+  );
+});
+
+test("longest-path discovery rejects duplicate fragment references", () => {
+  const { fragments } = syntheticCampaign();
+  const document = fragments.get("./n-sanity.json");
+  assert.throws(
+    () =>
+      discoverLongestCampaignManifest([
+        { fragment: "./n-sanity.json", document },
+        { fragment: "./n-sanity.json", document: structuredClone(document) },
+      ]),
+    /duplicate campaign fragment/,
+  );
+});
 
 test("composer accepts ordered native title capture metadata and exact mount pad history", async () => {
   const titleEntry = {

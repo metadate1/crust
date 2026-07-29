@@ -53420,8 +53420,8 @@ fn survey_pair_with_runtime_impl(
         *pad = active_pad;
     }
     if let Some(capture) = replay_capture {
-        let (destination_lid, transition) = match survey.next_lid {
-            Some((transition_frame, next_lid)) => {
+        let (destination_lid, transition) = match (survey.next_lid, survey.cross_level_restart) {
+            (Some((transition_frame, next_lid)), None) => {
                 if transition_frame != survey.frames {
                     return Err(format!(
                         "exact replay export stopped at frame {} but transition occurred at frame \
@@ -53435,7 +53435,23 @@ fn survey_pair_with_runtime_impl(
                 );
                 (destination_lid, true)
             }
-            None => (level.get(), false),
+            (None, Some((transition_frame, destination))) => {
+                if transition_frame != survey.frames {
+                    return Err(format!(
+                        "exact replay export stopped at frame {} but cross-level restart occurred \
+                         at frame {transition_frame}",
+                        survey.frames
+                    ));
+                }
+                (destination.get(), true)
+            }
+            (None, None) => (level.get(), false),
+            (Some(_), Some(_)) => {
+                return Err(
+                    "survey emitted both an ordinary transition and a cross-level restart"
+                        .to_owned(),
+                );
+            }
         };
         if transition {
             survey.pending_browser_replay = Some(PendingBrowserReplay {
@@ -53535,6 +53551,34 @@ impl CampaignPair {
             frame_budget,
         )
         .expect("carried campaign level must execute")
+    }
+
+    fn run_carried_with_pad(
+        &self,
+        carry: RetailSessionCarry,
+        input: SurveyInputProfile,
+        frame_budget: u32,
+        pad: &mut PersistentPadState,
+    ) -> (LevelSurvey, RetailRuntime) {
+        let mount_held = pad.snapshot.held;
+        survey_pair_with_persistent_pad(
+            self.name,
+            self.level,
+            &self.nsd,
+            &self.nsf,
+            &self.nsf_bytes,
+            RetailRuntime::new_from_session(GLOBAL_WORDS, self.level, carry)
+                .expect("campaign level must import the preceding retail carry"),
+            LevelContextSource::SessionGlobals,
+            input,
+            frame_budget,
+            pad,
+            PersistentSurveyPlan {
+                mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("carried campaign level must execute with persistent pad history")
     }
 
     fn finish_checked(&self, mut runtime: RetailRuntime, expected: LevelId) -> RetailSessionCarry {
@@ -53737,6 +53781,34 @@ fn carry_completion_to_title(
     carry
 }
 
+fn carry_completion_to_title_with_pad(
+    completion: &CampaignPair,
+    carry: RetailSessionCarry,
+    expected_globals: [u32; 7],
+    pad: &mut PersistentPadState,
+) -> RetailSessionCarry {
+    assert_unassisted_campaign_carry(&carry, completion.name);
+    let (survey, runtime) = completion.run_carried_with_pad(
+        carry,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        2_000,
+        pad,
+    );
+    assert_eq!(
+        survey.next_lid.map(|(_, lid)| lid),
+        Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
+        "{}",
+        survey.summary()
+    );
+    assert_no_campaign_recovery(&survey, completion.name);
+    assert_eq!(survey.faulted_objects, 0);
+    assert!(survey.is_clean(), "{}", survey.summary());
+    assert_eq!(campaign_progression_globals(&runtime), expected_globals);
+    let carry = completion.finish_checked_with_replay(runtime, LevelId::TITLE, &survey);
+    assert_unassisted_campaign_carry(&carry, completion.name);
+    carry
+}
+
 fn carry_map_to_next_level(
     title: &CampaignPair,
     carry: RetailSessionCarry,
@@ -53750,6 +53822,30 @@ fn carry_map_to_next_level(
     assert_eq!(campaign_progression_globals(&map.runtime), expected_globals);
     assert_eq!(map.runtime.faulted_object_count(), 0);
     let (carry, _pad) = map.finish_transition(expected);
+    assert_unassisted_campaign_carry(&carry, title.name);
+    carry
+}
+
+fn carry_map_to_next_level_with_pad(
+    title: &CampaignPair,
+    carry: RetailSessionCarry,
+    expected: LevelId,
+    expected_globals: [u32; 7],
+    pad: &mut PersistentPadState,
+) -> RetailSessionCarry {
+    assert_unassisted_campaign_carry(&carry, title.name);
+    let mut map = AuthoredTitleMapHarness::from_session_with_pad(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        carry,
+        *pad,
+    );
+    map.select_next_unlocked(expected);
+    assert_eq!(campaign_progression_globals(&map.runtime), expected_globals);
+    assert_eq!(map.runtime.faulted_object_count(), 0);
+    let (carry, next_pad) = map.finish_transition(expected);
+    *pad = next_pad;
     assert_unassisted_campaign_carry(&carry, title.name);
     carry
 }
@@ -55246,6 +55342,7 @@ fn lights_out_post_slippery_carried_matrix_reaches_authored_end_warp() {
 fn carry_boulder_dash_through_heavy_machinery(
     root: &Path,
     boulder_completion_carry: RetailSessionCarry,
+    mut pad: PersistentPadState,
 ) {
     let completion = CampaignPair::parse(root, LevelId::LEVEL_COMPLETE);
     let title = CampaignPair::parse(root, LevelId::TITLE);
@@ -55267,16 +55364,18 @@ fn carry_boulder_dash_through_heavy_machinery(
     let dr_neo_cortex = CampaignPair::parse(root, LevelId::new_const(0x1f));
     let ending = CampaignPair::parse(root, LevelId::ENDING);
 
-    let post_boulder_title = carry_completion_to_title(
+    let post_boulder_title = carry_completion_to_title_with_pad(
         &completion,
         boulder_completion_carry,
         [0x300, 15, 15, 15, 1, 16, 0],
+        &mut pad,
     );
-    let sunset_carry = carry_map_to_next_level(
+    let sunset_carry = carry_map_to_next_level_with_pad(
         &title,
         post_boulder_title,
         sunset_vista.level,
         [0, 15, 15, 16, 1, 16, 1],
+        &mut pad,
     );
     eprintln!(
         "authentic Sunset carry: rng={:#010x} draw={} rng-b={:#010x} respawns={} deaths={}",
@@ -55286,10 +55385,11 @@ fn carry_boulder_dash_through_heavy_machinery(
         sunset_carry.respawn_count,
         sunset_carry.death_count,
     );
-    let (sunset_survey, sunset_runtime) = sunset_vista.run_carried(
+    let (sunset_survey, sunset_runtime) = sunset_vista.run_carried_with_pad(
         sunset_carry,
         SurveyInputProfile::SunsetVistaCompletionRoute,
         11_000,
+        &mut pad,
     );
     assert_eq!(
         sunset_survey.next_lid.map(|(_, lid)| lid),
@@ -55305,24 +55405,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&sunset_runtime),
         [0x500, 15, 15, 16, 1, 17, 0]
     );
-    let sunset_completion_carry =
-        sunset_vista.finish_checked(sunset_runtime, LevelId::LEVEL_COMPLETE);
-    let post_sunset_title = carry_completion_to_title(
+    let sunset_completion_carry = sunset_vista.finish_checked_with_replay(
+        sunset_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &sunset_survey,
+    );
+    let post_sunset_title = carry_completion_to_title_with_pad(
         &completion,
         sunset_completion_carry,
         [0x300, 15, 15, 16, 1, 17, 0],
+        &mut pad,
     );
 
-    let koala_carry = carry_map_to_next_level(
+    let koala_carry = carry_map_to_next_level_with_pad(
         &title,
         post_sunset_title,
         koala_kong.level,
         [0, 15, 15, 17, 1, 17, 1],
+        &mut pad,
     );
-    let (koala_survey, koala_runtime) = koala_kong.run_carried(
+    let (koala_survey, koala_runtime) = koala_kong.run_carried_with_pad(
         koala_carry,
         SurveyInputProfile::KoalaKongCompletionRoute,
         7_000,
+        &mut pad,
     );
     assert_eq!(
         koala_survey.next_lid.map(|(_, lid)| lid),
@@ -55338,18 +55444,21 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&koala_runtime),
         [0x300, 15, 15, 17, 1, 18, 0]
     );
-    let post_koala_title = koala_kong.finish_checked(koala_runtime, LevelId::TITLE);
+    let post_koala_title =
+        koala_kong.finish_checked_with_replay(koala_runtime, LevelId::TITLE, &koala_survey);
 
-    let heavy_carry = carry_map_to_next_level(
+    let heavy_carry = carry_map_to_next_level_with_pad(
         &title,
         post_koala_title,
         heavy_machinery.level,
         [0, 15, 15, 18, 1, 18, 1],
+        &mut pad,
     );
-    let (heavy_survey, heavy_runtime) = heavy_machinery.run_carried(
+    let (heavy_survey, heavy_runtime) = heavy_machinery.run_carried_with_pad(
         heavy_carry,
         SurveyInputProfile::HeavyMachineryCompletionRoute,
         5_600,
+        &mut pad,
     );
     assert_eq!(
         heavy_survey.next_lid.map(|(_, lid)| lid),
@@ -55389,12 +55498,16 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&heavy_runtime),
         [0x500, 15, 15, 18, 1, 19, 0]
     );
-    let heavy_completion_carry =
-        heavy_machinery.finish_checked(heavy_runtime, LevelId::LEVEL_COMPLETE);
-    let post_heavy_title = carry_completion_to_title(
+    let heavy_completion_carry = heavy_machinery.finish_checked_with_replay(
+        heavy_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &heavy_survey,
+    );
+    let post_heavy_title = carry_completion_to_title_with_pad(
         &completion,
         heavy_completion_carry,
         [0x300, 15, 15, 18, 1, 19, 0],
+        &mut pad,
     );
     assert_eq!(
         [
@@ -55410,16 +55523,18 @@ fn carry_boulder_dash_through_heavy_machinery(
         [0x300, 15, 15, 18, 1, 19, 0]
     );
 
-    let cortex_power_carry = carry_map_to_next_level(
+    let cortex_power_carry = carry_map_to_next_level_with_pad(
         &title,
         post_heavy_title,
         cortex_power.level,
         [0, 15, 15, 19, 1, 19, 1],
+        &mut pad,
     );
-    let (cortex_power_survey, cortex_power_runtime) = cortex_power.run_carried(
+    let (cortex_power_survey, cortex_power_runtime) = cortex_power.run_carried_with_pad(
         cortex_power_carry,
         SurveyInputProfile::CortexPowerCompletionRoute,
         4_000,
+        &mut pad,
     );
     assert_eq!(
         cortex_power_survey.next_lid.map(|(_, lid)| lid),
@@ -55444,12 +55559,16 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&cortex_power_runtime),
         [0x500, 15, 15, 19, 1, 20, 0]
     );
-    let cortex_power_completion_carry =
-        cortex_power.finish_checked(cortex_power_runtime, LevelId::LEVEL_COMPLETE);
-    let post_cortex_power_title = carry_completion_to_title(
+    let cortex_power_completion_carry = cortex_power.finish_checked_with_replay(
+        cortex_power_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &cortex_power_survey,
+    );
+    let post_cortex_power_title = carry_completion_to_title_with_pad(
         &completion,
         cortex_power_completion_carry,
         [0x300, 15, 15, 19, 1, 20, 0],
+        &mut pad,
     );
     assert_eq!(
         [
@@ -55465,16 +55584,18 @@ fn carry_boulder_dash_through_heavy_machinery(
         [0x300, 15, 15, 19, 1, 20, 0]
     );
 
-    let generator_carry = carry_map_to_next_level(
+    let generator_carry = carry_map_to_next_level_with_pad(
         &title,
         post_cortex_power_title,
         generator_room.level,
         [0, 15, 15, 20, 1, 20, 1],
+        &mut pad,
     );
-    let (generator_survey, generator_runtime) = generator_room.run_carried(
+    let (generator_survey, generator_runtime) = generator_room.run_carried_with_pad(
         generator_carry,
         SurveyInputProfile::GeneratorRoomCompletionRoute,
         4_200,
+        &mut pad,
     );
     assert_eq!(
         generator_survey.next_lid.map(|(_, lid)| lid),
@@ -55499,24 +55620,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&generator_runtime),
         [0x500, 15, 15, 20, 1, 21, 0]
     );
-    let generator_completion_carry =
-        generator_room.finish_checked(generator_runtime, LevelId::LEVEL_COMPLETE);
-    let post_generator_title = carry_completion_to_title(
+    let generator_completion_carry = generator_room.finish_checked_with_replay(
+        generator_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &generator_survey,
+    );
+    let post_generator_title = carry_completion_to_title_with_pad(
         &completion,
         generator_completion_carry,
         [0x300, 15, 15, 20, 1, 21, 0],
+        &mut pad,
     );
 
-    let toxic_carry = carry_map_to_next_level(
+    let toxic_carry = carry_map_to_next_level_with_pad(
         &title,
         post_generator_title,
         toxic_waste.level,
         [0, 15, 15, 21, 1, 21, 1],
+        &mut pad,
     );
-    let (toxic_survey, toxic_runtime) = toxic_waste.run_carried(
+    let (toxic_survey, toxic_runtime) = toxic_waste.run_carried_with_pad(
         toxic_carry,
         SurveyInputProfile::ToxicWasteCompletionRoute,
         3_000,
+        &mut pad,
     );
     assert_eq!(
         toxic_survey.next_lid.map(|(_, lid)| lid),
@@ -55532,23 +55659,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&toxic_runtime),
         [0x500, 15, 15, 21, 1, 22, 0]
     );
-    let toxic_completion_carry = toxic_waste.finish_checked(toxic_runtime, LevelId::LEVEL_COMPLETE);
-    let post_toxic_title = carry_completion_to_title(
+    let toxic_completion_carry = toxic_waste.finish_checked_with_replay(
+        toxic_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &toxic_survey,
+    );
+    let post_toxic_title = carry_completion_to_title_with_pad(
         &completion,
         toxic_completion_carry,
         [0x300, 15, 15, 21, 1, 22, 0],
+        &mut pad,
     );
 
-    let pinstripe_carry = carry_map_to_next_level(
+    let pinstripe_carry = carry_map_to_next_level_with_pad(
         &title,
         post_toxic_title,
         pinstripe.level,
         [0, 15, 15, 22, 1, 22, 1],
+        &mut pad,
     );
-    let (pinstripe_survey, pinstripe_runtime) = pinstripe.run_carried(
+    let (pinstripe_survey, pinstripe_runtime) = pinstripe.run_carried_with_pad(
         pinstripe_carry,
         SurveyInputProfile::PinstripeCompletionRoute,
         2_200,
+        &mut pad,
     );
     assert_eq!(
         pinstripe_survey.next_lid.map(|(_, lid)| lid),
@@ -55573,18 +55707,21 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&pinstripe_runtime),
         [0x300, 15, 15, 22, 1, 23, 0]
     );
-    let post_pinstripe_title = pinstripe.finish_checked(pinstripe_runtime, LevelId::TITLE);
+    let post_pinstripe_title =
+        pinstripe.finish_checked_with_replay(pinstripe_runtime, LevelId::TITLE, &pinstripe_survey);
 
-    let high_road_carry = carry_map_to_next_level(
+    let high_road_carry = carry_map_to_next_level_with_pad(
         &title,
         post_pinstripe_title,
         high_road.level,
         [0, 15, 15, 23, 1, 23, 1],
+        &mut pad,
     );
-    let (high_road_survey, high_road_runtime) = high_road.run_carried(
+    let (high_road_survey, high_road_runtime) = high_road.run_carried_with_pad(
         high_road_carry,
         SurveyInputProfile::HighRoadCompletionRoute,
         3_000,
+        &mut pad,
     );
     assert_eq!(
         high_road_survey.next_lid.map(|(_, lid)| lid),
@@ -55609,24 +55746,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&high_road_runtime),
         [0x500, 15, 15, 23, 1, 24, 0]
     );
-    let high_road_completion_carry =
-        high_road.finish_checked(high_road_runtime, LevelId::LEVEL_COMPLETE);
-    let post_high_road_title = carry_completion_to_title(
+    let high_road_completion_carry = high_road.finish_checked_with_replay(
+        high_road_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &high_road_survey,
+    );
+    let post_high_road_title = carry_completion_to_title_with_pad(
         &completion,
         high_road_completion_carry,
         [0x300, 15, 15, 23, 1, 24, 0],
+        &mut pad,
     );
 
-    let slippery_carry = carry_map_to_next_level(
+    let slippery_carry = carry_map_to_next_level_with_pad(
         &title,
         post_high_road_title,
         slippery_climb.level,
         [0, 15, 15, 24, 1, 24, 1],
+        &mut pad,
     );
-    let (slippery_survey, slippery_runtime) = slippery_climb.run_carried(
+    let (slippery_survey, slippery_runtime) = slippery_climb.run_carried_with_pad(
         slippery_carry,
         SurveyInputProfile::SlipperyClimbCompletionRoute,
         8_000,
+        &mut pad,
     );
     assert_eq!(
         slippery_survey.next_lid.map(|(_, lid)| lid),
@@ -55642,24 +55785,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&slippery_runtime),
         [0x500, 15, 15, 24, 1, 25, 0]
     );
-    let slippery_completion_carry =
-        slippery_climb.finish_checked(slippery_runtime, LevelId::LEVEL_COMPLETE);
-    let post_slippery_title = carry_completion_to_title(
+    let slippery_completion_carry = slippery_climb.finish_checked_with_replay(
+        slippery_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &slippery_survey,
+    );
+    let post_slippery_title = carry_completion_to_title_with_pad(
         &completion,
         slippery_completion_carry,
         [0x300, 15, 15, 24, 1, 25, 0],
+        &mut pad,
     );
 
-    let lights_out_carry = carry_map_to_next_level(
+    let lights_out_carry = carry_map_to_next_level_with_pad(
         &title,
         post_slippery_title,
         lights_out.level,
         [0, 15, 15, 25, 1, 25, 1],
+        &mut pad,
     );
-    let (lights_out_survey, lights_out_runtime) = lights_out.run_carried(
+    let (lights_out_survey, lights_out_runtime) = lights_out.run_carried_with_pad(
         lights_out_carry,
         SurveyInputProfile::LightsOutCompletionRoute,
         6_000,
+        &mut pad,
     );
     assert_eq!(
         lights_out_survey.next_lid.map(|(_, lid)| lid),
@@ -55684,24 +55833,30 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&lights_out_runtime),
         [0x500, 15, 15, 25, 1, 26, 0]
     );
-    let lights_out_completion_carry =
-        lights_out.finish_checked(lights_out_runtime, LevelId::LEVEL_COMPLETE);
-    let post_lights_out_title = carry_completion_to_title(
+    let lights_out_completion_carry = lights_out.finish_checked_with_replay(
+        lights_out_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &lights_out_survey,
+    );
+    let post_lights_out_title = carry_completion_to_title_with_pad(
         &completion,
         lights_out_completion_carry,
         [0x300, 15, 15, 25, 1, 26, 0],
+        &mut pad,
     );
 
-    let jaws_carry = carry_map_to_next_level(
+    let jaws_carry = carry_map_to_next_level_with_pad(
         &title,
         post_lights_out_title,
         jaws_of_darkness.level,
         [0, 15, 15, 26, 1, 26, 1],
+        &mut pad,
     );
-    let (jaws_survey, jaws_runtime) = jaws_of_darkness.run_carried(
+    let (jaws_survey, jaws_runtime) = jaws_of_darkness.run_carried_with_pad(
         jaws_carry,
         SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
         5_600,
+        &mut pad,
     );
     assert_eq!(
         jaws_survey.next_lid.map(|(_, lid)| lid),
@@ -55717,19 +55872,24 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&jaws_runtime),
         [0x500, 15, 15, 26, 1, 27, 0]
     );
-    let jaws_completion_carry =
-        jaws_of_darkness.finish_checked(jaws_runtime, LevelId::LEVEL_COMPLETE);
-    let post_jaws_title = carry_completion_to_title(
+    let jaws_completion_carry = jaws_of_darkness.finish_checked_with_replay(
+        jaws_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &jaws_survey,
+    );
+    let post_jaws_title = carry_completion_to_title_with_pad(
         &completion,
         jaws_completion_carry,
         [0x300, 15, 15, 26, 1, 27, 0],
+        &mut pad,
     );
 
-    let castle_carry = carry_map_to_next_level(
+    let castle_carry = carry_map_to_next_level_with_pad(
         &title,
         post_jaws_title,
         castle_machinery.level,
         [0, 15, 15, 27, 1, 27, 1],
+        &mut pad,
     );
     assert_eq!(
         (
@@ -55748,10 +55908,11 @@ fn carry_boulder_dash_through_heavy_machinery(
         ),
         "the uninterrupted campaign must retain Castle Machinery's characterized machinery phase"
     );
-    let (castle_survey, castle_runtime) = castle_machinery.run_carried(
+    let (castle_survey, castle_runtime) = castle_machinery.run_carried_with_pad(
         castle_carry,
         SurveyInputProfile::CastleMachineryExactCampaignPhase,
         7_500,
+        &mut pad,
     );
     assert_eq!(
         castle_survey.next_lid.map(|(_, lid)| lid),
@@ -55775,22 +55936,31 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&castle_runtime),
         [0x500, 15, 15, 27, 1, 28, 0]
     );
-    let castle_completion_carry =
-        castle_machinery.finish_checked(castle_runtime, LevelId::LEVEL_COMPLETE);
-    let post_castle_title = carry_completion_to_title(
+    let castle_completion_carry = castle_machinery.finish_checked_with_replay(
+        castle_runtime,
+        LevelId::LEVEL_COMPLETE,
+        &castle_survey,
+    );
+    let post_castle_title = carry_completion_to_title_with_pad(
         &completion,
         castle_completion_carry,
         [0x300, 15, 15, 27, 1, 28, 0],
+        &mut pad,
     );
 
-    let brio_carry = carry_map_to_next_level(
+    let brio_carry = carry_map_to_next_level_with_pad(
         &title,
         post_castle_title,
         dr_n_brio.level,
         [0, 15, 15, 28, 1, 28, 1],
+        &mut pad,
     );
-    let (brio_survey, brio_runtime) =
-        dr_n_brio.run_carried(brio_carry, SurveyInputProfile::BrioCompletionRoute, 3_000);
+    let (brio_survey, brio_runtime) = dr_n_brio.run_carried_with_pad(
+        brio_carry,
+        SurveyInputProfile::BrioCompletionRoute,
+        3_000,
+        &mut pad,
+    );
     assert_eq!(
         brio_survey.next_lid.map(|(_, lid)| lid),
         Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
@@ -55805,13 +55975,15 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&brio_runtime),
         [0x300, 15, 15, 28, 1, 29, 0]
     );
-    let post_brio_title = dr_n_brio.finish_checked(brio_runtime, LevelId::TITLE);
+    let post_brio_title =
+        dr_n_brio.finish_checked_with_replay(brio_runtime, LevelId::TITLE, &brio_survey);
 
-    let lab_carry = carry_map_to_next_level(
+    let lab_carry = carry_map_to_next_level_with_pad(
         &title,
         post_brio_title,
         lab.level,
         [0, 15, 15, 29, 1, 29, 1],
+        &mut pad,
     );
     assert_eq!(
         (
@@ -55830,8 +56002,12 @@ fn carry_boulder_dash_through_heavy_machinery(
         ),
         "the uninterrupted campaign must retain The Lab's characterized hazard phase"
     );
-    let (lab_survey, lab_runtime) =
-        lab.run_carried(lab_carry, SurveyInputProfile::LabExactCampaignPhase, 4_200);
+    let (lab_survey, lab_runtime) = lab.run_carried_with_pad(
+        lab_carry,
+        SurveyInputProfile::LabExactCampaignPhase,
+        4_200,
+        &mut pad,
+    );
     assert_eq!(
         lab_survey.next_lid.map(|(_, lid)| lid),
         Some(i32::try_from(LevelId::LEVEL_COMPLETE.get()).unwrap()),
@@ -55846,23 +56022,27 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&lab_runtime),
         [0x500, 15, 15, 29, 1, 30, 0]
     );
-    let lab_completion_carry = lab.finish_checked(lab_runtime, LevelId::LEVEL_COMPLETE);
-    let post_lab_title = carry_completion_to_title(
+    let lab_completion_carry =
+        lab.finish_checked_with_replay(lab_runtime, LevelId::LEVEL_COMPLETE, &lab_survey);
+    let post_lab_title = carry_completion_to_title_with_pad(
         &completion,
         lab_completion_carry,
         [0x300, 15, 15, 29, 1, 30, 0],
+        &mut pad,
     );
 
-    let great_hall_carry = carry_map_to_next_level(
+    let great_hall_carry = carry_map_to_next_level_with_pad(
         &title,
         post_lab_title,
         great_hall.level,
         [0, 15, 15, 30, 1, 30, 1],
+        &mut pad,
     );
-    let (great_hall_survey, great_hall_runtime) = great_hall.run_carried(
+    let (great_hall_survey, great_hall_runtime) = great_hall.run_carried_with_pad(
         great_hall_carry,
         SurveyInputProfile::GreatHallCortexRoute,
         1_200,
+        &mut pad,
     );
     assert_eq!(
         great_hall_survey.next_lid.map(|(_, lid)| lid),
@@ -55887,18 +56067,24 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&great_hall_runtime),
         [0x300, 15, 15, 30, 1, 31, 0]
     );
-    let post_great_hall_title = great_hall.finish_checked(great_hall_runtime, LevelId::TITLE);
+    let post_great_hall_title = great_hall.finish_checked_with_replay(
+        great_hall_runtime,
+        LevelId::TITLE,
+        &great_hall_survey,
+    );
 
-    let cortex_carry = carry_map_to_next_level(
+    let cortex_carry = carry_map_to_next_level_with_pad(
         &title,
         post_great_hall_title,
         dr_neo_cortex.level,
         [0, 15, 15, 31, 1, 31, 1],
+        &mut pad,
     );
-    let (cortex_survey, cortex_runtime) = dr_neo_cortex.run_carried(
+    let (cortex_survey, cortex_runtime) = dr_neo_cortex.run_carried_with_pad(
         cortex_carry,
         SurveyInputProfile::CortexCompletionRoute,
         4_500,
+        &mut pad,
     );
     assert_eq!(
         cortex_survey.next_lid.map(|(_, lid)| lid),
@@ -55910,10 +56096,11 @@ fn carry_boulder_dash_through_heavy_machinery(
     assert_eq!(cortex_survey.death_camera_frames, 0);
     assert!(cortex_survey.first_terminal_fall.is_none());
     assert!(cortex_survey.is_clean(), "{}", cortex_survey.summary());
-    let ending_carry = dr_neo_cortex.finish_checked(cortex_runtime, LevelId::ENDING);
+    let ending_carry =
+        dr_neo_cortex.finish_checked_with_replay(cortex_runtime, LevelId::ENDING, &cortex_survey);
 
     let (ending_survey, ending_runtime) =
-        ending.run_carried(ending_carry, SurveyInputProfile::Idle, 3_600);
+        ending.run_carried_with_pad(ending_carry, SurveyInputProfile::Idle, 3_600, &mut pad);
     assert_eq!(
         ending_survey.next_lid.map(|(_, lid)| lid),
         Some(i32::try_from(LevelId::TITLE.get()).unwrap()),
@@ -55927,7 +56114,8 @@ fn carry_boulder_dash_through_heavy_machinery(
         campaign_progression_globals(&ending_runtime),
         [0, 15, 15, 31, 1, 32, 0]
     );
-    let title_after_ending_carry = ending.finish_checked(ending_runtime, LevelId::TITLE);
+    let title_after_ending_carry =
+        ending.finish_checked_with_replay(ending_runtime, LevelId::TITLE, &ending_survey);
     let title_after_ending =
         RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, title_after_ending_carry)
             .expect("Title must import the uninterrupted Ending carry");
@@ -69319,24 +69507,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         [(11, i32::try_from(LevelId::N_SANITY_BEACH.get()).unwrap())],
         "the first unlocked map node must request N. Sanity Beach"
     );
-    let initial_map_carry = {
-        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-        let report = initial_map
-            .runtime
-            .finish_level_transition(
-                &mut host,
-                i32::try_from(LevelId::N_SANITY_BEACH.get()).unwrap(),
-            )
-            .expect("initial Title Map LEVEL_END must export a session carry");
-        assert!(
-            report.event_failures.is_empty(),
-            "initial Title Map LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
-        );
-        assert_eq!(report.resolved.level, LevelId::N_SANITY_BEACH);
-        assert!(!report.resolved.bonus_return);
-        report.carry
-    };
+    let (initial_map_carry, mut pad) = initial_map.finish_transition(LevelId::N_SANITY_BEACH);
 
     let n_sanity = LevelId::N_SANITY_BEACH;
     let (n_sanity_nsd, n_sanity_nsf, n_sanity_nsf_bytes) =
@@ -69362,7 +69533,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     // Preserve the historical exact-campaign phase as an explicitly recorded
     // PBAK characterization. The publisher-first regression immediately above
     // proves the same opening through Jungle with physically possible input.
-    let (n_sanity_survey, mut n_sanity_runtime) = survey_pair_with_runtime(
+    let n_sanity_mount_held = pad.snapshot.held;
+    let (n_sanity_survey, mut n_sanity_runtime) = survey_pair_with_persistent_pad(
         known_name(n_sanity),
         n_sanity,
         &n_sanity_nsd,
@@ -69372,6 +69544,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::NSanityRecordedCompletionRoute,
         N_SANITY_FRAMES,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: n_sanity_mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("N. Sanity authored route must execute");
     assert_eq!(
@@ -69421,6 +69598,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
         assert!(!report.resolved.bonus_return);
         assert_eq!(report.carry.draw_count, n_sanity_draw_count);
+        n_sanity_survey
+            .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+            .expect("N. Sanity replay export must finish at Level Complete");
         report.carry
     };
 
@@ -69431,7 +69611,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         RetailRuntime::new_from_session(GLOBAL_WORDS, completion, completion_carry)
             .expect("Level Complete must import N. Sanity's session carry");
     assert_eq!(completion_runtime.draw_count(), n_sanity_draw_count);
-    let (completion_survey, mut completion_runtime) = survey_pair_with_runtime(
+    let completion_mount_held = pad.snapshot.held;
+    let (completion_survey, mut completion_runtime) = survey_pair_with_persistent_pad(
         known_name(completion),
         completion,
         &completion_nsd,
@@ -69441,6 +69622,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::DirectionAndButtonSweepToTransition,
         COMPLETION_FRAMES,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: completion_mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("Level Complete authored runtime must execute");
     assert_eq!(
@@ -69474,6 +69660,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         assert_eq!(report.resolved.level, LevelId::TITLE);
         assert!(!report.resolved.bonus_return);
         assert_eq!(report.carry.draw_count, completion_draw_count);
+        completion_survey
+            .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+            .expect("Level Complete replay export must finish at Title");
         report.carry
     };
 
@@ -69490,11 +69679,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     assert_eq!(title_carry.globals[LEVEL_COUNT_GLOBAL], 1);
     assert_eq!(title_carry.globals[LEVELS_UNLOCKED_GLOBAL], 2);
 
-    let mut post_completion_map = AuthoredTitleMapHarness::from_session(
+    let mut post_completion_map = AuthoredTitleMapHarness::from_session_with_pad(
         &title_nsd,
         &title_nsf,
         &title_nsf_bytes,
         title_carry,
+        pad,
     );
     assert_eq!(
         post_completion_map.runtime.draw_count(),
@@ -69558,23 +69748,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         0,
         "post-completion Map must retain no faulted authored object"
     );
-    let jungle_rollers_carry = {
-        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-        let report = post_completion_map
-            .runtime
-            .finish_level_transition(&mut host, 0x0c)
-            .expect("Title Map LEVEL_END must export the Jungle Rollers carry");
-        assert!(
-            report.event_failures.is_empty(),
-            "post-completion Map LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
-        );
-        assert_eq!(report.requested_lid, 0x0c);
-        assert_eq!(report.next_lid_after_event, 0x0c);
-        assert_eq!(report.resolved.level, LevelId::new_const(0x0c));
-        assert!(!report.resolved.bonus_return);
-        report.carry
-    };
+    let (jungle_rollers_carry, next_pad) =
+        post_completion_map.finish_transition(LevelId::new_const(0x0c));
+    pad = next_pad;
     assert_eq!(jungle_rollers_carry.globals[CURRENT_MAP_LEVEL_GLOBAL], 2);
     assert_eq!(jungle_rollers_carry.globals[LEVEL_COUNT_GLOBAL], 1);
     assert_eq!(jungle_rollers_carry.globals[LEVELS_UNLOCKED_GLOBAL], 2);
@@ -69598,7 +69774,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         2_628,
         "Jungle Rollers must inherit the authentic Map draw count"
     );
-    let (jungle_survey, mut jungle_runtime) = survey_pair_with_runtime(
+    let jungle_mount_held = pad.snapshot.held;
+    let (jungle_survey, mut jungle_runtime) = survey_pair_with_persistent_pad(
         known_name(jungle),
         jungle,
         &jungle_nsd,
@@ -69608,6 +69785,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::JunglePhaseRobust,
         3_000,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: jungle_mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("Jungle Rollers authentic-phase route must execute");
     assert_eq!(jungle_survey.frames, 2_758, "{}", jungle_survey.summary());
@@ -69716,6 +69898,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
         assert!(!report.resolved.bonus_return);
         assert!(report.effects.is_empty());
+        jungle_survey
+            .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+            .expect("Jungle Rollers replay export must finish at Level Complete");
         report.carry
     };
     assert_eq!(
@@ -69747,18 +69932,25 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         jungle_completion_carry,
     )
     .expect("Level Complete must import Jungle Rollers' session carry");
-    let (jungle_completion_survey, mut jungle_completion_runtime) = survey_pair_with_runtime(
-        known_name(LevelId::LEVEL_COMPLETE),
-        LevelId::LEVEL_COMPLETE,
-        &completion_nsd,
-        &completion_nsf,
-        &completion_nsf_bytes,
-        jungle_completion_runtime,
-        LevelContextSource::SessionGlobals,
-        SurveyInputProfile::DirectionAndButtonSweepToTransition,
-        COMPLETION_FRAMES,
-    )
-    .expect("Jungle Rollers' Level Complete runtime must execute");
+    let jungle_completion_mount_held = pad.snapshot.held;
+    let (jungle_completion_survey, mut jungle_completion_runtime) =
+        survey_pair_with_persistent_pad(
+            known_name(LevelId::LEVEL_COMPLETE),
+            LevelId::LEVEL_COMPLETE,
+            &completion_nsd,
+            &completion_nsf,
+            &completion_nsf_bytes,
+            jungle_completion_runtime,
+            LevelContextSource::SessionGlobals,
+            SurveyInputProfile::DirectionAndButtonSweepToTransition,
+            COMPLETION_FRAMES,
+            &mut pad,
+            PersistentSurveyPlan {
+                mount_held: jungle_completion_mount_held,
+                ..PersistentSurveyPlan::default()
+            },
+        )
+        .expect("Jungle Rollers' Level Complete runtime must execute");
     assert_eq!(jungle_completion_survey.frames, 393);
     assert_eq!(jungle_completion_survey.zone_transitions, 0);
     assert_eq!(jungle_completion_survey.restarts, 0);
@@ -69829,6 +70021,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         assert_eq!(report.resolved.level, LevelId::TITLE);
         assert!(!report.resolved.bonus_return);
         assert!(report.effects.is_empty());
+        jungle_completion_survey
+            .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+            .expect("Jungle completion replay export must finish at Title");
         report.carry
     };
     assert_eq!(
@@ -69854,11 +70049,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     );
     assert_eq!(post_jungle_title_carry.random_seed, 0x1bf4_a635);
     assert_eq!(post_jungle_title_carry.draw_count, 5_779);
-    let mut post_jungle_map = AuthoredTitleMapHarness::from_session(
+    let mut post_jungle_map = AuthoredTitleMapHarness::from_session_with_pad(
         &title_nsd,
         &title_nsf,
         &title_nsf_bytes,
         post_jungle_title_carry,
+        pad,
     );
     assert_eq!(post_jungle_map.runtime.draw_count(), 5_779);
     assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x1bf4_a635);
@@ -69909,24 +70105,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     assert_eq!(post_jungle_map.runtime.machine().random_seed(), 0x2f32_c56e);
     assert_eq!(post_jungle_map.runtime.draw_count(), 6_032);
 
-    let great_gate_carry: RetailSessionCarry = {
-        let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-        let report = post_jungle_map
-            .runtime
-            .finish_level_transition(&mut host, great_gate_lid)
-            .expect("post-Jungle Title Map must export The Great Gate carry");
-        assert!(
-            report.event_failures.is_empty(),
-            "post-Jungle Map LEVEL_END handlers must complete cleanly: {:?}",
-            report.event_failures
-        );
-        assert_eq!(report.requested_lid, great_gate_lid);
-        assert_eq!(report.next_lid_after_event, great_gate_lid);
-        assert_eq!(report.resolved.level, great_gate);
-        assert!(!report.resolved.bonus_return);
-        assert!(report.effects.is_empty());
-        report.carry
-    };
+    let (great_gate_carry, next_pad) = post_jungle_map.finish_transition(great_gate);
+    pad = next_pad;
     assert_eq!(
         [
             GAME_STATE_GLOBAL,
@@ -69955,7 +70135,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     let great_gate_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry.clone())
             .expect("The Great Gate must import the second-completion map carry");
-    let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_runtime(
+    let mut bonus_pad = pad;
+    let bonus_parent_mount_held = bonus_pad.snapshot.held;
+    let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_persistent_pad(
         known_name(great_gate),
         great_gate,
         &great_gate_nsd,
@@ -69965,6 +70147,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::GreatGateTawnaBonus,
         4_000,
+        &mut bonus_pad,
+        PersistentSurveyPlan {
+            mount_held: bonus_parent_mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("The Great Gate must execute through its Tawna bonus transition");
     assert_eq!(
@@ -70142,6 +70329,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         bonus_transition.carry.saved_level_state.as_ref(),
         Some(&expected_parent_snapshot)
     );
+    great_gate_survey
+        .export_finished_browser_replay(&bonus_transition.carry, bonus)
+        .expect("Great Gate Tawna replay export must finish at Bonus 2");
 
     let (bonus_nsd, bonus_nsf, bonus_nsf_bytes) =
         parse_local_pair(&root, bonus).expect("Bonus 2 pair must parse");
@@ -70178,7 +70368,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
     let bonus_runtime =
         RetailRuntime::new_from_session(GLOBAL_WORDS, bonus, bonus_transition.carry)
             .expect("Bonus 2 must import the Great Gate session carry");
-    let (bonus_survey, mut bonus_runtime) = survey_pair_with_runtime(
+    let bonus_mount_held = bonus_pad.snapshot.held;
+    let (bonus_survey, mut bonus_runtime) = survey_pair_with_persistent_pad(
         known_name(bonus),
         bonus,
         &bonus_nsd,
@@ -70188,6 +70379,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::TawnaBonusTwoCompletionRoute,
         700,
+        &mut bonus_pad,
+        PersistentSurveyPlan {
+            mount_held: bonus_mount_held,
+            ..PersistentSurveyPlan::default()
+        },
     )
     .expect("ordinary pad input must traverse Bonus 2 and request its Great Gate return");
     assert_eq!(bonus_survey.frames, 609, "{}", bonus_survey.summary());
@@ -70282,6 +70478,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         return_transition.carry.globals[CHECKPOINT_ID_GLOBAL],
         113 << 8
     );
+    bonus_survey
+        .export_finished_browser_replay(&return_transition.carry, great_gate)
+        .expect("Bonus 2 replay export must finish at the carried Great Gate return");
 
     let parent_graph = graph_for_pair(
         great_gate,
@@ -70407,7 +70606,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         let great_gate_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, great_gate, great_gate_carry)
                 .expect("The Great Gate must import the second-completion map carry");
-        let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_runtime(
+        let great_gate_mount_held = pad.snapshot.held;
+        let (great_gate_survey, mut great_gate_runtime) = survey_pair_with_persistent_pad(
             known_name(great_gate),
             great_gate,
             &great_gate_nsd,
@@ -70417,6 +70617,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             LevelContextSource::SessionGlobals,
             SurveyInputProfile::GreatGatePhaseRobust,
             3_400,
+            &mut pad,
+            PersistentSurveyPlan {
+                mount_held: great_gate_mount_held,
+                ..PersistentSurveyPlan::default()
+            },
         )
         .expect("The Great Gate must execute through its end WarpC transition");
         assert_eq!(
@@ -70596,6 +70801,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            great_gate_survey
+                .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+                .expect("Great Gate replay export must finish at Level Complete");
             report.carry
         };
         assert_eq!(
@@ -70627,8 +70835,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             great_gate_completion_carry,
         )
         .expect("Level Complete must import The Great Gate's session carry");
+        let great_gate_completion_mount_held = pad.snapshot.held;
         let (great_gate_completion_survey, mut great_gate_completion_runtime) =
-            survey_pair_with_runtime(
+            survey_pair_with_persistent_pad(
                 known_name(LevelId::LEVEL_COMPLETE),
                 LevelId::LEVEL_COMPLETE,
                 &completion_nsd,
@@ -70638,6 +70847,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::DirectionAndButtonSweepToTransition,
                 COMPLETION_FRAMES,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held: great_gate_completion_mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("The Great Gate's Level Complete runtime must execute");
         assert_eq!(great_gate_completion_survey.frames, 225);
@@ -70710,15 +70924,19 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::TITLE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            great_gate_completion_survey
+                .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+                .expect("Great Gate completion replay export must finish at Title");
             report.carry
         };
         assert_eq!(post_great_gate_title_carry.random_seed, 0x3c78_e2ea);
         assert_eq!(post_great_gate_title_carry.draw_count, 9_198);
-        let mut post_great_gate_map = AuthoredTitleMapHarness::from_session(
+        let mut post_great_gate_map = AuthoredTitleMapHarness::from_session_with_pad(
             &title_nsd,
             &title_nsf,
             &title_nsf_bytes,
             post_great_gate_title_carry,
+            pad,
         );
         post_great_gate_map.wait_until_ready(64);
         assert_eq!(post_great_gate_map.frame, 10);
@@ -70768,24 +70986,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             0xc90d_87bc
         );
         assert_eq!(post_great_gate_map.runtime.draw_count(), 9_451);
-        let boulders_carry: RetailSessionCarry = {
-            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-            let report = post_great_gate_map
-                .runtime
-                .finish_level_transition(&mut host, boulders_lid)
-                .expect("post-Great-Gate Map must export the Boulders carry");
-            assert!(
-                report.event_failures.is_empty(),
-                "post-Great-Gate Map LEVEL_END handlers must complete cleanly: {:?}",
-                report.event_failures
-            );
-            assert_eq!(report.requested_lid, boulders_lid);
-            assert_eq!(report.next_lid_after_event, boulders_lid);
-            assert_eq!(report.resolved.level, boulders);
-            assert!(!report.resolved.bonus_return);
-            assert!(report.effects.is_empty());
-            report.carry
-        };
+        let post_great_gate_map_draw_count = post_great_gate_map.runtime.draw_count();
+        let (boulders_carry, next_pad) = post_great_gate_map.finish_transition(boulders);
+        pad = next_pad;
         assert_eq!(
             [
                 GAME_STATE_GLOBAL,
@@ -70826,7 +71029,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         let boulders_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry.clone())
                 .expect("Boulders must import the third-completion map carry");
-        let (boulders_survey, boulders_runtime) = survey_pair_with_runtime(
+        let mut boulders_prefix_pad = pad;
+        let boulders_prefix_mount_held = boulders_prefix_pad.snapshot.held;
+        let (boulders_survey, boulders_runtime) = survey_pair_with_persistent_pad(
             known_name(boulders),
             boulders,
             &boulders_nsd,
@@ -70836,6 +71041,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             LevelContextSource::SessionGlobals,
             SurveyInputProfile::LocalPbakPrefix,
             770,
+            &mut boulders_prefix_pad,
+            PersistentSurveyPlan {
+                mount_held: boulders_prefix_mount_held,
+                ..PersistentSurveyPlan::default()
+            },
         )
         .expect("Boulders must execute the legally local authored pad prefix");
         assert_eq!(boulders_survey.frames, 770);
@@ -70902,7 +71112,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         assert_eq!(boulders_camera.progress.raw(), 3_840);
         assert_eq!(
             boulders_survey.final_player_translation,
-            Some([2_313_984, 8_158_316, -14_955_008])
+            Some([2_313_984, 8_158_310, -14_952_960])
         );
         assert_eq!(boulders_runtime.machine().random_seed(), 0x89f3_9240);
         assert_eq!(boulders_runtime.draw_count(), 10_221);
@@ -70910,18 +71120,25 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         let completion_route_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, boulders, boulders_carry)
                 .expect("Boulders completion route must import the map carry");
-        let (completion_route_survey, mut completion_route_runtime) = survey_pair_with_runtime(
-            known_name(boulders),
-            boulders,
-            &boulders_nsd,
-            &boulders_nsf,
-            &boulders_nsf_bytes,
-            completion_route_runtime,
-            LevelContextSource::SessionGlobals,
-            SurveyInputProfile::BouldersCompletionRoute,
-            2_300,
-        )
-        .expect("Boulders completion route must execute cleanly");
+        let boulders_completion_mount_held = pad.snapshot.held;
+        let (completion_route_survey, mut completion_route_runtime) =
+            survey_pair_with_persistent_pad(
+                known_name(boulders),
+                boulders,
+                &boulders_nsd,
+                &boulders_nsf,
+                &boulders_nsf_bytes,
+                completion_route_runtime,
+                LevelContextSource::SessionGlobals,
+                SurveyInputProfile::BouldersCompletionRoute,
+                2_300,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held: boulders_completion_mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
+            )
+            .expect("Boulders completion route must execute cleanly");
         assert_eq!(completion_route_survey.frames, 2_235);
         assert_eq!(
             completion_route_survey.terminal.as_deref(),
@@ -71038,6 +71255,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            completion_route_survey
+                .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+                .expect("Boulders replay export must finish at Level Complete");
             report.carry
         };
         assert_eq!(boulders_completion_carry.random_seed, 0x5637_fe9d);
@@ -71070,8 +71290,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             boulders_completion_carry,
         )
         .expect("Level Complete must import Boulders' session carry");
+        let boulders_screen_mount_held = pad.snapshot.held;
         let (boulders_completion_survey, mut boulders_completion_runtime) =
-            survey_pair_with_runtime(
+            survey_pair_with_persistent_pad(
                 known_name(LevelId::LEVEL_COMPLETE),
                 LevelId::LEVEL_COMPLETE,
                 &completion_nsd,
@@ -71081,6 +71302,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::DirectionAndButtonSweepToTransition,
                 COMPLETION_FRAMES,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held: boulders_screen_mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("Boulders' Level Complete runtime must execute");
         assert_eq!(
@@ -71168,16 +71394,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::TITLE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            boulders_completion_survey
+                .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+                .expect("Boulders completion replay export must finish at Title");
             report.carry
         };
         assert_eq!(post_boulders_title_carry.random_seed, 0x650e_d54b);
         assert_eq!(post_boulders_title_carry.draw_count, 11_871);
 
-        let mut post_boulders_map = AuthoredTitleMapHarness::from_session(
+        let mut post_boulders_map = AuthoredTitleMapHarness::from_session_with_pad(
             &title_nsd,
             &title_nsf,
             &title_nsf_bytes,
             post_boulders_title_carry,
+            pad,
         );
         post_boulders_map.wait_until_ready(64);
         assert_eq!(post_boulders_map.frame, 10);
@@ -71227,25 +71457,10 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             0x98a5_de72
         );
         assert_eq!(post_boulders_map.runtime.draw_count(), 12_124);
+        let post_boulders_map_draw_count = post_boulders_map.runtime.draw_count();
 
-        let upstream_carry: RetailSessionCarry = {
-            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-            let report = post_boulders_map
-                .runtime
-                .finish_level_transition(&mut host, upstream_lid)
-                .expect("post-Boulders Map must export the Upstream carry");
-            assert!(
-                report.event_failures.is_empty(),
-                "post-Boulders Map LEVEL_END handlers must complete cleanly: {:?}",
-                report.event_failures
-            );
-            assert_eq!(report.requested_lid, upstream_lid);
-            assert_eq!(report.next_lid_after_event, upstream_lid);
-            assert_eq!(report.resolved.level, upstream);
-            assert!(!report.resolved.bonus_return);
-            assert!(report.effects.is_empty());
-            report.carry
-        };
+        let (upstream_carry, next_pad) = post_boulders_map.finish_transition(upstream);
+        pad = next_pad;
         assert_eq!(upstream_carry.random_seed, 0x98a5_de72);
         assert_eq!(upstream_carry.draw_count, 12_124);
         assert_eq!(
@@ -71275,7 +71490,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         let upstream_runtime =
             RetailRuntime::new_from_session(GLOBAL_WORDS, upstream, upstream_carry)
                 .expect("Upstream must import the fourth-completion map carry");
-        let (upstream_survey, mut upstream_runtime) = survey_pair_with_runtime(
+        let upstream_mount_held = pad.snapshot.held;
+        let (upstream_survey, mut upstream_runtime) = survey_pair_with_persistent_pad(
             known_name(upstream),
             upstream,
             &upstream_nsd,
@@ -71285,6 +71501,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             LevelContextSource::SessionGlobals,
             SurveyInputProfile::UpstreamPhaseRobust,
             4_000,
+            &mut pad,
+            PersistentSurveyPlan {
+                mount_held: upstream_mount_held,
+                ..PersistentSurveyPlan::default()
+            },
         )
         .expect("Upstream must complete from the carried campaign phase");
         assert_eq!(
@@ -71429,6 +71650,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            upstream_survey
+                .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+                .expect("Upstream replay export must finish at Level Complete");
             report.carry
         };
         assert_eq!(upstream_completion_carry.random_seed, 0x197f_1ee0);
@@ -71461,8 +71685,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             upstream_completion_carry,
         )
         .expect("Level Complete must import Upstream's session carry");
+        let upstream_screen_mount_held = pad.snapshot.held;
         let (upstream_completion_survey, mut upstream_completion_runtime) =
-            survey_pair_with_runtime(
+            survey_pair_with_persistent_pad(
                 known_name(LevelId::LEVEL_COMPLETE),
                 LevelId::LEVEL_COMPLETE,
                 &completion_nsd,
@@ -71472,6 +71697,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::DirectionAndButtonSweepToTransition,
                 COMPLETION_FRAMES,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held: upstream_screen_mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("Upstream's Level Complete runtime must execute");
         assert_eq!(
@@ -71559,6 +71789,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::TITLE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            upstream_completion_survey
+                .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+                .expect("Upstream completion replay export must finish at Title");
             report.carry
         };
         assert_eq!(post_upstream_title_carry.random_seed, 0x5f14_3d6c);
@@ -71585,11 +71818,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             ]
         );
 
-        let mut post_upstream_map = AuthoredTitleMapHarness::from_session(
+        let mut post_upstream_map = AuthoredTitleMapHarness::from_session_with_pad(
             &title_nsd,
             &title_nsf,
             &title_nsf_bytes,
             post_upstream_title_carry,
+            pad,
         );
         post_upstream_map.wait_until_ready(64);
         assert_eq!(post_upstream_map.frame, 10);
@@ -71641,24 +71875,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         );
         assert_eq!(post_upstream_map.runtime.draw_count(), 15_491);
 
-        let papu_papu_carry: RetailSessionCarry = {
-            let mut host = NsfProgramHost::new(&title_nsd, &title_nsf, &title_nsf_bytes);
-            let report = post_upstream_map
-                .runtime
-                .finish_level_transition(&mut host, papu_papu_lid)
-                .expect("post-Upstream Map must export the Papu Papu carry");
-            assert!(
-                report.event_failures.is_empty(),
-                "post-Upstream Map LEVEL_END handlers must complete cleanly: {:?}",
-                report.event_failures
-            );
-            assert_eq!(report.requested_lid, papu_papu_lid);
-            assert_eq!(report.next_lid_after_event, papu_papu_lid);
-            assert_eq!(report.resolved.level, papu_papu);
-            assert!(!report.resolved.bonus_return);
-            assert!(report.effects.is_empty());
-            report.carry
-        };
+        let (papu_papu_carry, next_pad) = post_upstream_map.finish_transition(papu_papu);
+        pad = next_pad;
         assert_eq!(papu_papu_carry.random_seed, 0x0a76_ce04);
         assert_eq!(papu_papu_carry.draw_count, 15_491);
         assert_eq!(
@@ -71689,8 +71907,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             let papu_papu_completion_runtime =
                 RetailRuntime::new_from_session(GLOBAL_WORDS, papu_papu, papu_papu_carry)
                     .expect("Papu Papu's completion route must import the carried Map phase");
+            let mount_held = pad.snapshot.held;
             let (papu_papu_completion_survey, mut papu_papu_completion_runtime) =
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(papu_papu),
                     papu_papu,
                     &papu_papu_nsd,
@@ -71700,6 +71919,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::PapuPapuCompletionRoute,
                     900,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Papu Papu's carried ordinary-pad completion route must execute");
             assert_eq!(papu_papu_completion_survey.frames, 812);
@@ -71927,6 +72151,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, LevelId::TITLE);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                papu_papu_completion_survey
+                    .export_finished_browser_replay(&report.carry, LevelId::TITLE)
+                    .expect("Papu Papu replay export must finish at Title");
                 report.carry
             };
             assert_eq!(carry.random_seed, 0x1930_1bfe);
@@ -71963,15 +72190,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             title_nsf: &Nsf,
             title_nsf_bytes: &[u8],
             papu_title_carry: RetailSessionCarry,
-        ) -> RetailSessionCarry {
+            pad: PersistentPadState,
+        ) -> (RetailSessionCarry, PersistentPadState) {
             let rolling_stones = LevelId::new_const(0x15);
             let rolling_stones_lid = i32::try_from(rolling_stones.get()).unwrap();
             {
-                let mut post_papu_map = AuthoredTitleMapHarness::from_session(
+                let mut post_papu_map = AuthoredTitleMapHarness::from_session_with_pad(
                     title_nsd,
                     title_nsf,
                     title_nsf_bytes,
                     papu_title_carry,
+                    pad,
                 );
                 post_papu_map.wait_until_ready(64);
                 assert_eq!(post_papu_map.frame, 10);
@@ -72045,23 +72274,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(post_papu_map.runtime.machine().random_seed(), 0x1930_1bfe);
                 assert_eq!(post_papu_map.runtime.draw_count(), 16_369);
 
-                let mut host = NsfProgramHost::new(title_nsd, title_nsf, title_nsf_bytes);
-                let report = post_papu_map
-                    .runtime
-                    .finish_level_transition(&mut host, rolling_stones_lid)
-                    .expect("post-Papu Map must export the Rolling Stones carry");
-                assert!(
-                    report.event_failures.is_empty(),
-                    "post-Papu Map LEVEL_END handlers must complete cleanly: {:?}",
-                    report.event_failures
-                );
-                assert_eq!(report.requested_lid, rolling_stones_lid);
-                assert_eq!(report.next_lid_after_event, report.requested_lid);
-                assert_eq!(report.resolved.level, rolling_stones);
-                assert!(!report.resolved.bonus_return);
-                assert!(report.effects.is_empty());
-                assert_eq!(report.carry.random_seed, 0x1930_1bfe);
-                assert_eq!(report.carry.draw_count, 16_369);
+                let (carry, pad) = post_papu_map.finish_transition(rolling_stones);
+                assert_eq!(carry.random_seed, 0x1930_1bfe);
+                assert_eq!(carry.draw_count, 16_369);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -72072,7 +72287,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                         LEVELS_UNLOCKED_GLOBAL,
                         ISLAND_CAMERA_STATE_GLOBAL,
                     ]
-                    .map(|index| report.carry.globals[index]),
+                    .map(|index| carry.globals[index]),
                     [
                         0,
                         TitleScreen::Map.raw(),
@@ -72083,21 +72298,24 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                         1,
                     ]
                 );
-                report.carry
+                (carry, pad)
             }
         }
-        let rolling_stones_carry = post_papu_map_to_rolling_stones(
+        let (rolling_stones_carry, next_pad) = post_papu_map_to_rolling_stones(
             &title_nsd,
             &title_nsf,
             &title_nsf_bytes,
             papu_title_carry,
+            pad,
         );
+        pad = next_pad;
 
         // This second call frame similarly bounds the mounted gameplay runtime.
         #[allow(clippy::items_after_statements)]
         fn assert_carried_rolling_stones_route(
             root: &Path,
             rolling_stones_carry: RetailSessionCarry,
+            pad: &mut PersistentPadState,
         ) -> RetailSessionCarry {
             let rolling_stones = LevelId::new_const(0x15);
             let known_name = |level| {
@@ -72109,8 +72327,13 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             };
             let (rolling_stones_nsd, rolling_stones_nsf, rolling_stones_nsf_bytes) =
                 parse_local_pair(root, rolling_stones).expect("Rolling Stones pair must parse");
+            // The existing exact Rolling Stones controller is characterized from a
+            // neutral pad epoch. A carried post-Papu map history currently misses the
+            // final route jump, so keep this honest seam explicit: replay composition
+            // must not claim continuity across the mismatched checkpoints.
+            *pad = PersistentPadState::default();
             let mut rolling_stones_result = Box::new(
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(rolling_stones),
                     rolling_stones,
                     &rolling_stones_nsd,
@@ -72125,6 +72348,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::RollingStonesExactCampaign,
                     3_200,
+                    pad,
+                    PersistentSurveyPlan::default(),
                 )
                 .expect("Rolling Stones' carried ordinary-pad route must execute"),
             );
@@ -72288,6 +72513,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
             assert!(!report.resolved.bonus_return);
             assert!(report.effects.is_empty());
+            rolling_stones_survey
+                .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+                .expect("Rolling Stones replay export must finish at Level Complete");
             assert_eq!(report.carry.random_seed, 0x562e_0400);
             assert_eq!(report.carry.draw_count, 18_890);
             assert_eq!(
@@ -72322,11 +72550,16 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             .name("carried-rolling-stones-route".to_owned())
             .stack_size(8 * 1024 * 1024)
             .spawn(move || {
-                let completion_carry =
-                    assert_carried_rolling_stones_route(&rolling_stones_root, rolling_stones_carry);
+                let mut pad = pad;
+                let completion_carry = assert_carried_rolling_stones_route(
+                    &rolling_stones_root,
+                    rolling_stones_carry,
+                    &mut pad,
+                );
                 carry_rolling_stones_through_native_to_lost_city(
                     &rolling_stones_root,
                     completion_carry,
+                    pad,
                 );
             })
             .expect("the carried Rolling Stones route worker must start")
@@ -72339,6 +72572,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
         fn carry_rolling_stones_through_native_to_lost_city(
             root: &Path,
             rolling_stones_completion_carry: RetailSessionCarry,
+            mut pad: PersistentPadState,
         ) {
             let known_name = |level| {
                 KNOWN_LEVELS
@@ -72363,8 +72597,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             let (title_nsd, title_nsf, title_nsf_bytes) =
                 parse_local_pair(root, title).expect("Title pair must parse");
 
+            let mount_held = pad.snapshot.held;
             let (rolling_completion_survey, mut rolling_completion_runtime) =
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(completion),
                     completion,
                     &completion_nsd,
@@ -72379,6 +72614,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::DirectionAndButtonSweepToTransition,
                     600,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Rolling Stones' Level Complete screen must execute");
             assert_eq!(rolling_completion_survey.frames, 465);
@@ -72445,6 +72685,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                rolling_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Rolling Stones completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0x76ec_574e);
                 assert_eq!(report.carry.draw_count, 19_355);
                 assert_eq!(
@@ -72463,11 +72706,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 report.carry
             };
 
-            let mut pre_hog_map = AuthoredTitleMapHarness::from_session(
+            let mut pre_hog_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 rolling_title_carry,
+                pad,
             );
             pre_hog_map.wait_until_ready(64);
             assert_eq!(pre_hog_map.frame, 10);
@@ -72535,12 +72779,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     .map(|index| report.carry.globals[index]),
                     [0, 15, 15, 8, 1, 8, 1]
                 );
+                pre_hog_map
+                    .replay
+                    .as_ref()
+                    .expect("pre-Hog map replay capture must be mounted")
+                    .export_transition_from_carry(&report.carry, &pre_hog_map.pad, hog_wild.get())
+                    .expect("pre-Hog map replay export must finish at Hog Wild");
+                pad = pre_hog_map.pad;
                 report.carry
             };
 
             let (hog_nsd, hog_nsf, hog_nsf_bytes) =
                 parse_local_pair(root, hog_wild).expect("Hog Wild pair must parse");
-            let (hog_survey, mut hog_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (hog_survey, mut hog_runtime) = survey_pair_with_persistent_pad(
                 known_name(hog_wild),
                 hog_wild,
                 &hog_nsd,
@@ -72551,6 +72803,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::HogWildCompletionRoute,
                 2_200,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("authentic carried Hog Wild route must execute");
             assert_eq!(hog_survey.frames, 1_949);
@@ -72637,6 +72894,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                hog_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("Hog Wild replay export must finish at Level Complete");
                 assert_eq!(report.carry.random_seed, 0xab9a_b36b);
                 assert_eq!(report.carry.draw_count, 21_557);
                 assert_eq!(
@@ -72655,19 +72915,26 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 report.carry
             };
 
-            let (hog_completion_survey, mut hog_completion_runtime) = survey_pair_with_runtime(
-                known_name(completion),
-                completion,
-                &completion_nsd,
-                &completion_nsf,
-                &completion_nsf_bytes,
-                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, hog_completion_carry)
-                    .expect("Level Complete must import authentic Hog Wild carry"),
-                LevelContextSource::SessionGlobals,
-                SurveyInputProfile::DirectionAndButtonSweepToTransition,
-                600,
-            )
-            .expect("Hog Wild's authentic Level Complete screen must execute");
+            let mount_held = pad.snapshot.held;
+            let (hog_completion_survey, mut hog_completion_runtime) =
+                survey_pair_with_persistent_pad(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(GLOBAL_WORDS, completion, hog_completion_carry)
+                        .expect("Level Complete must import authentic Hog Wild carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    600,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
+                )
+                .expect("Hog Wild's authentic Level Complete screen must execute");
             assert_eq!(hog_completion_survey.frames, 305);
             assert_eq!(
                 hog_completion_survey.terminal.as_deref(),
@@ -72720,6 +72987,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                hog_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Hog Wild completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0x53a6_4a6e);
                 assert_eq!(report.carry.draw_count, 21_862);
                 assert_eq!(
@@ -72738,11 +73008,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 report.carry
             };
 
-            let mut post_hog_map = AuthoredTitleMapHarness::from_session(
+            let mut post_hog_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_hog_title_carry,
+                pad,
             );
             post_hog_map.wait_until_ready(64);
             assert_eq!(post_hog_map.frame, 10);
@@ -72811,11 +73082,23 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     .map(|index| report.carry.globals[index]),
                     [0, 15, 15, 9, 1, 9, 1]
                 );
+                post_hog_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Hog map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_hog_map.pad,
+                        native_fortress.get(),
+                    )
+                    .expect("post-Hog map replay export must finish at Native Fortress");
+                pad = post_hog_map.pad;
                 report.carry
             };
             let (native_nsd, native_nsf, native_nsf_bytes) =
                 parse_local_pair(root, native_fortress).expect("Native Fortress pair must parse");
-            let (native_survey, mut native_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (native_survey, mut native_runtime) = survey_pair_with_persistent_pad(
                 known_name(native_fortress),
                 native_fortress,
                 &native_nsd,
@@ -72826,6 +73109,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::NativeFortressD6Route,
                 7_000,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("the authentic carried Native Fortress route must execute");
             assert_eq!(native_survey.frames, 6_730, "{}", native_survey.summary());
@@ -72917,13 +73205,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                native_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("Native Fortress replay export must finish at Level Complete");
                 assert_eq!(report.carry.random_seed, 0x2388_0145);
                 assert_eq!(report.carry.draw_count, 28_845);
                 report.carry
             };
 
+            let mount_held = pad.snapshot.held;
             let (native_completion_survey, mut native_completion_runtime) =
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(completion),
                     completion,
                     &completion_nsd,
@@ -72938,6 +73230,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::DirectionAndButtonSweepToTransition,
                     600,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Native Fortress' authentic Level Complete screen must execute");
             assert_eq!(native_completion_survey.frames, 425);
@@ -72987,16 +73284,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                native_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Native Fortress completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0xf44b_20c8);
                 assert_eq!(report.carry.draw_count, 29_270);
                 report.carry
             };
 
-            let mut post_native_map = AuthoredTitleMapHarness::from_session(
+            let mut post_native_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_native_title_carry,
+                pad,
             );
             post_native_map.wait_until_ready(64);
             assert_eq!(post_native_map.frame, 10);
@@ -73041,6 +73342,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, up_the_creek);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                post_native_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Native map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_native_map.pad,
+                        up_the_creek.get(),
+                    )
+                    .expect("post-Native map replay export must finish at Up the Creek");
+                pad = post_native_map.pad;
                 assert_eq!(report.carry.random_seed, 0xeb35_f712);
                 assert_eq!(report.carry.draw_count, 29_523);
                 report.carry
@@ -73048,7 +73360,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
 
             let (up_nsd, up_nsf, up_nsf_bytes) =
                 parse_local_pair(root, up_the_creek).expect("Up the Creek pair must parse");
-            let (up_survey, mut up_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (up_survey, mut up_runtime) = survey_pair_with_persistent_pad(
                 known_name(up_the_creek),
                 up_the_creek,
                 &up_nsd,
@@ -73059,6 +73372,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::UpTheCreekCompletionRoute,
                 4_700,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("the authentic carried Up the Creek route must execute");
             assert_eq!(up_survey.frames, 4_346, "{}", up_survey.summary());
@@ -73135,23 +73453,33 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                up_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("Up the Creek replay export must finish at Level Complete");
                 assert_eq!(report.carry.random_seed, 0xe4e1_81e6);
                 assert_eq!(report.carry.draw_count, 33_869);
                 report.carry
             };
-            let (up_completion_survey, mut up_completion_runtime) = survey_pair_with_runtime(
-                known_name(completion),
-                completion,
-                &completion_nsd,
-                &completion_nsf,
-                &completion_nsf_bytes,
-                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, up_completion_carry)
-                    .expect("Level Complete must import authentic Up the Creek carry"),
-                LevelContextSource::SessionGlobals,
-                SurveyInputProfile::DirectionAndButtonSweepToTransition,
-                600,
-            )
-            .expect("Up the Creek's authentic Level Complete screen must execute");
+            let mount_held = pad.snapshot.held;
+            let (up_completion_survey, mut up_completion_runtime) =
+                survey_pair_with_persistent_pad(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(GLOBAL_WORDS, completion, up_completion_carry)
+                        .expect("Level Complete must import authentic Up the Creek carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    600,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
+                )
+                .expect("Up the Creek's authentic Level Complete screen must execute");
             assert_eq!(up_completion_survey.frames, 185);
             assert_eq!(
                 up_completion_survey.terminal.as_deref(),
@@ -73233,16 +73561,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                up_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Up the Creek completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0x9147_eb46);
                 assert_eq!(report.carry.draw_count, 34_054);
                 report.carry
             };
 
-            let mut post_up_map = AuthoredTitleMapHarness::from_session(
+            let mut post_up_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_up_title_carry,
+                pad,
             );
             post_up_map.wait_until_ready(64);
             assert_eq!(post_up_map.frame, 10);
@@ -73296,6 +73628,13 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, ripper_roo);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                post_up_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Up map replay capture must be mounted")
+                    .export_transition_from_carry(&report.carry, &post_up_map.pad, ripper_roo.get())
+                    .expect("post-Up map replay export must finish at Ripper Roo");
+                pad = post_up_map.pad;
                 assert_eq!(report.carry.random_seed, 0x7bff_c615);
                 assert_eq!(report.carry.draw_count, 34_307);
                 report.carry
@@ -73303,7 +73642,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
 
             let (ripper_nsd, ripper_nsf, ripper_nsf_bytes) =
                 parse_local_pair(root, ripper_roo).expect("Ripper Roo pair must parse");
-            let (ripper_survey, mut ripper_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (ripper_survey, mut ripper_runtime) = survey_pair_with_persistent_pad(
                 known_name(ripper_roo),
                 ripper_roo,
                 &ripper_nsd,
@@ -73314,6 +73654,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::RipperRooCompletionRoute,
                 2_600,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("the authentic carried Ripper Roo route must execute");
             assert_eq!(ripper_survey.frames, 2_064, "{}", ripper_survey.summary());
@@ -73401,16 +73746,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                ripper_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Ripper Roo replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0xca54_0d03);
                 assert_eq!(report.carry.draw_count, 36_371);
                 report.carry
             };
 
-            let mut post_ripper_map = AuthoredTitleMapHarness::from_session(
+            let mut post_ripper_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_ripper_title_carry,
+                pad,
             );
             post_ripper_map.wait_until_ready(64);
             assert_eq!(post_ripper_map.frame, 10);
@@ -73464,13 +73813,23 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.resolved.level, lost_city);
                 assert!(!report.resolved.bonus_return);
                 assert!(report.effects.is_empty());
+                post_ripper_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Ripper map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_ripper_map.pad,
+                        lost_city.get(),
+                    )
+                    .expect("post-Ripper map replay export must finish at The Lost City");
+                pad = post_ripper_map.pad;
                 assert_eq!(report.carry.random_seed, 0xc1e0_197b);
                 assert_eq!(report.carry.draw_count, 36_624);
                 report.carry
             };
             let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
                 parse_local_pair(root, lost_city).expect("The Lost City pair must parse");
-            let mut lost_city_pad = PersistentPadState::default();
             let (lost_city_survey, mut lost_city_runtime) = survey_pair_with_persistent_pad(
                 known_name(lost_city),
                 lost_city,
@@ -73482,7 +73841,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::LostCityExactCarryRoute,
                 7_000,
-                &mut lost_city_pad,
+                &mut pad,
                 PersistentSurveyPlan {
                     mount_held: PAD_CROSS,
                     initial_idle_frames: 0,
@@ -73580,7 +73939,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(lost_city_runtime.machine().random_seed(), 0x1e7c_7803);
             assert_eq!(lost_city_runtime.random_seed_b(), 0xf306_0442);
             assert_eq!(lost_city_runtime.draw_count(), 43_071);
-            assert_eq!(lost_city_pad.snapshot.held, PAD_LEFT | PAD_SQUARE);
+            assert_eq!(pad.snapshot.held, PAD_LEFT | PAD_SQUARE);
             assert_eq!(lost_city_runtime.faulted_object_count(), 0);
 
             let lost_city_completion_carry = {
@@ -73600,12 +73959,15 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x2d);
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
+                lost_city_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("The Lost City replay export must finish at Level Complete");
                 assert_eq!(report.carry.random_seed, 0x1e7c_7803);
                 assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
                 assert_eq!(report.carry.draw_count, 43_071);
                 report.carry
             };
-            let completion_mount_held = lost_city_pad.snapshot.held;
+            let completion_mount_held = pad.snapshot.held;
             let (lost_completion_survey, mut lost_completion_runtime) =
                 survey_pair_with_persistent_pad(
                     known_name(completion),
@@ -73622,7 +73984,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::DirectionAndButtonSweepToTransition,
                     600,
-                    &mut lost_city_pad,
+                    &mut pad,
                     PersistentSurveyPlan {
                         mount_held: completion_mount_held,
                         initial_idle_frames: 0,
@@ -73687,7 +74049,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(lost_completion_runtime.random_seed_b(), 0xf306_0442);
             assert_eq!(lost_completion_runtime.draw_count(), 43_343);
             assert_eq!(
-                lost_city_pad.snapshot,
+                pad.snapshot,
                 RetailPadSnapshot {
                     tapped: PAD_CROSS,
                     held: PAD_CROSS,
@@ -73713,16 +74075,20 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x19);
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
+                lost_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("The Lost City completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0xc89d_8ae6);
                 assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
                 assert_eq!(report.carry.draw_count, 43_343);
                 report.carry
             };
-            let mut post_lost_city_map = AuthoredTitleMapHarness::from_session(
+            let mut post_lost_city_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 lost_city_title_carry,
+                pad,
             );
             post_lost_city_map.wait_until_ready(64);
             assert_eq!(post_lost_city_map.frame, 10);
@@ -73810,6 +74176,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x1c);
                 assert_eq!(report.resolved.level, temple_ruins);
                 assert!(!report.resolved.bonus_return);
+                post_lost_city_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Lost-City map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_lost_city_map.pad,
+                        temple_ruins.get(),
+                    )
+                    .expect("post-Lost-City map replay export must finish at Temple Ruins");
+                pad = post_lost_city_map.pad;
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -73830,7 +74207,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             };
             let (temple_nsd, temple_nsf, temple_nsf_bytes) =
                 parse_local_pair(root, temple_ruins).expect("Temple Ruins pair must parse");
-            let (temple_mount_survey, mut temple_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (temple_mount_survey, mut temple_runtime) = survey_pair_with_persistent_pad(
                 known_name(temple_ruins),
                 temple_ruins,
                 &temple_nsd,
@@ -73841,6 +74219,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::TempleRuinsCompletionRoute,
                 6_000,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("the authentic campaign must execute Temple Ruins' completion route");
             assert_eq!(
@@ -73933,6 +74316,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x2d);
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
+                temple_mount_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("Temple Ruins replay export must finish at Level Complete");
                 assert_eq!(report.carry.random_seed, 0x1160_9e42);
                 assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
                 assert_eq!(report.carry.draw_count, 48_033);
@@ -73951,8 +74337,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 );
                 report.carry
             };
+            let mount_held = pad.snapshot.held;
             let (temple_completion_survey, mut temple_completion_runtime) =
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(completion),
                     completion,
                     &completion_nsd,
@@ -73967,6 +74354,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::DirectionAndButtonSweepToTransition,
                     700,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Temple Ruins' authentic Level Complete screen must execute");
             assert_eq!(temple_completion_survey.frames, 633);
@@ -74037,6 +74429,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x19);
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
+                temple_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Temple Ruins completion replay export must finish at Title");
                 assert_eq!(report.carry.random_seed, 0x3601_0088);
                 assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
                 assert_eq!(report.carry.draw_count, 48_666);
@@ -74055,11 +74450,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 );
                 report.carry
             };
-            let mut post_temple_map = AuthoredTitleMapHarness::from_session(
+            let mut post_temple_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_temple_title_carry,
+                pad,
             );
             post_temple_map.wait_until_ready(64);
             assert_eq!(post_temple_map.frame, 10);
@@ -74165,6 +74561,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x14);
                 assert_eq!(report.resolved.level, road_to_nowhere);
                 assert!(!report.resolved.bonus_return);
+                post_temple_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Temple map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_temple_map.pad,
+                        road_to_nowhere.get(),
+                    )
+                    .expect("post-Temple map replay export must finish at Road to Nowhere");
+                pad = post_temple_map.pad;
                 assert_eq!(report.carry.random_seed, 0x2d26_d8d2);
                 assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
                 assert_eq!(report.carry.draw_count, 48_919);
@@ -74185,7 +74592,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             };
             let (road_nsd, road_nsf, road_nsf_bytes) =
                 parse_local_pair(root, road_to_nowhere).expect("Road to Nowhere pair must parse");
-            let (road_mount_survey, road_mount_runtime) = survey_pair_with_runtime(
+            let mut road_mount_pad = pad;
+            let mount_held = road_mount_pad.snapshot.held;
+            let (road_mount_survey, road_mount_runtime) = survey_pair_with_persistent_pad(
                 known_name(road_to_nowhere),
                 road_to_nowhere,
                 &road_nsd,
@@ -74196,6 +74605,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::RoadToNowhereCompletionRoute,
                 1,
+                &mut road_mount_pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("Road to Nowhere's carried first frame must execute");
             assert_eq!(road_mount_survey.frames, 1);
@@ -74261,7 +74675,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 road_mount_survey.summary()
             );
 
-            let (road_survey, mut road_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (road_survey, mut road_runtime) = survey_pair_with_persistent_pad(
                 known_name(road_to_nowhere),
                 road_to_nowhere,
                 &road_nsd,
@@ -74272,6 +74687,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::RoadToNowhereCompletionRoute,
                 2_800,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("Road to Nowhere's authentic carried completion route must execute");
             assert_eq!(road_survey.frames, 2_449);
@@ -74396,21 +74816,35 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x2d);
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
+                road_survey
+                    .export_finished_browser_replay(&report.carry, completion)
+                    .expect("Road to Nowhere replay export must finish at Level Complete");
                 report.carry
             };
-            let (road_completion_survey, mut road_completion_runtime) = survey_pair_with_runtime(
-                known_name(completion),
-                completion,
-                &completion_nsd,
-                &completion_nsf,
-                &completion_nsf_bytes,
-                RetailRuntime::new_from_session(GLOBAL_WORDS, completion, road_completion_carry)
+            let mount_held = pad.snapshot.held;
+            let (road_completion_survey, mut road_completion_runtime) =
+                survey_pair_with_persistent_pad(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        completion,
+                        road_completion_carry,
+                    )
                     .expect("Level Complete must import Road to Nowhere's authentic carry"),
-                LevelContextSource::SessionGlobals,
-                SurveyInputProfile::DirectionAndButtonSweepToTransition,
-                700,
-            )
-            .expect("Road to Nowhere's authentic Level Complete screen must execute");
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    700,
+                    &mut pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
+                )
+                .expect("Road to Nowhere's authentic Level Complete screen must execute");
             assert_eq!(
                 road_completion_survey.next_lid.map(|(_, lid)| lid),
                 Some(0x19),
@@ -74431,13 +74865,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x19);
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
+                road_completion_survey
+                    .export_finished_browser_replay(&report.carry, title)
+                    .expect("Road to Nowhere completion replay export must finish at Title");
                 report.carry
             };
-            let mut post_road_map = AuthoredTitleMapHarness::from_session(
+            let mut post_road_map = AuthoredTitleMapHarness::from_session_with_pad(
                 &title_nsd,
                 &title_nsf,
                 &title_nsf_bytes,
                 post_road_title_carry,
+                pad,
             );
             post_road_map.wait_until_ready(64);
             assert_eq!(post_road_map.frame, 10);
@@ -74468,12 +74906,25 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x13);
                 assert_eq!(report.resolved.level, boulder_dash);
                 assert!(!report.resolved.bonus_return);
+                post_road_map
+                    .replay
+                    .as_ref()
+                    .expect("post-Road map replay capture must be mounted")
+                    .export_transition_from_carry(
+                        &report.carry,
+                        &post_road_map.pad,
+                        boulder_dash.get(),
+                    )
+                    .expect("post-Road map replay export must finish at Boulder Dash");
+                pad = post_road_map.pad;
                 report.carry
             };
             let (boulder_dash_nsd, boulder_dash_nsf, boulder_dash_nsf_bytes) =
                 parse_local_pair(root, boulder_dash).expect("Boulder Dash pair must parse");
+            let mut boulder_dash_mount_pad = pad;
+            let mount_held = boulder_dash_mount_pad.snapshot.held;
             let (boulder_dash_mount_survey, _boulder_dash_mount_runtime) =
-                survey_pair_with_runtime(
+                survey_pair_with_persistent_pad(
                     known_name(boulder_dash),
                     boulder_dash,
                     &boulder_dash_nsd,
@@ -74488,11 +74939,17 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     LevelContextSource::SessionGlobals,
                     SurveyInputProfile::BoulderDashCompletionRoute,
                     1,
+                    &mut boulder_dash_mount_pad,
+                    PersistentSurveyPlan {
+                        mount_held,
+                        ..PersistentSurveyPlan::default()
+                    },
                 )
                 .expect("Boulder Dash's carried first frame must execute");
             assert!(boulder_dash_mount_survey.is_clean());
 
-            let (boulder_dash_survey, mut boulder_dash_runtime) = survey_pair_with_runtime(
+            let mount_held = pad.snapshot.held;
+            let (boulder_dash_survey, mut boulder_dash_runtime) = survey_pair_with_persistent_pad(
                 known_name(boulder_dash),
                 boulder_dash,
                 &boulder_dash_nsd,
@@ -74503,6 +74960,11 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 LevelContextSource::SessionGlobals,
                 SurveyInputProfile::BoulderDashCompletionRoute,
                 3_100,
+                &mut pad,
+                PersistentSurveyPlan {
+                    mount_held,
+                    ..PersistentSurveyPlan::default()
+                },
             )
             .expect("Boulder Dash's authentic carried completion route must execute");
             assert_eq!(
@@ -74548,9 +75010,12 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x2d);
                 assert_eq!(report.resolved.level, LevelId::LEVEL_COMPLETE);
                 assert!(!report.resolved.bonus_return);
+                boulder_dash_survey
+                    .export_finished_browser_replay(&report.carry, LevelId::LEVEL_COMPLETE)
+                    .expect("Boulder Dash replay export must finish at Level Complete");
                 report.carry
             };
-            carry_boulder_dash_through_heavy_machinery(root, boulder_completion_carry);
+            carry_boulder_dash_through_heavy_machinery(root, boulder_completion_carry, pad);
         }
 
         eprintln!(
@@ -74607,7 +75072,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             great_gate_runtime.draw_count(),
             great_gate_completion_survey.frames,
             great_gate_completion_runtime.draw_count(),
-            post_great_gate_map.runtime.draw_count(),
+            post_great_gate_map_draw_count,
             boulders_runtime.machine().random_seed(),
             boulders_runtime.draw_count(),
             completion_route_survey.frames,
@@ -74615,7 +75080,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             completion_route_runtime.draw_count(),
             boulders_completion_survey.frames,
             boulders_completion_runtime.draw_count(),
-            post_boulders_map.runtime.draw_count(),
+            post_boulders_map_draw_count,
             upstream_survey.frames,
             upstream_runtime.machine().random_seed(),
             upstream_runtime.draw_count(),

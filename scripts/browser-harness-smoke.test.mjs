@@ -212,6 +212,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
     ],
     expect: {
       currentLid: 0x19,
+      retailFrame: 123,
       retailDrawCount: 123,
       retailProcessDrawCount: 123,
       retailRandomSeed: 0x1234_5678,
@@ -219,6 +220,7 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
       retailHardRestarts: 0,
       retailLoadStates: 0,
       retailDeathCameraFrames: 0,
+      paused: false,
       lifeCount: 3 << 8,
       minRetailExecutions: 1,
     },
@@ -239,12 +241,14 @@ test("run-length replay validates 16-bit input and deterministic frame count", (
     mountedLid: 0x2d,
   });
   assert.equal(replay.expect.retailDrawCount, 123);
+  assert.equal(replay.expect.retailFrame, 123);
   assert.equal(replay.expect.retailProcessDrawCount, 123);
   assert.equal(replay.expect.retailRandomSeed, 0x1234_5678);
   assert.equal(replay.expect.retailRandomSeedB, 0x8765_4321);
   assert.equal(replay.expect.retailHardRestarts, 0);
   assert.equal(replay.expect.retailLoadStates, 0);
   assert.equal(replay.expect.retailDeathCameraFrames, 0);
+  assert.equal(replay.expect.paused, false);
   assert.equal(replay.expect.lifeCount, 3 << 8);
   assert.equal(
     normalizeReplay(
@@ -420,6 +424,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
     expectationFailures(
       {
         mountedLid: 0x19,
+        retailFrame: 64,
         retailDrawCount: 64,
         retailProcessDrawCount: 64,
         retailRandomSeed: 0x1234,
@@ -427,6 +432,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         retailHardRestarts: 0,
         retailLoadStates: 0,
         retailDeathCameraFrames: 0,
+        paused: false,
         lifeCount: 3 << 8,
         minFrame: 64,
         minRetailExecutions: 1,
@@ -434,6 +440,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
       {
         debug: {
           mountedLid: 0x19,
+          retailFrame: 64,
           retailDrawCount: 64,
           retailProcessDrawCount: 64,
           retailRandomSeed: 0x1234,
@@ -441,6 +448,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
           retailHardRestarts: 0,
           retailLoadStates: 0,
           retailDeathCameraFrames: 0,
+          paused: false,
           browserTestGlobals: { lifeCount: 3 << 8 },
           frame: 64,
           retailExecutions: 9,
@@ -453,16 +461,19 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
     expectationFailures(
       {
         currentLid: 8,
+        retailFrame: 64,
         retailRandomSeedB: 0x5678,
         retailHardRestarts: 0,
         retailLoadStates: 0,
         retailDeathCameraFrames: 0,
+        paused: false,
         lifeCount: 3 << 8,
         minRetailFrame: 65,
       },
       {
         debug: {
           currentLid: 0x19,
+          paused: true,
           retailRandomSeedB: 0x9999,
           retailHardRestarts: 2,
           retailLoadStates: 1,
@@ -472,7 +483,7 @@ test("checkpoint expectations compare only exported read-only debug fields", () 
         },
       },
     ).join("\n"),
-    /currentLid.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*retailFrame.*lifeCount/s,
+    /currentLid.*retailFrame.*retailRandomSeedB.*retailHardRestarts.*retailLoadStates.*retailDeathCameraFrames.*paused.*retailFrame.*lifeCount/s,
   );
 });
 

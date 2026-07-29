@@ -350,6 +350,7 @@ function normalizeExpectation(raw, label) {
         "mountedLid",
         "currentLid",
         "titleState",
+        "retailFrame",
         "retailDrawCount",
         "retailProcessDrawCount",
         "retailRandomSeed",
@@ -357,6 +358,7 @@ function normalizeExpectation(raw, label) {
         "retailHardRestarts",
         "retailLoadStates",
         "retailDeathCameraFrames",
+        "paused",
         "lifeCount",
         "minFrame",
         "minRetailFrame",
@@ -364,6 +366,13 @@ function normalizeExpectation(raw, label) {
       ].includes(name)
     ) {
       throw new Error(`${label}.${name} is not a supported expectation`);
+    }
+    if (name === "paused") {
+      if (typeof value !== "boolean") {
+        throw new Error(`${label}.${name} must be a boolean`);
+      }
+      expectation[name] = value;
+      continue;
     }
     expectation[name] = parseWholeNumber(
       value,
@@ -648,6 +657,7 @@ export function expectationFailures(expectation, snapshot) {
     "mountedLid",
     "currentLid",
     "titleState",
+    "retailFrame",
     "retailDrawCount",
     "retailProcessDrawCount",
     "retailRandomSeed",
@@ -655,6 +665,7 @@ export function expectationFailures(expectation, snapshot) {
     "retailHardRestarts",
     "retailLoadStates",
     "retailDeathCameraFrames",
+    "paused",
   ]) {
     if (expectation[name] !== undefined && debug[name] !== expectation[name]) {
       failures.push(
@@ -1396,6 +1407,7 @@ async function runBrowser(options, replay, chromeExecutable) {
           retailLoadStates: finalSnapshot.debug?.retailLoadStates,
           retailDeathCameraFrames:
             finalSnapshot.debug?.retailDeathCameraFrames,
+          paused: finalSnapshot.debug?.paused,
           retailCurrentZone: finalSnapshot.debug?.retailCurrentZone,
           retailMain: finalSnapshot.debug?.retailMain
             ? { ...finalSnapshot.debug.retailMain }
@@ -1493,6 +1505,7 @@ async function runBrowser(options, replay, chromeExecutable) {
       retailHardRestarts: finalSnapshot.debug.retailHardRestarts,
       retailLoadStates: finalSnapshot.debug.retailLoadStates,
       retailDeathCameraFrames: finalSnapshot.debug.retailDeathCameraFrames,
+      paused: finalSnapshot.debug.paused,
       retailCurrentZone: finalSnapshot.debug.retailCurrentZone,
       retailLiveObjects: finalSnapshot.debug.retailLiveObjects,
       retailAuthoredSpawnRejections:

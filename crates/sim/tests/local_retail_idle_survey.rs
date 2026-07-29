@@ -97,9 +97,9 @@ const ISLAND_SELECTED_LID_REGISTER: usize = 81;
 // original controllers, which are already characterized independently.
 const AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 61_045;
 const AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT: u32 = 70_396;
-const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED: u32 = 0x8385_1908;
-const UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT: u32 = 64_200;
-const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B: u32 = 0xdc82_6488;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED: u32 = 0x0956_f409;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT: u32 = 104_886;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B: u32 = 0x9b47_a83c;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED: u32 = 0xccd8_9975;
 const UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 69_831;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
@@ -42629,6 +42629,7 @@ struct JawsOfDarknessCompletionRouteController {
     first_flame_active_seen: bool,
     opening_stage: u8,
     opening_airborne_seen: bool,
+    opening_spider_jump_delayed: bool,
     a2_gap_launched: bool,
     a2_platform_exit_pending: bool,
     a4_gap_launched: bool,
@@ -42636,6 +42637,8 @@ struct JawsOfDarknessCompletionRouteController {
     corner_jump_launched: bool,
     corner_relaunch_stage: u8,
     a7_rat_attack_fired: bool,
+    a7_entry_spear_stage: u8,
+    a7_entry_spear_active_seen: bool,
     a7_spear_stage: u8,
     b0_axe_stage: u8,
     b0_axe_peak_z: i32,
@@ -42671,6 +42674,7 @@ struct JawsOfDarknessCompletionRouteController {
     d1_spear_stage: u8,
     d1_spear_active_seen: bool,
     d1_spear_clear_seen: bool,
+    d1_exact_second_spear_stage: u8,
     d7_turn_stage: u8,
     d7_final_gate_wait_done: bool,
 }
@@ -42783,14 +42787,19 @@ impl JawsOfDarknessCompletionRouteController {
             == Eid::from_name("a7_tZ").expect("fixed Jaws rat-corridor zone EID is valid");
         let a8_zone = camera.path.zone
             == Eid::from_name("a8_tZ").expect("fixed Jaws post-spear gap zone EID is valid");
-        let attack =
-            if self.corner_jump_launched && corner_zone || a7_zone || self.b3_shuttle_stage >= 2 {
-                0
-            } else if self.tick % 12 < 3 {
-                PAD_SQUARE
-            } else {
-                0
-            };
+        let a9_zone = camera.path.zone
+            == Eid::from_name("a9_tZ").expect("fixed Jaws stepping-stone zone EID is valid");
+        let attack = if self.corner_jump_launched && corner_zone
+            || a7_zone
+            || self.exact_campaign_phase && a8_zone && self.a7_spear_stage >= 3
+            || self.b3_shuttle_stage >= 2
+        {
+            0
+        } else if self.tick % 12 < 3 {
+            PAD_SQUARE
+        } else {
+            0
+        };
         let d6_turn_approach = camera.path.zone
             == Eid::from_name("d6_tZ").expect("fixed Jaws late-turn approach EID is valid")
             && camera.path.index == 0;
@@ -43448,6 +43457,24 @@ impl JawsOfDarknessCompletionRouteController {
                 return PAD_RIGHT | PAD_CROSS;
             }
         }
+        let opening_spider_runup = camera.path.zone
+            == Eid::from_name("a1_tZ").expect("fixed Jaws opening-spider zone EID is valid")
+            && camera.path.index == 0
+            && self.exact_campaign_phase
+            && !self.opening_spider_jump_delayed
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (17_550_000..=17_650_000).contains(&player.translation[0])
+            });
+        if opening_spider_runup {
+            // The uninterrupted post-Lights phase lands the preceding hop one
+            // tick early. Keep the ordinary run-up grounded for that tick so
+            // the following jump reaches the spider on its authored bounce.
+            self.opening_spider_jump_delayed = true;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT | attack;
+        }
         let first_moving_platform_approach = camera.path.zone
             == Eid::from_name("a2_tZ").expect("fixed Jaws moving-platform zone EID is valid")
             && camera.path.index == 0
@@ -43530,6 +43557,45 @@ impl JawsOfDarknessCompletionRouteController {
             && player.is_some_and(|player| player.translation[0] > 22_240_000)
         {
             direction = PAD_UP | PAD_LEFT;
+        }
+        if self.exact_campaign_phase && a7_zone && self.a7_entry_spear_stage < 2 {
+            let entry_spear_blocks_lane = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 18,
+                        }
+                    ) && (35_650_000..=35_850_000).contains(&object.translation[2])
+                        && object.frame_bound.is_some_and(|bound| {
+                            bound.max.x > player.translation[0].saturating_sub(100_000)
+                                && bound.min.x < player.translation[0].saturating_add(100_000)
+                        })
+                })
+            });
+            if self.a7_entry_spear_stage == 0
+                && player.is_some_and(|player| player.translation[2] <= 36_000_000)
+            {
+                // The uninterrupted post-Lights phase reaches a7 while the
+                // right-hand entry row is extending. Brake on the authored
+                // runway and observe one live unsafe-to-clear transition.
+                self.a7_entry_spear_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+            }
+            if self.a7_entry_spear_stage == 1 {
+                self.a7_entry_spear_active_seen |= entry_spear_blocks_lane;
+                if self.a7_entry_spear_active_seen && !entry_spear_blocks_lane {
+                    self.a7_entry_spear_stage = 2;
+                    self.jump_frames = 24;
+                    self.release_frames = 0;
+                    return PAD_UP | PAD_CROSS;
+                }
+                return player.map_or(0, |player| {
+                    Self::move_toward(player.translation, 22_320_000, 35_950_000)
+                });
+            }
         }
         if !self.a7_rat_attack_fired
             && camera.path.zone
@@ -43621,6 +43687,20 @@ impl JawsOfDarknessCompletionRouteController {
                 // before the next stepping stone and can be re-armed on contact.
                 self.jump_frames = 18;
                 return PAD_UP | PAD_CROSS;
+            }
+        }
+        if self.exact_campaign_phase && a8_zone && self.a7_spear_stage >= 3 {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x < 22_420_000 => direction |= PAD_RIGHT,
+                Some(x) if x > 22_460_000 => direction |= PAD_LEFT,
+                _ => {}
+            }
+        }
+        if self.exact_campaign_phase && a9_zone && self.a7_spear_stage >= 3 {
+            match player.map(|player| player.translation[0]) {
+                Some(x) if x < 22_300_000 => direction |= PAD_RIGHT,
+                Some(x) if x > 22_340_000 => direction |= PAD_LEFT,
+                _ => {}
             }
         }
         let hold_first_flame_platform = || match player.map(|player| player.translation[0]) {
@@ -45015,7 +45095,13 @@ impl JawsOfDarknessCompletionRouteController {
         if self.b9_pillar_stage == 11 && d1_zone {
             if self.d1_spear_stage == 0
                 && player.is_some_and(|player| {
-                    player.status_a & 1 != 0 && player.translation[2] <= 23_650_000
+                    player.status_a & 1 != 0
+                        && player.translation[2]
+                            <= if self.exact_campaign_phase {
+                                24_100_000
+                            } else {
+                                23_650_000
+                            }
                 })
             {
                 self.d1_spear_stage = 1;
@@ -45036,6 +45122,11 @@ impl JawsOfDarknessCompletionRouteController {
                 return 0;
             }
             if self.d1_spear_stage == 2 {
+                let spear_row = if self.exact_campaign_phase {
+                    23_800_000..=23_930_000
+                } else {
+                    22_950_000..=23_350_000
+                };
                 let lane_blocked = player.is_some_and(|player| {
                     objects.iter().any(|object| {
                         matches!(
@@ -45044,7 +45135,7 @@ impl JawsOfDarknessCompletionRouteController {
                                 executable: 42,
                                 subtype: 18,
                             }
-                        ) && (22_950_000..=23_350_000).contains(&object.translation[2])
+                        ) && spear_row.contains(&object.translation[2])
                             && object.frame_bound.is_some_and(|bound| {
                                 bound.max.x > player.translation[0].saturating_sub(100_000)
                                     && bound.min.x < player.translation[0].saturating_add(100_000)
@@ -45059,11 +45150,34 @@ impl JawsOfDarknessCompletionRouteController {
                             executable: 42,
                             subtype: 18,
                         }
-                    ) && (23_180_000..=23_230_000).contains(&object.translation[2])
-                        && object.frame_bound.is_some()
+                    ) && if self.exact_campaign_phase {
+                        (23_800_000..=23_930_000).contains(&object.translation[2])
+                    } else {
+                        (23_180_000..=23_230_000).contains(&object.translation[2])
+                    } && object.frame_bound.is_some()
                 });
                 self.d1_spear_clear_seen |= !near_row_active;
                 let destination_open = player.is_some_and(|player| {
+                    if self.exact_campaign_phase {
+                        return objects
+                            .iter()
+                            .filter(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 42,
+                                        subtype: 18,
+                                    }
+                                ) && (23_800_000..=23_930_000).contains(&object.translation[2])
+                            })
+                            .all(|object| {
+                                object.frame_bound.is_none_or(|bound| {
+                                    bound.min.x > player.translation[0].saturating_add(20_000)
+                                        || bound.max.x
+                                            < player.translation[0].saturating_sub(100_000)
+                                })
+                            });
+                    }
                     let far_row_open = objects.iter().any(|object| {
                         matches!(
                             object.origin,
@@ -45107,6 +45221,84 @@ impl JawsOfDarknessCompletionRouteController {
                 return 0;
             }
             if self.d1_spear_stage == 3 {
+                if self.exact_campaign_phase && self.d1_exact_second_spear_stage < 3 {
+                    if self.d1_exact_second_spear_stage == 0
+                        && player.is_some_and(|player| {
+                            player.status_a & 1 != 0 && player.translation[2] <= 23_650_000
+                        })
+                    {
+                        self.d1_exact_second_spear_stage = 1;
+                        self.jump_frames = 0;
+                        self.release_frames = 0;
+                        return PAD_DOWN;
+                    }
+                    if self.d1_exact_second_spear_stage == 1 {
+                        if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                            return PAD_DOWN;
+                        }
+                        if player.is_some_and(|player| player.velocity[2] > 50_000) {
+                            return PAD_UP;
+                        }
+                        self.d1_exact_second_spear_stage = 2;
+                        self.d1_spear_active_seen = false;
+                        return 0;
+                    }
+                    if self.d1_exact_second_spear_stage == 2 {
+                        let relevant_spears = objects.iter().filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 18,
+                                }
+                            ) && (22_950_000..=23_350_000).contains(&object.translation[2])
+                        });
+                        let (count, lane_blocked, lane_open) =
+                            player.map_or((0_usize, false, false), |player| {
+                                relevant_spears.fold(
+                                    (0_usize, false, true),
+                                    |(count, blocked, open), object| {
+                                        let blocks = object.frame_bound.is_some_and(|bound| {
+                                            if object.translation[0] < player.translation[0] {
+                                                bound.max.x
+                                                    >= player.translation[0].saturating_add(100_000)
+                                            } else {
+                                                bound.min.x
+                                                    <= player.translation[0].saturating_sub(100_000)
+                                            }
+                                        });
+                                        let clear = if object.translation[2] <= 23_110_000 {
+                                            object.frame_bound.is_none()
+                                        } else if object.translation[0] < player.translation[0] {
+                                            object.frame_bound.is_none_or(|bound| {
+                                                bound.max.x
+                                                    < player.translation[0].saturating_sub(20_000)
+                                            })
+                                        } else {
+                                            true
+                                        };
+                                        (count + 1, blocked || blocks, open && clear)
+                                    },
+                                )
+                            });
+                        self.d1_spear_active_seen |= lane_blocked;
+                        if self.d1_spear_active_seen && count != 0 && lane_open {
+                            self.d1_exact_second_spear_stage = 3;
+                            self.release_frames = 0;
+                            return 0;
+                        }
+                        return 0;
+                    }
+                }
+                if self.exact_campaign_phase && self.d1_exact_second_spear_stage == 3 {
+                    if player.is_some_and(|player| player.translation[2] > 23_380_000) {
+                        return PAD_UP;
+                    }
+                    self.d1_exact_second_spear_stage = 4;
+                    self.d1_spear_stage = 4;
+                    self.jump_frames = 45;
+                    return PAD_UP | PAD_CROSS;
+                }
                 if self.release_frames != 0 {
                     self.release_frames -= 1;
                     return 0;
@@ -45141,7 +45333,14 @@ impl JawsOfDarknessCompletionRouteController {
                     } else {
                         0
                     };
-                    return PAD_UP | PAD_CROSS | PAD_SQUARE | lateral;
+                    return PAD_UP
+                        | PAD_CROSS
+                        | lateral
+                        | if self.exact_campaign_phase {
+                            0
+                        } else {
+                            PAD_SQUARE
+                        };
                 }
             }
             if self.d1_spear_stage == 5 {
@@ -48198,6 +48397,7 @@ impl SurveyInputController {
                 first_flame_active_seen: false,
                 opening_stage: 0,
                 opening_airborne_seen: false,
+                opening_spider_jump_delayed: false,
                 a2_gap_launched: false,
                 a2_platform_exit_pending: false,
                 a4_gap_launched: false,
@@ -48205,6 +48405,8 @@ impl SurveyInputController {
                 corner_jump_launched: false,
                 corner_relaunch_stage: 0,
                 a7_rat_attack_fired: false,
+                a7_entry_spear_stage: 0,
+                a7_entry_spear_active_seen: false,
                 a7_spear_stage: 0,
                 b0_axe_stage: 0,
                 b0_axe_peak_z: i32::MIN,
@@ -48240,6 +48442,7 @@ impl SurveyInputController {
                 d1_spear_stage: 0,
                 d1_spear_active_seen: false,
                 d1_spear_clear_seen: false,
+                d1_exact_second_spear_stage: 0,
                 d7_turn_stage: 0,
                 d7_final_gate_wait_done: false,
             },

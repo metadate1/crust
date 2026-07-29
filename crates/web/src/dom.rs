@@ -208,7 +208,7 @@ impl Dom {
         let aspect = OutputAspect::from_value(&self.output_aspect.value());
         let output_ratio = aspect
             .fixed_ratio()
-            .unwrap_or_else(|| self.automatic_output_ratio());
+            .unwrap_or_else(Self::automatic_output_ratio);
         let extended_world = self.extended_world.checked()
             || projection_percent != 100
             || aspect != OutputAspect::Retail;
@@ -271,7 +271,7 @@ impl Dom {
         }
     }
 
-    fn automatic_output_ratio(&self) -> OutputRatio {
+    fn automatic_output_ratio() -> OutputRatio {
         let dimensions = window().ok().and_then(|window| {
             let width = window.inner_width().ok()?.as_f64()?;
             let height = window.inner_height().ok()?.as_f64()?;

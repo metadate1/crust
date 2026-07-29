@@ -1582,12 +1582,12 @@ fn sunset_vista_authentic_campaign_phase_reaches_authored_end_warp() {
             .expect("authentic campaign global must exist");
     }
     let mut carry = title.export_session_carry();
-    carry.random_seed = 0xd075_86d1;
-    carry.draw_count = 14_688;
-    carry.set_random_seed_b(0x654c_b6a6);
+    carry.random_seed = 0xd8f0_8ec4;
+    carry.draw_count = 55_777;
+    carry.set_random_seed_b(0xdff3_7021);
     let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
         .expect("Sunset Vista must import the authentic campaign phase");
-    let (survey, _) = survey_pair_with_runtime(
+    let (survey, mut runtime) = survey_pair_with_runtime(
         "Sunset Vista authentic campaign phase",
         level,
         &nsd,
@@ -1596,7 +1596,7 @@ fn sunset_vista_authentic_campaign_phase_reaches_authored_end_warp() {
         runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::SunsetVistaCompletionRoute,
-        9_500,
+        11_000,
     )
     .expect("Sunset Vista's authentic carried route must execute");
 
@@ -1613,6 +1613,36 @@ fn sunset_vista_authentic_campaign_phase_reaches_authored_end_warp() {
     assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
     assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
     assert!(survey.is_clean(), "{}", survey.summary());
+    assert_ordinary_completion_input(&survey, "Sunset Vista authentic campaign phase");
+
+    let mut host = NsfProgramHost::new(&nsd, &nsf, &nsf_bytes);
+    let transition = runtime
+        .finish_level_transition(
+            &mut host,
+            i32::try_from(LevelId::LEVEL_COMPLETE.get()).expect("Level Complete LID fits i32"),
+        )
+        .expect("Sunset Vista LEVEL_END must resolve Level Complete");
+    assert!(transition.event_failures.is_empty());
+    assert!(transition.effects.is_empty());
+    assert_eq!(transition.requested_lid, 0x2d);
+    assert_eq!(transition.next_lid_after_event, 0x2d);
+    assert_eq!(transition.resolved.level, LevelId::LEVEL_COMPLETE);
+    assert!(!transition.resolved.bonus_return);
+
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let post_sunset_title =
+        carry_completion_to_title(&completion, transition.carry, [0x300, 15, 15, 16, 1, 17, 0]);
+    assert_eq!(
+        (
+            post_sunset_title.random_seed,
+            post_sunset_title.draw_count,
+            post_sunset_title.random_seed_b(),
+            post_sunset_title.respawn_count,
+            post_sunset_title.death_count,
+        ),
+        (0x392a_f35e, 66_684, 0x809c_5eee, 0, 0),
+        "the authentic Sunset completion must preserve the characterized post-Level-Complete title phase"
+    );
 }
 
 #[test]
@@ -1811,8 +1841,6 @@ enum SurveyInputProfile {
     CastleMachineryExactCampaignPhase,
     FumblingInTheDarkCompletionRoute,
     SlipperyClimbCompletionRoute,
-    #[allow(dead_code)]
-    UpstreamCarriedRecovery,
     UpstreamPhaseRobust,
     RollingStonesCheckpoint,
     RollingStonesExactCampaign,
@@ -1922,7 +1950,6 @@ impl SurveyInputProfile {
             Self::CastleMachineryExactCampaignPhase => "castle-machinery-exact-campaign-phase",
             Self::FumblingInTheDarkCompletionRoute => "fumbling-in-the-dark-completion-route",
             Self::SlipperyClimbCompletionRoute => "slippery-climb-completion-route",
-            Self::UpstreamCarriedRecovery => "upstream-carried-recovery",
             Self::UpstreamPhaseRobust => "upstream-phase-robust",
             Self::RollingStonesCheckpoint => "rolling-stones-checkpoint",
             Self::RollingStonesExactCampaign => "rolling-stones-exact-campaign",
@@ -1996,7 +2023,6 @@ impl SurveyInputProfile {
                 | Self::CastleMachineryExactCampaignPhase
                 | Self::FumblingInTheDarkCompletionRoute
                 | Self::SlipperyClimbCompletionRoute
-                | Self::UpstreamCarriedRecovery
                 | Self::UpstreamPhaseRobust
                 | Self::RollingStonesCheckpoint
                 | Self::RollingStonesExactCampaign
@@ -4564,6 +4590,7 @@ struct LostCityCompletionRouteController {
     recovery_tick: u8,
     return_stage: u8,
     return_tick: u8,
+    second_wall_gate_phase: u8,
     zero_recovery_carry: bool,
 }
 
@@ -5029,8 +5056,80 @@ impl LostCityCompletionRouteController {
             }
             11 => {
                 self.return_tick = self.return_tick.saturating_add(1);
-                if self.zero_recovery_carry && player_collider_entity == Some(126) {
-                    return PAD_LEFT | PAD_CROSS;
+                let second_wall = route_objects.iter().find_map(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 126)
+                        .then_some((object.state, object.status_b))
+                });
+                if self.zero_recovery_carry {
+                    if player_collider_entity == Some(126)
+                        && player.is_some_and(|player| player.translation[0] > 15_900_000)
+                        && self.second_wall_gate_phase == 0
+                    {
+                        self.second_wall_gate_phase = 1;
+                        return PAD_LEFT;
+                    }
+                    let second_wall_live =
+                        second_wall.is_some_and(|(_, status_b)| status_b & 16 != 0);
+                    let second_wall_takeoff = second_wall
+                        .is_some_and(|(state, status_b)| state == 18 && status_b & 16 != 0);
+                    if self.second_wall_gate_phase == 1 && !second_wall_live {
+                        self.second_wall_gate_phase = 2;
+                    }
+                    if self.second_wall_gate_phase == 2 && second_wall_takeoff {
+                        self.second_wall_gate_phase = 3;
+                        return PAD_LEFT;
+                    }
+                    if self.second_wall_gate_phase == 3 {
+                        if player_collider_entity == Some(126) {
+                            self.second_wall_gate_phase = 4;
+                            return PAD_LEFT | PAD_CROSS;
+                        }
+                        return PAD_LEFT;
+                    }
+                    if self.second_wall_gate_phase == 4 {
+                        if player.is_some_and(|player| player.translation[2] > 300_000) {
+                            self.second_wall_gate_phase = 0;
+                            self.return_stage = 12;
+                            self.return_tick = 0;
+                            return PAD_LEFT | PAD_UP | PAD_CROSS;
+                        }
+                        return PAD_LEFT | PAD_CROSS;
+                    }
+                    if self.second_wall_gate_phase == 5 {
+                        if player.is_some_and(|player| player.translation[2] > 300_000) {
+                            self.second_wall_gate_phase = 0;
+                            self.return_stage = 12;
+                            self.return_tick = 1;
+                            return PAD_LEFT | PAD_UP | PAD_CROSS;
+                        }
+                        return PAD_LEFT | PAD_CROSS;
+                    }
+                    if self.second_wall_gate_phase != 0 {
+                        let Some(player) = player else {
+                            return 0;
+                        };
+                        const SECOND_WALL_RUNUP_X: i32 = 15_881_328;
+                        const TOLERANCE: u32 = 12_288;
+                        if player.translation[0] > SECOND_WALL_RUNUP_X + TOLERANCE.cast_signed() {
+                            return PAD_LEFT;
+                        }
+                        if player.translation[0] < SECOND_WALL_RUNUP_X - TOLERANCE.cast_signed() {
+                            return PAD_RIGHT;
+                        }
+                        if player.velocity[0] > 70_000 {
+                            return PAD_LEFT;
+                        }
+                        if player.velocity[0] < -70_000 {
+                            return PAD_RIGHT;
+                        }
+                        return 0;
+                    }
+                    if matches!(player_collider_entity, Some(137..=139))
+                        && player.is_some_and(|player| player.translation[2] < 300_000)
+                    {
+                        self.second_wall_gate_phase = 5;
+                        return PAD_LEFT | PAD_CROSS;
+                    }
                 }
                 if player.is_some_and(|player| player.translation[0] < 14_900_000) {
                     self.return_stage = 13;
@@ -5048,6 +5147,45 @@ impl LostCityCompletionRouteController {
                 let Some(player) = player else {
                     return 0;
                 };
+                if self.zero_recovery_carry && self.return_tick != 0 {
+                    self.return_tick = self.return_tick.saturating_add(1);
+                    let horizontal = if player.translation[0] > 14_880_000 {
+                        PAD_LEFT
+                    } else {
+                        match player.velocity[0].cmp(&0) {
+                            Ordering::Less => PAD_RIGHT,
+                            Ordering::Greater => PAD_LEFT,
+                            Ordering::Equal => 0,
+                        }
+                    };
+                    let depth = if player.translation[2] > 220_000 {
+                        PAD_UP
+                    } else {
+                        PAD_DOWN
+                    };
+                    if player.translation[2].abs_diff(204_544) <= 24_576 && player.status_a & 1 != 0
+                    {
+                        self.return_stage = 11;
+                        self.return_tick = 0;
+                        return PAD_LEFT;
+                    }
+                    return horizontal
+                        | depth
+                        | if matches!(player_collider_entity, Some(137..=139)) {
+                            PAD_CROSS
+                        } else {
+                            0
+                        };
+                }
+                if self.zero_recovery_carry && player.translation[0] > 15_700_000 {
+                    return PAD_LEFT
+                        | PAD_UP
+                        | if player_collider_entity == Some(126) {
+                            PAD_CROSS
+                        } else {
+                            0
+                        };
+                }
                 let horizontal_brake = match player.velocity[0].cmp(&0) {
                     Ordering::Less => PAD_RIGHT,
                     Ordering::Greater => PAD_LEFT,
@@ -5911,7 +6049,14 @@ struct LostCityExactCarryRouteController {
     opening_stage: u8,
     pusher_bound_seen: bool,
     pusher_bound_cleared: bool,
+    first_wall_train_seen: bool,
+    b3_checkpoint_seen: bool,
+    b3_transfer_jump_started: bool,
+    first_orbit_runup: u8,
+    second_orbit_capture_armed: bool,
+    second_orbit_landed: bool,
     second_wall_train_seen: bool,
+    third_wall_train_seen: bool,
     ascent_slab_rearmed: bool,
     return_route: LostCityCompletionRouteController,
 }
@@ -6108,11 +6253,11 @@ impl LostCityExactCarryRouteController {
             } else {
                 PAD_RIGHT | PAD_DOWN
             }
-        } else if self.opening_stage == 16 && player.translation[0] < 12_700_000 {
+        } else if matches!(self.opening_stage, 15 | 16) && player.translation[0] < 12_700_000 {
             let room_z = std::env::var("C1_LOST_B3_Z")
                 .ok()
                 .and_then(|value| value.parse::<i32>().ok())
-                .unwrap_or(-358_656);
+                .unwrap_or(204_544);
             if player.translation[2] < room_z - 12_000 || player.velocity[2] < 0 {
                 PAD_DOWN
             } else if player.translation[2] > room_z + 12_000 || player.velocity[2] > 0 {
@@ -6131,21 +6276,63 @@ impl LostCityExactCarryRouteController {
             return PAD_RIGHT;
         }
         if self.opening_stage == 14 {
-            if player.status_a & 1 != 0 {
+            let first_wall_train_bound = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 11
+                    }
+                ) && (9_200_000..=10_800_000).contains(&object.translation[0])
+                    && object.frame_bound.is_some()
+            });
+            if first_wall_train_bound {
+                self.first_wall_train_seen = true;
+            }
+            if player.status_a & 1 != 0 && self.first_wall_train_seen && !first_wall_train_bound {
                 if self.wall_jump_wait < 2 {
                     self.wall_jump_wait += 1;
-                    return PAD_RIGHT;
+                    return 0;
                 }
                 self.opening_stage = 15;
                 self.jump_hold = 16;
                 self.jump_release = 0;
                 return PAD_RIGHT | PAD_CROSS;
             }
-            return PAD_RIGHT;
+            if player.translation[0] > 10_020_000 || player.velocity[0] > 70_000 {
+                return PAD_LEFT;
+            }
+            if player.translation[0] < 9_960_000 || player.velocity[0] < -70_000 {
+                return PAD_RIGHT;
+            }
+            return 0;
         }
         if self.opening_stage == 15 && player.translation[0] >= 11_300_000 {
             self.opening_stage = 16;
             self.wall_jump_wait = 0;
+        }
+        if self.opening_stage == 16
+            && !self.b3_checkpoint_seen
+            && (checkpoint_id == 0x4000 || player_collider_entity == Some(64))
+        {
+            self.b3_checkpoint_seen = true;
+            self.jump_hold = 24;
+            self.jump_release = 0;
+        }
+        if self.opening_stage == 16
+            && self.b3_checkpoint_seen
+            && !self.b3_transfer_jump_started
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 12_700_000
+        {
+            self.jump_hold = 0;
+            self.jump_release = 0;
+            if player.translation[0] < 12_900_000 {
+                return PAD_RIGHT;
+            }
+            self.b3_transfer_jump_started = true;
+            self.jump_hold = 11;
+            return PAD_RIGHT | PAD_CROSS;
         }
         if self.opening_stage == 16 && player.translation[0] >= 13_000_000 {
             self.opening_stage = 17;
@@ -6153,20 +6340,21 @@ impl LostCityExactCarryRouteController {
             self.jump_release = 0;
         }
         if self.opening_stage == 17 {
-            if player.status_a & 1 != 0 && player.translation[0] >= 13_130_000 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(68) {
                 self.opening_stage = 18;
-                self.jump_hold = 2;
+                self.jump_hold = 0;
                 self.jump_release = 0;
-                return PAD_RIGHT | PAD_CROSS;
+                return PAD_RIGHT;
             }
             return PAD_RIGHT;
         }
         if self.opening_stage == 18
             && player.status_a & 1 != 0
             && player_collider_entity == Some(68)
+            && player.translation[0] >= 13_390_000
         {
             self.opening_stage = 19;
-            self.jump_hold = 2;
+            self.jump_hold = 8;
             self.jump_release = 0;
             return PAD_RIGHT | PAD_CROSS;
         }
@@ -6318,7 +6506,7 @@ impl LostCityExactCarryRouteController {
             return horizontal_brake | lane;
         }
         if self.opening_stage == 23 {
-            if player.status_a & 1 != 0 && player.translation[0] >= 15_100_000 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 15_090_000 {
                 self.opening_stage = 24;
                 self.jump_hold = 0;
                 self.jump_release = 0;
@@ -6490,7 +6678,7 @@ impl LostCityExactCarryRouteController {
             return PAD_RIGHT | lane;
         }
         if self.opening_stage == 30 {
-            let near_platform_ready = route_objects.iter().any(|object| {
+            let near_platform_runup = route_objects.iter().any(|object| {
                 matches!(
                     object.origin,
                     ObjectOrigin::Runtime {
@@ -6499,20 +6687,48 @@ impl LostCityExactCarryRouteController {
                     }
                 ) && object.frame_bound.is_some()
                     && (16_850_000..=17_000_000).contains(&object.translation[0])
-                    && (-8_400_000..=-8_180_000).contains(&object.translation[1])
+                    && (-8_320_000..=-8_260_000).contains(&object.translation[1])
             });
-            if player.status_a & 1 != 0
-                && (16_480_000..=16_560_000).contains(&player.translation[0])
-                && near_platform_ready
-            {
-                self.opening_stage = 31;
-                self.jump_hold = 16;
-                self.jump_release = 0;
-                return PAD_RIGHT | PAD_CROSS;
+            let takeoff_clear = route_objects.iter().all(|object| {
+                !matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 11
+                    }
+                ) || object.frame_bound.is_none_or(|bound| {
+                    bound.max.x < 16_400_000
+                        || bound.min.x > 16_650_000
+                        || bound.max.z < player.translation[2] - 80_000
+                        || bound.min.z > player.translation[2] + 80_000
+                })
+            });
+            if self.first_orbit_runup != 0 {
+                if takeoff_clear && player.translation[0] <= 16_560_000 {
+                    self.first_orbit_runup = 0;
+                    self.opening_stage = 31;
+                    self.jump_hold = 24;
+                    self.jump_release = 0;
+                    return PAD_RIGHT | PAD_CROSS;
+                }
+                return if player.translation[0] > 16_550_000 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
             }
-            let horizontal_brake = if player.translation[0] > 16_550_000 || player.velocity[0] > 0 {
+            if player.status_a & 1 != 0
+                && (16_380_000..=16_460_000).contains(&player.translation[0])
+                && near_platform_runup
+            {
+                self.first_orbit_runup = 1;
+                return PAD_RIGHT;
+            }
+            let horizontal_brake = if player.translation[0] > 16_440_000
+                || (player.translation[0] >= 16_400_000 && player.velocity[0] > 0)
+            {
                 PAD_LEFT
-            } else if player.translation[0] < 16_500_000 || player.velocity[0] < 0 {
+            } else if player.translation[0] < 16_400_000 || player.velocity[0] < 0 {
                 PAD_RIGHT
             } else {
                 0
@@ -6527,7 +6743,21 @@ impl LostCityExactCarryRouteController {
             return horizontal_brake | lane;
         }
         if self.opening_stage == 31 {
-            if player.status_a & 1 != 0 && player.translation[0] >= 16_750_000 {
+            let centered_on_platform = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1
+                    }
+                ) && object.frame_bound.is_some_and(|bound| {
+                    player.translation[0] >= bound.min.x + 40_000
+                        && player.translation[0] <= bound.max.x - 20_000
+                        && player.translation[1].abs_diff(bound.max.y) <= 50_000
+                        && (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                })
+            });
+            if player.status_a & 1 != 0 && centered_on_platform {
                 self.opening_stage = 32;
                 self.jump_hold = 0;
                 self.jump_release = 0;
@@ -6575,23 +6805,84 @@ impl LostCityExactCarryRouteController {
                 self.jump_release = 0;
                 return PAD_LEFT;
             }
-            let spin = if self.tick % 18 < 4 { PAD_SQUARE } else { 0 };
+            let second_platform = route_objects.iter().find(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1
+                    }
+                ) && (17_100_000..=17_600_000).contains(&object.translation[0])
+                    && object.translation[1] <= -8_300_000
+            });
+            if !self.second_orbit_capture_armed
+                && player.status_a & 1 == 0
+                && player.translation[0] >= 17_050_000
+            {
+                self.second_orbit_capture_armed = true;
+            }
+            let centered_on_second_platform = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 46,
+                        subtype: 1
+                    }
+                ) && object.frame_bound.is_some_and(|bound| {
+                    player.translation[0] >= bound.min.x + 30_000
+                        && player.translation[0] <= bound.max.x - 20_000
+                        && player.translation[1].abs_diff(bound.max.y) <= 50_000
+                        && (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                })
+            });
+            if self.second_orbit_capture_armed
+                && !self.second_orbit_landed
+                && player.status_a & 1 != 0
+                && centered_on_second_platform
+            {
+                self.second_orbit_landed = true;
+                self.jump_hold = 16;
+                self.jump_release = 0;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let direction = if !self.second_orbit_landed && player.translation[0] >= 17_050_000 {
+                second_platform.map_or(0, |platform| {
+                    if player.translation[0] > platform.translation[0] + 20_000
+                        || player.velocity[0] > 80_000
+                    {
+                        PAD_LEFT
+                    } else if player.translation[0] < platform.translation[0] - 20_000
+                        || player.velocity[0] < -80_000
+                    {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    }
+                })
+            } else {
+                PAD_RIGHT
+            };
+            let spin = if self.second_orbit_landed && self.tick % 18 < 4 {
+                PAD_SQUARE
+            } else {
+                0
+            };
             if self.jump_hold != 0 {
                 self.jump_hold -= 1;
                 if self.jump_hold == 0 {
                     self.jump_release = 4;
                 }
-                return PAD_RIGHT | PAD_CROSS | spin;
+                return direction | PAD_CROSS | spin;
             }
             if self.jump_release != 0 {
                 self.jump_release -= 1;
-                return PAD_RIGHT | spin;
+                return direction | spin;
             }
             if player.status_a & 1 != 0 {
                 self.jump_hold = 16;
-                return PAD_RIGHT | PAD_CROSS | spin;
+                return direction | PAD_CROSS | spin;
             }
-            return PAD_RIGHT | spin;
+            return direction | spin;
         }
         if self.opening_stage == 34 {
             if player.status_a & 1 != 0 && player.translation[0] >= 17_700_000 {
@@ -6609,7 +6900,7 @@ impl LostCityExactCarryRouteController {
             return 0;
         }
         if self.opening_stage == 35 {
-            if player.status_a & 1 != 0 && player.translation[0] >= 18_850_000 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 18_600_000 {
                 self.opening_stage = 36;
                 self.jump_hold = 0;
                 self.jump_release = 0;
@@ -6635,21 +6926,65 @@ impl LostCityExactCarryRouteController {
             return PAD_RIGHT | spin;
         }
         if self.opening_stage == 36 {
-            let slab_train_present = route_objects.iter().any(|object| {
+            let slab_train_in_corridor = route_objects.iter().any(|object| {
                 matches!(
                     object.origin,
                     ObjectOrigin::Runtime {
                         executable: 42,
                         subtype: 11
                     }
-                )
+                ) && object.frame_bound.is_some_and(|bound| {
+                    bound.max.x >= 18_700_000
+                        && bound.min.x <= 19_300_000
+                        && bound.max.z >= player.translation[2] - 80_000
+                        && bound.min.z <= player.translation[2] + 80_000
+                })
             });
-            if slab_train_present {
+            if slab_train_in_corridor {
                 self.second_wall_train_seen = true;
             }
-            if player.translation[0] >= 19_180_000 {
+            let lane = if player.translation[2] < 350_000 || player.velocity[2] < 0 {
+                PAD_DOWN
+            } else if player.translation[2] > 370_000 || player.velocity[2] > 0 {
+                PAD_UP
+            } else {
+                0
+            };
+            if self.second_wall_train_seen
+                && !slab_train_in_corridor
+                && player.status_a & 1 != 0
+                && (18_600_000..=18_700_000).contains(&player.translation[0])
+            {
+                self.opening_stage = 39;
+                self.jump_hold = 24;
+                self.jump_release = 0;
+                return PAD_RIGHT | PAD_CROSS | lane;
+            }
+            let horizontal_brake = if player.translation[0] > 18_680_000 || player.velocity[0] > 0 {
+                PAD_LEFT
+            } else if player.translation[0] < 18_630_000 || player.velocity[0] < 0 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            return horizontal_brake | lane;
+        }
+        if self.opening_stage == 39 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 19_180_000 {
                 self.opening_stage = 37;
+                self.jump_hold = 0;
+                self.jump_release = 0;
                 return PAD_LEFT;
+            }
+            if self.jump_hold != 0 {
+                self.jump_hold -= 1;
+                if self.jump_hold == 0 {
+                    self.jump_release = 4;
+                }
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.jump_release != 0 {
+                self.jump_release -= 1;
             }
             return PAD_RIGHT;
         }
@@ -6716,7 +7051,7 @@ impl LostCityExactCarryRouteController {
                 self.opening_stage = 40;
                 self.jump_hold = 16;
                 self.jump_release = 0;
-                return PAD_RIGHT | PAD_CROSS;
+                return PAD_RIGHT | PAD_UP | PAD_CROSS;
             }
             if self.jump_hold != 0 {
                 self.jump_hold -= 1;
@@ -6731,33 +7066,69 @@ impl LostCityExactCarryRouteController {
             return PAD_RIGHT;
         }
         if self.opening_stage == 40 {
-            let lane = if player.translation[2] < 390_000 {
+            const BRIDGE_PLATFORM_Z: i32 = 204_544;
+            let third_wall_train_in_corridor = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Runtime {
+                        executable: 42,
+                        subtype: 11
+                    }
+                ) && object.frame_bound.is_some_and(|bound| {
+                    bound.max.x >= 20_000_000
+                        && bound.min.x <= 20_650_000
+                        && bound.max.z >= BRIDGE_PLATFORM_Z - 80_000
+                        && bound.min.z <= BRIDGE_PLATFORM_Z + 80_000
+                })
+            });
+            if third_wall_train_in_corridor {
+                self.third_wall_train_seen = true;
+            }
+            let lane = if player.translation[2] < BRIDGE_PLATFORM_Z - 20_000
+                || player.velocity[2] < -50_000
+            {
                 PAD_DOWN
-            } else if player.translation[2] > 410_000 || player.velocity[2] > 0 {
+            } else if player.translation[2] > BRIDGE_PLATFORM_Z + 20_000
+                || player.velocity[2] > 50_000
+            {
                 PAD_UP
             } else {
-                PAD_DOWN
+                0
             };
-            if player.status_a & 1 != 0 && player.translation[0] >= 20_080_000 {
+            if self.third_wall_train_seen
+                && !third_wall_train_in_corridor
+                && player.status_a & 1 != 0
+                && (19_650_000..=19_900_000).contains(&player.translation[0])
+            {
                 self.opening_stage = 41;
-                self.jump_hold = 16;
+                self.jump_hold = 32;
                 self.jump_release = 0;
-                return PAD_RIGHT | PAD_DOWN | PAD_CROSS;
+                return PAD_RIGHT | PAD_UP | PAD_CROSS;
             }
+            let horizontal_brake = if player.translation[0] > 19_820_000
+                || (player.translation[0] >= 19_720_000 && player.velocity[0] > 0)
+            {
+                PAD_LEFT
+            } else if player.translation[0] < 19_720_000 || player.velocity[0] < 0 {
+                PAD_RIGHT
+            } else {
+                0
+            };
             if self.jump_hold != 0 {
                 self.jump_hold -= 1;
                 if self.jump_hold == 0 {
                     self.jump_release = 4;
                 }
-                return PAD_RIGHT | PAD_CROSS | lane;
+                return horizontal_brake | lane | PAD_CROSS;
             }
             if self.jump_release != 0 {
                 self.jump_release -= 1;
             }
-            return PAD_RIGHT | lane;
+            return horizontal_brake | lane;
         }
         if self.opening_stage == 41 {
             const ASCENT_START: [i32; 3] = [24_023_616, -8_294_156, 74_880];
+            const BRIDGE_PLATFORM_Z: i32 = 204_544;
             if player.translation[0] >= 23_450_000 {
                 self.opening_stage = 42;
                 self.jump_hold = 0;
@@ -6776,12 +7147,17 @@ impl LostCityExactCarryRouteController {
                 return horizontal | depth;
             }
             let spin = if self.tick % 18 < 4 { PAD_SQUARE } else { 0 };
-            let lane = if player.translation[0] < 20_400_000 {
+            let target_z = if player.translation[0] < 21_100_000 {
+                BRIDGE_PLATFORM_Z
+            } else {
+                360_000
+            };
+            let lane = if player.translation[2] > target_z + 20_000 || player.velocity[2] > 50_000 {
+                PAD_UP
+            } else if player.translation[2] < target_z - 20_000 || player.velocity[2] < -50_000 {
                 PAD_DOWN
             } else if player.translation[2] > 370_000 || player.velocity[2] > 0 {
                 PAD_UP
-            } else if player.translation[2] < 350_000 || player.velocity[2] < 0 {
-                PAD_DOWN
             } else {
                 0
             };
@@ -6805,7 +7181,7 @@ impl LostCityExactCarryRouteController {
         if self.opening_stage == 42 {
             const ASCENT_START: [i32; 3] = [24_023_616, -8_294_156, 74_880];
             const ALIGN_TOLERANCE: u32 = 2_048;
-            const CALIBRATION_WAIT_FRAMES: u8 = 83;
+            const CALIBRATION_WAIT_FRAMES: u8 = 77;
             let grounded = player.status_a & 1 != 0;
             let horizontally_still = player.velocity[0] == 0 && player.velocity[2] == 0;
             let aligned = player.translation[1].abs_diff(ASCENT_START[1]) <= 32
@@ -6896,6 +7272,7 @@ impl LostCityExactCarryRouteController {
             {
                 self.opening_stage = 45;
                 self.jump_hold = 1;
+                self.wall_jump_wait = 0;
                 return PAD_LEFT;
             }
             self.ascent_tick = self.ascent_tick.saturating_add(1);
@@ -6916,8 +7293,7 @@ impl LostCityExactCarryRouteController {
                 485..=493 => PAD_LEFT | PAD_CROSS,
                 494..=496 => PAD_CROSS,
                 497..=518 => 0,
-                519..=522 => PAD_LEFT,
-                523..=532 => PAD_LEFT | PAD_CROSS,
+                519..=532 => PAD_LEFT | PAD_CROSS,
                 533 => PAD_CROSS,
                 534..=550 => 0,
                 _ => {
@@ -6937,6 +7313,11 @@ impl LostCityExactCarryRouteController {
                 self.opening_stage = 46;
                 self.ascent_tick = 516;
                 self.jump_hold = 0;
+                return 0;
+            }
+            const LANDING_SETTLE_FRAMES: u8 = 39;
+            if self.wall_jump_wait < LANDING_SETTLE_FRAMES {
+                self.wall_jump_wait = self.wall_jump_wait.saturating_add(1);
                 return 0;
             }
             if grounded && self.jump_hold > 16 {
@@ -7321,12 +7702,13 @@ impl LostCityExactCarryRouteController {
         if self.opening_stage == 65 {
             const RETURN_START_X: i32 = 20_745_888;
             const TOLERANCE: u32 = 1_024;
+            const LAUNCH_RESIDUE: u32 = 27;
             let grounded = player.status_a & 1 != 0;
             let horizontally_still = player.velocity[0] == 0 && player.velocity[2] == 0;
             if grounded
                 && horizontally_still
                 && player.translation[0].abs_diff(RETURN_START_X) <= TOLERANCE
-                && self.tick % 72 == 27
+                && self.tick % 72 == LAUNCH_RESIDUE
             {
                 self.opening_stage = 63;
                 return PAD_CROSS;
@@ -7338,6 +7720,14 @@ impl LostCityExactCarryRouteController {
                 return PAD_LEFT;
             }
             return 0;
+        }
+        if self.opening_stage == 16
+            && player.translation[0] >= 11_450_000
+            && player.translation[0] < 12_700_000
+            && !self.b3_checkpoint_seen
+            && alcove_exit != 0
+        {
+            return alcove_exit;
         }
         let forward = if matches!(self.opening_stage, 10 | 11) {
             0
@@ -18493,6 +18883,20 @@ impl BoulderDashCompletionRouteController {
         let zero_t = Eid::from_name("0t_jZ").expect("fixed Boulder Dash suffix EID is valid");
         if camera.path.zone == zero_t {
             let progress = camera.progress.raw();
+            if self.zero_a_zero_entry
+                && camera.path.index == 1
+                && self.suffix_jump_stage == 22
+                && (600..=1_500).contains(&progress)
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
+                })
+            {
+                // Session carry enters this shelf one lane left of a fresh
+                // boot. Own the takeoff edge here and carry rightward speed
+                // into the same live landing lane.
+                self.suffix_jump_stage = 23;
+                return PAD_DOWN | PAD_RIGHT | PAD_CROSS;
+            }
             if camera.path.index == 0 && progress >= 3_500 {
                 held |= if progress < 5_500 {
                     0
@@ -18508,11 +18912,67 @@ impl BoulderDashCompletionRouteController {
                     PAD_RIGHT
                 };
             } else if camera.path.index == 1 && self.suffix_jump_stage == 23 {
-                if progress < 6_800 {
+                if self.zero_a_zero_entry
+                    && let Some(player) = player
+                {
+                    let marker_target_x = if progress < 3_000 {
+                        2_790_000_i32.saturating_sub(12_000_i32.saturating_mul(progress) / 3_000)
+                    } else if progress < 6_000 {
+                        2_778_000_i32.saturating_sub(
+                            118_000_i32.saturating_mul(progress.saturating_sub(3_000)) / 3_000,
+                        )
+                    } else if progress < 8_500 {
+                        2_660_000_i32.saturating_sub(
+                            140_000_i32.saturating_mul(progress.saturating_sub(6_000)) / 2_500,
+                        )
+                    } else {
+                        2_520_000
+                    };
+                    let platform_target_x = objects.iter().find_map(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if descriptor.id == 94
+                                    && descriptor.executable == 11
+                                    && descriptor.subtype == 2
+                        )
+                        .then_some(object.frame_bound.or(object.bound))
+                        .flatten()
+                        .filter(|bound| {
+                            (bound.min.z.saturating_sub(400_000)
+                                ..=bound.max.z.saturating_add(32_000))
+                                .contains(&player.translation[2])
+                        })
+                        .map(|bound| bound.max.x.saturating_sub(64_000))
+                    });
+                    let target_x = platform_target_x.unwrap_or(marker_target_x);
+                    let tolerance = if platform_target_x.is_some() {
+                        8_000
+                    } else {
+                        16_000
+                    };
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(2) / 34);
+                    held &= !(PAD_LEFT | PAD_RIGHT);
+                    if predicted_x < target_x.saturating_sub(tolerance) {
+                        held |= PAD_RIGHT;
+                    } else if predicted_x > target_x.saturating_add(tolerance) {
+                        held |= PAD_LEFT;
+                    }
+                } else if progress < 6_800 {
                     held |= PAD_LEFT;
                 } else if progress < 8_900 {
                     held |= PAD_RIGHT;
                 }
+            } else if self.zero_a_zero_entry
+                && camera.path.index == 1
+                && self.suffix_jump_stage == 24
+                && progress < 12_000
+            {
+                // Preserve the carried platform jump's live hold long enough
+                // to clear the next shelf's front face without surrendering
+                // three chase frames on the takeoff platform.
+                held |= PAD_CROSS;
             } else if camera.path.index == 1 && self.suffix_jump_stage == 22 && progress < 200 {
                 // Preserve the path-0 rightward landing velocity for the
                 // boundary frame; the following Cross+Left edge then reverses
@@ -18710,15 +19170,20 @@ impl BoulderDashCompletionRouteController {
             && camera.path.index == 1
             && self.suffix_jump_stage == 3
             && camera.progress.raw() < 1_024
-            && player.is_some_and(|player| {
-                player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19)
-            })
+            && let Some(player) = player
+            && (player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19))
         {
-            // The live-platform landing consumes two more carried samples
-            // than a fresh boot. Take the next jump on the path boundary so
-            // its forward lane, rather than an absolute frame, owns takeoff.
+            // The carried route reaches this path boundary roughly one lane
+            // left of the fresh route and still has leftward momentum. Walk
+            // across the live platform until its successful takeoff lane is
+            // under Crash, then launch with a clean Cross edge.
+            let predicted_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(2) / 34);
+            if predicted_x < 2_650_000 || player.velocity[0] < 0 {
+                return PAD_RIGHT;
+            }
             self.suffix_jump_stage = 4;
-            return held | PAD_CROSS;
+            return PAD_DOWN | PAD_RIGHT | PAD_CROSS;
         }
         if self.zero_a_zero_entry
             && camera.path.zone == zero_a
@@ -19003,7 +19468,7 @@ impl BoulderDashCompletionRouteController {
                 return held | PAD_CROSS;
             }
         }
-        let delay_carried_zero_u_jump = self.zero_a_zero_entry
+        let delay_carried_suffix_jump = (self.zero_a_zero_entry
             && self.suffix_jump_stage == 20
             && camera.path.zone == zero_u
             && camera.path.index == 1
@@ -19022,7 +19487,12 @@ impl BoulderDashCompletionRouteController {
                         .flatten()
                     })
                     .is_some_and(|bound| player.translation[2] < bound.max.z.saturating_sub(40_000))
-            });
+            }))
+            || (self.zero_a_zero_entry
+                && self.suffix_jump_stage == 22
+                && camera.path.zone == zero_t
+                && camera.path.index == 1
+                && camera.progress.raw() < 600);
         if let Some(&(zone_name, path_index, start, end)) =
             SUFFIX_JUMPS.get(usize::from(self.suffix_jump_stage))
         {
@@ -19031,7 +19501,7 @@ impl BoulderDashCompletionRouteController {
                 held &= !PAD_CROSS;
                 if camera.path.index == path_index
                     && (start..=end).contains(&camera.progress.raw())
-                    && !delay_carried_zero_u_jump
+                    && !delay_carried_suffix_jump
                     && (self.suffix_jump_stage != 3 || !self.zero_a_zero_entry)
                     && player.is_some_and(|player| {
                         (player.status_a & 1 != 0 || matches!(player.state, 2 | 17 | 19))
@@ -24247,8 +24717,6 @@ impl LightsOutCompletionRouteController {
         held
     }
 }
-
-const UPSTREAM_PBAK_FRAMES: u32 = 934;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct MovingPlatformTrace {
@@ -31369,9 +31837,32 @@ struct HighRoadCompletionRouteController {
     sunset_wait: u16,
     sunset_stage: u8,
     sunset_b1_recovery_alignment: bool,
+    sunset_b2_closed_cycle_seen: bool,
+    sunset_b2_projectile_wait: bool,
+    sunset_b2_projectile_wait_complete: bool,
+    sunset_b2_wait_spin_tick: u8,
+    sunset_b3_wait_spin_tick: u8,
+    sunset_b3_far_lane_recenter_started: bool,
+    sunset_b3_far_lane_backout_complete: bool,
+    sunset_b3_projectile_volley_seen: bool,
+    sunset_b3_far_lane_wall_clear: bool,
+    sunset_c1_entry_alignment_complete: bool,
+    sunset_c2_projectile_volley_seen: bool,
+    sunset_c2_projectile_volley_clear: bool,
+    sunset_c2_exit_jump_started: bool,
+    sunset_c3_lowering_alignment: bool,
     sunset_f4_phase_gate: u8,
+    sunset_h3_ruin_phase_ready: bool,
+    sunset_h3_next_ruin_phase_ready: bool,
     sunset_h5_ruin_phase_gate: u8,
     sunset_h5_upper_entry_phase: u8,
+    sunset_i1_carrier_takeoff_ready: bool,
+    sunset_i3_second_ruin_takeoff_ready: bool,
+    sunset_i4_wall_open_seen: bool,
+    sunset_m4_takeoff_direction: u32,
+    sunset_m4_takeoff_speed_ready: bool,
+    sunset_m4_second_target_ready: bool,
+    sunset_m4_second_runup_ready: bool,
     sunset_i3_stage126_ready_wait: u8,
     sunset_attack_tick: u8,
     sunset_c4_recovery_brake: u8,
@@ -31399,10 +31890,8 @@ struct HighRoadCompletionRouteController {
 #[allow(clippy::match_same_arms)] // This is a named route-parameter lookup table.
 fn sunset_route_default(name: &str) -> Option<&'static str> {
     match name {
-        "C1_SUNSET_C2_SECOND_WAIT" => Some("38"),
         "C1_SUNSET_C3_HOLD" => Some("0"),
         "C1_SUNSET_C3_RUNUP" => Some("12"),
-        "C1_SUNSET_C3_WAIT" => Some("90"),
         "C1_SUNSET_C4_DELAY" => Some("12"),
         "C1_SUNSET_C4_HOLD" => Some("32"),
         "C1_SUNSET_D1_BOX_ATTACK_X" => Some("18000000"),
@@ -31512,7 +32001,6 @@ fn sunset_route_default(name: &str) -> Option<&'static str> {
         "C1_SUNSET_STAGE207_TAS_RIGHT_HOLD" => Some("20"),
         "C1_SUNSET_STAGE208_LEFT_BRAKE" => Some("20"),
         "C1_SUNSET_STAGE208_RIGHT_HOLD" => Some("14"),
-        "C1_SUNSET_STAGE210_DIRECT_H12" => Some("1"),
         _ => None,
     }
 }
@@ -31621,6 +32109,37 @@ impl HighRoadCompletionRouteController {
         {
             if self.sunset_wait > 0 {
                 self.sunset_wait -= 1;
+                if self.sunset_b1_recovery_alignment && self.sunset_stage == 7 {
+                    // The recovered b3 landing is one floor branch higher
+                    // than the original carried characterization. Keep its
+                    // stationary phase wait, but spin on separate rising
+                    // edges so the ordinary ruin projectile volley cannot
+                    // hit Crash while the next moving support synchronizes.
+                    let tick = self.sunset_b3_wait_spin_tick;
+                    self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                    let spin_delay = 8;
+                    let lane_target = -360_000;
+                    let lane = if player.translation[2] < lane_target - 15_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > lane_target + 15_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    let horizontal_target = 7_870_000;
+                    let horizontal = if player.translation[0] > horizontal_target + 20_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < horizontal_target - 20_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    return horizontal
+                        | lane
+                        | (tick >= spin_delay && (tick - spin_delay).is_multiple_of(2))
+                            .then_some(PAD_SQUARE)
+                            .unwrap_or(0);
+                }
                 if self.sunset_b1_recovery_alignment
                     && self.sunset_stage == 16
                     && player.status_a & 1 != 0
@@ -31702,7 +32221,12 @@ impl HighRoadCompletionRouteController {
             }
             if self.sunset_stage == 3
                 && camera.path.zone == b2
-                && player.translation[0] >= 6_380_000
+                && player.translation[0]
+                    >= if self.sunset_b1_recovery_alignment {
+                        6_390_000
+                    } else {
+                        6_380_000
+                    }
             {
                 self.sunset_stage = 4;
                 return 0;
@@ -31719,11 +32243,11 @@ impl HighRoadCompletionRouteController {
                 // ordinary-pad departure sequence.
                 self.sunset_wait = if self.session_globals {
                     // The b1 live-edge recovery enters this synchronization
-                    // point nineteen frames after the original carried
-                    // bootstrap. Preserve the same absolute moving-support
-                    // phase rather than adding that delay a second time.
+                    // point on a different global moving-wall phase. Wait
+                    // through the direct-boot minimum, then use the live wall
+                    // geometry below to choose the safe departure frame.
                     if self.sunset_b1_recovery_alignment {
-                        146
+                        150
                     } else {
                         165
                     }
@@ -31742,17 +32266,122 @@ impl HighRoadCompletionRouteController {
                 };
             }
             if self.sunset_stage == 5 {
+                if self.sunset_b1_recovery_alignment {
+                    let paired_walls_closed = [25_u16, 26_u16].into_iter().all(|id| {
+                        objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                            ) && object.state == 17
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| bound.min.z <= 0 && bound.max.z >= 500_000)
+                        })
+                    });
+                    self.sunset_b2_closed_cycle_seen |= paired_walls_closed;
+                    // The uninterrupted campaign can enter b2 at several
+                    // global object phases. Depart only while both paired
+                    // ruin walls are lowering after a closed phase, rather
+                    // than during the geometrically identical rising phase;
+                    // this remains an ordinary-pad route and observes only
+                    // live collision geometry.
+                    let lowering_min = 500_000;
+                    let lowering_max = 520_000;
+                    let paired_walls_lowering = [25_u16, 26_u16].into_iter().all(|id| {
+                        objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor) if descriptor.id == id
+                            ) && object.state == 18
+                                && object.frame_bound.is_some_and(|bound| {
+                                    bound.min.z < 0
+                                        && (lowering_min..=lowering_max).contains(&bound.max.z)
+                                })
+                        })
+                    });
+                    if !self.sunset_b2_closed_cycle_seen || !paired_walls_lowering {
+                        return 0;
+                    }
+                }
                 self.sunset_stage = 6;
                 self.jump_hold = 0;
                 return 0;
             }
             if self.sunset_stage == 6 && camera.path.zone == b2 {
-                if player.translation[0] >= 7_400_000 {
+                if self.sunset_b1_recovery_alignment
+                    && !self.sunset_b2_projectile_wait_complete
+                    && (self.sunset_b2_projectile_wait
+                        || (player.translation[0] >= 7_300_000 && player.status_a & 1 != 0))
+                {
+                    self.sunset_b2_projectile_wait = true;
+                    let projectile_volley_clear = objects
+                        .iter()
+                        .filter(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 11
+                                }
+                            ) && object.state == 18
+                        })
+                        .all(|object| {
+                            object.translation[0] <= player.translation[0]
+                                || object.translation[0] >= 8_550_000
+                        });
+                    let horizontal = if player.translation[0] > 7_340_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 7_300_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                    let lane_target = 216_832;
+                    let lane = if player.translation[2] > lane_target + 15_000 {
+                        PAD_UP
+                    } else if player.translation[2] < lane_target - 15_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+                    let attack = if projectile_volley_clear {
+                        self.sunset_b2_wait_spin_tick = 0;
+                        0
+                    } else {
+                        let tick = self.sunset_b2_wait_spin_tick;
+                        self.sunset_b2_wait_spin_tick =
+                            self.sunset_b2_wait_spin_tick.wrapping_add(1);
+                        (tick >= 7 && (tick - 7).is_multiple_of(6))
+                            .then_some(PAD_SQUARE)
+                            .unwrap_or(0)
+                    };
+                    if !projectile_volley_clear
+                        || !(7_300_000..=7_340_000).contains(&player.translation[0])
+                        || player.velocity[0].unsigned_abs() > 80_000
+                        || player.translation[2].abs_diff(216_832) > 15_000
+                        || player.status_a & 1 == 0
+                    {
+                        return horizontal | lane | attack;
+                    }
+                    self.sunset_b2_projectile_wait = false;
+                    self.sunset_b2_projectile_wait_complete = true;
+                    self.jump_hold = 0;
+                    return 0;
+                }
+                if player.translation[0] >= 7_400_000
+                    && !(self.sunset_b1_recovery_alignment
+                        && self.sunset_b2_projectile_wait_complete)
+                {
                     self.sunset_stage = 3;
                     self.sunset_tick = 478;
                     return 0;
                 }
-                let lane = if player.translation[0] >= 7_180_000 {
+                let lane = if player.translation[0]
+                    >= if self.sunset_b1_recovery_alignment {
+                        7_220_000
+                    } else {
+                        7_180_000
+                    } {
                     PAD_DOWN
                 } else if player.translation[2] > 55_000 {
                     PAD_UP
@@ -31776,7 +32405,12 @@ impl HighRoadCompletionRouteController {
             if camera.path.zone == b3 {
                 if self.sunset_stage < 7
                     && player.translation[0] >= 7_780_000
-                    && player.translation[1] < -21_450_000
+                    && player.translation[1]
+                        < if self.sunset_b1_recovery_alignment {
+                            -21_100_000
+                        } else {
+                            -21_450_000
+                        }
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 7;
@@ -31784,10 +32418,29 @@ impl HighRoadCompletionRouteController {
                     // fourteen frames before a fresh boot. Resynchronize
                     // while Crash is stationary so the following authored
                     // moving-platform sequence sees the same phase.
-                    self.sunset_wait = if self.session_globals { 54 } else { 40 };
+                    self.sunset_wait = if self.sunset_b1_recovery_alignment || self.session_globals
+                    {
+                        54
+                    } else {
+                        40
+                    };
                     return 0;
                 }
                 if self.sunset_stage == 7 {
+                    let recovery_run_lane = -360_000;
+                    if self.sunset_b1_recovery_alignment
+                        && player.translation[2].abs_diff(recovery_run_lane) > 15_000
+                    {
+                        let tick = self.sunset_b3_wait_spin_tick;
+                        self.sunset_b3_wait_spin_tick =
+                            self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                        let lane = if player.translation[2] < recovery_run_lane {
+                            PAD_DOWN
+                        } else {
+                            PAD_UP
+                        };
+                        return lane | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                    }
                     self.sunset_stage = 8;
                     self.jump_hold = 8;
                     return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
@@ -31800,8 +32453,102 @@ impl HighRoadCompletionRouteController {
                     self.jump_hold = 8;
                     return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
+                if self.sunset_b1_recovery_alignment
+                    && self.sunset_stage == 13
+                    && !self.sunset_b3_far_lane_wall_clear
+                    && (self.sunset_b3_far_lane_recenter_started
+                        || player.translation[0] >= 8_000_000)
+                {
+                    self.sunset_b3_far_lane_recenter_started = true;
+                    let blocking_boxes_live = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor)
+                                if matches!(descriptor.id, 41 | 42)
+                        )
+                    });
+                    if !blocking_boxes_live {
+                        let tick = self.sunset_b3_wait_spin_tick;
+                        self.sunset_b3_wait_spin_tick =
+                            self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                        let attack = tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                        if !self.sunset_b3_far_lane_backout_complete {
+                            if player.translation[0] > 7_900_000 {
+                                return PAD_LEFT | attack;
+                            }
+                            self.sunset_b3_far_lane_backout_complete = true;
+                            self.sunset_b3_wait_spin_tick = 0;
+                            return 0;
+                        }
+                        let forward_projectiles_live = objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 42,
+                                    subtype: 11
+                                }
+                            ) && object.state == 18
+                                && object.translation[0] >= player.translation[0] - 100_000
+                                && object.translation[0] <= 8_900_000
+                        });
+                        self.sunset_b3_projectile_volley_seen |= forward_projectiles_live;
+                        if !self.sunset_b3_projectile_volley_seen {
+                            // Advance the live camera just far enough to
+                            // activate the next ruin thrower while remaining
+                            // in the safe outside lane behind the cleared
+                            // crate row.
+                            let lane = if player.translation[2] > -345_000 {
+                                PAD_UP
+                            } else {
+                                0
+                            };
+                            return PAD_RIGHT | lane | attack;
+                        }
+                        if forward_projectiles_live {
+                            // Let the ordinary volley cross ahead of Crash
+                            // before returning to its collision lane.
+                            let horizontal = if player.translation[0] > 7_880_000 {
+                                PAD_LEFT
+                            } else if player.translation[0] < 7_840_000 {
+                                PAD_RIGHT
+                            } else {
+                                0
+                            };
+                            let lane = if player.translation[2] > -345_000 {
+                                PAD_UP
+                            } else {
+                                0
+                            };
+                            return horizontal | lane | attack;
+                        }
+                        if player.translation[2] < 180_000 {
+                            return PAD_DOWN | attack;
+                        }
+                        self.sunset_b3_far_lane_wall_clear = true;
+                        self.jump_hold = 0;
+                        self.sunset_b3_wait_spin_tick = 0;
+                        return 0;
+                    }
+                    if player.translation[2].abs_diff(210_000) > 30_000 {
+                        let tick = self.sunset_b3_wait_spin_tick;
+                        self.sunset_b3_wait_spin_tick =
+                            self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                        let lane = if player.translation[2] < 210_000 {
+                            PAD_DOWN
+                        } else {
+                            PAD_UP
+                        };
+                        return lane | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                    }
+                    return 0;
+                }
                 if self.sunset_stage == 13
-                    && player.translation[0] >= 8_650_000
+                    && player.translation[0]
+                        >= if self.sunset_b1_recovery_alignment {
+                            8_600_000
+                        } else {
+                            8_650_000
+                        }
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 14;
@@ -31817,7 +32564,16 @@ impl HighRoadCompletionRouteController {
                     self.jump_hold = 8;
                     return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
                 }
-                let (lane_min, lane_max) = (180_000, 240_000);
+                let (lane_min, lane_max) = if self.sunset_b1_recovery_alignment {
+                    let target = if self.sunset_b3_far_lane_wall_clear {
+                        210_000
+                    } else {
+                        -360_000
+                    };
+                    (target - 30_000, target + 30_000)
+                } else {
+                    (180_000, 240_000)
+                };
                 let lane = if player.translation[2] > lane_max {
                     PAD_UP
                 } else if player.translation[2] < lane_min {
@@ -31825,7 +32581,17 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                let held = PAD_RIGHT | lane | PAD_SQUARE;
+                let attack = if self.sunset_b1_recovery_alignment
+                    && self.sunset_b3_far_lane_wall_clear
+                    && self.sunset_stage == 13
+                {
+                    let tick = self.sunset_b3_wait_spin_tick;
+                    self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                    tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0)
+                } else {
+                    PAD_SQUARE
+                };
+                let held = PAD_RIGHT | lane | attack;
                 if (self.sunset_stage == 8 || self.sunset_stage == 13)
                     && player.translation[0] >= 7_720_000
                     && player.status_a & 1 != 0
@@ -31862,6 +32628,105 @@ impl HighRoadCompletionRouteController {
             let h3 = Eid::from_name("h3_zZ").expect("fixed Sunset Vista zone EID is valid");
             let h4 = Eid::from_name("h4_zZ").expect("fixed Sunset Vista zone EID is valid");
             let h5 = Eid::from_name("h5_zZ").expect("fixed Sunset Vista zone EID is valid");
+            let c1 = Eid::from_name("c1_zZ").expect("fixed Sunset Vista zone EID is valid");
+            if self.sunset_b1_recovery_alignment
+                && self.sunset_stage == 15
+                && camera.path.zone == c1
+                && !self.sunset_c1_entry_alignment_complete
+                && player.translation[0] >= 9_150_000
+            {
+                let horizontal = if player.velocity[0] > 80_000 {
+                    PAD_LEFT
+                } else if player.velocity[0] < -80_000 {
+                    PAD_RIGHT
+                } else if player.translation[0] > 9_300_000 {
+                    PAD_LEFT
+                } else if player.translation[0] < 9_150_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+                let lane = if player.velocity[2] > 80_000 {
+                    PAD_UP
+                } else if player.velocity[2] < -80_000 {
+                    PAD_DOWN
+                } else if player.translation[2] > 216_832 {
+                    PAD_UP
+                } else if player.translation[2] < 216_832 {
+                    PAD_DOWN
+                } else {
+                    0
+                };
+                if player.status_a & 1 != 0
+                    && player.velocity[0].unsigned_abs() <= 80_000
+                    && player.velocity[2].unsigned_abs() <= 80_000
+                    && (9_150_000..=9_300_000).contains(&player.translation[0])
+                    && player.translation[2] == 216_832
+                {
+                    self.sunset_c1_entry_alignment_complete = true;
+                    self.jump_hold = 0;
+                    // Braking to align the recovered entry also consumes the
+                    // full-speed run-up that the ordinary route carries onto
+                    // this shelf. Rebuild that run-up before arming the
+                    // normal five-frame grounded jump cadence.
+                    self.sunset_attack_tick = 11;
+                    return 0;
+                }
+                let tick = self.sunset_b3_wait_spin_tick;
+                self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                return horizontal
+                    | lane
+                    | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+            }
+            if self.sunset_b1_recovery_alignment
+                && self.sunset_stage == 17
+                && camera.path.zone == c2
+                && !self.sunset_c2_projectile_volley_clear
+            {
+                let forward_projectiles_live = objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 42,
+                            subtype: 11
+                        }
+                    ) && object.state == 18
+                        && object.translation[0] >= player.translation[0] - 100_000
+                        && object.translation[0] <= 13_000_000
+                });
+                self.sunset_c2_projectile_volley_seen |= forward_projectiles_live;
+                let tick = self.sunset_b3_wait_spin_tick;
+                self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                let attack = tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                if !self.sunset_c2_projectile_volley_seen || forward_projectiles_live {
+                    // The carried global phase puts a full ruin-stone volley
+                    // across the next jump. Clear it from this authored safe
+                    // shelf using separate spin rising edges before departing.
+                    return attack;
+                }
+                self.sunset_c2_projectile_volley_clear = true;
+                self.sunset_b3_wait_spin_tick = 0;
+                self.sunset_attack_tick = 0;
+                self.jump_hold = 0;
+                return 0;
+            }
+            if self.sunset_b1_recovery_alignment
+                && self.sunset_stage == 17
+                && camera.path.zone == c2
+                && self.sunset_c2_projectile_volley_clear
+                && !self.sunset_c2_exit_jump_started
+                && player.translation[0] >= 12_150_000
+                && player.status_a & 1 != 0
+            {
+                // The live-volley wait changes the first c2 rotating support
+                // from its automatic upward-hit phase to a normal grounded
+                // landing. Take the equivalent authored jump immediately
+                // from that live support, before its far wall catches the
+                // lower delayed arc.
+                self.sunset_c2_exit_jump_started = true;
+                self.jump_hold = 16;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
             let right_route = camera.path.zone.name().is_some_and(|name| {
                 matches!(
                     name.as_str(),
@@ -32388,6 +33253,24 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 97
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
+                if self.sunset_b1_recovery_alignment && !self.sunset_h3_ruin_phase_ready {
+                    // The carried campaign reaches this safe H3 ledge in the
+                    // opposite phase from a clean Sunset Vista boot. Do not
+                    // step off until the next ruin's live collider covers the
+                    // player's depth lane.
+                    self.sunset_h3_ruin_phase_ready = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(entity) if entity.id == 132
+                        ) && object.state == 11
+                            && object.frame_bound.is_some_and(|bound| {
+                                (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                            })
+                    });
+                    if !self.sunset_h3_ruin_phase_ready {
+                        return 0;
+                    }
+                }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                 let lane = if (tick / 2).is_multiple_of(2) {
@@ -32400,6 +33283,20 @@ impl HighRoadCompletionRouteController {
                     .and_then(|value| value.parse::<i32>().ok())
                     .unwrap_or(23_700_000);
                 if player.translation[0] < jump_x && player.status_a & 1 != 0 {
+                    if self.sunset_b1_recovery_alignment && !self.sunset_h3_next_ruin_phase_ready {
+                        self.sunset_h3_next_ruin_phase_ready = objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(entity) if entity.id == 131
+                            ) && object.state == 11
+                                && object.frame_bound.is_some_and(|bound| {
+                                    (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                                })
+                        });
+                        if !self.sunset_h3_next_ruin_phase_ready {
+                            return 0;
+                        }
+                    }
                     self.sunset_stage = 98;
                     self.sunset_attack_tick = 0;
                     return PAD_LEFT | lane | PAD_CROSS | PAD_SQUARE;
@@ -32535,7 +33432,22 @@ impl HighRoadCompletionRouteController {
             {
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let lane = if (tick / 2).is_multiple_of(2) {
+                let lane = if self.sunset_b1_recovery_alignment {
+                    // Keep the carried route in the authored shallow H4 lane.
+                    // A one-tick depth offset at this alternating ruin chain
+                    // otherwise pushes Crash into entity 145's side wall.
+                    if player.velocity[2] > 100_000 {
+                        PAD_UP
+                    } else if player.velocity[2] < -100_000 {
+                        PAD_DOWN
+                    } else if player.translation[2] > 48_000 {
+                        PAD_UP
+                    } else if player.translation[2] < 24_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    }
+                } else if (tick / 2).is_multiple_of(2) {
                     PAD_UP
                 } else {
                     PAD_DOWN
@@ -32566,6 +33478,25 @@ impl HighRoadCompletionRouteController {
                 }
                 if player.translation[2] > 165_000 || player.velocity[2] > 100_000 {
                     return PAD_UP;
+                }
+                if self.sunset_b1_recovery_alignment {
+                    let moving_ruin_takeoff_phase = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(entity) if entity.id == 140
+                        ) && object.state == 12
+                            && object
+                                .frame_bound
+                                .is_some_and(|bound| (40_000..=80_000).contains(&bound.max.z))
+                    });
+                    if !moving_ruin_takeoff_phase {
+                        // The H4 turn lands on entity 140 roughly one jump
+                        // later. Release from this safe box only while its live
+                        // collider is in the phase that will cover Crash's
+                        // 153K depth lane at touchdown; otherwise its side
+                        // face ejects the carried route off the ruin.
+                        return 0;
+                    }
                 }
                 let wait_frames = sunset_var("C1_SUNSET_STAGE105_WAIT")
                     .ok()
@@ -33125,6 +34056,26 @@ impl HighRoadCompletionRouteController {
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
                 if sunset_var_os("C1_SUNSET_STAGE122_CENTER").is_some() {
+                    if self.sunset_b1_recovery_alignment && !self.sunset_i1_carrier_takeoff_ready {
+                        self.sunset_i1_carrier_takeoff_ready = player.status_a & 1 != 0
+                            && objects.iter().any(|object| {
+                                matches!(
+                                    object.origin,
+                                    ObjectOrigin::Runtime {
+                                        executable: 46,
+                                        subtype: 9
+                                    }
+                                ) && (21_950_000..=22_020_000).contains(&object.translation[0])
+                                    && (-12_650_000..=-12_450_000).contains(&object.translation[1])
+                            });
+                        if !self.sunset_i1_carrier_takeoff_ready {
+                            // The carried object clock reaches this safe I1
+                            // ledge while the lower carrier is moving away.
+                            // Wait for its live path position to match the
+                            // incoming arc before beginning the jump cycle.
+                            return 0;
+                        }
+                    }
                     let tick = self.sunset_attack_tick;
                     self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
                     if player.status_a & 1 != 0
@@ -33304,6 +34255,27 @@ impl HighRoadCompletionRouteController {
             if self.sunset_stage == 128
                 && sunset_var_os("C1_SUNSET_STAGE78_SOURCE_CONTROLLER").is_some()
             {
+                if self.sunset_b1_recovery_alignment && !self.sunset_i3_second_ruin_takeoff_ready {
+                    self.sunset_i3_second_ruin_takeoff_ready = player.status_a & 1 != 0
+                        && objects.iter().any(|object| {
+                            matches!(
+                                object.origin,
+                                ObjectOrigin::Entity(descriptor)
+                                    if descriptor.id == 153
+                                        && descriptor.executable == 46
+                                        && descriptor.subtype == 7
+                            ) && object.state == 12
+                                && object
+                                    .frame_bound
+                                    .is_some_and(|bound| (160_000..=200_000).contains(&bound.max.z))
+                        });
+                    if !self.sunset_i3_second_ruin_takeoff_ready {
+                        // The carried clock reaches I3 with this ruin rotating
+                        // out of Crash's lane. Hold the safe landing until its
+                        // live collider sweeps back through the incoming arc.
+                        return 0;
+                    }
+                }
                 if player.status_a & 1 != 0
                     && player.translation[1] > -11_420_000
                     && (21_520_000..21_850_000).contains(&player.translation[0])
@@ -33390,15 +34362,10 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
-                // The b1 live-edge recovery settles this ledge one fixed-point
-                // depth step farther out than the authored campaign phase.
-                // Take the next rise diagonally to land inside its collision
-                // bank instead of clipping the outer lip and dropping.
-                let up_ticks = if self.sunset_b1_recovery_alignment {
-                    21
-                } else {
-                    0
-                };
+                // The I3 live-collider gate now preserves the authored depth
+                // lane through this rise, so no corrective depth input is
+                // needed on either the direct or carried route.
+                let up_ticks = 0;
                 let lane = if self.session_globals && route_tick < up_ticks {
                     PAD_UP
                 } else {
@@ -33833,6 +34800,19 @@ impl HighRoadCompletionRouteController {
                         })
                     })
                 });
+                if self.sunset_b1_recovery_alignment && !self.sunset_i4_wall_open_seen {
+                    self.sunset_i4_wall_open_seen = !closed_wall_cycle;
+                    // The carried clock can enter this hold during an old
+                    // closed phase. Observe the bank open before accepting
+                    // the next live closed edge used by the authored route.
+                    return if player.translation[0] > 24_280_000 {
+                        PAD_LEFT
+                    } else if player.translation[0] < 24_240_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                }
                 if self.session_globals && !closed_wall_cycle {
                     return if player.translation[0] > 24_280_000 {
                         PAD_LEFT
@@ -34399,6 +35379,26 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 153 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
+                if self.session_globals && self.sunset_attack_tick == 0 {
+                    let first_crate_run_up_is_ready = objects.iter().any(|object| {
+                        matches!(
+                            object.origin,
+                            ObjectOrigin::Entity(descriptor) if descriptor.id == 172
+                        ) && object.frame_bound.or(object.bound).is_some_and(|bound| {
+                            bound.min.x.saturating_sub(player.translation[0]) <= 470_000
+                        })
+                    });
+                    if !first_crate_run_up_is_ready {
+                        // The carried route can enter K1 one simulation step
+                        // behind the focused route. Keep running on the safe
+                        // shelf until the live crate face is within the same
+                        // takeoff range, then use the ordinary right/jump
+                        // traversal so Crash lands on top instead of against
+                        // the crate's front collider.
+                        return PAD_RIGHT;
+                    }
+                    self.sunset_attack_tick = 1;
+                }
                 if player.status_a & 1 != 0
                     && player.translation[0] > 29_500_000
                     && player.translation[1] > -10_500_000
@@ -36015,12 +37015,40 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 210 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                if sunset_var_os("C1_SUNSET_STAGE210_DIRECT_H12").is_none_or(|value| value != "0")
+                let carried_phase = self.session_globals && !self.collect_sunset_cortex_tokens;
+                let supported_by_live_upper_platform = carried_phase
+                    && self.sunset_b1_recovery_alignment
                     && player.status_a & 1 != 0
-                    && (40_200_000..=41_000_000).contains(&player.translation[0])
-                    && (-7_250_000..=-6_950_000).contains(&player.translation[1])
-                    && (-150_000..=150_000).contains(&player.translation[2])
+                    && player.translation[1] >= -7_200_000
+                    && objects.iter().any(|object| {
+                        object.program.name().as_deref() == Some("RWaOC")
+                            && object.state == 1
+                            && matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 46,
+                                    subtype: 9
+                                }
+                            )
+                            && object.frame_bound.is_some_and(|bound| {
+                                (bound.min.x.saturating_sub(40_000)
+                                    ..=bound.max.x.saturating_add(40_000))
+                                    .contains(&player.translation[0])
+                                    && (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                                    && player.translation[1].abs_diff(bound.max.y) <= 20_000
+                            })
+                    });
+                if supported_by_live_upper_platform
+                    || (player.status_a & 1 != 0
+                        && (40_200_000..=41_000_000).contains(&player.translation[0])
+                        && (-7_250_000..=-6_950_000).contains(&player.translation[1])
+                        && (-150_000..=150_000).contains(&player.translation[2]))
                 {
+                    // The direct route lands on a live RWaOC runtime 46/9
+                    // state-1 collider near y=-7.12M. In a carried session the
+                    // independently phased platform can meet Crash outside the
+                    // direct run's fixed x window, so advance on that same
+                    // grounded support identity and upper-deck height.
                     self.sunset_stage = 212;
                     self.sunset_attack_tick = 0;
                     return 0;
@@ -36033,14 +37061,77 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
+                if carried_phase && self.sunset_b1_recovery_alignment {
+                    if self.sunset_m4_takeoff_direction == 0 {
+                        self.sunset_m4_takeoff_direction = objects
+                            .iter()
+                            .filter(|object| {
+                                object.program.name().as_deref() == Some("RWaOC")
+                                    && object.state == 1
+                                    && object.animation_counter == 0
+                                    && matches!(
+                                        object.origin,
+                                        ObjectOrigin::Runtime {
+                                            executable: 46,
+                                            subtype: 9
+                                        }
+                                    )
+                            })
+                            .filter_map(|object| {
+                                let bound = object.frame_bound?;
+                                let vertical_gap =
+                                    bound.max.y.saturating_sub(player.translation[1]);
+                                (200_000..=375_000).contains(&vertical_gap).then_some((
+                                    object.translation[0]
+                                        .saturating_sub(player.translation[0])
+                                        .abs(),
+                                    object.translation[0],
+                                ))
+                            })
+                            .min_by_key(|(horizontal_gap, _)| *horizontal_gap)
+                            .map_or(0, |(_, target_x)| {
+                                if target_x < player.translation[0] {
+                                    PAD_LEFT
+                                } else {
+                                    PAD_RIGHT
+                                }
+                            });
+                        if self.sunset_m4_takeoff_direction == 0 {
+                            return 0;
+                        }
+                    }
+                    let direction = self.sunset_m4_takeoff_direction;
+                    if !self.sunset_m4_takeoff_speed_ready {
+                        let directional_speed = if direction == PAD_LEFT {
+                            player.velocity[0].saturating_neg()
+                        } else {
+                            player.velocity[0]
+                        };
+                        if player.status_a & 1 == 0 || directional_speed < 425_000 {
+                            // Independently phased orbiting platforms can put
+                            // the reachable M4 destination on either side.
+                            // Select the nearest live upper bound, then build
+                            // ordinary ground speed toward it while Crash is
+                            // still supported.
+                            return direction;
+                        }
+                        self.sunset_m4_takeoff_speed_ready = true;
+                        self.sunset_attack_tick = 0;
+                    }
+                    let tick = self.sunset_attack_tick;
+                    self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
+                    if tick < 5 {
+                        return direction | PAD_CROSS;
+                    }
+                    return 0;
+                }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
-                let carried_phase = self.session_globals && !self.collect_sunset_cortex_tokens;
                 let runup = std::env::var("C1_SUNSET_STAGE210_RUNUP")
                     .ok()
                     .and_then(|value| value.parse::<u8>().ok())
                     .unwrap_or(if self.sunset_b1_recovery_alignment {
-                        7
+                        0
                     } else if carried_phase {
                         5
                     } else {
@@ -36189,6 +37280,46 @@ impl HighRoadCompletionRouteController {
                     self.sunset_stage = 214;
                     self.sunset_attack_tick = 0;
                     return 0;
+                }
+                if self.sunset_b1_recovery_alignment && !self.sunset_m4_second_target_ready {
+                    let upper_target_ready = objects.iter().any(|object| {
+                        object.program.name().as_deref() == Some("RWaOC")
+                            && object.state == 1
+                            && matches!(
+                                object.origin,
+                                ObjectOrigin::Runtime {
+                                    executable: 46,
+                                    subtype: 9
+                                }
+                            )
+                            && object.frame_bound.is_some_and(|bound| {
+                                let vertical_gap =
+                                    bound.max.y.saturating_sub(player.translation[1]);
+                                let horizontal_gap =
+                                    bound.min.x.saturating_sub(player.translation[0]);
+                                (180_000..=350_000).contains(&vertical_gap)
+                                    && (80_000..=250_000).contains(&horizontal_gap)
+                                    && (bound.min.z..=bound.max.z).contains(&player.translation[2])
+                            })
+                    });
+                    if !upper_target_ready {
+                        // The upper orbit can arrive directly overhead in a
+                        // carried session. Stay on the source collider until
+                        // a live upper 46/9 platform has the same rightward
+                        // approach window used by the passing direct jump.
+                        return 0;
+                    }
+                    self.sunset_m4_second_target_ready = true;
+                }
+                if self.sunset_b1_recovery_alignment && !self.sunset_m4_second_runup_ready {
+                    if player.status_a & 1 != 0 && player.velocity[0] < 170_000 {
+                        // The phase-safe target arrives a little farther right
+                        // than in the direct route. Build two ordinary ground
+                        // acceleration steps before committing to the jump.
+                        return PAD_RIGHT;
+                    }
+                    self.sunset_m4_second_runup_ready = true;
+                    self.sunset_attack_tick = 0;
                 }
                 let tick = self.sunset_attack_tick;
                 self.sunset_attack_tick = self.sunset_attack_tick.saturating_add(1);
@@ -37432,16 +38563,25 @@ impl HighRoadCompletionRouteController {
                 let e3_lane_target = sunset_var("C1_SUNSET_E3_LANE")
                     .ok()
                     .and_then(|value| value.parse::<i32>().ok())
-                    .unwrap_or(player.translation[2]);
+                    .unwrap_or(if self.sunset_b1_recovery_alignment {
+                        218_496
+                    } else {
+                        player.translation[2]
+                    });
+                let e3_lane_tolerance = if self.sunset_b1_recovery_alignment {
+                    2_000
+                } else {
+                    8_000
+                };
                 let e3_lane_start = 23_000_000;
                 let e3_lane = if (camera.path.zone == e2 || camera.path.zone == e3)
                     && player.translation[0] >= e3_lane_start
-                    && player.translation[2] > e3_lane_target + 8_000
+                    && player.translation[2] > e3_lane_target + e3_lane_tolerance
                 {
                     PAD_UP
                 } else if (camera.path.zone == e2 || camera.path.zone == e3)
                     && player.translation[0] >= e3_lane_start
-                    && player.translation[2] < e3_lane_target - 8_000
+                    && player.translation[2] < e3_lane_target - e3_lane_tolerance
                 {
                     PAD_DOWN
                 } else {
@@ -38182,7 +39322,7 @@ impl HighRoadCompletionRouteController {
                         self.sunset_attack_tick = 4;
                     }
                     if self.sunset_attack_tick == 4
-                        && (ruin_volley_head.is_some_and(|x| x > 24_220_000) || !ruin_spikes_ready)
+                        && (ruin_volley_head.is_some_and(|x| x > 24_675_000) || !ruin_spikes_ready)
                     {
                         // Preload forward velocity against the bank's vertical
                         // step while the tail of the volley passes overhead.
@@ -38861,6 +40001,31 @@ impl HighRoadCompletionRouteController {
                     self.sunset_attack_tick = 0;
                     return 0;
                 }
+                if self.sunset_b1_recovery_alignment
+                    && self.sunset_stage == 17
+                    && camera.path.zone == c3
+                    && player.translation[0] >= 12_500_000
+                    && player.translation[1] >= -21_450_000
+                    && player.status_a & 1 != 0
+                {
+                    self.sunset_c3_lowering_alignment = true;
+                    self.jump_hold = 0;
+                    self.sunset_attack_tick = 0;
+                }
+                if self.sunset_c3_lowering_alignment
+                    && self.sunset_stage == 17
+                    && camera.path.zone == c3
+                {
+                    if player.translation[1] < -21_450_000 && player.status_a & 1 != 0 {
+                        self.sunset_c3_lowering_alignment = false;
+                    } else if player.translation[0] > 12_560_000 || player.velocity[0] > 100_000 {
+                        return PAD_LEFT;
+                    } else if player.translation[0] < 12_520_000 || player.velocity[0] < -100_000 {
+                        return PAD_RIGHT;
+                    } else {
+                        return 0;
+                    }
+                }
                 if camera.path.zone == c3
                     && self.sunset_stage == 17
                     && player.translation[0] >= 12_500_000
@@ -38868,10 +40033,11 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 18;
-                    self.sunset_wait = sunset_var("C1_SUNSET_C3_WAIT")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(40);
+                    self.sunset_wait = if self.sunset_b1_recovery_alignment {
+                        34
+                    } else {
+                        90
+                    };
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
@@ -38883,10 +40049,11 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                 {
                     self.sunset_stage = 17;
-                    self.sunset_wait = sunset_var("C1_SUNSET_C2_SECOND_WAIT")
-                        .ok()
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(40);
+                    self.sunset_wait = if self.sunset_b1_recovery_alignment {
+                        84
+                    } else {
+                        38
+                    };
                     self.sunset_attack_tick = 0;
                     self.jump_hold = 0;
                     return 0;
@@ -38909,6 +40076,18 @@ impl HighRoadCompletionRouteController {
                 } else {
                     0
                 };
+                let route_attack = if self.sunset_b1_recovery_alignment
+                    && self.sunset_stage == 17
+                    && self.sunset_c2_projectile_volley_clear
+                {
+                    let tick = self.sunset_b3_wait_spin_tick;
+                    self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
+                    tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0)
+                } else if camera.path.zone == d1 {
+                    0
+                } else {
+                    PAD_SQUARE
+                };
                 let mut held = PAD_RIGHT
                     | lane
                     | d1_lane
@@ -38916,19 +40095,16 @@ impl HighRoadCompletionRouteController {
                     | e3_lane
                     | f3_lane
                     | f2_lane
-                    | if camera.path.zone == d1 {
-                        0
-                    } else {
-                        PAD_SQUARE
-                    };
+                    | route_attack;
                 if self.sunset_b1_recovery_alignment
                     && self.sunset_stage == 17
                     && camera.path.zone == c3
-                    && camera.progress.raw() < 200
+                    && camera.progress.raw() < 400
                 {
-                    // The recovered support branch enters c3 one horizontal
-                    // quantum ahead. Preserve the authored Down sample while
-                    // coasting once to match its c3 position.
+                    // The live-volley wait leaves the recovered support
+                    // branch with a full extra jump arc at c3 entry. Preserve
+                    // its first two authored Down samples while coasting so
+                    // the longer arc lands at the same support position.
                     held &= !PAD_RIGHT;
                 }
                 if camera.path.zone == c4
@@ -38937,25 +40113,32 @@ impl HighRoadCompletionRouteController {
                     && player.status_a & 1 != 0
                     && player.translation[0] < 15_400_000
                 {
-                    if self.sunset_c4_recovery_brake == 0 && player.translation[0] >= 14_483_500 {
+                    let recovery_lane = if player.translation[2] > 238_000 {
+                        PAD_UP
+                    } else if player.translation[2] < 228_000 {
+                        PAD_DOWN
+                    } else {
+                        0
+                    };
+                    if self.sunset_c4_recovery_brake == 0 && player.translation[0] >= 14_440_000 {
                         self.sunset_c4_recovery_brake = 1;
                         return PAD_LEFT | PAD_SQUARE;
                     }
                     if (1..=22).contains(&self.sunset_c4_recovery_brake) {
                         self.sunset_c4_recovery_brake += 1;
-                        return PAD_SQUARE;
+                        return recovery_lane | PAD_SQUARE;
                     }
-                    if (23..=31).contains(&self.sunset_c4_recovery_brake) {
+                    if (23..=33).contains(&self.sunset_c4_recovery_brake) {
                         self.sunset_c4_recovery_brake += 1;
-                        return PAD_RIGHT | PAD_SQUARE;
+                        return PAD_RIGHT | recovery_lane | PAD_SQUARE;
                     }
-                    if self.sunset_c4_recovery_brake == 32 {
+                    if self.sunset_c4_recovery_brake == 34 {
                         self.sunset_c4_recovery_brake = u8::MAX;
                         self.jump_hold = sunset_var("C1_SUNSET_C4_HOLD")
                             .ok()
                             .and_then(|value| value.parse().ok())
                             .unwrap_or(32);
-                        return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+                        return PAD_RIGHT | recovery_lane | PAD_CROSS | PAD_SQUARE;
                     }
                 }
                 if camera.path.zone == c4
@@ -38971,6 +40154,22 @@ impl HighRoadCompletionRouteController {
                     // issue its jump on the same frame as before.
                     self.sunset_attack_tick = 1;
                     return held;
+                }
+                if self.sunset_b1_recovery_alignment
+                    && self.sunset_stage == 21
+                    && camera.path.zone == c3
+                    && (12_580_000..=12_660_000).contains(&player.translation[0])
+                    && player.translation[1] >= -21_450_000
+                    && player.status_a & 1 != 0
+                    && self.jump_hold == 0
+                {
+                    // The focused route receives an authored one-tick bounce
+                    // at this upper c3 ledge. The carried projectile phase
+                    // does not, so issue the equivalent ordinary jump edge
+                    // before the generic five-frame cadence can run off the
+                    // narrow support.
+                    self.sunset_attack_tick = 0;
+                    return held | PAD_CROSS;
                 }
                 if camera.path.zone == c3
                     && !matches!(self.sunset_stage, 18..=20)
@@ -42969,7 +44168,7 @@ impl TempleRuinsCompletionRouteController {
             self.b8_lift_stage = 2;
             self.complete_platform(157);
             self.active_platform = None;
-            self.jump_frames = 30;
+            self.jump_frames = if self.session_globals { 30 } else { 10 };
             self.release_frames = 5;
             return PAD_UP | PAD_CROSS | PAD_SQUARE;
         }
@@ -43939,10 +45138,8 @@ impl TempleRuinsCompletionRouteController {
         }
         if b3_spike_approach && self.b4_crossing_stage == 9 {
             if self.session_globals && b3_fire_is_active {
-                // Waiting here for only the current clear frame loses the
-                // spike-cycle edge established by stages 6 through 17. Re-run
-                // that synchronization after the carried fire phase clears.
-                self.b4_crossing_stage = 5;
+                // Preserve the spike-cycle edge while the carried fire phase
+                // finishes, then launch on its falling edge.
                 return 0;
             }
             if self.session_globals && b4_spikes_are_extended {
@@ -44365,7 +45562,7 @@ impl TempleRuinsCompletionRouteController {
             })
         {
             self.a2_fire_crossing_stage = 2;
-            self.jump_frames = 10;
+            self.jump_frames = 30;
             self.release_frames = 5;
             return PAD_UP | PAD_CROSS;
         }
@@ -45964,6 +47161,7 @@ impl SurveyInputController {
                 recovery_tick: 0,
                 return_stage: 0,
                 return_tick: 0,
+                second_wall_gate_phase: 0,
                 zero_recovery_carry: false,
             },
             lost_city_exact_carry: LostCityExactCarryRouteController::default(),
@@ -45979,9 +47177,32 @@ impl SurveyInputController {
                 sunset_wait: 0,
                 sunset_stage: 0,
                 sunset_b1_recovery_alignment: false,
+                sunset_b2_closed_cycle_seen: false,
+                sunset_b2_projectile_wait: false,
+                sunset_b2_projectile_wait_complete: false,
+                sunset_b2_wait_spin_tick: 0,
+                sunset_b3_wait_spin_tick: 0,
+                sunset_b3_far_lane_recenter_started: false,
+                sunset_b3_far_lane_backout_complete: false,
+                sunset_b3_projectile_volley_seen: false,
+                sunset_b3_far_lane_wall_clear: false,
+                sunset_c1_entry_alignment_complete: false,
+                sunset_c2_projectile_volley_seen: false,
+                sunset_c2_projectile_volley_clear: false,
+                sunset_c2_exit_jump_started: false,
+                sunset_c3_lowering_alignment: false,
                 sunset_f4_phase_gate: 0,
+                sunset_h3_ruin_phase_ready: false,
+                sunset_h3_next_ruin_phase_ready: false,
                 sunset_h5_ruin_phase_gate: 0,
                 sunset_h5_upper_entry_phase: 0,
+                sunset_i1_carrier_takeoff_ready: false,
+                sunset_i3_second_ruin_takeoff_ready: false,
+                sunset_i4_wall_open_seen: false,
+                sunset_m4_takeoff_direction: 0,
+                sunset_m4_takeoff_speed_ready: false,
+                sunset_m4_second_target_ready: false,
+                sunset_m4_second_runup_ready: false,
                 sunset_i3_stage126_ready_wait: 0,
                 sunset_attack_tick: 0,
                 sunset_c4_recovery_brake: 0,
@@ -46334,15 +47555,6 @@ impl SurveyInputController {
             }
             SurveyInputProfile::SlipperyClimbCompletionRoute => {
                 self.slippery_climb.held(camera, player, route_objects)
-            }
-            SurveyInputProfile::UpstreamCarriedRecovery => {
-                if frame <= UPSTREAM_PBAK_FRAMES {
-                    local_pbak_held
-                        .expect("the legally local Upstream PBAK prefix covers its authored frames")
-                } else {
-                    self.upstream
-                        .held(camera, player, upstream_platforms, checkpoint_id)
-                }
             }
             SurveyInputProfile::UpstreamPhaseRobust => {
                 self.upstream
@@ -49539,7 +50751,6 @@ fn survey_pair_with_runtime_impl(
     let local_pbak_frame_count = match input_profile {
         SurveyInputProfile::LocalPbakPrefix => Some(survey_frames),
         SurveyInputProfile::BouldersCompletionRoute => Some(895),
-        SurveyInputProfile::UpstreamCarriedRecovery => Some(UPSTREAM_PBAK_FRAMES),
         _ => None,
     };
     let local_pbak_prefix = if input_profile == SurveyInputProfile::LostCityCompletionRoute {
@@ -49668,11 +50879,7 @@ fn survey_pair_with_runtime_impl(
         } else {
             None
         };
-        let upstream_platforms = if matches!(
-            input_profile,
-            SurveyInputProfile::UpstreamCarriedRecovery | SurveyInputProfile::UpstreamPhaseRobust
-        ) && (input_profile == SurveyInputProfile::UpstreamPhaseRobust
-            || frame > UPSTREAM_PBAK_FRAMES)
+        let upstream_platforms = if matches!(input_profile, SurveyInputProfile::UpstreamPhaseRobust)
         {
             upstream_platform_traces(&runtime)?
         } else {
@@ -71188,7 +72395,8 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             };
             let (lost_city_nsd, lost_city_nsf, lost_city_nsf_bytes) =
                 parse_local_pair(root, lost_city).expect("The Lost City pair must parse");
-            let (lost_city_survey, mut lost_city_runtime) = survey_pair_with_runtime(
+            let mut lost_city_pad = PersistentPadState::default();
+            let (lost_city_survey, mut lost_city_runtime) = survey_pair_with_persistent_pad(
                 known_name(lost_city),
                 lost_city,
                 &lost_city_nsd,
@@ -71197,55 +72405,71 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 RetailRuntime::new_from_session(GLOBAL_WORDS, lost_city, lost_city_carry)
                     .expect("The Lost City must import authentic Ripper Roo campaign carry"),
                 LevelContextSource::SessionGlobals,
-                SurveyInputProfile::LostCityCompletionRoute,
-                9_000,
+                SurveyInputProfile::LostCityExactCarryRoute,
+                7_000,
+                &mut lost_city_pad,
+                PersistentSurveyPlan {
+                    mount_held: PAD_CROSS,
+                    initial_idle_frames: 0,
+                    fixed_cross_frame: None,
+                    cross_pulse_period: None,
+                },
             )
-            .expect("the authentic campaign must execute The Lost City's completion route");
+            .expect("the authentic campaign must execute The Lost City's exact carried route");
             assert_eq!(
                 lost_city_survey.frames,
-                8_093,
+                6_447,
                 "{}",
                 lost_city_survey.summary()
             );
             assert_eq!(
                 lost_city_survey.terminal.as_deref(),
-                Some("frame 8093 requested level transition to 0x19")
+                Some("frame 6447 requested level transition to 0x2d")
             );
-            assert_eq!(lost_city_survey.next_lid, Some((8_093, 0x19)));
+            assert_eq!(lost_city_survey.next_lid, Some((6_447, 0x2d)));
             assert_eq!(lost_city_survey.final_live_objects, 34);
-            assert_eq!(lost_city_survey.max_live_objects, 73);
-            assert_eq!(lost_city_survey.successful_spawns, 495);
-            assert_eq!(lost_city_survey.spawn_attempts, 136_960);
-            assert_eq!(lost_city_survey.expected_spawn_rejections, 136_465);
-            assert_eq!(lost_city_survey.executions, 249_188);
-            assert_eq!(lost_city_survey.zone_transitions, 64);
-            assert_eq!(lost_city_survey.restarts, 8);
-            assert_eq!(
-                lost_city_survey.restart_frames,
-                [325, 603, 949, 1_228, 1_573, 1_886, 2_166, 6_483]
-            );
+            assert_eq!(lost_city_survey.max_live_objects, 47);
+            assert_eq!(lost_city_survey.successful_spawns, 179);
+            assert_eq!(lost_city_survey.spawn_attempts, 77_968);
+            assert_eq!(lost_city_survey.expected_spawn_rejections, 77_789);
+            assert_eq!(lost_city_survey.executions, 166_431);
+            assert_eq!(lost_city_survey.zone_transitions, 49);
+            assert_eq!(lost_city_survey.restarts, 0);
+            assert!(lost_city_survey.restart_frames.is_empty());
+            assert_eq!(lost_city_survey.death_camera_frames, 0);
+            assert!(lost_city_survey.first_terminal_fall.is_none());
             assert_eq!(
                 lost_city_survey.checkpoint_samples,
                 [
                     (1, -1, [2_048_000, 1_738_240, 19_455_744]),
-                    (6_329, 0x8000, [16_588_800, -3_072_768, 204_544]),
+                    (781, 0x4000, [11_571_200, -8_295_168, 204_544]),
+                    (1_879, 0x5400, [20_991_232, -8_295_168, 204_544]),
+                    (2_713, 0x5f00, [24_166_400, -6_349_568, 50_944]),
+                    (4_819, 0x8000, [16_588_800, -3_072_768, 204_544]),
                 ]
             );
             assert_eq!(
                 lost_city_survey.box_count_samples,
                 [
                     (1, 0),
-                    (6_329, 0x100),
-                    (6_484, 0),
-                    (6_485, 0x100),
-                    (7_407, 0x200),
-                    (7_565, 0x300),
-                    (7_922, 0x400),
-                    (7_928, 0x500),
+                    (547, 0x100),
+                    (781, 0x200),
+                    (1_879, 0x300),
+                    (2_713, 0x400),
+                    (4_819, 0x500),
+                    (5_742, 0x600),
+                    (5_907, 0x700),
+                    (6_280, 0x800),
+                    (6_286, 0x900),
                 ]
             );
-            assert_eq!(lost_city_survey.effect_counts.get("save-state"), Some(&1));
-            assert_eq!(lost_city_survey.effect_counts.get("load-state"), Some(&8));
+            assert_eq!(
+                lost_city_survey.saved_box_count_samples,
+                [(781, 0x100), (1_879, 0x200), (2_713, 0x300), (4_819, 0x400)]
+            );
+            assert_eq!(lost_city_survey.save_handshakes, 0);
+            assert_eq!(lost_city_survey.effect_counts.get("save-state"), Some(&4));
+            assert_eq!(lost_city_survey.effect_counts.get("load-state"), None);
             assert_eq!(
                 lost_city_survey.effect_counts.get("master-fade-reset"),
                 Some(&1)
@@ -71264,7 +72488,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .expect("carried Lost City must retain Crash through the exit warp");
             assert_eq!(lost_city_player.zone, Eid::from_name("h5_wZ").unwrap());
             assert_eq!(lost_city_player.state, 32);
-            assert_eq!(lost_city_player.translation, [1_220_336, 650_576, 200_064]);
+            assert_eq!(lost_city_player.translation, [1_212_224, 650_575, 236_800]);
             assert_eq!(
                 [
                     GAME_STATE_GLOBAL,
@@ -71276,44 +72500,147 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     ISLAND_CAMERA_STATE_GLOBAL,
                 ]
                 .map(|index| lost_city_runtime.global_word(index).unwrap()),
-                [0x300, 15, 15, 12, 1, 13, 0]
+                [0x500, 15, 15, 12, 1, 13, 0]
             );
-            assert_eq!(lost_city_runtime.machine().random_seed(), 0xc111_1307);
-            assert_eq!(lost_city_runtime.random_seed_b(), 0xc602_d495);
-            assert_eq!(lost_city_runtime.draw_count(), 1_610);
+            assert_eq!(lost_city_runtime.machine().random_seed(), 0x1e7c_7803);
+            assert_eq!(lost_city_runtime.random_seed_b(), 0xf306_0442);
+            assert_eq!(lost_city_runtime.draw_count(), 43_071);
+            assert_eq!(lost_city_pad.snapshot.held, PAD_LEFT | PAD_SQUARE);
             assert_eq!(lost_city_runtime.faulted_object_count(), 0);
 
-            let lost_city_title_carry = {
+            let lost_city_completion_carry = {
                 let mut host =
                     NsfProgramHost::new(&lost_city_nsd, &lost_city_nsf, &lost_city_nsf_bytes);
                 let report = lost_city_runtime
                     .finish_level_transition(
                         &mut host,
-                        i32::try_from(title.get()).expect("Title LID fits i32"),
+                        i32::try_from(completion.get()).expect("Level Complete LID fits i32"),
                     )
-                    .expect("The Lost City LEVEL_END must export its authored direct-Title carry");
+                    .expect(
+                        "The Lost City LEVEL_END must export its authored Level Complete carry",
+                    );
+                assert!(report.event_failures.is_empty());
+                assert!(report.effects.is_empty());
+                assert_eq!(report.requested_lid, 0x2d);
+                assert_eq!(report.next_lid_after_event, 0x2d);
+                assert_eq!(report.resolved.level, completion);
+                assert!(!report.resolved.bonus_return);
+                assert_eq!(report.carry.random_seed, 0x1e7c_7803);
+                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
+                assert_eq!(report.carry.draw_count, 43_071);
+                report.carry
+            };
+            let completion_mount_held = lost_city_pad.snapshot.held;
+            let (lost_completion_survey, mut lost_completion_runtime) =
+                survey_pair_with_persistent_pad(
+                    known_name(completion),
+                    completion,
+                    &completion_nsd,
+                    &completion_nsf,
+                    &completion_nsf_bytes,
+                    RetailRuntime::new_from_session(
+                        GLOBAL_WORDS,
+                        completion,
+                        lost_city_completion_carry,
+                    )
+                    .expect("Level Complete must import The Lost City's authentic carry"),
+                    LevelContextSource::SessionGlobals,
+                    SurveyInputProfile::DirectionAndButtonSweepToTransition,
+                    600,
+                    &mut lost_city_pad,
+                    PersistentSurveyPlan {
+                        mount_held: completion_mount_held,
+                        initial_idle_frames: 0,
+                        fixed_cross_frame: None,
+                        cross_pulse_period: NonZeroU32::new(16),
+                    },
+                )
+                .expect("The Lost City's authentic Level Complete screen must execute");
+            assert_eq!(
+                lost_completion_survey.frames,
+                272,
+                "{}",
+                lost_completion_survey.summary()
+            );
+            assert_eq!(
+                lost_completion_survey.terminal.as_deref(),
+                Some("frame 272 requested level transition to 0x19")
+            );
+            assert_eq!(lost_completion_survey.next_lid, Some((272, 0x19)));
+            assert_eq!(lost_completion_survey.final_live_objects, 5);
+            assert_eq!(lost_completion_survey.max_live_objects, 8);
+            assert_eq!(lost_completion_survey.successful_spawns, 2);
+            assert_eq!(lost_completion_survey.spawn_attempts, 544);
+            assert_eq!(lost_completion_survey.expected_spawn_rejections, 542);
+            assert_eq!(lost_completion_survey.unexpected_spawn_errors, 0);
+            assert_eq!(lost_completion_survey.executions, 1_623);
+            assert_eq!(lost_completion_survey.execution_errors, 0);
+            assert_eq!(lost_completion_survey.zone_transitions, 0);
+            assert_eq!(lost_completion_survey.restarts, 0);
+            assert!(lost_completion_survey.restart_frames.is_empty());
+            assert_eq!(lost_completion_survey.save_handshakes, 0);
+            assert_eq!(lost_completion_survey.death_camera_frames, 0);
+            assert_eq!(lost_completion_survey.effect_counts.get("load-state"), None);
+            assert_eq!(
+                lost_completion_survey.effect_counts.get("transition"),
+                Some(&1)
+            );
+            assert!(lost_completion_survey.first_terminal_fall.is_none());
+            assert_eq!(lost_completion_survey.box_count_samples.len(), 18);
+            assert_eq!(
+                lost_completion_survey.box_count_samples.first(),
+                Some(&(1, 0))
+            );
+            assert_eq!(
+                lost_completion_survey.box_count_samples.last(),
+                Some(&(191, 0x1100))
+            );
+            assert_eq!(
+                [
+                    GAME_STATE_GLOBAL,
+                    TITLE_STATE_GLOBAL,
+                    SAVED_TITLE_STATE_GLOBAL,
+                    CURRENT_MAP_LEVEL_GLOBAL,
+                    LEVEL_COUNT_GLOBAL,
+                    LEVELS_UNLOCKED_GLOBAL,
+                    ISLAND_CAMERA_STATE_GLOBAL,
+                ]
+                .map(|index| lost_completion_runtime.global_word(index).unwrap()),
+                [0x300, 15, 15, 12, 1, 13, 0]
+            );
+            assert_eq!(lost_completion_runtime.machine().random_seed(), 0xc89d_8ae6);
+            assert_eq!(lost_completion_runtime.random_seed_b(), 0xf306_0442);
+            assert_eq!(lost_completion_runtime.draw_count(), 43_343);
+            assert_eq!(
+                lost_city_pad.snapshot,
+                RetailPadSnapshot {
+                    tapped: PAD_CROSS,
+                    held: PAD_CROSS,
+                    tapped_previous: 0,
+                    held_previous: 0,
+                    held_previous_2: 0,
+                }
+            );
+            assert!(
+                lost_completion_survey.is_clean(),
+                "{}",
+                lost_completion_survey.summary()
+            );
+            let lost_city_title_carry = {
+                let mut host =
+                    NsfProgramHost::new(&completion_nsd, &completion_nsf, &completion_nsf_bytes);
+                let report = lost_completion_runtime
+                    .finish_level_transition(&mut host, 0x19)
+                    .expect("The Lost City Level Complete LEVEL_END must export Title");
                 assert!(report.event_failures.is_empty());
                 assert!(report.effects.is_empty());
                 assert_eq!(report.requested_lid, 0x19);
                 assert_eq!(report.next_lid_after_event, 0x19);
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
-                assert_eq!(
-                    [
-                        GAME_STATE_GLOBAL,
-                        TITLE_STATE_GLOBAL,
-                        SAVED_TITLE_STATE_GLOBAL,
-                        CURRENT_MAP_LEVEL_GLOBAL,
-                        LEVEL_COUNT_GLOBAL,
-                        LEVELS_UNLOCKED_GLOBAL,
-                        ISLAND_CAMERA_STATE_GLOBAL,
-                    ]
-                    .map(|index| report.carry.globals[index]),
-                    [0x300, 15, 15, 12, 1, 13, 0]
-                );
-                assert_eq!(report.carry.random_seed, 0xc111_1307);
-                assert_eq!(report.carry.random_seed_b(), 0xc602_d495);
-                assert_eq!(report.carry.draw_count, 1_610);
+                assert_eq!(report.carry.random_seed, 0xc89d_8ae6);
+                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
+                assert_eq!(report.carry.draw_count, 43_343);
                 report.carry
             };
             let mut post_lost_city_map = AuthoredTitleMapHarness::from_session(
@@ -71347,10 +72674,10 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             );
             assert_eq!(
                 post_lost_city_map.runtime.machine().random_seed(),
-                0xc111_1307
+                0xc89d_8ae6
             );
-            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xc602_d495);
-            assert_eq!(post_lost_city_map.runtime.draw_count(), 1_620);
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xf306_0442);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 43_353);
             assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
 
             for _ in 0..120 {
@@ -71387,10 +72714,10 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             );
             assert_eq!(
                 post_lost_city_map.runtime.machine().random_seed(),
-                0xbaa1_071e
+                0x391a_351f
             );
-            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xc602_d495);
-            assert_eq!(post_lost_city_map.runtime.draw_count(), 1_863);
+            assert_eq!(post_lost_city_map.runtime.random_seed_b(), 0xf306_0442);
+            assert_eq!(post_lost_city_map.runtime.draw_count(), 43_596);
             assert_eq!(post_lost_city_map.runtime.faulted_object_count(), 0);
 
             let temple_ruins_carry = {
@@ -71421,9 +72748,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     .map(|index| report.carry.globals[index]),
                     [0, 15, 15, 13, 1, 13, 1]
                 );
-                assert_eq!(report.carry.random_seed, 0xbaa1_071e);
-                assert_eq!(report.carry.random_seed_b(), 0xc602_d495);
-                assert_eq!(report.carry.draw_count, 1_863);
+                assert_eq!(report.carry.random_seed, 0x391a_351f);
+                assert_eq!(report.carry.random_seed_b(), 0xf306_0442);
+                assert_eq!(report.carry.draw_count, 43_596);
                 report.carry
             };
             let (temple_nsd, temple_nsf, temple_nsf_bytes) =
@@ -71443,28 +72770,28 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             .expect("the authentic campaign must execute Temple Ruins' completion route");
             assert_eq!(
                 temple_mount_survey.frames,
-                4_863,
+                4_437,
                 "{}",
                 temple_mount_survey.summary()
             );
-            assert_eq!(temple_mount_survey.next_lid, Some((4_863, 0x2d)));
+            assert_eq!(temple_mount_survey.next_lid, Some((4_437, 0x2d)));
             assert_eq!(
                 temple_mount_survey.terminal.as_deref(),
-                Some("frame 4863 requested level transition to 0x2d")
+                Some("frame 4437 requested level transition to 0x2d")
             );
             assert_eq!(temple_mount_survey.final_live_objects, 35);
             assert_eq!(temple_mount_survey.max_live_objects, 66);
             assert_eq!(temple_mount_survey.successful_spawns, 190);
-            assert_eq!(temple_mount_survey.spawn_attempts, 82_283);
-            assert_eq!(temple_mount_survey.expected_spawn_rejections, 82_093);
+            assert_eq!(temple_mount_survey.spawn_attempts, 78_505);
+            assert_eq!(temple_mount_survey.expected_spawn_rejections, 78_315);
             assert_eq!(temple_mount_survey.unexpected_spawn_errors, 0);
-            assert_eq!(temple_mount_survey.executions, 159_460);
+            assert_eq!(temple_mount_survey.executions, 150_727);
             assert_eq!(temple_mount_survey.execution_errors, 0);
             assert_eq!(temple_mount_survey.zone_transitions, 33);
             assert_eq!(temple_mount_survey.camera_ranges.len(), 60);
             assert_eq!(temple_mount_survey.camera_path_changes, 59);
-            assert_eq!(temple_mount_survey.last_camera_path_change, 4_705);
-            assert_eq!(temple_mount_survey.last_camera_progress_change, 4_764);
+            assert_eq!(temple_mount_survey.last_camera_path_change, 4_253);
+            assert_eq!(temple_mount_survey.last_camera_progress_change, 4_341);
             assert_eq!(temple_mount_survey.restarts, 0);
             assert!(temple_mount_survey.restart_frames.is_empty());
             assert_eq!(temple_mount_survey.death_camera_frames, 0);
@@ -71490,7 +72817,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
             assert_eq!(temple_player.event, 0x1600);
             assert_eq!(
                 temple_player.translation,
-                [15_667_568, 4_742_990, 5_343_584]
+                [15_667_040, 4_742_990, 5_402_784]
             );
             assert_eq!(
                 [
@@ -71511,7 +72838,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     temple_runtime.random_seed_b(),
                     temple_runtime.draw_count(),
                 ),
-                (0x55d1_ad6d, 0x16d5_0715, 6_726)
+                (0x1160_9e42, 0xdff3_7021, 48_033)
             );
             assert_eq!(temple_runtime.faulted_object_count(), 0);
             assert!(
@@ -71531,8 +72858,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x2d);
                 assert_eq!(report.resolved.level, completion);
                 assert!(!report.resolved.bonus_return);
-                assert_eq!(report.carry.random_seed, 0x55d1_ad6d);
-                assert_eq!(report.carry.draw_count, 6_726);
+                assert_eq!(report.carry.random_seed, 0x1160_9e42);
+                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
+                assert_eq!(report.carry.draw_count, 48_033);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -71566,30 +72894,30 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     700,
                 )
                 .expect("Temple Ruins' authentic Level Complete screen must execute");
-            assert_eq!(temple_completion_survey.frames, 585);
+            assert_eq!(temple_completion_survey.frames, 633);
             assert_eq!(
                 temple_completion_survey.terminal.as_deref(),
-                Some("frame 585 requested level transition to 0x19")
+                Some("frame 633 requested level transition to 0x19")
             );
-            assert_eq!(temple_completion_survey.next_lid, Some((585, 0x19)));
+            assert_eq!(temple_completion_survey.next_lid, Some((633, 0x19)));
             assert_eq!(temple_completion_survey.final_live_objects, 5);
             assert_eq!(temple_completion_survey.max_live_objects, 8);
             assert_eq!(temple_completion_survey.successful_spawns, 2);
-            assert_eq!(temple_completion_survey.spawn_attempts, 1_170);
-            assert_eq!(temple_completion_survey.expected_spawn_rejections, 1_168);
+            assert_eq!(temple_completion_survey.spawn_attempts, 1_266);
+            assert_eq!(temple_completion_survey.expected_spawn_rejections, 1_264);
             assert_eq!(temple_completion_survey.unexpected_spawn_errors, 0);
-            assert_eq!(temple_completion_survey.executions, 4_031);
+            assert_eq!(temple_completion_survey.executions, 4_264);
             assert_eq!(temple_completion_survey.execution_errors, 0);
             assert_eq!(temple_completion_survey.restarts, 0);
             assert_eq!(temple_completion_survey.faulted_objects, 0);
-            assert_eq!(temple_completion_survey.box_count_samples.len(), 54);
+            assert_eq!(temple_completion_survey.box_count_samples.len(), 55);
             assert_eq!(
                 temple_completion_survey.box_count_samples.first(),
                 Some(&(1, 0))
             );
             assert_eq!(
                 temple_completion_survey.box_count_samples.last(),
-                Some(&(515, 0x3500))
+                Some(&(524, 0x3600))
             );
             assert_eq!(
                 temple_completion_survey.effect_counts.get("transition"),
@@ -71614,7 +72942,7 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                     temple_completion_runtime.random_seed_b(),
                     temple_completion_runtime.draw_count(),
                 ),
-                (0x5683_2afc, 0x16d5_0715, 7_311)
+                (0x3601_0088, 0xdff3_7021, 48_666)
             );
             assert!(
                 temple_completion_survey.is_clean(),
@@ -71634,8 +72962,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x19);
                 assert_eq!(report.resolved.level, title);
                 assert!(!report.resolved.bonus_return);
-                assert_eq!(report.carry.random_seed, 0x5683_2afc);
-                assert_eq!(report.carry.draw_count, 7_311);
+                assert_eq!(report.carry.random_seed, 0x3601_0088);
+                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
+                assert_eq!(report.carry.draw_count, 48_666);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -71680,9 +73009,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0x300, 15, 15, 13, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x5683_2afc);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x16d5_0715);
-            assert_eq!(post_temple_map.runtime.draw_count(), 7_321);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x3601_0088);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
+            assert_eq!(post_temple_map.runtime.draw_count(), 48_676);
             for _ in 0..120 {
                 post_temple_map.step(0);
             }
@@ -71710,9 +73039,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 13, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x62fc_4fda);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x16d5_0715);
-            assert_eq!(post_temple_map.runtime.draw_count(), 7_443);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0xfaa7_1e46);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
+            assert_eq!(post_temple_map.runtime.draw_count(), 48_798);
             for _ in 0..120 {
                 post_temple_map.step(0);
             }
@@ -71741,9 +73070,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .map(|index| post_temple_map.runtime.global_word(index).unwrap()),
                 [0, 15, 15, 14, 1, 14, 1]
             );
-            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x1603_dd94);
-            assert_eq!(post_temple_map.runtime.random_seed_b(), 0x16d5_0715);
-            assert_eq!(post_temple_map.runtime.draw_count(), 7_564);
+            assert_eq!(post_temple_map.runtime.machine().random_seed(), 0x2d26_d8d2);
+            assert_eq!(post_temple_map.runtime.random_seed_b(), 0xdff3_7021);
+            assert_eq!(post_temple_map.runtime.draw_count(), 48_919);
             assert_eq!(post_temple_map.runtime.faulted_object_count(), 0);
 
             let road_carry = {
@@ -71761,8 +73090,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 assert_eq!(report.next_lid_after_event, 0x14);
                 assert_eq!(report.resolved.level, road_to_nowhere);
                 assert!(!report.resolved.bonus_return);
-                assert_eq!(report.carry.random_seed, 0x1603_dd94);
-                assert_eq!(report.carry.draw_count, 7_564);
+                assert_eq!(report.carry.random_seed, 0x2d26_d8d2);
+                assert_eq!(report.carry.random_seed_b(), 0xdff3_7021);
+                assert_eq!(report.carry.draw_count, 48_919);
                 assert_eq!(
                     [
                         GAME_STATE_GLOBAL,
@@ -71842,9 +73172,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .map(|index| road_mount_runtime.global_word(index).unwrap()),
                 [0x100, 15, 15, 14, 1, 14, 0]
             );
-            assert_eq!(road_mount_runtime.machine().random_seed(), 0xf605_b5f4);
-            assert_eq!(road_mount_runtime.random_seed_b(), 0x16d5_0715);
-            assert_eq!(road_mount_runtime.draw_count(), 7_565);
+            assert_eq!(road_mount_runtime.machine().random_seed(), 0x296b_2832);
+            assert_eq!(road_mount_runtime.random_seed_b(), 0xdff3_7021);
+            assert_eq!(road_mount_runtime.draw_count(), 48_920);
             let road_mount_player = player_trace(&road_mount_runtime)
                 .expect("Road to Nowhere mount player trace must resolve")
                 .expect("Road to Nowhere mount must retain Crash");
@@ -71970,9 +73300,9 @@ fn authored_main_campaign_reaches_ending_and_returns_to_title_with_session_carry
                 .map(|index| road_runtime.global_word(index).unwrap()),
                 [0x500, 15, 15, 14, 1, 15, 0]
             );
-            assert_eq!(road_runtime.machine().random_seed(), 0x053b_59e6);
-            assert_eq!(road_runtime.random_seed_b(), 0x16d5_0715);
-            assert_eq!(road_runtime.draw_count(), 10_013);
+            assert_eq!(road_runtime.machine().random_seed(), 0x8fd9_baba);
+            assert_eq!(road_runtime.random_seed_b(), 0xdff3_7021);
+            assert_eq!(road_runtime.draw_count(), 51_368);
             assert_eq!(road_runtime.faulted_object_count(), 0);
             assert!(
                 road_survey.is_clean(),

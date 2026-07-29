@@ -96,6 +96,9 @@ const ISLAND_SELECTED_LID_REGISTER: usize = 81;
 // original controllers, which are already characterized independently.
 const AUTHENTIC_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 61_045;
 const AUTHENTIC_POST_BRIO_LAB_DRAW_COUNT: u32 = 70_396;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED: u32 = 0x8385_1908;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT: u32 = 64_200;
+const UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B: u32 = 0xdc82_6488;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED: u32 = 0xccd8_9975;
 const UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT: u32 = 69_831;
 const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
@@ -52023,6 +52026,19 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
         jaws_of_darkness.level,
         [0, 15, 15, 26, 1, 26, 1],
     );
+    assert_eq!(
+        (
+            jaws_carry.random_seed,
+            jaws_carry.draw_count,
+            jaws_carry.random_seed_b(),
+        ),
+        (
+            UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED,
+            UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT,
+            UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B,
+        ),
+        "the post-Sunset chain must retain Jaws of Darkness's characterized hazard phase"
+    );
     let jaws_completion = run_clean_carried_campaign_step(
         &jaws_of_darkness,
         jaws_carry,
@@ -52052,6 +52068,14 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
         "{castle_summary}"
     );
     assert_no_campaign_recovery(&castle_survey, castle_machinery.name);
+    assert_eq!(
+        castle_survey
+            .first_terminal_fall
+            .as_ref()
+            .map(|(frame, player)| (*frame, player.state, player.translation)),
+        Some((93, 11, [11_816_960, -1_140_975, 102_400])),
+        "Castle Machinery's authored opening shaft is not a death: {castle_summary}"
+    );
     assert!(castle_survey.is_clean(), "{castle_summary}");
     assert_eq!(
         campaign_progression_globals(&castle_runtime),
@@ -52919,16 +52943,38 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
         lights_out_completion,
         [0x300, 15, 15, 25, 1, 26, 0],
     );
-    let jaws_carry = carry_map_to_next_level(
+    let mut jaws_carry = carry_map_to_next_level(
         &title,
         post_lights_out_title,
         jaws_of_darkness.level,
         [0, 15, 15, 26, 1, 26, 1],
     );
+    // This deliberately synthetic prefix does not reproduce the real
+    // campaign's process-lifetime clocks. Pin the characterized post-Lights
+    // phase before exercising the phase-sensitive Jaws hazards.
+    jaws_carry.random_seed = UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED;
+    jaws_carry.draw_count = UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT;
+    jaws_carry.set_random_seed_b(UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B);
+    assert_eq!(
+        (
+            jaws_carry.random_seed,
+            jaws_carry.draw_count,
+            jaws_carry.random_seed_b(),
+            jaws_carry.respawn_count,
+            jaws_carry.death_count,
+        ),
+        (
+            UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED,
+            UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT,
+            UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B,
+            0,
+            0,
+        )
+    );
     let jaws_completion = run_clean_carried_campaign_step(
         &jaws_of_darkness,
         jaws_carry,
-        SurveyInputProfile::JawsOfDarknessCompletionRoute,
+        SurveyInputProfile::JawsOfDarknessExactCampaignPhase,
         5_600,
         LevelId::LEVEL_COMPLETE,
         [0x500, 15, 15, 26, 1, 27, 0],
@@ -52942,14 +52988,50 @@ fn synthetic_post_pinstripe_session_reaches_post_castle_title() {
         castle_machinery.level,
         [0, 15, 15, 27, 1, 27, 1],
     );
-    let castle_completion = run_clean_carried_campaign_step(
-        &castle_machinery,
-        castle_carry,
-        SurveyInputProfile::CastleMachineryCompletionRoute,
-        7_500,
-        LevelId::LEVEL_COMPLETE,
-        [0x500, 15, 15, 27, 1, 28, 0],
+    assert_eq!(
+        (
+            castle_carry.random_seed,
+            castle_carry.draw_count,
+            castle_carry.random_seed_b(),
+            castle_carry.respawn_count,
+            castle_carry.death_count,
+        ),
+        (
+            UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED,
+            UNINTERRUPTED_POST_JAWS_CASTLE_DRAW_COUNT,
+            UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B,
+            0,
+            0,
+        ),
+        "the pinned Jaws phase must export Castle Machinery's characterized campaign clocks"
     );
+    let (castle_survey, castle_runtime) = castle_machinery.run_carried(
+        castle_carry,
+        SurveyInputProfile::CastleMachineryExactCampaignPhase,
+        7_500,
+    );
+    let castle_summary = castle_survey.summary();
+    assert_eq!(
+        castle_survey.next_lid,
+        Some((castle_survey.frames, 0x2d)),
+        "{castle_summary}"
+    );
+    assert_no_campaign_recovery(&castle_survey, castle_machinery.name);
+    assert_eq!(
+        castle_survey
+            .first_terminal_fall
+            .as_ref()
+            .map(|(frame, player)| (*frame, player.state, player.translation)),
+        Some((93, 11, [11_816_960, -1_140_975, 102_400])),
+        "Castle Machinery's authored opening shaft is not a death: {castle_summary}"
+    );
+    assert!(castle_survey.is_clean(), "{castle_summary}");
+    assert_eq!(
+        campaign_progression_globals(&castle_runtime),
+        [0x500, 15, 15, 27, 1, 28, 0]
+    );
+    let castle_completion =
+        castle_machinery.finish_checked(castle_runtime, LevelId::LEVEL_COMPLETE);
     let post_castle_title = carry_completion_to_title(
         &completion,
         castle_completion,
@@ -52977,9 +53059,9 @@ fn jaws_exact_uninterrupted_campaign_phase_reaches_authored_end_warp() {
     let post_lights = synthetic_title_map_carry(25, 26, 0x46bc_ad50, 55_228, 0x93e2_6958);
     let mut carry =
         carry_map_to_next_level(&title, post_lights, jaws.level, [0, 15, 15, 26, 1, 26, 1]);
-    carry.random_seed = 0x8385_1908;
-    carry.draw_count = 64_200;
-    carry.set_random_seed_b(0xdc82_6488);
+    carry.random_seed = UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED;
+    carry.draw_count = UNINTERRUPTED_POST_LIGHTS_JAWS_DRAW_COUNT;
+    carry.set_random_seed_b(UNINTERRUPTED_POST_LIGHTS_JAWS_RANDOM_SEED_B);
     let (survey, runtime) = jaws.run_carried(
         carry,
         SurveyInputProfile::JawsOfDarknessExactCampaignPhase,

@@ -106,9 +106,9 @@ const UNINTERRUPTED_POST_JAWS_CASTLE_RANDOM_SEED_B: u32 = 0xae0b_2001;
 const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED: u32 = 0x9c11_0f6a;
 const ACTUAL_POST_SUNSET_CASTLE_DRAW_COUNT: u32 = 110_454;
 const ACTUAL_POST_SUNSET_CASTLE_RANDOM_SEED_B: u32 = 0x99dc_97b1;
-const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED: u32 = 0xa610_ddea;
-const ACTUAL_POST_SUNSET_GENERATOR_DRAW_COUNT: u32 = 80_335;
-const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED_B: u32 = 0x8523_b805;
+const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED: u32 = 0x492e_dbec;
+const ACTUAL_POST_SUNSET_GENERATOR_DRAW_COUNT: u32 = 81_480;
+const ACTUAL_POST_SUNSET_GENERATOR_RANDOM_SEED_B: u32 = 0xa389_4380;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED: u32 = 0x5944_4b2a;
 const UNINTERRUPTED_POST_BRIO_LAB_DRAW_COUNT: u32 = 78_796;
 const UNINTERRUPTED_POST_BRIO_LAB_RANDOM_SEED_B: u32 = 0x2227_f8a8;
@@ -515,9 +515,9 @@ fn toxic_waste_authentic_post_generator_phase_reaches_authored_end_warp() {
             .expect("authentic campaign global must exist");
     }
     let mut carry = title.export_session_carry();
-    carry.random_seed = 0x8b50_51fc;
-    carry.draw_count = 45_022;
-    carry.set_random_seed_b(0x4d32_ef39);
+    carry.random_seed = 0xa978_e195;
+    carry.draw_count = 87_004;
+    carry.set_random_seed_b(0x4167_05ff);
     let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
         .expect("Toxic Waste must import the authentic post-Generator phase");
     let (survey, _) = survey_pair_with_runtime(
@@ -681,9 +681,9 @@ fn slippery_climb_post_high_road_campaign_phase_reaches_authored_end_warp() {
             .expect("post-High-Road campaign global must exist");
     }
     let mut carry = title.export_session_carry();
-    carry.random_seed = 0x8757_f779;
-    carry.draw_count = 52_539;
-    carry.set_random_seed_b(0x4d32_ef39);
+    carry.random_seed = 0x975b_6895;
+    carry.draw_count = 94_554;
+    carry.set_random_seed_b(0x4167_05ff);
     let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, level, carry)
         .expect("Slippery Climb must import the post-High-Road campaign phase");
     let (survey, _) = survey_pair_with_runtime(
@@ -19971,6 +19971,7 @@ struct GeneratorRoomCompletionRouteController {
     b0_source_landed: bool,
     b0_platform_runup: bool,
     b0_platform_departed: bool,
+    b1_source_release_seen: bool,
     b1_side_route_started: bool,
     b1_second_crate_hit: bool,
     b1_platform_landed: bool,
@@ -20179,6 +20180,32 @@ impl GeneratorRoomCompletionRouteController {
             if target_y.is_some_and(|y| y >= -500_000) {
                 self.a9_target_high_seen = true;
             }
+            if self.session_globals && self.a9_target_high_seen {
+                let Some(player) = player else {
+                    return 0;
+                };
+                if player.translation[0] > 1_100_000 {
+                    return PAD_LEFT;
+                }
+                if target_y.is_some_and(|y| y < -350_000) {
+                    return if player.velocity[0] < -50_000 {
+                        PAD_RIGHT
+                    } else {
+                        0
+                    };
+                }
+                if target_y.is_some_and(|y| y < -300_000) {
+                    return PAD_LEFT;
+                }
+                if player.status_a & 1 != 0 {
+                    self.a9_platform_departed = true;
+                    self.a9_platform_depart_frames = 0;
+                    self.jump_frames = jump_hold;
+                    self.release_frames = 5;
+                    return PAD_LEFT | PAD_UP | PAD_CROSS;
+                }
+                return 0;
+            }
             if self.a9_target_high_seen
                 && player.is_some_and(|player| {
                     player.translation[0] <= 1_080_000
@@ -20251,6 +20278,12 @@ impl GeneratorRoomCompletionRouteController {
         if self.route_stage == 5 && self.session_globals && player_collider_entity == Some(66) {
             self.jump_frames = 0;
             self.release_frames = 0;
+            if !self.b1_source_release_seen {
+                self.b1_source_release_seen = true;
+                // Release Cross for one retail input-latch tick without
+                // discarding the full forward speed carried onto the lift.
+                return PAD_UP;
+            }
             if player
                 .is_some_and(|player| player.status_a & 1 != 0 && player.translation[1] >= -380_000)
             {
@@ -20732,14 +20765,33 @@ impl GeneratorRoomCompletionRouteController {
         if self.route_stage == 18
             && player_collider_entity == Some(90)
             && player.is_some_and(|player| player.status_a & 1 != 0)
-            && self.b4_fresh_phase_stance != Some(true)
+            && (self.session_globals || self.b4_fresh_phase_stance != Some(true))
         {
             // A carried save-state handshake can consume the generic
             // grounded auto-jump on the checkpoint platform. Make this
             // authored departure explicit for both fresh and carried runs.
             self.jump_frames = jump_hold;
             self.release_frames = 5;
-            return PAD_UP | PAD_CROSS;
+            if self.session_globals {
+                self.b6_box_90_climb_stage = 4;
+            }
+            return PAD_UP | PAD_CROSS | if self.session_globals { PAD_SQUARE } else { 0 };
+        }
+        if self.route_stage == 18
+            && self.session_globals
+            && self.b6_box_90_climb_stage == 4
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (-8_500_000..=-8_400_000).contains(&player.translation[2])
+            })
+        {
+            // Match the fresh route's spin-jump phase after the checkpoint,
+            // then return to the ordinary global cadence once the b7 floor
+            // has accepted the landing.
+            self.b6_box_90_climb_stage = 5;
+            self.jump_frames = jump_hold;
+            self.release_frames = 5;
+            return PAD_UP | PAD_CROSS | PAD_SQUARE;
         }
         if self.route_stage == 18
             && self.b4_fresh_phase_stance != Some(true)
@@ -20890,7 +20942,7 @@ impl GeneratorRoomCompletionRouteController {
                         .then_some(object.bound)
                         .flatten()
                 });
-                let carried_box_climb = self.session_globals && self.b6_box_90_climb_stage == 3;
+                let carried_box_climb = self.session_globals && self.b6_box_90_climb_stage >= 3;
                 let takeoff = (self.b4_fresh_phase_stance == Some(false) || carried_box_climb)
                     .then_some(())
                     .and(player.zip(platform))
@@ -21622,7 +21674,18 @@ impl GeneratorRoomCompletionRouteController {
                 matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 86)
                     .then_some(object.translation)
             });
-            if self.b4_fresh_phase_stance == Some(false) {
+            if self.session_globals && self.b4_fresh_phase_stance == Some(true) {
+                // This carried phase catches entity 86 at the same vertical
+                // pose as the fresh route but with its source platform farther
+                // forward.  Keep the first half of the jump on the lateral
+                // axis so Crash reaches the rear half of the moving collider;
+                // adding depth immediately only clips its departing edge.
+                if self.jump_frames > 10 {
+                    PAD_LEFT
+                } else {
+                    PAD_LEFT | PAD_DOWN
+                }
+            } else if self.b4_fresh_phase_stance == Some(false) {
                 // Entity 86 is moving left faster than the source platform
                 // approaches it in this phase.  Alternate digital axes to
                 // produce the shallower, roughly 2:1 left/depth trajectory
@@ -21644,10 +21707,18 @@ impl GeneratorRoomCompletionRouteController {
                     .then_some(object.translation[2])
             });
             PAD_LEFT
-                | match (player.map(|player| player.translation[2]), target_z) {
-                    (Some(z), Some(target)) if z <= target && z > target - 70_000 => PAD_UP,
-                    (Some(z), Some(target)) if z < target - 105_000 => PAD_DOWN,
-                    _ => 0,
+                | if self.session_globals {
+                    // The carried landing is already centered in entity 91's
+                    // depth span. Preserve full lateral acceleration; the
+                    // fresh route's rear-edge correction needlessly turns
+                    // this into a diagonal and reaches the platform late.
+                    0
+                } else {
+                    match (player.map(|player| player.translation[2]), target_z) {
+                        (Some(z), Some(target)) if z <= target && z > target - 70_000 => PAD_UP,
+                        (Some(z), Some(target)) if z < target - 105_000 => PAD_DOWN,
+                        _ => 0,
+                    }
                 }
                 | if self.tick.is_multiple_of(7) {
                     PAD_SQUARE
@@ -21658,6 +21729,15 @@ impl GeneratorRoomCompletionRouteController {
             PAD_LEFT
         } else if self.route_stage == 18 {
             PAD_UP
+                | if self.session_globals && self.b6_box_90_climb_stage >= 4 {
+                    match player.map(|player| player.translation[0]) {
+                        Some(x) if x > 1_243_000 => PAD_LEFT,
+                        Some(x) if x < 1_240_000 => PAD_RIGHT,
+                        _ => 0,
+                    }
+                } else {
+                    0
+                }
                 | if self.tick.is_multiple_of(7) {
                     PAD_SQUARE
                 } else {
@@ -22011,6 +22091,7 @@ struct ToxicWasteCompletionRouteController {
     b3_barrel_stage: u8,
     b4_barrel_stage: u8,
     b8_barrel_stage: u8,
+    b9_barrel_stage: u8,
     b6_stage: u8,
     b6_hold_frames: u8,
     c0_stage: u8,
@@ -22140,11 +22221,11 @@ impl ToxicWasteCompletionRouteController {
                 player.zone == a8
                     && player.translation[2] <= 20_850_000
                     && player.status_a & 1 != 0
-                    && matches!(player.state, 1 | 2)
+                    && matches!(player.state, 1 | 2 | 10)
             })
         {
             self.a8_checkpoint_stage = 1;
-            self.a8_checkpoint_wait_frames = 2;
+            self.a8_checkpoint_wait_frames = 0;
         }
         if self.a8_checkpoint_stage == 1 && self.a8_checkpoint_wait_frames != 0 {
             self.a8_checkpoint_wait_frames -= 1;
@@ -22333,7 +22414,7 @@ impl ToxicWasteCompletionRouteController {
         // barrel has passed in Z, then immediately recenter.
         let b8 = Eid::from_name("b8_7Z").expect("fixed Toxic Waste b8 EID is valid");
         if self.session_globals
-            && self.b4_barrel_stage == 2
+            && self.b6_stage == 4
             && self.b8_barrel_stage == 0
             && player.is_some_and(|player| {
                 player.zone == b8 && player.status_a & 1 != 0 && matches!(player.state, 1 | 2)
@@ -22435,6 +22516,86 @@ impl ToxicWasteCompletionRouteController {
             self.jump_frames = 10;
             self.release_frames = 1;
             return PAD_UP | PAD_CROSS;
+        }
+
+        // A carried barrel phase can put b9's center-lane roller directly
+        // under the ordinary jump apex.  Use the solid right shoulder while
+        // its live bound crosses the lane, then recenter as soon as it has
+        // passed behind Crash.
+        let b9_zone = Eid::from_name("b9_7Z").expect("fixed Toxic Waste b9 EID is valid");
+        let b9_live_barrel = player.and_then(|player| {
+            objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                .filter(|bound| {
+                    player.translation[2].abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                        <= 800_000
+                })
+                .min_by_key(|bound| {
+                    player.translation[2].abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                })
+        });
+        if self.session_globals
+            && self.b6_stage == 4
+            && self.b9_barrel_stage == 0
+            && player.is_some_and(|player| {
+                (player.zone == b8 || player.zone == b9_zone)
+                    && player.translation[2] <= 6_800_000
+                    && matches!(player.state, 1 | 2 | 10)
+                    && b9_live_barrel.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && (200_000..=500_000).contains(&(player.translation[2] - bound.max.z))
+                    })
+            })
+        {
+            self.b9_barrel_stage = 1;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_RIGHT | PAD_CROSS;
+        }
+        if self.b9_barrel_stage == 1 {
+            let lateral_clear = player.is_some_and(|player| {
+                b9_live_barrel.is_some_and(|bound| player.translation[0] - 38_400 > bound.max.x)
+            });
+            if lateral_clear {
+                self.b9_barrel_stage = 2;
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
+        } else if self.b9_barrel_stage == 2 {
+            let barrel_has_passed = player.is_some_and(|player| {
+                b9_live_barrel.is_some_and(|bound| bound.min.z > player.translation[2])
+            });
+            if barrel_has_passed {
+                self.b9_barrel_stage = 3;
+                held |= PAD_LEFT;
+            } else if player.is_some_and(|player| {
+                b9_live_barrel.is_some_and(|bound| {
+                    let safe_center_x = bound.max.x.saturating_add(42_000);
+                    player.translation[0] <= safe_center_x || player.velocity[0] < -100_000
+                })
+            }) {
+                held |= PAD_RIGHT;
+            } else {
+                held |= PAD_LEFT;
+            }
+        } else if self.b9_barrel_stage == 3 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.b9_barrel_stage = 0;
+            }
         }
 
         // The opening barrel pair shares Crash's center lane. Cross the right
@@ -22564,9 +22725,11 @@ impl ToxicWasteCompletionRouteController {
         if self.b6_stage == 1 {
             self.jump_frames = 0;
             self.release_frames = 0;
-            if !player
-                .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2))
-            {
+            if !player.is_some_and(|player| {
+                player.translation[2] <= 11_650_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            }) {
                 return PAD_UP;
             }
             // Give Cross one grounded release frame so the trench takeoff is
@@ -23231,6 +23394,7 @@ impl ToxicWasteCompletionRouteController {
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct CortexPowerCompletionRouteController {
+    session_globals: bool,
     tick: u32,
     jump_frames: u8,
     release_frames: u8,
@@ -23249,6 +23413,7 @@ struct CortexPowerCompletionRouteController {
     final_reactor_previous_x: Option<i32>,
     final_reactor_phase_cleared: bool,
     seven_b_alignment_stage: u8,
+    opening_reactor_phase_cleared: bool,
 }
 
 impl CortexPowerCompletionRouteController {
@@ -23458,6 +23623,41 @@ impl CortexPowerCompletionRouteController {
             .zip(self.final_reactor_previous_x)
             .is_some_and(|(current, previous)| current > previous);
         self.final_reactor_previous_x = final_reactor_x;
+        let opening_reactor = route_objects.iter().find(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 13
+            ) && object.program
+                == Eid::from_name("PoRoC").expect("fixed Cortex Power reactor-rod EID is valid")
+        });
+
+        // The uninterrupted post-Sunset phase reaches the first reactor
+        // eighteen scheduler ticks nearer its active sweep than a fresh boot.
+        // Start the existing diagonal launch from the live retracted pose
+        // instead of consuming the full absolute staging window and meeting
+        // the rod as it crosses the lane.
+        if self.session_globals
+            && !self.opening_reactor_phase_cleared
+            && self.tick >= 520
+            && camera.path.zone
+                == Eid::from_name("a1_3Z").expect("fixed Cortex Power camera EID is valid")
+            && player.is_some_and(|player| {
+                player.status_a & 1 != 0
+                    && (30_500_000..=30_560_000).contains(&player.translation[2])
+            })
+        {
+            if opening_reactor
+                .is_some_and(|reactor| reactor.state == 6 && reactor.translation[0] <= 1_900_000)
+            {
+                self.opening_reactor_phase_cleared = true;
+                self.tick = 543;
+            } else {
+                self.tick = 519;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
         let mut held = if self.tick >= 150 { PAD_UP } else { PAD_RIGHT };
         if let Some(player) = player
             && let Some(target_x) = Self::centerline_x(camera, player.translation[2])
@@ -23505,6 +23705,41 @@ impl CortexPowerCompletionRouteController {
             self.release_frames = 0;
             return PAD_LEFT;
         }
+        if self.a4_recovery_required
+            && camera.path.zone
+                == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
+            && camera.progress.raw() < 15_000
+        {
+            // A carried session reaches a6 with Cross already held and can
+            // touch the powered strip in a spin-bounce state. Give the retail
+            // input latch one grounded release frame, then press Cross again
+            // so the bounce becomes the same high jump a fresh boot takes.
+            if self.hazard_tick == 25
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && matches!(player.state, 17 | 18)
+                })
+            {
+                self.hazard_tick = 26;
+                return held & !PAD_CROSS;
+            }
+            return held | PAD_CROSS;
+        }
+        if self.opening_reactor_phase_cleared
+            && camera.path.zone
+                == Eid::from_name("a1_3Z").expect("fixed Cortex Power camera EID is valid")
+            && let Some(player) = player
+            && player.translation[2] >= 29_900_000
+        {
+            let target_x = 2_400_000;
+            let projected_x =
+                player.translation[0].saturating_add(player.velocity[0].saturating_mul(3) / 34);
+            held &= !(PAD_LEFT | PAD_RIGHT);
+            if projected_x < target_x - 8_000 {
+                held |= PAD_RIGHT;
+            } else if projected_x > target_x + 8_000 {
+                held |= PAD_LEFT;
+            }
+        }
         let at_first_pit = camera.path.zone
             == Eid::from_name("a2_3Z").expect("fixed Cortex Power camera EID is valid")
             && player.is_some_and(|player| player.translation[2] <= 29_750_000);
@@ -23530,6 +23765,14 @@ impl CortexPowerCompletionRouteController {
                 .is_some_and(|player| player.status_a & 1 != 0 && matches!(player.state, 1 | 2));
             let player_is_at_barrier =
                 player.is_some_and(|player| player.translation[2] <= 29_600_000);
+            if self.opening_reactor_phase_cleared
+                && player.is_some_and(|player| player.translation[0] > 2_205_000)
+            {
+                // The right-hand reactor bypass finishes just outside the
+                // first door's contact strip. Rejoin its authored trigger
+                // lane after the rod is behind Crash.
+                return PAD_UP | PAD_LEFT;
+            }
             if !door_is_opening || !player_is_grounded || !player_is_at_barrier {
                 return PAD_UP;
             }
@@ -23584,7 +23827,8 @@ impl CortexPowerCompletionRouteController {
             == Eid::from_name("a4_3Z").expect("fixed Cortex Power camera EID is valid");
         if self.hazard_stage == 5 && on_a4_reactor_approach && !self.a4_entry_seen {
             self.a4_entry_seen = true;
-            self.a4_recovery_required = player.is_some_and(|player| player.status_a & 1 == 0);
+            self.a4_recovery_required =
+                self.session_globals || player.is_some_and(|player| player.status_a & 1 == 0);
         }
         if self.hazard_stage == 5 && on_a4_reactor_approach && self.a4_recovery_required {
             self.jump_frames = 0;
@@ -23645,7 +23889,9 @@ impl CortexPowerCompletionRouteController {
             let landed_in_a6 = camera.path.zone
                 == Eid::from_name("a6_3Z").expect("fixed Cortex Power camera EID is valid")
                 && self.hazard_tick >= 5
-                && player.is_some_and(|player| player.status_a & 1 != 0);
+                && player.is_some_and(|player| {
+                    player.status_a & 1 != 0 && matches!(player.state, 1 | 2 | 11)
+                });
             if landed_in_a6 {
                 self.hazard_stage = 9;
                 self.jump_frames = 0;
@@ -23676,6 +23922,23 @@ impl CortexPowerCompletionRouteController {
             let Some(player) = player else {
                 return 0;
             };
+            let a6_beam_is_retracted = !self.a4_recovery_required
+                || route_objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 91
+                    ) && object.program
+                        == Eid::from_name("PoRoC")
+                            .expect("fixed Cortex Power reactor-rod EID is valid")
+                        && object.state == 6
+                        && object.translation[0] >= 3_500_000
+                });
+            if player.translation[2] <= 24_200_000 && !a6_beam_is_retracted {
+                // Brake before the rod's collision reach rather than at the
+                // jump marker: forward momentum carries Crash several retail
+                // ticks after input is released.
+                return 0;
+            }
             if player.translation[2] > 23_950_000 {
                 return held;
             }
@@ -32636,14 +32899,29 @@ impl SlipperyClimbCompletionRouteController {
         if self.tower_b2_row_stage == 12 && upper {
             let tick = self.tower_b2_row_tick;
             self.tower_b2_row_tick = self.tower_b2_row_tick.saturating_add(1);
-            let transfer_ready = !self.session_globals
-                || objects.iter().any(|object| {
+            let transfer_age = objects.iter().find_map(|object| {
+                if matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 17
+                ) && object.state == 14
+                {
+                    Some(player.animation_stamp.saturating_sub(object.state_stamp))
+                } else {
+                    None
+                }
+            });
+            let assistant_ready = objects
+                .iter()
+                .find(|object| {
                     matches!(
                         object.origin,
-                        ObjectOrigin::Entity(descriptor) if descriptor.id == 17
-                    ) && object.state == 14
-                        && player.animation_stamp.saturating_sub(object.state_stamp) >= 32
-                });
+                        ObjectOrigin::Entity(descriptor) if descriptor.id == 16
+                    )
+                })
+                .is_none_or(|object| object.state == 8 && object.animation_frame >= 4_096);
+            let transfer_ready = !self.session_globals
+                || player.status_a & 1 == 0
+                || (transfer_age.is_some_and(|age| (32..=40).contains(&age)) && assistant_ready);
             if tick < 90 || !transfer_ready {
                 return 0;
             }
@@ -32822,8 +33100,16 @@ impl SlipperyClimbCompletionRouteController {
             self.jump_hold = 0;
             self.vertical_jump_released = true;
             if next_ledge.is_some_and(|ledge| {
+                let required_height_margin = if matches!(
+                    ledge.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 99
+                ) {
+                    0
+                } else {
+                    100_000
+                };
                 ledge.translation[0] - platform.translation[0] <= launch_distance
-                    && platform.translation[1] >= ledge.translation[1] - 100_000
+                    && platform.translation[1] >= ledge.translation[1] - required_height_margin
                     && (!(10_500_000..12_700_000).contains(&player.translation[0])
                         || ledge.translation[1] >= -2_870_000)
             }) && player.status_a & 1 != 0
@@ -33026,7 +33312,7 @@ impl SlipperyClimbCompletionRouteController {
         {
             return PAD_LEFT;
         }
-        if (self.post_high_road_phase || self.actual_post_sunset_phase)
+        if self.session_globals
             && self.tower_b2_row_stage == 20
             && upper
             && (18_050_000..18_250_000).contains(&player.translation[0])
@@ -33459,14 +33745,23 @@ impl SlipperyClimbCompletionRouteController {
             self.vertical_jump_released = true;
             return 0;
         }
-        if self.post_high_road_phase
-            && self.tower_wall_step == 3
-            && player.status_a & 1 != 0
-            && player.velocity[0] < -100_000
-        {
-            self.jump_hold = 0;
-            self.vertical_jump_released = true;
-            return PAD_RIGHT;
+        if self.session_globals && self.tower_wall_step == 3 {
+            let fourth_step_supports_lane = objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 82)
+                    && object.frame_bound.is_some_and(|bound| {
+                        bound.min.z <= player.translation[2] + 38_400
+                            && bound.max.z >= player.translation[2] + 38_400
+                    })
+            });
+            if !fourth_step_supports_lane {
+                // The fourth rotating wall block can be edge-on when the
+                // carried RNG phase reaches this transfer. Stay on the third
+                // block until the target's live collision spans Crash's lane,
+                // then let the ordinary leftward handoff resume.
+                self.jump_hold = 0;
+                self.vertical_jump_released = true;
+                return 0;
+            }
         }
         if self.session_globals
             && self.tower_wall_step >= 4
@@ -49105,6 +49400,7 @@ impl SurveyInputController {
                 j3_portal_stabilizing: false,
             },
             cortex_power: CortexPowerCompletionRouteController {
+                session_globals,
                 tick: 0,
                 jump_frames: 0,
                 release_frames: 0,
@@ -49123,6 +49419,7 @@ impl SurveyInputController {
                 final_reactor_previous_x: None,
                 final_reactor_phase_cleared: false,
                 seven_b_alignment_stage: 0,
+                opening_reactor_phase_cleared: false,
             },
             generator_room: GeneratorRoomCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
@@ -49153,6 +49450,7 @@ impl SurveyInputController {
                 b0_source_landed: false,
                 b0_platform_runup: false,
                 b0_platform_departed: false,
+                b1_source_release_seen: false,
                 b1_side_route_started: false,
                 b1_second_crate_hit: false,
                 b1_platform_landed: false,
@@ -49261,6 +49559,7 @@ impl SurveyInputController {
                 b3_barrel_stage: 0,
                 b4_barrel_stage: 0,
                 b8_barrel_stage: 0,
+                b9_barrel_stage: 0,
                 b6_stage: 0,
                 b6_hold_frames: 0,
                 c0_stage: 0,
@@ -56757,7 +57056,7 @@ fn authentic_post_sunset_session_reaches_ending_and_returns_to_title() {
         &generator_room,
         generator_carry,
         SurveyInputProfile::GeneratorRoomCompletionRoute,
-        4_200,
+        5_500,
         LevelId::LEVEL_COMPLETE,
         [0x500, 15, 15, 20, 1, 21, 0],
     );
@@ -58306,7 +58605,7 @@ fn carry_boulder_dash_through_heavy_machinery(
     let (generator_survey, generator_runtime) = generator_room.run_carried_with_pad(
         generator_carry,
         SurveyInputProfile::GeneratorRoomCompletionRoute,
-        4_200,
+        5_500,
         &mut pad,
     );
     assert_eq!(
@@ -67149,7 +67448,7 @@ fn generator_room_actual_post_sunset_phase_reaches_authored_end_warp() {
         runtime,
         LevelContextSource::SessionGlobals,
         SurveyInputProfile::GeneratorRoomCompletionRoute,
-        4_200,
+        5_500,
     )
     .expect("Generator Room's actual post-Sunset route must execute");
     let summary = survey.summary();

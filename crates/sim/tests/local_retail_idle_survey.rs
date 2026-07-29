@@ -13604,6 +13604,10 @@ struct RollingStonesRouteController {
     exact_zero_b_wall_exit_jump_done: bool,
     exact_zero_e_wall_jump_done: bool,
     exact_zero_e_wall_jump_hold: u8,
+    exact_post_wall_last_x: Option<i32>,
+    exact_post_wall_phase_ready: bool,
+    exact_post_wall_exit_z: Option<i32>,
+    exact_post_wall_phase_jump_hold: u8,
     post_bank_tick: Option<u16>,
 }
 
@@ -13723,6 +13727,10 @@ impl RollingStonesRouteController {
         self.exact_zero_b_wall_exit_jump_done = false;
         self.exact_zero_e_wall_jump_done = false;
         self.exact_zero_e_wall_jump_hold = 0;
+        self.exact_post_wall_last_x = None;
+        self.exact_post_wall_phase_ready = false;
+        self.exact_post_wall_exit_z = None;
+        self.exact_post_wall_phase_jump_hold = 0;
         self.post_bank_tick = None;
     }
 
@@ -13807,6 +13815,24 @@ impl RollingStonesRouteController {
                 // the following JunOC corridor. Recenter on the flat approach
                 // before those converging walls own Crash's collision.
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                if self.exact_zero_y_boundary_jump_hold > 0 {
+                    self.exact_zero_y_boundary_jump_hold -= 1;
+                    return PAD_UP | PAD_CROSS;
+                }
+                if self.exact_zero_u_right_platform_phase
+                    && !self.exact_zero_y_boundary_jump_done
+                    && camera.progress.raw() >= 22_000
+                    && player.zone == zero_y
+                    && player.status_a & 1 != 0
+                {
+                    // The retained pre-checkpoint waits can meet entity 9 on
+                    // its right cycle. That carry reaches 0y's physical ledge
+                    // one camera sample before the path switch, so create the
+                    // same ordinary jump edge from this last grounded sample.
+                    self.exact_zero_y_boundary_jump_done = true;
+                    self.exact_zero_y_boundary_jump_hold = 5;
+                    return PAD_UP | PAD_CROSS;
+                }
                 let held = if self.exact_zero_x_late_platform_phase
                     && tick == 295
                     && player.status_a & 1 != 0
@@ -13876,12 +13902,14 @@ impl RollingStonesRouteController {
                 return PAD_UP | PAD_RIGHT | PAD_CROSS;
             }
             if self.exact_zero_y_boundary_jump_hold > 0
-                && camera.path.zone == zero_y
-                && camera.path.index == 1
+                && (camera.path.zone == zero_y
+                    || camera.path.zone == zero_x
+                        && camera.path.index == 0
+                        && camera.progress.raw() >= 22_000)
             {
                 self.exact_zero_y_boundary_jump_hold -= 1;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
-                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+                return PAD_UP | PAD_CROSS;
             }
             if self.exact_zero_u_right_platform_phase
                 && self.exact_zero_x_late_platform_phase
@@ -15046,30 +15074,406 @@ impl RollingStonesRouteController {
         // Each offset is one 30 Hz retail pad sample after the anchored opening.
         // The route uses only ordinary directional, jump, and spin inputs: the
         // pauses at 672 and the following jumps time authored moving platforms.
-        let held = match self.post_tick {
-            0..=7 | 80..=87 => PAD_UP | PAD_LEFT | PAD_SQUARE,
-            8..=15
-            | 112..=115
-            | 132..=135
-            | 164..=165
-            | 208..=211
-            | 292..=295
-            | 384..=387
-            | 492..=495
-            | 718..=721
-            | 743..=746
-            | 808..=811 => PAD_UP | PAD_CROSS,
-            64..=71 => PAD_UP | PAD_LEFT,
-            300..=303 => PAD_UP | PAD_RIGHT,
-            // A fresh one-frame spin edge opens checkpoint crate 8 after the
-            // turtle immediately before it has been defeated at offset 842.
-            344..=355 | 416..=427 | 540..=551 | 560..=571 | 842..=849 | 876 => PAD_UP | PAD_SQUARE,
-            // The timed pager leaves 0d's subtype-six JunOC wall one sweep
-            // nearer than the former instantaneous mount. Release forward
-            // for five ordinary samples so it clears without state 31.
-            166..=170 | 672..=685 => 0,
-            _ => PAD_UP,
+        let tick = self.post_tick;
+        let mut held = if self.exact_campaign_phase && (32..=63).contains(&tick) {
+            // The uninterrupted no-pause campaign reaches 0b while entity
+            // 45's live JunOC wall is sweeping left across the historical
+            // forward line. Brake on the safe side until the sweep clears
+            // instead of letting the wall overtake Crash from behind.
+            PAD_DOWN
+        } else {
+            match tick {
+                0..=7 | 80..=87 => PAD_UP | PAD_LEFT | PAD_SQUARE,
+                8..=15
+                | 112..=115
+                | 132..=135
+                | 164..=165
+                | 208..=211
+                | 292..=295
+                | 384..=387
+                | 492..=495
+                | 718..=721
+                | 743..=746
+                | 808..=811 => PAD_UP | PAD_CROSS,
+                64..=71 => PAD_UP | PAD_LEFT,
+                300..=303 => PAD_UP | PAD_RIGHT,
+                // A fresh one-frame spin edge opens checkpoint crate 8 after the
+                // turtle immediately before it has been defeated at offset 842.
+                344..=355 | 416..=427 | 540..=551 | 560..=571 | 842..=849 | 876 => {
+                    PAD_UP | PAD_SQUARE
+                }
+                // The timed pager leaves 0d's subtype-six JunOC wall one sweep
+                // nearer than the former instantaneous mount. Release forward
+                // for five ordinary samples so it clears without state 31.
+                166..=170 | 672..=685 => 0,
+                _ => PAD_UP,
+            }
         };
+        let post_zero_e =
+            Eid::from_name("0e_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+        let post_zero_f =
+            Eid::from_name("0f_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+        let post_zero_g =
+            Eid::from_name("0g_lZ").expect("fixed Rolling Stones landing-zone EID is valid");
+        if self.exact_campaign_phase
+            && tick >= 64
+            && let Some(player) = player
+            && let Some((wall_id, wall_bound)) = objects
+                .iter()
+                .filter_map(|object| {
+                    let ObjectOrigin::Entity(descriptor) = object.origin else {
+                        return None;
+                    };
+                    (descriptor.executable == 22
+                        && descriptor.subtype == 6
+                        && object.state == 5
+                        && (descriptor.id == 45
+                            || descriptor.id == 24 && player.zone == post_zero_e))
+                        .then_some((descriptor.id, object.bound?))
+                })
+                .filter(|(_, bound)| {
+                    player.translation[2] >= bound.min.z - 100_000
+                        && player.translation[2] <= bound.max.z + 900_000
+                        && player.translation[1] >= bound.min.y - 500_000
+                        && player.translation[1] <= bound.max.y + 500_000
+                        && {
+                            let center_x = bound.min.x + (bound.max.x - bound.min.x) / 2;
+                            player.translation[0].abs_diff(center_x) <= 1_000_000
+                        }
+                })
+                .min_by_key(|(_, bound)| player.translation[2].abs_diff(bound.max.z))
+        {
+            // Follow the live outside edge while crossing each moving wall's
+            // depth. Retained pool bounds change the uninterrupted campaign's
+            // wall phase from the direct-boot schedule, so the physical-pad
+            // controller must use the collision that is actually on screen.
+            let center_x = wall_bound.min.x + (wall_bound.max.x - wall_bound.min.x) / 2;
+            let wall_distance = player.translation[2].saturating_sub(wall_bound.max.z);
+            if wall_id == 24 {
+                self.exact_post_wall_exit_z = Some(wall_bound.min.z.saturating_sub(100_000));
+                let moving_right = self
+                    .exact_post_wall_last_x
+                    .is_some_and(|last_x| center_x > last_x);
+                self.exact_post_wall_last_x = Some(center_x);
+                if !self.exact_post_wall_phase_ready
+                    && moving_right
+                    && player.translation[0] <= 1_100_000
+                    && wall_bound.min.x >= 1_100_000
+                {
+                    // Start the run from the preceding shelf as the wall
+                    // leaves its left reversal. The longer approach preserves
+                    // enough forward speed to clear the retained wall depth
+                    // before the sweep returns.
+                    self.exact_post_wall_phase_ready = true;
+                }
+                if !self.exact_post_wall_phase_ready {
+                    // Brake on the preceding shelf and move to the left edge
+                    // while the wall finishes its unsafe leftward sweep. This
+                    // object-cycle wait must not advance the route clock.
+                    let target_z = wall_bound.max.z.saturating_add(500_000);
+                    let predicted_z = player.translation[2]
+                        .saturating_add(player.velocity[2].saturating_mul(3) / 34);
+                    let longitudinal = if predicted_z < target_z - 20_000 {
+                        PAD_DOWN
+                    } else if predicted_z > target_z + 20_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                    let lateral = if predicted_x < 1_058_000 {
+                        PAD_RIGHT
+                    } else if predicted_x > 1_100_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    return longitudinal | lateral;
+                }
+                if wall_distance <= 420_000
+                    && self.exact_post_wall_phase_jump_hold == 0
+                    && player.status_a & 1 != 0
+                {
+                    self.exact_post_wall_phase_jump_hold = 7;
+                }
+                let jump = if self.exact_post_wall_phase_jump_hold > 0 {
+                    self.exact_post_wall_phase_jump_hold -= 1;
+                    PAD_CROSS
+                } else {
+                    0
+                };
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < 1_075_000 {
+                    PAD_RIGHT
+                } else if predicted_x > 1_110_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                held = PAD_UP | lateral | jump;
+            } else {
+                // Entity 45's right-side opening is already widening after
+                // the opening brake. Stay outside it and create a fresh jump
+                // edge once there is enough horizontal clearance.
+                let (lateral, has_jump_clearance) = if player.translation[0] >= center_x {
+                    (
+                        PAD_RIGHT,
+                        player.translation[0] >= wall_bound.max.x.saturating_add(300_000),
+                    )
+                } else {
+                    (
+                        PAD_LEFT,
+                        player.translation[0] <= wall_bound.min.x.saturating_sub(300_000),
+                    )
+                };
+                let jump = if player.status_a & 1 != 0 && has_jump_clearance {
+                    PAD_CROSS
+                } else {
+                    held & PAD_CROSS
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE))
+                    | PAD_UP
+                    | lateral
+                    | jump;
+            }
+        }
+        if self.exact_campaign_phase
+            && self.exact_post_wall_phase_ready
+            && let Some(player) = player
+            && player.zone == post_zero_e
+            && self
+                .exact_post_wall_exit_z
+                .is_some_and(|exit_z| player.translation[2] < exit_z)
+        {
+            // Rejoin the authored center line only after Crash has crossed
+            // behind entity 24; recentering inside its depth recreates the
+            // collision this live phase gate avoids.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+            let lateral = if predicted_x > 1_350_000 {
+                PAD_LEFT
+            } else if predicted_x < 1_290_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | lateral;
+            if lateral == 0 {
+                self.exact_post_wall_phase_ready = false;
+                // The retained-wall detour rejoins the characterized route
+                // at physical sample 238. Re-anchor its remaining jump/spin
+                // windows here; advancing the historical clock while parked
+                // would fire the 0f gap jump before Crash reaches that gap.
+                self.post_tick = 237;
+            }
+        }
+        if self.exact_campaign_phase
+            && let Some(player) = player
+            && player.zone == post_zero_f
+            && let Some(first_wall) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 27
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 6
+                            && object.state == 5
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+            && let Some(second_wall) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 26
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 6
+                            && object.state == 5
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+        {
+            let approach_start = first_wall.max.z.saturating_add(1_000_000);
+            let pair_exit = second_wall.min.z.saturating_sub(100_000);
+            if tick <= 258
+                && player.translation[2] >= first_wall.max.z.saturating_add(350_000)
+                && player.translation[2] <= approach_start
+            {
+                let phase_open = first_wall.min.x >= 1_850_000 && second_wall.min.x <= 1_850_000;
+                if !phase_open {
+                    // Wait on the inside shelf until the walls cross. Their
+                    // retained depths overlap, but the opposing sweeps expose
+                    // a traversable middle corridor shortly after this live
+                    // phase. Object-cycle wait time does not advance the
+                    // movement route.
+                    let target_z = first_wall.max.z.saturating_add(500_000);
+                    let predicted_z = player.translation[2]
+                        .saturating_add(player.velocity[2].saturating_mul(3) / 34);
+                    let longitudinal = if predicted_z < target_z - 20_000 {
+                        PAD_DOWN
+                    } else if predicted_z > target_z + 20_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                    let lateral = if predicted_x < 1_870_000 {
+                        PAD_RIGHT
+                    } else if predicted_x > 1_930_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    return longitudinal | lateral;
+                }
+                // Rejoin nineteen samples before the gap jump so the delayed
+                // run takes off at the same physical approach depth.
+                self.post_tick = 273;
+            }
+            let target_x =
+                if player.translation[2] >= pair_exit && player.translation[2] <= approach_start {
+                    let gap_min = second_wall.max.x;
+                    let gap_max = first_wall.min.x;
+                    // Enter the middle opening as the opposing sweeps separate.
+                    // Before it is wide enough for Crash's collider, stay on its
+                    // center line while still outside both depth planes.
+                    Some(if gap_max.saturating_sub(gap_min) >= 240_000 {
+                        gap_min + (gap_max - gap_min) / 2
+                    } else {
+                        1_900_000
+                    })
+                } else if player.translation[2] < pair_exit
+                    && player.translation[2] >= second_wall.min.z.saturating_sub(700_000)
+                {
+                    // Rejoin the authored line after both wall depths.
+                    Some(1_900_000)
+                } else {
+                    None
+                };
+            if let Some(target_x) = target_x {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                let lateral = if predicted_x < target_x - 24_000 {
+                    PAD_RIGHT
+                } else if predicted_x > target_x + 24_000 {
+                    PAD_LEFT
+                } else {
+                    0
+                };
+                if player.translation[2] <= second_wall.max.z.saturating_add(100_000)
+                    && player.translation[2] >= pair_exit
+                    && self.exact_post_wall_phase_jump_hold == 0
+                    && player.status_a & 1 != 0
+                {
+                    // Create a new grounded edge after the scheduled first
+                    // jump lands. This clears retained entity 26 vertically
+                    // instead of entering its closing side bound.
+                    self.exact_post_wall_phase_jump_hold = 7;
+                }
+                let jump = if self.exact_post_wall_phase_jump_hold > 0 {
+                    self.exact_post_wall_phase_jump_hold -= 1;
+                    PAD_CROSS
+                } else {
+                    held & PAD_CROSS
+                };
+                held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_CROSS))
+                    | PAD_UP
+                    | lateral
+                    | jump;
+            }
+        }
+        if self.exact_campaign_phase
+            && let Some(player) = player
+            && let Some(wall) = objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor)
+                        if descriptor.id == 16
+                            && descriptor.executable == 22
+                            && descriptor.subtype == 6
+                            && object.state == 5
+                )
+                .then_some(object.bound)
+                .flatten()
+            })
+            && player.translation[2] >= wall.min.z.saturating_sub(100_000)
+            && player.translation[2] <= wall.max.z.saturating_add(700_000)
+        {
+            if !self.exact_post_wall_phase_ready {
+                let center_x = wall.min.x + (wall.max.x - wall.min.x) / 2;
+                let moving_right = self
+                    .exact_post_wall_last_x
+                    .is_some_and(|last_x| center_x > last_x);
+                self.exact_post_wall_last_x = Some(center_x);
+                if moving_right && wall.min.x <= 2_450_000 {
+                    self.exact_post_wall_phase_ready = true;
+                    // Resume at the physical sample represented by route
+                    // tick 370; its ordinary jump then reaches the wall only
+                    // after the rightward sweep has vacated the landing line.
+                    self.post_tick = 369;
+                } else {
+                    // Park outside the wall's depth through its leftward
+                    // sweep and reversal. Hazard-cycle time must not consume
+                    // movement-route samples while Crash is waiting.
+                    let target_z = wall.max.z.saturating_add(500_000);
+                    let predicted_z = player.translation[2]
+                        .saturating_add(player.velocity[2].saturating_mul(3) / 34);
+                    let longitudinal = if predicted_z < target_z - 20_000 {
+                        PAD_DOWN
+                    } else if predicted_z > target_z + 20_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                    let lateral = if predicted_x < 2_540_000 {
+                        PAD_RIGHT
+                    } else if predicted_x > 2_600_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    return longitudinal | lateral;
+                }
+            }
+            if player.translation[2] <= wall.max.z.saturating_add(300_000) {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 34);
+                if predicted_x > wall.min.x.saturating_sub(180_000) {
+                    held = (held & !(PAD_LEFT | PAD_RIGHT)) | PAD_LEFT;
+                }
+            }
+        }
+        if self.exact_campaign_phase
+            && self.exact_post_wall_phase_ready
+            && (404..=411).contains(&tick)
+        {
+            // The live outside line clears entity 16 about 0.1m left of the
+            // authored curve. Restore that offset on the flat landing before
+            // the following spin and transverse shelf.
+            held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | PAD_RIGHT;
+        }
+        if self.exact_campaign_phase
+            && self.exact_post_wall_exit_z.is_some()
+            && let Some(player) = player
+            && player.zone == post_zero_g
+            && player.translation[2] <= 26_050_000
+        {
+            // The second live-wall jump exits the retained pair with more
+            // forward speed than the historical route. Rejoin its clock at
+            // the invariant 0g boundary so the next ordinary jump still
+            // occurs at the physical gap rather than eleven samples later.
+            self.exact_post_wall_exit_z = None;
+            self.post_tick = 326;
+        }
+        if self.exact_campaign_phase
+            && (327..=330).contains(&tick)
+            && player.is_some_and(|player| player.zone == post_zero_g)
+        {
+            // The middle-corridor exit is slightly inside the historical
+            // curved-track line. Four ordinary right samples restore its
+            // lateral approach before the next spin and gap jump.
+            held = (held & !(PAD_LEFT | PAD_RIGHT | PAD_DOWN | PAD_SQUARE)) | PAD_UP | PAD_RIGHT;
+        }
         self.post_tick = self.post_tick.saturating_add(1);
         held
     }
@@ -15787,6 +16191,10 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         exact_zero_b_wall_exit_jump_done: true,
         exact_zero_e_wall_jump_done: true,
         exact_zero_e_wall_jump_hold: 4,
+        exact_post_wall_last_x: Some(1_234),
+        exact_post_wall_phase_ready: true,
+        exact_post_wall_exit_z: Some(5_678),
+        exact_post_wall_phase_jump_hold: 9,
         post_bank_tick: Some(23),
     };
 
@@ -15808,6 +16216,10 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert!(!controller.exact_zero_b_wall_exit_jump_done);
     assert!(!controller.exact_zero_e_wall_jump_done);
     assert_eq!(controller.exact_zero_e_wall_jump_hold, 0);
+    assert_eq!(controller.exact_post_wall_last_x, None);
+    assert!(!controller.exact_post_wall_phase_ready);
+    assert_eq!(controller.exact_post_wall_exit_z, None);
+    assert_eq!(controller.exact_post_wall_phase_jump_hold, 0);
     assert_eq!(controller.post_bank_tick, None);
 }
 
@@ -49805,6 +50217,10 @@ impl SurveyInputController {
                 exact_zero_b_wall_exit_jump_done: false,
                 exact_zero_e_wall_jump_done: false,
                 exact_zero_e_wall_jump_hold: 0,
+                exact_post_wall_last_x: None,
+                exact_post_wall_phase_ready: false,
+                exact_post_wall_exit_z: None,
+                exact_post_wall_phase_jump_hold: 0,
                 post_bank_tick: None,
             },
             rolling_stones_brio: RollingStonesBrioBonusRouteController {
@@ -49829,6 +50245,10 @@ impl SurveyInputController {
                     exact_zero_b_wall_exit_jump_done: false,
                     exact_zero_e_wall_jump_done: false,
                     exact_zero_e_wall_jump_hold: 0,
+                    exact_post_wall_last_x: None,
+                    exact_post_wall_phase_ready: false,
+                    exact_post_wall_exit_z: None,
+                    exact_post_wall_phase_jump_hold: 0,
                     post_bank_tick: None,
                 },
                 first_token_tick: None,
@@ -71433,30 +71853,30 @@ fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
             [2_252_544, 1_023_744, 31_794_432],
         ))
     );
-    assert_eq!(survey.frames, 2_525, "{}", survey.summary());
-    assert_eq!(survey.next_lid, Some((2_525, 0x2d)), "{}", survey.summary());
+    assert_eq!(survey.frames, 2_655, "{}", survey.summary());
+    assert_eq!(survey.next_lid, Some((2_655, 0x2d)), "{}", survey.summary());
     assert_eq!(
         survey.terminal.as_deref(),
-        Some("frame 2525 requested level transition to 0x2d")
+        Some("frame 2655 requested level transition to 0x2d")
     );
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert!(survey.restart_frames.is_empty());
     assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
     assert!(survey.first_terminal_fall.is_none(), "{}", survey.summary());
-    assert_eq!(survey.successful_spawns, 117);
-    assert_eq!(survey.spawn_attempts, 30_076);
-    assert_eq!(survey.expected_spawn_rejections, 29_959);
+    assert_eq!(survey.successful_spawns, 123);
+    assert_eq!(survey.spawn_attempts, 31_437);
+    assert_eq!(survey.expected_spawn_rejections, 31_314);
     assert_eq!(survey.unexpected_spawn_errors, 0);
-    assert_eq!(survey.executions, 56_673);
+    assert_eq!(survey.executions, 58_722);
     assert_eq!(survey.execution_errors, 0);
-    assert_eq!(survey.zone_transitions, 32);
+    assert_eq!(survey.zone_transitions, 34);
     assert_eq!(survey.camera_ranges.len(), 45);
-    assert_eq!(survey.camera_path_changes, 46);
+    assert_eq!(survey.camera_path_changes, 48);
     assert_eq!(
         survey.checkpoint_samples,
         [
             (1, 57 << 8, [2_252_800, 2_350_080, 15_564_288]),
-            (1_159, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
+            (1_298, 8 << 8, [2_815_232, 2_979_072, 17_458_688]),
         ]
     );
     assert_eq!(
@@ -71465,26 +71885,24 @@ fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
             (1, 0),
             (278, 0x100),
             (279, 0x200),
-            (280, 0x300),
-            (281, 0x400),
-            (295, 0x500),
-            (355, 0x600),
-            (629, 0x700),
-            (1_036, 0x800),
-            (1_053, 0x900),
-            (1_159, 0xa00),
-            (1_940, 0xb00),
+            (282, 0x300),
+            (296, 0x400),
+            (713, 0x500),
+            (1_175, 0x600),
+            (1_192, 0x700),
+            (1_298, 0x800),
+            (2_070, 0x900),
         ]
     );
-    assert_eq!(survey.saved_box_count_samples, [(1_159, 0x900)]);
+    assert_eq!(survey.saved_box_count_samples, [(1_298, 0x700)]);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
     assert!(survey.is_clean(), "{}", survey.summary());
     assert_eq!(runtime.global_word(CHECKPOINT_ID_GLOBAL), Ok(8 << 8));
-    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0xb00));
-    assert_eq!(runtime.draw_count(), 19_649);
-    assert_eq!(runtime.machine().random_seed(), 0xd252_a6ab);
+    assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x900));
+    assert_eq!(runtime.draw_count(), 19_779);
+    assert_eq!(runtime.machine().random_seed(), 0x6156_3342);
     assert_eq!(runtime.random_seed_b(), 0xe730_1ec7);
     assert_eq!(
         campaign_progression_globals(&runtime),
@@ -71498,14 +71916,14 @@ fn exact_post_papu_rolling_stones_phase_completes_with_live_controller() {
         Eid::from_name("0O_lZ").expect("fixed Rolling Stones end-zone EID is valid")
     );
     assert_eq!(final_camera.path.index, 0);
-    assert_eq!(final_camera.progress.raw(), 8_448);
+    assert_eq!(final_camera.progress.raw(), 8_402);
     let player = player_trace(&runtime)
         .expect("exact Rolling Stones completion player trace must resolve")
         .expect("Rolling Stones end warp must retain Crash");
     assert_eq!(player.zone, Eid::from_name("0O_lZ").unwrap());
     assert_eq!(player.state, 32);
     assert_eq!(player.event, 0x1600);
-    assert_eq!(player.translation, [2_245_280, 9_256_235, -1_755_904]);
+    assert_eq!(player.translation, [2_240_192, 9_256_241, -1_749_760]);
 }
 
 #[test]

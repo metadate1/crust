@@ -17080,7 +17080,7 @@ impl GreatGateRouteController {
                         object.origin,
                         ObjectOrigin::Runtime {
                             executable: 33,
-                            subtype: 6
+                            subtype: 1
                         }
                     )
                     .then_some((object.state, object.translation[1]))
@@ -19773,6 +19773,7 @@ struct GeneratorRoomCompletionRouteController {
     b4_turn_started: bool,
     b4_fresh_phase_stance: Option<bool>,
     b6_target_previous_y: Option<i32>,
+    b6_box_90_climb_stage: u8,
     b7_depart_runup: bool,
     b7_brake_airborne_seen: bool,
     b7_wall_airborne_seen: bool,
@@ -20034,6 +20035,43 @@ impl GeneratorRoomCompletionRouteController {
             self.release_frames = 5;
             return PAD_RIGHT | PAD_CROSS;
         }
+        if self.route_stage == 5 && self.session_globals && player_collider_entity == Some(66) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player
+                .is_some_and(|player| player.status_a & 1 != 0 && player.translation[1] >= -380_000)
+            {
+                // The authentic carried phase reaches this vertical platform
+                // near the bottom of its cycle.  Leaving immediately starts
+                // the next jump below b1's intervening floor, so Crash passes
+                // beneath it.  Ride the same live platform back to the fresh
+                // route's departure height before continuing.
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return 0;
+        }
+        if self.route_stage == 5 && self.session_globals && player_collider_entity == Some(70) {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            if player
+                .is_some_and(|player| player.status_a & 1 != 0 && player.translation[1] >= -260_000)
+            {
+                if player.is_some_and(|player| player.translation[2] > -7_835_000) {
+                    // Recover the forward run-up that the live-phase wait
+                    // deliberately shed while keeping Crash aboard.
+                    return PAD_UP;
+                }
+                // The second vertical platform has an independent phase.
+                // Depart from its live upper pass so the following ordinary
+                // jump reaches b1's floor instead of travelling underneath.
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            return 0;
+        }
         if self.route_stage == 6 && player_collider_entity == Some(71) {
             self.b1_second_crate_hit = true;
             self.jump_frames = jump_hold;
@@ -20203,6 +20241,18 @@ impl GeneratorRoomCompletionRouteController {
         }
         if self.route_stage == 9 && player_collider_entity == Some(78) {
             self.b3_source_landed = true;
+            if self.session_globals
+                && player.is_some_and(|player| player.translation[0] < 3_030_000)
+            {
+                // The carried platform phase brushes the left edge of b3's
+                // support before the fresh route's established takeoff point.
+                // Keep running across the live collider until the same usable
+                // departure margin is available; jumping on the first contact
+                // drops below the following floor.
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
         }
         if self.route_stage == 9 && player_collider_entity == Some(84) {
             self.b4_turn_started = true;
@@ -20386,12 +20436,11 @@ impl GeneratorRoomCompletionRouteController {
             }
             self.jump_frames = 0;
             self.release_frames = 0;
-            if self.b4_fresh_phase_stance == Some(true) {
-                // The fresh phase is the original deterministic route: Crash
-                // remains parented at the landing offset until entity 102
-                // reaches the characterized departure window.
-                return 0;
-            }
+            // Usually the fresh route lands at the characterized rear-left
+            // offset already.  A carried phase can reach the same platform
+            // class from its opposite edge, though, so use the live parent
+            // offset below for both cases rather than assuming the stance
+            // from an earlier platform phase.
             let velocity = player.map_or([0; 3], |player| player.velocity);
             let mut held = match relative.map(|(x, _)| x) {
                 Some(x) if x > -60_000 && velocity[0] >= -100_000 => PAD_LEFT,
@@ -20490,6 +20539,62 @@ impl GeneratorRoomCompletionRouteController {
             self.release_frames = 5;
             return PAD_UP | PAD_CROSS;
         }
+        if self.route_stage == 18 && self.session_globals {
+            let box_90_bound = objects.iter().find_map(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 90)
+                    .then_some(object.frame_bound.or(object.bound))
+                    .flatten()
+            });
+            if self.b6_box_90_climb_stage == 2 && player_collider_entity == Some(90) {
+                // The short climb releases Cross before contact, so the first
+                // live top-collider sample can start the same forward bounce
+                // used by the characterized fresh route.
+                self.b6_box_90_climb_stage = 3;
+                self.jump_frames = jump_hold;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            if self.b6_box_90_climb_stage == 1 {
+                if player.is_some_and(|player| player.velocity[2] < -50_000) {
+                    // The front face is already arresting forward movement;
+                    // counter-steer on the grounded floor until the retained
+                    // carried-session run speed is nearly neutral.
+                    return PAD_DOWN;
+                }
+                self.b6_box_90_climb_stage = 2;
+                self.jump_frames = 1;
+                self.release_frames = 5;
+                return PAD_UP | PAD_CROSS;
+            }
+            if self.b6_box_90_climb_stage == 2 {
+                let mut held = PAD_UP;
+                if self.jump_frames != 0 {
+                    self.jump_frames -= 1;
+                    held |= PAD_CROSS;
+                } else if self.release_frames != 0 {
+                    self.release_frames -= 1;
+                }
+                return held;
+            }
+            if self.b6_box_90_climb_stage == 0
+                && player_collider_entity.is_none()
+                && player.zip(box_90_bound).is_some_and(|(player, bound)| {
+                    player.status_a & 1 != 0
+                        && player.translation[2] >= bound.max.z
+                        && player.translation[2] <= bound.max.z.saturating_add(100_000)
+                })
+            {
+                // The authentic carried phase reaches the short floor in
+                // front of entity 90 about one box width before the fresh
+                // route's top contact. A short vertical climb, steered by the
+                // live box bound above, preserves the authored route without
+                // the long generic jump overshooting the box.
+                self.b6_box_90_climb_stage = 1;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_DOWN;
+            }
+        }
         if self.route_stage == 18 && player_collider_entity == Some(99) {
             self.route_stage = 19;
         }
@@ -20568,7 +20673,8 @@ impl GeneratorRoomCompletionRouteController {
                         .then_some(object.bound)
                         .flatten()
                 });
-                let takeoff = (self.b4_fresh_phase_stance == Some(false))
+                let carried_box_climb = self.session_globals && self.b6_box_90_climb_stage == 3;
+                let takeoff = (self.b4_fresh_phase_stance == Some(false) || carried_box_climb)
                     .then_some(())
                     .and(player.zip(platform))
                     .filter(|(player, platform)| {
@@ -21680,8 +21786,14 @@ struct ToxicWasteCompletionRouteController {
     release_frames: u8,
     started: bool,
     a6_barrel_stage: u8,
+    a7_exit_stage: u8,
+    a7_exit_brake_frames: u8,
     a8_checkpoint_stage: u8,
     a8_checkpoint_wait_frames: u8,
+    b1_barrel_stage: u8,
+    b3_barrel_stage: u8,
+    b4_barrel_stage: u8,
+    b8_barrel_stage: u8,
     b6_stage: u8,
     b6_hold_frames: u8,
     c0_stage: u8,
@@ -21691,8 +21803,10 @@ struct ToxicWasteCompletionRouteController {
     c3_stage: u8,
     c3_frames: u8,
     c4_stage: u8,
+    c4_barrel_stage: u8,
     c4_frames: u8,
     c5_stage: u8,
+    c5_barrel_stage: u8,
     c5_frames: u8,
     c6_steer_stage: u8,
     c6_steer_frames: u8,
@@ -21774,6 +21888,29 @@ impl ToxicWasteCompletionRouteController {
             return PAD_UP;
         }
 
+        // A different live barrel phase can turn the last a7 cadence arc into
+        // a short stomp and leave one Cross-release frame at the floor lip.
+        // Take that grounded lip immediately; waiting for the generic cadence
+        // loses the solid surface before the fresh tap can begin.
+        let a7 = Eid::from_name("a7_7Z").expect("fixed Toxic Waste a7 EID is valid");
+        if self.session_globals
+            && self.a7_exit_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == a7 && player.translation[2] <= 21_850_000 && player.status_a & 1 != 0
+            })
+        {
+            self.a7_exit_stage = 1;
+            self.a7_exit_brake_frames = 5;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_DOWN | PAD_CROSS;
+        }
+        if self.a7_exit_stage == 1 && self.a7_exit_brake_frames != 0 {
+            self.a7_exit_brake_frames -= 1;
+            self.jump_frames = self.jump_frames.saturating_sub(1);
+            return PAD_DOWN | PAD_CROSS;
+        }
+
         // The carried route reaches the last a8 takeoff two movement samples
         // behind the fresh boot.  Wait on the live solid surface, then hold
         // the resulting jump only until the checkpoint's authored bounce
@@ -21815,6 +21952,274 @@ impl ToxicWasteCompletionRouteController {
             held |= PAD_CROSS;
         }
 
+        // The exact post-Sunset campaign reaches b1 while the next rolling
+        // barrel is still approaching the center landing.  Stop on the live
+        // solid until that barrel's collision bound reaches the characterized
+        // vault window, then take a fresh full jump over it.  Freeze only this
+        // controller's cadence clock so downstream authored inputs remain
+        // path-relative.
+        let b1 = Eid::from_name("b1_7Z").expect("fixed Toxic Waste b1 EID is valid");
+        if self.session_globals
+            && self.a7_exit_stage != 0
+            && self.b1_barrel_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == b1
+                    && player.translation[2] <= 16_800_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && player.translation[2] - bound.max.z <= 1_000_000
+                    })
+                })
+            })
+        {
+            self.b1_barrel_stage = 1;
+        }
+        if self.b1_barrel_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.tick = self.tick.saturating_sub(1);
+            let barrel_takeoff_ready = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && player.translation[2] - bound.max.z <= 500_000
+                    })
+                })
+            });
+            if barrel_takeoff_ready {
+                self.b1_barrel_stage = 2;
+                self.jump_frames = 10;
+                self.release_frames = 1;
+                return PAD_UP | PAD_CROSS;
+            }
+            return 0;
+        }
+
+        // The b1 vault advances the following live barrel phase enough that
+        // the hard-coded b3 hold can still be down when Crash lands.  Key a
+        // single release frame and the fresh vault to the approaching
+        // barrel's bound instead of campaign time.
+        let b3 = Eid::from_name("b3_7Z").expect("fixed Toxic Waste b3 EID is valid");
+        if self.session_globals
+            && self.b1_barrel_stage == 2
+            && self.b3_barrel_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == b3 && player.status_a & 1 != 0 && matches!(player.state, 1 | 2)
+            })
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && player.translation[2] - bound.max.z <= 650_000
+                    })
+                })
+            })
+        {
+            self.b3_barrel_stage = 1;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.tick = self.tick.saturating_sub(1);
+            return PAD_UP;
+        }
+        if self.b3_barrel_stage == 1 {
+            self.b3_barrel_stage = 2;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_CROSS;
+        }
+
+        // Repeat the live vault for b4: after the b3 release correction the
+        // next barrel approaches during the ordinary landing arc, well before
+        // the stale campaign-frame wait.  Arrest on the solid and launch from
+        // the barrel's relative collision gap.
+        let b4 = Eid::from_name("b4_7Z").expect("fixed Toxic Waste b4 EID is valid");
+        if self.session_globals
+            && self.b3_barrel_stage == 2
+            && self.b4_barrel_stage == 0
+            && player.is_some_and(|player| {
+                (player.zone == b3 || player.zone == b4)
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && (650_000..=1_100_000)
+                                .contains(&(player.translation[2] - bound.max.z))
+                    })
+                })
+            })
+        {
+            self.b4_barrel_stage = 1;
+        }
+        if self.b4_barrel_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.tick = self.tick.saturating_sub(1);
+            let barrel_takeoff_ready = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 1
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && player.translation[2] - bound.max.z <= 500_000
+                    })
+                })
+            });
+            if barrel_takeoff_ready {
+                self.b4_barrel_stage = 2;
+                self.jump_frames = 10;
+                self.release_frames = 1;
+                return PAD_UP | PAD_CROSS;
+            }
+            return 0;
+        }
+
+        // The exact carried phase meets b8's last fast barrel above the
+        // center lane, where its bounce is too high for Crash's ordinary
+        // jump.  Take the right shoulder only while the live collision
+        // bounds still overlap laterally, hold that clearance until the
+        // barrel has passed in Z, then immediately recenter.
+        let b8 = Eid::from_name("b8_7Z").expect("fixed Toxic Waste b8 EID is valid");
+        if self.session_globals
+            && self.b4_barrel_stage == 2
+            && self.b8_barrel_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == b8 && player.status_a & 1 != 0 && matches!(player.state, 1 | 2)
+            })
+            && player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && (500_000..=800_000).contains(&(player.translation[2] - bound.max.z))
+                    })
+                })
+            })
+        {
+            self.b8_barrel_stage = 1;
+        }
+        if self.b8_barrel_stage == 1 {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.tick = self.tick.saturating_sub(1);
+            let barrel_takeoff_ready = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object.bound.is_some_and(|bound| {
+                        bound.max.z < player.translation[2]
+                            && player.translation[2] - bound.max.z <= 360_000
+                    })
+                })
+            });
+            if barrel_takeoff_ready {
+                self.b8_barrel_stage = 2;
+                self.jump_frames = 10;
+                self.release_frames = 1;
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_UP;
+        }
+        if self.b8_barrel_stage == 2 {
+            let lateral_clear = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object
+                        .bound
+                        .is_some_and(|bound| player.translation[0] - 38_400 > bound.max.x)
+                })
+            });
+            if lateral_clear {
+                self.b8_barrel_stage = 3;
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
+        } else if self.b8_barrel_stage == 3 {
+            let barrel_has_passed = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object
+                        .bound
+                        .is_some_and(|bound| bound.min.z > player.translation[2])
+                })
+            });
+            held |= PAD_LEFT;
+            if barrel_has_passed {
+                self.b8_barrel_stage = 4;
+            }
+        } else if self.b8_barrel_stage == 4 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.b8_barrel_stage = 5;
+            }
+        }
+        if self.b8_barrel_stage == 5
+            && player.is_some_and(|player| {
+                player.zone == b8 && player.translation[2] <= 7_000_000 && player.status_a & 1 != 0
+            })
+        {
+            self.b8_barrel_stage = 6;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_CROSS;
+        }
+
         // The opening barrel pair shares Crash's center lane. Cross the right
         // shoulder while airborne, then return to center after it passes.
         if (61..=78).contains(&self.tick) {
@@ -21827,6 +22232,31 @@ impl ToxicWasteCompletionRouteController {
         // before the following waste channel.
         let c5 = Eid::from_name("c5_7Z").expect("fixed Toxic Waste c5 EID is valid");
         let c6 = Eid::from_name("c6_7Z").expect("fixed Toxic Waste c6 EID is valid");
+        let c6_live_barrel = player.and_then(|player| {
+            objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                .filter(|bound| {
+                    bound.min.x <= 2_047_000
+                        && bound.max.x >= 2_047_000
+                        && player.translation[2]
+                            .abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                            <= 900_000
+                })
+                .min_by_key(|bound| {
+                    player.translation[2].abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                })
+        });
         if self.c6_steer_stage == 0
             && player.is_some_and(|player| {
                 (player.zone == c5 || player.zone == c6) && player.translation[2] <= -3_240_000
@@ -21853,7 +22283,7 @@ impl ToxicWasteCompletionRouteController {
             && player.is_some_and(|player| player.zone == c6 && player.translation[2] <= -4_050_000)
         {
             self.c6_steer_stage = 4;
-            self.c6_steer_frames = 9;
+            self.c6_steer_frames = if self.session_globals { 6 } else { 9 };
         }
         if self.c6_steer_stage == 4 && self.c6_steer_frames != 0 {
             held |= PAD_LEFT;
@@ -21862,11 +22292,48 @@ impl ToxicWasteCompletionRouteController {
                 self.c6_steer_stage = 5;
                 self.c6_steer_frames = 13;
             }
+        } else if self.c6_steer_stage == 5 && self.session_globals {
+            let barrel_has_passed = player.is_some_and(|player| {
+                c6_live_barrel.is_some_and(|bound| bound.min.z > player.translation[2])
+            });
+            if barrel_has_passed {
+                self.c6_steer_stage = 6;
+                self.c6_steer_frames = 6;
+            } else if player.is_some_and(|player| {
+                c6_live_barrel.is_some_and(|bound| {
+                    let safe_center_x = bound.min.x.saturating_sub(42_000);
+                    player.translation[0] >= safe_center_x || player.velocity[0] > 100_000
+                })
+            }) {
+                // The authentic carried barrel is still crossing this jump
+                // when the fixed fresh-route recenter begins. Hover just
+                // outside its live left bound until it passes.
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
         } else if self.c6_steer_stage == 5 && self.c6_steer_frames != 0 {
             held |= PAD_RIGHT;
             self.c6_steer_frames -= 1;
             if self.c6_steer_frames == 0 {
                 self.c6_steer_stage = 6;
+            }
+        }
+        if self.c6_steer_stage == 6 && self.session_globals && self.c6_steer_frames != 0 {
+            held |= PAD_RIGHT;
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 7;
+                self.c6_steer_frames = 4;
+            }
+        } else if self.c6_steer_stage == 7 && self.session_globals && self.c6_steer_frames != 0 {
+            // Brake the lateral run before the following enemy knockback.
+            // A fixed fresh-route recenter continues steering through that
+            // encounter and carries some valid session phases off the road.
+            held |= PAD_LEFT;
+            self.c6_steer_frames -= 1;
+            if self.c6_steer_frames == 0 {
+                self.c6_steer_stage = 8;
             }
         }
 
@@ -21999,6 +22466,9 @@ impl ToxicWasteCompletionRouteController {
         // Give c0's last center barrel the same solid-lane right of way before
         // resuming the final ascent.
         let b9 = Eid::from_name("b9_7Z").expect("fixed Toxic Waste b9 EID is valid");
+        let c0 = Eid::from_name("c0_7Z").expect("fixed Toxic Waste c0 EID is valid");
+        let c1 = Eid::from_name("c1_7Z").expect("fixed Toxic Waste c1 EID is valid");
+        let c2 = Eid::from_name("c2_7Z").expect("fixed Toxic Waste c2 EID is valid");
         if (1_470..=1_480).contains(&self.tick) {
             self.jump_frames = 0;
             self.release_frames = 0;
@@ -22007,6 +22477,83 @@ impl ToxicWasteCompletionRouteController {
         // Recover the distance shed by b8's longer live wait before entering
         // c0's narrow safe surface. Walk three grounded frames after the first
         // post-barrel arc, then take a fresh full jump.
+        if self.c0_stage == 0
+            && self.session_globals
+            && self.b8_barrel_stage == 6
+            && player.is_some_and(|player| {
+                (player.zone == b9 || player.zone == c0)
+                    && player.translation[2] <= 5_800_000
+                    && player.status_a & 1 != 0
+            })
+        {
+            self.c0_stage = 10;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_RIGHT | PAD_CROSS;
+        }
+        if self.c0_stage == 10 {
+            let lateral_clear = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object
+                        .bound
+                        .is_some_and(|bound| player.translation[0] - 38_400 > bound.max.x)
+                })
+            });
+            if lateral_clear {
+                self.c0_stage = 11;
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
+        } else if self.c0_stage == 11 {
+            let barrel_has_passed = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    ) && object
+                        .bound
+                        .is_some_and(|bound| bound.min.z > player.translation[2])
+                })
+            });
+            held |= PAD_LEFT;
+            if barrel_has_passed {
+                self.c0_stage = 12;
+            }
+        } else if self.c0_stage == 12 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.c0_stage = 2;
+            }
+        }
+        // The exact carried phase reaches c0's first full-width waste lip as
+        // the nearby Fat's spin recovery settles into state 19.  That is an
+        // ordinary grounded state, but the default cadence deliberately only
+        // starts from walk/idle states.  Use the live grounded recovery as
+        // the takeoff signal so Cross is pressed before the solid ends.
+        if self.session_globals
+            && self.c0_stage == 2
+            && player.is_some_and(|player| {
+                (player.zone == c0 || player.zone == c1)
+                    && player.state == 19
+                    && player.status_a & 1 != 0
+            })
+        {
+            self.c0_stage = 3;
+            self.jump_frames = 10;
+            self.release_frames = 1;
+            return PAD_UP | PAD_CROSS;
+        }
         if self.c0_stage == 0
             && player.is_some_and(|player| {
                 player.zone == b9
@@ -22030,7 +22577,6 @@ impl ToxicWasteCompletionRouteController {
             self.release_frames = 1;
             return held | PAD_CROSS;
         }
-        let c1 = Eid::from_name("c1_7Z").expect("fixed Toxic Waste c1 EID is valid");
         if self.c2_stage == 0
             && player.is_some_and(|player| {
                 player.zone == c1
@@ -22041,6 +22587,52 @@ impl ToxicWasteCompletionRouteController {
         {
             self.c2_stage = 1;
             self.c2_wait_frames = 3;
+        }
+        if self.c2_stage == 1 && self.session_globals {
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            self.c2_stage = 10;
+        }
+        if self.c2_stage == 10 {
+            let lateral_clear = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 142)
+                        && object
+                            .bound
+                            .is_some_and(|bound| player.translation[0] - 38_400 > bound.max.x)
+                })
+            });
+            if lateral_clear {
+                self.c2_stage = 11;
+                return PAD_UP;
+            }
+            return PAD_UP | PAD_RIGHT;
+        }
+        if self.c2_stage == 11 {
+            let crate_is_behind = player.is_some_and(|player| {
+                objects.iter().any(|object| {
+                    matches!(object.origin, ObjectOrigin::Entity(entity) if entity.id == 142)
+                        && object
+                            .bound
+                            .is_some_and(|bound| player.translation[2] + 38_400 < bound.min.z)
+                })
+            });
+            if crate_is_behind {
+                // The right shoulder remains solid beside the Nitro.  Launch
+                // from its live far edge and recenter during the full jump.
+                self.c2_stage = 12;
+                self.jump_frames = 19;
+                self.release_frames = 1;
+                return PAD_UP | PAD_LEFT | PAD_CROSS;
+            }
+            return PAD_UP;
+        }
+        if self.c2_stage == 12 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.c2_stage = 2;
+            }
         }
         if self.c2_stage == 1 && self.c2_wait_frames != 0 {
             self.c2_wait_frames -= 1;
@@ -22054,7 +22646,6 @@ impl ToxicWasteCompletionRouteController {
             self.release_frames = 1;
             return held | PAD_CROSS;
         }
-        let c2 = Eid::from_name("c2_7Z").expect("fixed Toxic Waste c2 EID is valid");
         if self.c3_stage == 0
             && player.is_some_and(|player| player.zone == c2 && player.translation[2] <= 1_500_000)
         {
@@ -22105,7 +22696,11 @@ impl ToxicWasteCompletionRouteController {
                 return held & !PAD_CROSS;
             }
             self.c4_stage = 2;
-            self.c4_frames = 8;
+            // The exact carried barrel phase reaches the next center-lane
+            // intersection ten frames later in the jump than the fresh boot.
+            // Delay this ordinary takeoff so the live pass occurs near the
+            // high arc instead of at landing; both shoulders are waste.
+            self.c4_frames = if self.session_globals { 18 } else { 8 };
         }
         if self.c4_stage == 2 && self.c4_frames != 0 {
             self.c4_frames -= 1;
@@ -22117,6 +22712,95 @@ impl ToxicWasteCompletionRouteController {
             self.c4_stage = 3;
             self.c4_frames = 12;
         }
+        // The high carried jump alone misses the rising barrel by less than
+        // one Crash-frame bound. Use the same live bound for a minimal
+        // airborne shoulder shift, braking before the arc descends onto the
+        // adjacent type-four surface and recentering as soon as it passes.
+        let c4_live_barrel = player.and_then(|player| {
+            objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                // The target rolls up the authored center lane. Selecting it
+                // by its live bound keeps the route independent of runtime
+                // handles while excluding shoulder and later barrels.
+                .filter(|bound| {
+                    bound.min.x <= 2_029_312
+                        && bound.max.x >= 2_029_312
+                        && player.translation[2]
+                            .abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                            <= 800_000
+                })
+                .min_by_key(|bound| {
+                    player.translation[2].abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                })
+        });
+        if self.session_globals
+            && self.c4_stage == 3
+            && self.c4_barrel_stage == 0
+            && player.is_some_and(|player| {
+                c4_live_barrel.is_some_and(|bound| {
+                    bound.max.z < player.translation[2]
+                        && (400_000..=650_000).contains(&(player.translation[2] - bound.max.z))
+                })
+            })
+        {
+            self.c4_barrel_stage = 1;
+        }
+        if self.c4_barrel_stage == 1 {
+            let begin_braking = player.is_some_and(|player| {
+                c4_live_barrel.is_some_and(|bound| {
+                    bound.max.z < player.translation[2]
+                        && player.translation[2] - bound.max.z <= 700_000
+                        && player.translation[0] > bound.max.x.saturating_add(15_000)
+                })
+            });
+            if begin_braking {
+                self.c4_barrel_stage = 2;
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
+        } else if self.c4_barrel_stage == 2 {
+            let barrel_has_passed = player.is_some_and(|player| {
+                c4_live_barrel.is_some_and(|bound| {
+                    bound.min.z > player.translation[2]
+                        && bound.min.z - player.translation[2] <= 300_000
+                })
+            });
+            if barrel_has_passed {
+                self.c4_barrel_stage = 3;
+                held |= PAD_LEFT;
+            } else if player.is_some_and(|player| {
+                c4_live_barrel.is_some_and(|bound| {
+                    let safe_center_x = bound.max.x.saturating_add(42_000);
+                    player.translation[0] <= safe_center_x || player.velocity[0] < -100_000
+                })
+            }) {
+                // Digital steering needs one-frame feedback here: holding
+                // left continuously brakes through the safe margin before
+                // the rolling bound has passed, while holding right reaches
+                // the adjacent waste. Hover just outside the live X bound.
+                held |= PAD_RIGHT;
+            } else {
+                held |= PAD_LEFT;
+            }
+        } else if self.c4_barrel_stage == 3 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.c4_barrel_stage = 4;
+            }
+        }
         if self.c4_stage == 3 && self.c4_frames != 0 {
             self.c4_frames -= 1;
             self.jump_frames = 0;
@@ -22125,6 +22809,23 @@ impl ToxicWasteCompletionRouteController {
         }
         if self.c4_stage == 3 {
             self.c4_stage = 4;
+        }
+        if self.session_globals
+            && self.c4_stage == 4
+            && self.c5_stage == 0
+            && player.is_some_and(|player| {
+                player.zone == c4
+                    && player.translation[2] > -1_760_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            // The airborne barrel dodge lands earlier on c4 than the fresh
+            // center-lane route. Preserve the authored c5 entry jump by
+            // rebuilding its ordinary forward run-up before taking off.
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
         }
         if self.c5_stage == 0
             && player.is_some_and(|player| player.zone == c5 && player.translation[2] <= -2_100_000)
@@ -22140,7 +22841,11 @@ impl ToxicWasteCompletionRouteController {
                 return held & !PAD_CROSS;
             }
             self.c5_stage = 2;
-            self.c5_frames = 8;
+            // The authentic carried phase has the c5 barrel already rolling
+            // into the fresh route's eight-frame run-up. Take the same jump
+            // from the first grounded frame so their live bounds meet near
+            // the apex rather than at barrel height.
+            self.c5_frames = if self.session_globals { 0 } else { 8 };
         }
         if self.c5_stage == 2 && self.c5_frames != 0 {
             self.c5_frames -= 1;
@@ -22152,12 +22857,123 @@ impl ToxicWasteCompletionRouteController {
             self.c5_stage = 3;
             self.c5_frames = 25;
         }
+        let c5_live_barrel = player.and_then(|player| {
+            objects
+                .iter()
+                .filter_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Runtime {
+                            executable: 16,
+                            subtype: 6
+                        }
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                .filter(|bound| {
+                    bound.min.x <= 2_048_000
+                        && bound.max.x >= 2_048_000
+                        && player.translation[2]
+                            .abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                            <= 800_000
+                })
+                .min_by_key(|bound| {
+                    player.translation[2].abs_diff(bound.min.z.saturating_add(bound.max.z) / 2)
+                })
+        });
+        if self.session_globals
+            && self.c5_stage == 3
+            && self.c5_barrel_stage == 0
+            && player.is_some_and(|player| {
+                c5_live_barrel.is_some_and(|bound| {
+                    bound.max.z < player.translation[2]
+                        && (250_000..=650_000).contains(&(player.translation[2] - bound.max.z))
+                })
+            })
+        {
+            self.c5_barrel_stage = 1;
+        }
+        if self.c5_barrel_stage == 1 {
+            let begin_braking = player.is_some_and(|player| {
+                c5_live_barrel.is_some_and(|bound| {
+                    bound.max.z < player.translation[2]
+                        && player.translation[2] - bound.max.z <= 700_000
+                        && player.translation[0] > bound.max.x.saturating_add(15_000)
+                })
+            });
+            if begin_braking {
+                self.c5_barrel_stage = 2;
+                held |= PAD_LEFT;
+            } else {
+                held |= PAD_RIGHT;
+            }
+        } else if self.c5_barrel_stage == 2 {
+            let barrel_has_passed = player.is_some_and(|player| {
+                c5_live_barrel.is_some_and(|bound| {
+                    bound.min.z > player.translation[2]
+                        && bound.min.z - player.translation[2] <= 300_000
+                })
+            });
+            if barrel_has_passed {
+                self.c5_barrel_stage = 3;
+                held |= PAD_LEFT;
+            } else if player.is_some_and(|player| {
+                c5_live_barrel.is_some_and(|bound| {
+                    let safe_center_x = bound.max.x.saturating_add(42_000);
+                    player.translation[0] <= safe_center_x || player.velocity[0] < -100_000
+                })
+            }) {
+                held |= PAD_RIGHT;
+            } else {
+                held |= PAD_LEFT;
+            }
+        } else if self.c5_barrel_stage == 3 {
+            if player.is_some_and(|player| player.translation[0] > 2_060_000) {
+                held |= PAD_LEFT;
+            } else {
+                self.c5_barrel_stage = 4;
+            }
+        }
         if self.c5_stage == 3 && self.c5_frames != 0 {
             self.c5_frames -= 1;
             held |= PAD_CROSS;
             if self.c5_frames == 0 {
                 self.c5_stage = 4;
             }
+        }
+        if self.session_globals
+            && self.c5_stage == 4
+            && player.is_some_and(|player| {
+                player.zone == c5
+                    && player.translation[2] <= -3_100_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            // Do not carry a late c5 cadence jump into c6: it lands in the
+            // first waste channel. Walk across the zone seam so the existing
+            // c6 shoulder jump begins from its authored grounded takeoff.
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return held & !PAD_CROSS;
+        }
+        if self.session_globals
+            && self.c6_steer_stage == 3
+            && player.is_some_and(|player| {
+                player.zone == c6
+                    && player.translation[2] > -4_050_000
+                    && player.status_a & 1 != 0
+                    && matches!(player.state, 1 | 2)
+            })
+        {
+            // In the carried barrel phase Crash takes off from the live low
+            // bounce at c6's first channel, which with the short cadence jump
+            // lands just before the far edge. Keep the ordinary jump held for
+            // the full high arc so it reaches the second shoulder maneuver.
+            self.jump_frames = 19;
+            self.release_frames = 1;
+            return held | PAD_CROSS;
         }
 
         // The opening section's final lane has a rolling barrel that meets the
@@ -22205,6 +23021,7 @@ struct CortexPowerCompletionRouteController {
     hazard_tick: u8,
     a4_entry_seen: bool,
     a4_recovery_required: bool,
+    a8_short_runup: bool,
     lower_barrier_previous_x: Option<i32>,
     lower_barrier_waiting: bool,
     lower_barrier_phase_cleared: bool,
@@ -22214,6 +23031,7 @@ struct CortexPowerCompletionRouteController {
     six_b_middle_runup_frames: u8,
     final_reactor_previous_x: Option<i32>,
     final_reactor_phase_cleared: bool,
+    seven_b_alignment_stage: u8,
 }
 
 impl CortexPowerCompletionRouteController {
@@ -22524,7 +23342,15 @@ impl CortexPowerCompletionRouteController {
                             .expect("fixed Cortex Power reactor-rod EID is valid")
                     && object.translation[0] <= 1_900_000
             });
-            if !player_is_grounded || !beam_is_left {
+            let landing_platform_is_right = route_objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 73)
+                    && object.program
+                        == Eid::from_name("PoRoC")
+                            .expect("fixed Cortex Power reactor-platform EID is valid")
+                    && object.state == 1
+                    && object.translation[0] >= 2_153_000
+            });
+            if !player_is_grounded || !beam_is_left || !landing_platform_is_right {
                 return 0;
             }
             self.hazard_stage = 4;
@@ -22744,6 +23570,14 @@ impl CortexPowerCompletionRouteController {
             if player.translation[2] > 20_960_000 {
                 return held;
             }
+            self.a8_short_runup = route_objects.iter().any(|object| {
+                matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 104)
+                    && object.program
+                        == Eid::from_name("PoRoC")
+                            .expect("fixed Cortex Power reactor-rod EID is valid")
+                    && object.state == 7
+                    && player.translation[2].saturating_sub(object.translation[2]) < 520_000
+            });
             if self.a4_recovery_required && matches!(player.state, 17 | 19) {
                 // A carried session can reach this boundary on the generic
                 // spin pulse, entering the powered strip in its spin-bounce
@@ -22762,6 +23596,17 @@ impl CortexPowerCompletionRouteController {
         }
         if self.hazard_stage == 17 {
             self.hazard_tick = self.hazard_tick.saturating_add(1);
+            if self.a8_short_runup
+                && self.hazard_tick <= 4
+                && camera.path.zone
+                    == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
+            {
+                // The carried route reaches the last safe strip one movement
+                // quantum closer to the live reactor rod than a fresh boot.
+                // A short ordinary-pad coast keeps the following landing on
+                // the near side of that rod without discarding the run-up.
+                held &= !(PAD_LEFT | PAD_RIGHT | PAD_UP | PAD_DOWN);
+            }
             let on_power_floor = (camera.path.zone
                 == Eid::from_name("a8_3Z").expect("fixed Cortex Power camera EID is valid")
                 && camera.path.index == 1)
@@ -22860,6 +23705,7 @@ impl CortexPowerCompletionRouteController {
             return held | PAD_CROSS;
         }
         if self.hazard_stage == 22 {
+            let carried_phase_recovery = self.a4_recovery_required || self.a8_short_runup;
             let in_second_lower_corridor = camera.path.zone
                 == Eid::from_name("2b_3Z").expect("fixed Cortex Power camera EID is valid")
                 && camera.path.index == 1;
@@ -22875,7 +23721,7 @@ impl CortexPowerCompletionRouteController {
             let reached_lower_barrier_runup = in_second_lower_corridor
                 && player.is_some_and(|player| player.translation[2] <= 16_985_000);
             if !self.lower_barrier_phase_cleared
-                && self.a4_recovery_required
+                && carried_phase_recovery
                 && (self.lower_barrier_waiting || reached_lower_barrier_runup)
             {
                 self.lower_barrier_waiting = true;
@@ -22933,7 +23779,7 @@ impl CortexPowerCompletionRouteController {
                 });
             if riding_third_corridor_platform
                 && (moving_platform_z.is_some_and(|platform_z| platform_z > 15_100_000)
-                    || (self.a4_recovery_required
+                    || (carried_phase_recovery
                         && !(second_barrier_moving_right
                             && second_barrier_x
                                 .is_some_and(|x| (2_040_000..=2_070_000).contains(&x)))))
@@ -22980,11 +23826,11 @@ impl CortexPowerCompletionRouteController {
                 }
                 return PAD_UP;
             }
-            let at_six_b_middle_support = self.a4_recovery_required
+            let at_six_b_middle_support = carried_phase_recovery
                 && camera.path.zone
                     == Eid::from_name("6b_3Z").expect("fixed Cortex Power camera EID is valid")
                 && player.is_some_and(|player| {
-                    (10_850_000..=11_050_000).contains(&player.translation[2])
+                    (10_780_000..=11_050_000).contains(&player.translation[2])
                         && player.status_a & 1 != 0
                 });
             if at_six_b_middle_support && !self.six_b_middle_phase_cleared {
@@ -23009,7 +23855,7 @@ impl CortexPowerCompletionRouteController {
                     }
                 });
             }
-            let waiting_before_second_six_b_rod = self.a4_recovery_required
+            let on_second_six_b_support = carried_phase_recovery
                 && self.six_b_middle_phase_cleared
                 && !self.final_reactor_phase_cleared
                 && camera.path.zone
@@ -23018,6 +23864,7 @@ impl CortexPowerCompletionRouteController {
                     (10_300_000..=10_500_000).contains(&player.translation[2])
                         && player.status_a & 1 != 0
                 });
+            let waiting_before_second_six_b_rod = on_second_six_b_support;
             if waiting_before_second_six_b_rod {
                 if final_reactor_moving_right && final_reactor_x.is_some_and(|x| x >= 2_250_000) {
                     // Launch only after entity 199 has crossed the lane from
@@ -23054,6 +23901,22 @@ impl CortexPowerCompletionRouteController {
                 }
                 return held;
             }
+            let approaching_seven_b_bounce = self.seven_b_alignment_stage == 0
+                && self.a8_short_runup
+                && self.final_reactor_phase_cleared
+                && camera.path.zone
+                    == Eid::from_name("7b_3Z").expect("fixed Cortex Power camera EID is valid")
+                && camera.path.index == 0
+                && player.is_some_and(|player| {
+                    (9_980_000..=10_100_000).contains(&player.translation[2])
+                        && player.status_a & 1 != 0
+                });
+            if approaching_seven_b_bounce {
+                self.seven_b_alignment_stage = 1;
+                self.hazard_stage = 23;
+                self.hazard_tick = 0;
+                return held | PAD_CROSS;
+            }
             let probing_eight_b_gap = camera.path.zone
                 == Eid::from_name("8b_3Z").expect("fixed Cortex Power camera EID is valid")
                 && player
@@ -23070,7 +23933,7 @@ impl CortexPowerCompletionRouteController {
             }
             self.hazard_stage = 23;
             self.hazard_tick = 0;
-            let accelerating_checkpoint_bounce = self.a4_recovery_required
+            let accelerating_checkpoint_bounce = carried_phase_recovery
                 && player.is_some_and(|player| {
                     player.state == 14 && (16_300_000..=16_700_000).contains(&player.translation[2])
                 });
@@ -23083,15 +23946,31 @@ impl CortexPowerCompletionRouteController {
                 };
         }
         if self.hazard_stage == 23 {
+            let carried_phase_recovery = self.a4_recovery_required || self.a8_short_runup;
             self.hazard_tick = self.hazard_tick.saturating_add(1);
             let landed =
                 self.hazard_tick >= 5 && player.is_some_and(|player| player.status_a & 1 != 0);
             if landed {
+                if self.seven_b_alignment_stage == 1 {
+                    self.seven_b_alignment_stage = 2;
+                }
                 self.hazard_stage = 22;
                 self.hazard_tick = 0;
                 return held;
             }
-            if self.a4_recovery_required
+            if self.seven_b_alignment_stage == 1
+                && camera.path.zone
+                    == Eid::from_name("7b_3Z").expect("fixed Cortex Power camera EID is valid")
+            {
+                // The rod-synchronized launch begins from rest and reaches
+                // the first 7b support one short hop earlier than a direct
+                // run. Brake that hop briefly so its landing meets the same
+                // live bounce surface instead of clearing it into the 8b gap.
+                return (held & !(PAD_UP | PAD_DOWN))
+                    | if self.hazard_tick <= 6 { PAD_DOWN } else { 0 }
+                    | PAD_CROSS;
+            }
+            if carried_phase_recovery
                 && self.six_b_middle_phase_cleared
                 && !self.final_reactor_phase_cleared
                 && camera.path.zone
@@ -23134,7 +24013,7 @@ impl CortexPowerCompletionRouteController {
                 // entity 53's right extreme, so preserve the centerline while
                 // its accelerated bounce clears the floor seam.
                 return PAD_UP
-                    | if self.a4_recovery_required {
+                    | if carried_phase_recovery {
                         0
                     } else if player.translation[0] < 2_100_000 {
                         PAD_RIGHT
@@ -23199,6 +24078,7 @@ struct HeavyMachineryCompletionRouteController {
     i5_crossing_frame: Option<u32>,
     i5_zone_entry_frame: Option<u32>,
     i5_wait_for_zone_entry: bool,
+    i5_short_transfer: bool,
     i5_target_reanchor_done: bool,
     i6_crossing_frame: Option<u32>,
     i8_bounce_frame: Option<u32>,
@@ -23421,22 +24301,45 @@ impl HeavyMachineryCompletionRouteController {
             matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 32)
                 .then_some(object.translation[0])
         });
+        let first_vertical_roller_y = objects.iter().find_map(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 30)
+                .then_some(object.translation[1])
+        });
+        let second_vertical_roller_y = objects.iter().find_map(|object| {
+            matches!(object.origin, ObjectOrigin::Entity(descriptor) if descriptor.id == 31)
+                .then_some(object.translation[1])
+        });
         let f1_roller_moving_left = f1_roller_x
             .zip(self.f1_previous_roller_x)
             .is_some_and(|(current, previous)| current < previous);
         self.f1_previous_roller_x = f1_roller_x;
         if self.f1_crossing_frame.is_none()
-            && opening_route_frame >= 198
             && camera.path.zone == f1
             && camera.path.index == 0
-            && player.is_some_and(|player| {
-                player.status_a & 1 != 0
-                    && (1_630_000..=1_680_000).contains(&player.translation[0])
-                    && player.translation[1] <= 120_000
-                    && player.velocity[0].abs() <= 100_000
-            })
+            && let Some(player) = player
+            && player.status_a & 1 != 0
+            && (1_600_000..=1_780_000).contains(&player.translation[0])
+            && player.translation[1] <= 120_000
         {
-            if f1_roller_moving_left && f1_roller_x.is_some_and(|x| x <= 2_470_000) {
+            // Scheduler order can make the opening vertical roller either
+            // carry Crash onto this shelf or let him land directly on its
+            // fixed floor.  Both are ordinary authored outcomes.  Brake on
+            // the live grounded pose before consulting entity 32, so the
+            // horizontal-row gate cannot depend on the roller contact event.
+            const F1_STAGING_X: i32 = 1_652_736;
+            let position_error = F1_STAGING_X - player.translation[0];
+            if position_error.abs() > 2_048 || player.velocity[0].abs() > 42_500 {
+                return if position_error < -2_048 || player.velocity[0] > 42_500 {
+                    PAD_LEFT
+                } else {
+                    PAD_RIGHT
+                };
+            }
+            if f1_roller_moving_left
+                && f1_roller_x.is_some_and(|x| x <= 2_470_000)
+                && first_vertical_roller_y.is_some_and(|y| y <= 100_000)
+                && second_vertical_roller_y.is_some_and(|y| y >= 200_000)
+            {
                 self.f1_crossing_frame = Some(frame);
             } else {
                 return 0;
@@ -23613,6 +24516,7 @@ impl HeavyMachineryCompletionRouteController {
                 let launch_gap = target_x
                     .zip(player.map(|player| player.translation[0]))
                     .map(|(target, player)| target.saturating_sub(player));
+                self.i5_short_transfer = launch_gap.is_some_and(|gap| gap < 500_000);
                 self.i5_wait_for_zone_entry = camera.path.zone != i5
                     && launch_gap.is_some_and(|gap| gap >= Self::I5_SECOND_JUMP_GAP_MIN);
                 if std::env::var_os("C1_SURVEY_HEAVY_TRACE").is_some() {
@@ -23785,6 +24689,22 @@ impl HeavyMachineryCompletionRouteController {
                     held = 0;
                 }
                 held |= buttons;
+            }
+        }
+
+        // The source platform's inherited phase changes Crash's exact launch
+        // point even after entity 236 reaches the same leftward sweep. Use a
+        // short live projection to release horizontal acceleration before
+        // overshooting the target, while preserving the authored jump hold.
+        if self.i5_short_transfer
+            && self.i5_crossing_frame.is_some()
+            && !self.i5_target_reanchor_done
+            && let (Some(player), Some(target_x)) = (player, target_x)
+        {
+            let projected_x = player.translation[0]
+                .saturating_add(player.velocity[0].max(0).saturating_mul(6) / 34);
+            if projected_x >= target_x.saturating_sub(50_000) {
+                held &= !(PAD_LEFT | PAD_RIGHT);
             }
         }
 
@@ -46795,6 +47715,7 @@ impl SurveyInputController {
                 i5_crossing_frame: None,
                 i5_zone_entry_frame: None,
                 i5_wait_for_zone_entry: false,
+                i5_short_transfer: false,
                 i5_target_reanchor_done: false,
                 i6_crossing_frame: None,
                 i8_bounce_frame: None,
@@ -46812,6 +47733,7 @@ impl SurveyInputController {
                 hazard_tick: 0,
                 a4_entry_seen: false,
                 a4_recovery_required: false,
+                a8_short_runup: false,
                 lower_barrier_previous_x: None,
                 lower_barrier_waiting: false,
                 lower_barrier_phase_cleared: false,
@@ -46821,6 +47743,7 @@ impl SurveyInputController {
                 six_b_middle_runup_frames: 0,
                 final_reactor_previous_x: None,
                 final_reactor_phase_cleared: false,
+                seven_b_alignment_stage: 0,
             },
             generator_room: GeneratorRoomCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
@@ -46866,6 +47789,7 @@ impl SurveyInputController {
                 b4_turn_started: false,
                 b4_fresh_phase_stance: None,
                 b6_target_previous_y: None,
+                b6_box_90_climb_stage: 0,
                 b7_depart_runup: false,
                 b7_brake_airborne_seen: false,
                 b7_wall_airborne_seen: false,
@@ -46946,8 +47870,14 @@ impl SurveyInputController {
                 release_frames: 0,
                 started: false,
                 a6_barrel_stage: 0,
+                a7_exit_stage: 0,
+                a7_exit_brake_frames: 0,
                 a8_checkpoint_stage: 0,
                 a8_checkpoint_wait_frames: 0,
+                b1_barrel_stage: 0,
+                b3_barrel_stage: 0,
+                b4_barrel_stage: 0,
+                b8_barrel_stage: 0,
                 b6_stage: 0,
                 b6_hold_frames: 0,
                 c0_stage: 0,
@@ -46957,8 +47887,10 @@ impl SurveyInputController {
                 c3_stage: 0,
                 c3_frames: 0,
                 c4_stage: 0,
+                c4_barrel_stage: 0,
                 c4_frames: 0,
                 c5_stage: 0,
+                c5_barrel_stage: 0,
                 c5_frames: 0,
                 c6_steer_stage: 0,
                 c6_steer_frames: 0,
@@ -54208,7 +55140,7 @@ fn post_sunset_and_koala_carried_map_handoffs_use_isldc_selection() {
 
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
-fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
+fn authentic_post_sunset_session_reaches_ending_and_returns_to_title() {
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -54232,11 +55164,32 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
     let dr_neo_cortex = CampaignPair::parse(&root, LevelId::new_const(0x1f));
     let ending = CampaignPair::parse(&root, LevelId::ENDING);
 
-    // Start at a pinned, legally-local full-campaign characterization of the
-    // authored Title/map boundary after Sunset Vista and Level Complete. This
-    // synthetic test does not derive that checkpoint: it deliberately isolates
-    // every later mount while the continuous pre-Sunset chain remains active.
-    let post_sunset_title = synthetic_title_map_carry(16, 17, 0x9210_119b, 24_074, 0x4987_cf9b);
+    // Start at the exact Title/map carry exported by the legally-local
+    // uninterrupted campaign after Sunset Vista and Level Complete.
+    let post_sunset_title = synthetic_title_map_carry(16, 17, 0x392a_f35e, 66_684, 0x809c_5eee);
+    assert_eq!(
+        [
+            GAME_STATE_GLOBAL,
+            TITLE_STATE_GLOBAL,
+            SAVED_TITLE_STATE_GLOBAL,
+            CURRENT_MAP_LEVEL_GLOBAL,
+            LEVEL_COUNT_GLOBAL,
+            LEVELS_UNLOCKED_GLOBAL,
+            ISLAND_CAMERA_STATE_GLOBAL,
+        ]
+        .map(|index| post_sunset_title.globals[index]),
+        [0x300, 15, 15, 16, 1, 17, 0]
+    );
+    assert_eq!(
+        (
+            post_sunset_title.random_seed,
+            post_sunset_title.draw_count,
+            post_sunset_title.random_seed_b(),
+            post_sunset_title.respawn_count,
+            post_sunset_title.death_count,
+        ),
+        (0x392a_f35e, 66_684, 0x809c_5eee, 0, 0)
+    );
     let koala_carry = carry_map_to_next_level(
         &title,
         post_sunset_title,
@@ -54261,7 +55214,7 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
     let (heavy_survey, heavy_runtime) = heavy_machinery.run_carried(
         heavy_carry,
         SurveyInputProfile::HeavyMachineryCompletionRoute,
-        5_600,
+        7_000,
     );
     let heavy_summary = heavy_survey.summary();
     assert_eq!(
@@ -54270,7 +55223,7 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
         "{heavy_summary}"
     );
     assert_no_campaign_recovery(&heavy_survey, heavy_machinery.name);
-    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 1_390);
+    assert_heavy_machinery_authored_shaft_drop(&heavy_survey, 2_430);
     assert_ordinary_completion_input(&heavy_survey, heavy_machinery.name);
     assert!(heavy_survey.is_clean(), "{heavy_summary}");
     assert_eq!(

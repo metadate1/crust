@@ -37556,7 +37556,9 @@ impl HighRoadCompletionRouteController {
                 return 0;
             }
             if self.sunset_stage == 153 && sunset_var_os("C1_SUNSET_STAGE146_PHASED").is_some() {
-                if self.session_globals && self.sunset_attack_tick == 0 {
+                if (self.session_globals || self.collect_sunset_cortex_tokens)
+                    && self.sunset_attack_tick == 0
+                {
                     let first_crate_run_up_is_ready = objects.iter().any(|object| {
                         matches!(
                             object.origin,
@@ -37566,12 +37568,12 @@ impl HighRoadCompletionRouteController {
                         })
                     });
                     if !first_crate_run_up_is_ready {
-                        // The carried route can enter K1 one simulation step
-                        // behind the focused route. Keep running on the safe
-                        // shelf until the live crate face is within the same
-                        // takeoff range, then use the ordinary right/jump
-                        // traversal so Crash lands on top instead of against
-                        // the crate's front collider.
+                        // Different retained phases can enter K1 one
+                        // simulation step apart. Keep running on the safe
+                        // shelf until the live crate face is within takeoff
+                        // range, then use the ordinary right/jump traversal
+                        // so Crash lands on top instead of against the
+                        // crate's front collider.
                         return PAD_RIGHT;
                     }
                     self.sunset_attack_tick = 1;

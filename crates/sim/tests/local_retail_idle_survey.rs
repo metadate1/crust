@@ -9517,8 +9517,6 @@ impl UpTheCreekRouteController {
             116 => {
                 if self.collider_entity.is_none()
                     && camera.path.zone == zero_f
-                    && camera.path.index == 0
-                    && (2_304..=2_560).contains(&camera.progress.raw())
                     && player.is_some_and(|player| {
                         player.zone == zero_e
                             && player.state == 2
@@ -9575,8 +9573,6 @@ impl UpTheCreekRouteController {
                 }
                 let ready = self.collider_entity.is_none()
                     && camera.path.zone == zero_f
-                    && camera.path.index == 0
-                    && (2_304..=2_560).contains(&camera.progress.raw())
                     && player.is_some_and(|player| {
                         player.zone == zero_e
                             && player.state == 2
@@ -55567,7 +55563,7 @@ fn exact_raw_bin_post_hog_campaign_reaches_lost_city_mount_without_recovery() {
     assert_eq!(up_survey.frames, 4_318);
     assert_eq!(up_survey.successful_spawns, 192);
     assert_eq!(up_survey.unexpected_spawn_errors, 0);
-    assert_eq!(up_survey.executions, 125_230);
+    assert_eq!(up_survey.executions, 125_234);
     assert_eq!(up_survey.execution_errors, 0);
     assert_eq!(up_survey.zone_transitions, 36);
     assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
@@ -65771,6 +65767,18 @@ fn exact_current_browser_hog_wild_phase_exports_route() {
 #[test]
 #[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
 fn exact_current_browser_native_fortress_phase_exports_route() {
+    let assert_ordinary_pad = |survey: &LevelSurvey| {
+        assert!(
+            survey.pad_change_samples.iter().all(|(_, held)| {
+                let opposing_vertical = held & PAD_UP != 0 && held & PAD_DOWN != 0;
+                let opposing_horizontal = held & PAD_LEFT != 0 && held & PAD_RIGHT != 0;
+                !opposing_vertical && !opposing_horizontal && held & PAD_START == 0
+            }),
+            "{} must use only ordinary legal pad samples",
+            survey.name
+        );
+    };
+
     let root = PathBuf::from(
         std::env::var_os("C1_STREAM_DIR")
             .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
@@ -65875,7 +65883,326 @@ fn exact_current_browser_native_fortress_phase_exports_route() {
     assert_eq!(survey.restarts, 0, "{}", survey.summary());
     assert_eq!(survey.death_camera_frames, 0, "{}", survey.summary());
     assert!(survey.is_clean(), "{}", survey.summary());
+    assert_ordinary_pad(&survey);
     assert_eq!(runtime.draw_count(), 16_965, "{}", survey.summary());
+    assert_eq!(runtime.machine().random_seed(), 0x23aa_bbc1);
+    assert_eq!(runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        pad.snapshot,
+        RetailPadSnapshot {
+            tapped: 0,
+            held: PAD_LEFT | PAD_CROSS,
+            tapped_previous: 0,
+            held_previous: PAD_LEFT | PAD_CROSS,
+            held_previous_2: PAD_LEFT | PAD_CROSS,
+        }
+    );
+
+    let completion = CampaignPair::parse(&root, LevelId::LEVEL_COMPLETE);
+    let completion_runtime = RetailRuntime::new_from_session(
+        GLOBAL_WORDS,
+        completion.level,
+        native_fortress.finish_checked(runtime, completion.level),
+    )
+    .expect("current browser Level Complete carry must import");
+    let completion_mount_held = pad.snapshot.held;
+    let (completion_survey, completion_runtime) = survey_pair_with_persistent_pad(
+        completion.name,
+        completion.level,
+        &completion.nsd,
+        &completion.nsf,
+        &completion.nsf_bytes,
+        completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: completion_mount_held,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: NonZeroU32::new(16),
+        },
+    )
+    .expect("current browser Native completion must execute");
+    assert_eq!(completion_survey.frames, 400);
+    assert_eq!(completion_survey.next_lid, Some((400, 0x19)));
+    assert_eq!(completion_survey.successful_spawns, 2);
+    assert_eq!(completion_survey.executions, 2_532);
+    assert_eq!(completion_survey.restarts, 0);
+    assert_eq!(completion_survey.death_camera_frames, 0);
+    assert!(
+        completion_survey.is_clean(),
+        "{}",
+        completion_survey.summary()
+    );
+    assert_ordinary_pad(&completion_survey);
+    assert_eq!(completion_runtime.draw_count(), 17_365);
+    assert_eq!(completion_runtime.machine().random_seed(), 0x72e2_e461);
+    assert_eq!(completion_runtime.random_seed_b(), 0x2f16_3112);
+
+    let title = CampaignPair::parse(&root, LevelId::TITLE);
+    let mut post_native_map = PublisherTitleHarness::from_session(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        completion.finish_checked(completion_runtime, title.level),
+        pad,
+    );
+    for _ in 0..10 {
+        post_native_map.step(0);
+    }
+    assert_eq!(post_native_map.frame, 10);
+    assert_eq!(post_native_map.runtime.draw_count(), 17_375);
+    assert_eq!(post_native_map.runtime.machine().random_seed(), 0x72e2_e461);
+    assert_eq!(post_native_map.runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&post_native_map.runtime),
+        [0, 15, 15, 9, 1, 10, 5]
+    );
+    assert_eq!(
+        post_native_map.runtime.global_word(LIFE_COUNT_GLOBAL),
+        Ok(9 << 8)
+    );
+    assert_eq!(post_native_map.pad.snapshot, RetailPadSnapshot::default());
+    assert!(post_native_map.transitions.is_empty());
+    assert_eq!(
+        post_native_map
+            .runtime
+            .retail_title_presentation()
+            .expect("post-Native title presentation must be readable")
+            .expect("post-Native title presentation must be mounted")
+            .screen,
+        TitleScreen::Map
+    );
+    for _ in 10..130 {
+        post_native_map.step(0);
+    }
+    post_native_map.step(PAD_UP);
+    for _ in 131..252 {
+        post_native_map.step(0);
+    }
+    post_native_map.step(PAD_CROSS);
+    assert_eq!(post_native_map.frame, 253);
+    assert_eq!(post_native_map.transitions, [(253, 0x18)]);
+    assert_eq!(post_native_map.runtime.draw_count(), 17_618);
+    assert_eq!(post_native_map.runtime.machine().random_seed(), 0xd80a_be99);
+    assert_eq!(post_native_map.runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&post_native_map.runtime),
+        [0, 15, 15, 10, 1, 10, 1]
+    );
+
+    let up_the_creek = CampaignPair::parse(&root, LevelId::new_const(0x18));
+    let (up_carry, mut pad) = post_native_map.finish_transition(up_the_creek.level);
+    let up_runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, up_the_creek.level, up_carry)
+        .expect("Up the Creek must import the current browser post-Native carry");
+    let (up_survey, up_runtime) = survey_pair_with_persistent_pad(
+        up_the_creek.name,
+        up_the_creek.level,
+        &up_the_creek.nsd,
+        &up_the_creek.nsf,
+        &up_the_creek.nsf_bytes,
+        up_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::UpTheCreekCompletionRoute,
+        5_000,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("current browser Up the Creek carry must execute");
+    assert_eq!(up_survey.frames, 4_346, "{}", up_survey.summary());
+    assert_eq!(up_survey.next_lid, Some((4_346, 0x2d)));
+    assert_eq!(up_survey.successful_spawns, 192);
+    assert_eq!(up_survey.executions, 126_059);
+    assert_eq!(up_survey.zone_transitions, 36);
+    assert_eq!(up_survey.restarts, 0);
+    assert_eq!(up_survey.death_camera_frames, 0);
+    assert_eq!(up_survey.effect_counts.get("load-state"), None);
+    assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
+    assert!(up_survey.first_terminal_fall.is_none());
+    assert!(up_survey.is_clean(), "{}", up_survey.summary());
+    assert_ordinary_pad(&up_survey);
+    assert_eq!(up_runtime.draw_count(), 21_964);
+    assert_eq!(up_runtime.machine().random_seed(), 0x056f_ad01);
+    assert_eq!(up_runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&up_runtime),
+        [0x500, 15, 15, 10, 1, 11, 0]
+    );
+    assert_eq!(pad.snapshot, RetailPadSnapshot::default());
+
+    let up_completion_runtime = RetailRuntime::new_from_session(
+        GLOBAL_WORDS,
+        completion.level,
+        up_the_creek.finish_checked(up_runtime, completion.level),
+    )
+    .expect("current browser Up the Creek completion carry must import");
+    let up_completion_mount_held = pad.snapshot.held;
+    let (up_completion_survey, up_completion_runtime) = survey_pair_with_persistent_pad(
+        completion.name,
+        completion.level,
+        &completion.nsd,
+        &completion.nsf,
+        &completion.nsf_bytes,
+        up_completion_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::DirectionAndButtonSweepToTransition,
+        600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: up_completion_mount_held,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: NonZeroU32::new(16),
+        },
+    )
+    .expect("current browser Up the Creek completion must execute");
+    assert_eq!(up_completion_survey.frames, 192);
+    assert_eq!(up_completion_survey.next_lid, Some((192, 0x19)));
+    assert_eq!(up_completion_survey.successful_spawns, 2);
+    assert_eq!(up_completion_survey.executions, 1_001);
+    assert_eq!(up_completion_survey.restarts, 0);
+    assert_eq!(up_completion_survey.death_camera_frames, 0);
+    assert!(
+        up_completion_survey.is_clean(),
+        "{}",
+        up_completion_survey.summary()
+    );
+    assert_ordinary_pad(&up_completion_survey);
+    assert_eq!(up_completion_runtime.draw_count(), 22_156);
+    assert_eq!(up_completion_runtime.machine().random_seed(), 0x7c23_bfe1);
+    assert_eq!(up_completion_runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&up_completion_runtime),
+        [0x300, 15, 15, 10, 1, 11, 0]
+    );
+
+    let mut post_up_map = PublisherTitleHarness::from_session(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        completion.finish_checked(up_completion_runtime, title.level),
+        pad,
+    );
+    for _ in 0..130 {
+        post_up_map.step(0);
+    }
+    post_up_map.step(PAD_UP);
+    for _ in 131..252 {
+        post_up_map.step(0);
+    }
+    post_up_map.step(PAD_CROSS);
+    assert_eq!(post_up_map.frame, 253);
+    assert_eq!(post_up_map.transitions, [(253, 0x17)]);
+    assert_eq!(post_up_map.runtime.draw_count(), 22_409);
+    assert_eq!(post_up_map.runtime.machine().random_seed(), 0xa01c_278c);
+    assert_eq!(post_up_map.runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&post_up_map.runtime),
+        [0, 15, 15, 11, 1, 11, 1]
+    );
+
+    let ripper_roo = CampaignPair::parse(&root, LevelId::new_const(0x17));
+    let (ripper_carry, mut pad) = post_up_map.finish_transition(ripper_roo.level);
+    let ripper_runtime =
+        RetailRuntime::new_from_session(GLOBAL_WORDS, ripper_roo.level, ripper_carry)
+            .expect("Ripper Roo must import the current browser post-Up carry");
+    let (ripper_survey, ripper_runtime) = survey_pair_with_persistent_pad(
+        ripper_roo.name,
+        ripper_roo.level,
+        &ripper_roo.nsd,
+        &ripper_roo.nsf,
+        &ripper_roo.nsf_bytes,
+        ripper_runtime,
+        LevelContextSource::SessionGlobals,
+        SurveyInputProfile::RipperRooCompletionRoute,
+        2_600,
+        &mut pad,
+        PersistentSurveyPlan {
+            mount_held: PAD_CROSS,
+            initial_idle_frames: 0,
+            fixed_cross_frame: None,
+            cross_pulse_period: None,
+        },
+    )
+    .expect("current browser Ripper Roo carry must execute");
+    assert_eq!(ripper_survey.frames, 2_064, "{}", ripper_survey.summary());
+    assert_eq!(ripper_survey.next_lid, Some((2_064, 0x19)));
+    assert_eq!(ripper_survey.successful_spawns, 5);
+    assert_eq!(ripper_survey.executions, 46_695);
+    assert_eq!(ripper_survey.zone_transitions, 0);
+    assert_eq!(ripper_survey.save_handshakes, 2);
+    assert_eq!(ripper_survey.restarts, 0);
+    assert_eq!(ripper_survey.death_camera_frames, 0);
+    assert_eq!(ripper_survey.effect_counts.get("load-state"), None);
+    assert!(ripper_survey.first_terminal_fall.is_none());
+    assert!(ripper_survey.is_clean(), "{}", ripper_survey.summary());
+    assert_ordinary_pad(&ripper_survey);
+    assert_eq!(ripper_runtime.draw_count(), 24_473);
+    assert_eq!(ripper_runtime.machine().random_seed(), 0xe16b_d07d);
+    assert_eq!(ripper_runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&ripper_runtime),
+        [0x300, 15, 15, 11, 1, 12, 0]
+    );
+    assert_eq!(pad.snapshot, RetailPadSnapshot::default());
+
+    let mut post_ripper_map = PublisherTitleHarness::from_session(
+        &title.nsd,
+        &title.nsf,
+        &title.nsf_bytes,
+        ripper_roo.finish_checked(ripper_runtime, title.level),
+        pad,
+    );
+    for _ in 0..10 {
+        post_ripper_map.step(0);
+    }
+    assert_eq!(post_ripper_map.frame, 10);
+    assert_eq!(post_ripper_map.runtime.draw_count(), 24_483);
+    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xe16b_d07d);
+    assert_eq!(post_ripper_map.runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(
+        campaign_progression_globals(&post_ripper_map.runtime),
+        [0x300, 15, 15, 11, 1, 12, 1]
+    );
+    assert_eq!(
+        post_ripper_map.runtime.global_word(LIFE_COUNT_GLOBAL),
+        Ok(9 << 8)
+    );
+    assert_eq!(post_ripper_map.pad.snapshot, RetailPadSnapshot::default());
+    assert!(post_ripper_map.transitions.is_empty());
+    assert_eq!(
+        post_ripper_map
+            .runtime
+            .retail_title_presentation()
+            .expect("post-Ripper-Roo title presentation must be readable")
+            .expect("post-Ripper-Roo title presentation must be mounted")
+            .screen,
+        TitleScreen::Map
+    );
+    for _ in 10..130 {
+        post_ripper_map.step(0);
+    }
+    post_ripper_map.step(PAD_UP);
+    for _ in 131..252 {
+        post_ripper_map.step(0);
+    }
+    post_ripper_map.step(PAD_CROSS);
+    assert_eq!(post_ripper_map.frame, 253);
+    assert_eq!(post_ripper_map.runtime.draw_count(), 24_726);
+    assert_eq!(post_ripper_map.runtime.machine().random_seed(), 0xdac6_f03b);
+    assert_eq!(post_ripper_map.runtime.random_seed_b(), 0x2f16_3112);
+    assert_eq!(post_ripper_map.transitions, [(253, 0x20)]);
+    assert_eq!(
+        campaign_progression_globals(&post_ripper_map.runtime),
+        [0, 15, 15, 12, 1, 12, 1]
+    );
 }
 
 #[test]

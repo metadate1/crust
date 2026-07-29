@@ -571,7 +571,10 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
         live_big_tnt_samples,
         BTreeMap::from([
             (7, (5, [-251_392, -47_616, -386_592])),
-            (10, (5, [260_608, -44_544, -911_336])),
+            // Timed CD paging materializes the second waterfall controller
+            // at its native path phase; by frame 300 its child has advanced
+            // one additional 12-bit path unit in Y.
+            (10, (5, [260_608, -48_640, -911_336])),
         ])
     );
     let big_tnt_render = runtime
@@ -593,11 +596,13 @@ fn ripper_roo_big_tnt_children_copy_authored_waterfall_path() {
         [
             (1, (0, [485_888, -25_600, -397_312])),
             (80, (0, [485_888, -25_600, -397_312])),
-            (151, (1, [485_888, 0, -397_312])),
-            (200, (1, [-512, 0, -397_312])),
+            // Native copies the path helper's stack-local vector after its
+            // aliased misc-C writes, so Roo's authored jump height survives.
+            (151, (1, [485_888, 9_216, -397_312])),
+            (200, (1, [-512, 20_480, -397_312])),
             (230, (1, [-486_912, 0, 114_688])),
             (270, (1, [-512, 0, -397_312])),
-            (300, (1, [323_754, 0, -55_979])),
+            (300, (1, [323_754, 440_320, -55_979])),
         ],
         "the supported idle path must enter RRooC state one and traverse its authored pad loop"
     );

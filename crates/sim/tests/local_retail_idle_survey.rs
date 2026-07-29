@@ -1059,6 +1059,17 @@ fn lights_out_actual_post_sunset_phase_reaches_authored_end_warp() {
     );
 }
 
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn lights_out_continuous_post_pinstripe_phase_reaches_authored_end_warp() {
+    assert_lights_out_carried_phase_reaches_authored_end_warp(
+        "Lights Out continuous post-Pinstripe campaign phase",
+        0x5eb7_3475,
+        61_646,
+        0x2dff_1716,
+    );
+}
+
 fn assert_lights_out_carried_phase_reaches_authored_end_warp(
     label: &'static str,
     random_seed: u32,
@@ -26124,6 +26135,8 @@ struct LightsOutCompletionRouteController {
     d0_platform_phase_ready: bool,
     c0_platform_wait_elapsed: u8,
     late_phase_wait_elapsed: u8,
+    c7_wait_elapsed: u8,
+    d0_hazard_recentered: bool,
 }
 
 impl LightsOutCompletionRouteController {
@@ -26323,7 +26336,10 @@ impl LightsOutCompletionRouteController {
                 return held;
             }
         }
-        if self.actual_post_sunset_phase && next_frame == 3_490 && !self.d0_platform_phase_ready {
+        if (self.actual_post_sunset_phase || self.c7_wait_elapsed != 0)
+            && next_frame == 3_490
+            && !self.d0_platform_phase_ready
+        {
             let platform_ready = d0_platform.is_some_and(|platform| {
                 (-5_245_000..=-5_220_000).contains(&platform.translation[2])
                     && d0_platform_approaching
@@ -26336,6 +26352,38 @@ impl LightsOutCompletionRouteController {
                 // the same approaching band used by the nominal route.
                 return 0;
             }
+        }
+        let c7_sender_phase_retained = objects.iter().any(|object| {
+            matches!(
+                object.origin,
+                ObjectOrigin::Entity(descriptor) if descriptor.id == 8
+            ) && object.program.name().as_deref() == Some("CasOC")
+                && object.register_94 == 1
+        });
+        if c7_sender_phase_retained && next_frame == 2_959 && self.c7_wait_elapsed < 7 {
+            // The uninterrupted post-Pinstripe carry retains the c7 sender's
+            // active phase. Seven safe neutral frames let its ordinary GOOL
+            // cycle clear before taking the authored jump.
+            self.c7_wait_elapsed = self.c7_wait_elapsed.saturating_add(1);
+            return 0;
+        }
+        if self.c7_wait_elapsed != 0 && next_frame == 3_661 && !self.d0_hazard_recentered {
+            let Some(player) = player else {
+                return 0;
+            };
+            if !matches!(player.state, 1 | 2) {
+                return 0;
+            }
+            let mut held = 0;
+            if player.translation[2] < -6_680_000 || player.velocity[2] < -100_000 {
+                held |= PAD_DOWN;
+            } else if player.translation[2] > -6_650_000 || player.velocity[2] > 100_000 {
+                held |= PAD_UP;
+            }
+            if held != 0 {
+                return held;
+            }
+            self.d0_hazard_recentered = true;
         }
         self.route_frame = next_frame;
         let mut held = Self::held_at(next_frame);
@@ -26452,6 +26500,18 @@ impl LightsOutCompletionRouteController {
             }
             if corrected_late_phase && (3_957..=3_960).contains(&next_frame) {
                 held |= PAD_UP | PAD_LEFT;
+            }
+            if self.c7_wait_elapsed != 0 && (3_995..=4_002).contains(&next_frame) {
+                held &= !PAD_SQUARE;
+                if next_frame >= 3_999 {
+                    held |= PAD_CROSS;
+                }
+            }
+            if self.c7_wait_elapsed != 0 && (4_167..=4_173).contains(&next_frame) {
+                held = PAD_DOWN;
+            }
+            if self.c7_wait_elapsed != 0 && next_frame == 4_174 {
+                held = PAD_UP;
             }
             if corrected_late_phase && next_frame == 4_244 {
                 held |= PAD_CROSS;
@@ -49266,6 +49326,8 @@ impl SurveyInputController {
                 d0_platform_phase_ready: false,
                 c0_platform_wait_elapsed: 0,
                 late_phase_wait_elapsed: 0,
+                c7_wait_elapsed: 0,
+                d0_hazard_recentered: false,
             },
             slippery_climb: SlipperyClimbCompletionRouteController {
                 session_globals: matches!(context_source, LevelContextSource::SessionGlobals),
@@ -50205,6 +50267,7 @@ struct ProgramObjectTrace {
     state_stamp: u32,
     status_b: u32,
     register_72: u32,
+    register_94: u32,
 }
 
 #[derive(Debug)]
@@ -53202,6 +53265,7 @@ fn program_object_traces(
             state_stamp: register(process_register::STATE_STAMP)?,
             status_b: register(process_register::STATUS_B)?,
             register_72: register(72)?,
+            register_94: register(94)?,
         });
     }
     Ok(traces)

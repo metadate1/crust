@@ -942,8 +942,12 @@ impl ProgramHost for NsfProgramHost<'_> {
             u16::from(binding.subtype),
         )
         .map_err(NsfProgramError::Format)?;
-        let mut object = VmObject::from_gool_program(binding.object.vm(), &program)
-            .map_err(NsfProgramError::Vm)?;
+        let mut object = if binding.object.arena().is_dedicated_main() {
+            VmObject::from_gool_program_for_dedicated_main(binding.object.vm(), &program)
+        } else {
+            VmObject::from_gool_program(binding.object.vm(), &program)
+        }
+        .map_err(NsfProgramError::Vm)?;
         if let ProgramOrigin::RuntimeChild { arguments } = binding.origin {
             object
                 .initialize_arguments(arguments)
@@ -9685,6 +9689,9 @@ impl RetailRuntime {
                 actual: vm_object.handle(),
             });
         }
+        vm_object
+            .configure_retail_allocation(binding.object.arena.is_dedicated_main())
+            .map_err(RuntimeError::Vm)?;
         Self::apply_program_page_materialization(&mut self.machine, host, binding)?;
         self.machine
             .seed_retail_pool_slot_storage(binding.object.arena.slot(), &mut vm_object)
@@ -13213,6 +13220,11 @@ mod tests {
         let mut runtime = RetailRuntime::new_for_level(0, LevelId::TITLE);
         let ordinary = spawn_test_object(&mut runtime, ZONE, 270, 2, 0);
         let inactive_link = runtime.machine.object(ordinary.vm).unwrap();
+        assert_eq!(
+            inactive_link.register(crate::gool::REGISTER_COUNT),
+            Err(VmError::InvalidRegister(crate::gool::REGISTER_COUNT)),
+            "ordinary pool objects retain the exact regs[0x1fc] boundary"
+        );
         let inactive_word = inactive_link.register(5).unwrap();
         assert!(CollisionObjectReference::from_word(inactive_word).is_some());
         assert_eq!(
@@ -13223,6 +13235,15 @@ mod tests {
 
         let main = spawn_test_object(&mut runtime, ZONE, 271, 0, 0);
         assert!(main.arena.is_dedicated_main());
+        assert_eq!(
+            runtime
+                .machine
+                .object(main.vm)
+                .unwrap()
+                .register(crate::gool::REGISTER_COUNT),
+            Ok(0),
+            "materialization configures the dedicated allocation before process initialization"
+        );
         let live_link = runtime.machine.object(ordinary.vm).unwrap();
         assert_eq!(
             CollisionObjectReference::from_word(live_link.register(5).unwrap())

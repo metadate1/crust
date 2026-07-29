@@ -36,6 +36,17 @@ and seven bindings that the retail program loader also rejects, with fingerprint
 polygons. The observed first-presented state at path point two/draw count one produced 679 visible
 polygons from both the extracted pair and directly from the raw BIN.
 
+The player-allocation stack audit scanned all 44 extracted pairs plus every executable selected by
+the source's dedicated-main entity predicates. Across all GOOL globals, `init_sp` peaked at 103
+words; the 47 level/program main candidates peaked at 89. Their relevant authored operands used
+object registers only through index 88 and frame-relative offsets from -15 through +17, while both
+ordinary stack and two-pop stack forms were present. The VM's full 256-word checked stack reach
+therefore ends at word 345 for the worst main program, below the ordinary `regs[0x1fc]` boundary at
+508; the source's additional 64-word player tail is represented but unobserved by this corpus. A
+focused synthetic boundary test covers native's otherwise-unobserved nine-bit direct GOP access to
+main-only indices 508 through 511 while proving that ordinary allocations and physical-pool tokens
+still reject index 508.
+
 The object-format sweep parsed 6,738 candidate GOOL animation payload offsets across 441 globals:
 4,397 vertex, 1,813 sprite, 221 font, 62 text and 245 fragment descriptors. It found 1,391 TGEO
 occurrences (281 EIDs, 328 exact variants and 55,950 polygons), 30,011 SVTX/CVTX frames and

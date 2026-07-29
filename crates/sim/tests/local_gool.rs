@@ -7,15 +7,17 @@ use crust_formats::binary::Eid;
 use crust_formats::disc::DiscImage;
 use crust_formats::stream::{
     GoolAnimationDescriptor, GoolAnimationKind, KNOWN_LEVELS, LevelId, NsdKind, StreamKind,
-    StreamName, load_gool_program, load_gool_state_program, load_object_model_frame,
-    parse_gool_animation_descriptor, parse_nsd, parse_nsf, structs::GoolState,
+    StreamName, ZoneEntity, ZoneHeader, load_gool_program, load_gool_state_program,
+    load_object_model_frame, parse_gool_animation_descriptor, parse_nsd, parse_nsf,
+    structs::{GoolHeader, GoolState},
 };
 use crust_sim::gool::{
     AnimationReference, AnimationSource, CURRENT_LEVEL_GLOBAL, CodeAddress, CodeSegment, Execution,
-    HaltReason, Machine, ObjectHandle, Operand, ProcessAnimationKind, REGISTER_COUNT,
-    SendEventTarget, StorageReference, StorageRegion, VmEffect, VmHostRequest, VmObject,
-    VmStateProgram, process_register,
+    HaltReason, MAX_STACK_WORDS, Machine, ObjectHandle, Operand, ProcessAnimationKind,
+    REGISTER_COUNT, SendEventTarget, StorageReference, StorageRegion, VmEffect, VmHostRequest,
+    VmObject, VmStateProgram, process_register,
 };
+use crust_sim::object_arena::EntitySpawnDescriptor;
 
 fn words(bytes: &[u8]) -> Vec<u32> {
     assert!(bytes.len().is_multiple_of(4));
@@ -35,6 +37,180 @@ fn collect_direct_animation_leas(code: &[u32], sources: &mut BTreeSet<(u16, u16)
             sources.insert((instruction.operand_a, destination));
         }
     }
+}
+
+fn stack_relevant_operands(instruction: crust_sim::gool::Instruction) -> [Option<u16>; 2] {
+    match instruction.opcode {
+        0x00..=0x17 | 0x19 | 0x1b | 0x1d | 0x1e | 0x20..=0x22 | 0x25..=0x27 | 0x8b | 0x8c => {
+            [Some(instruction.operand_a), Some(instruction.operand_b)]
+        }
+        0x1c | 0x1f | 0x24 | 0x84 | 0x85 | 0x87 | 0x8d..=0x90 => {
+            [None, Some(instruction.operand_b)]
+        }
+        _ => [None, None],
+    }
+}
+
+#[test]
+#[ignore = "set C1_STREAM_DIR to legally local extracted retail streams"]
+fn retail_player_tail_is_outside_the_owned_corpus_stack_reach() {
+    let root = PathBuf::from(
+        std::env::var_os("C1_STREAM_DIR")
+            .expect("C1_STREAM_DIR must name legally local extracted retail streams"),
+    );
+    let mut all_max_initial_sp = 0_u32;
+    let mut main_max_initial_sp = 0_u32;
+    let mut main_program_count = 0_usize;
+    let mut max_object_register = None::<u16>;
+    let mut min_frame_offset = None::<i8>;
+    let mut max_frame_offset = None::<i8>;
+    let mut saw_stack = false;
+    let mut saw_stack_double = false;
+    let mut unresolved_external_state_count = 0_usize;
+    let mut pairs_without_executable_metadata = Vec::new();
+
+    let mut scan_code = |code: &[u32]| {
+        for word in code {
+            let instruction = crust_sim::gool::Instruction::decode(*word);
+            for raw in stack_relevant_operands(instruction).into_iter().flatten() {
+                match Operand::decode(raw) {
+                    Operand::ObjectRegister(index) => {
+                        max_object_register =
+                            Some(max_object_register.map_or(index, |max| max.max(index)));
+                    }
+                    Operand::FrameRelative(offset) => {
+                        min_frame_offset =
+                            Some(min_frame_offset.map_or(offset, |min| min.min(offset)));
+                        max_frame_offset =
+                            Some(max_frame_offset.map_or(offset, |max| max.max(offset)));
+                    }
+                    Operand::Stack => saw_stack = true,
+                    Operand::StackDouble => saw_stack_double = true,
+                    Operand::Internal(_)
+                    | Operand::External(_)
+                    | Operand::Immediate(_)
+                    | Operand::Null
+                    | Operand::LinkRegister { .. } => {}
+                }
+            }
+        }
+    };
+
+    for known in KNOWN_LEVELS {
+        let nsd_bytes = std::fs::read(root.join(known.nsd_filename())).unwrap();
+        let nsf_bytes = std::fs::read(root.join(known.nsf_filename())).unwrap();
+        let metadata = parse_nsd(&nsd_bytes, known.id).unwrap();
+        let nsf = parse_nsf(&nsf_bytes, &metadata).unwrap();
+        let Some(ldat) = metadata.ldat() else {
+            pairs_without_executable_metadata.push(known.id);
+            for global in nsf
+                .entries()
+                .filter(|entry| entry.entry_type == 11 && entry.items.len() >= 6)
+            {
+                let header =
+                    GoolHeader::parse(global.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+                all_max_initial_sp = all_max_initial_sp.max(header.initial_stack_pointer);
+            }
+            continue;
+        };
+
+        // Executable zero is selected by GoolObjectCreate. GoolObjectSpawn
+        // has a few additional entity predicates that still use the same
+        // separately allocated player storage.
+        let mut main_programs = BTreeSet::from([ldat.executable_map[0]]);
+        for zone in nsf.entries().filter(|entry| entry.entry_type == 7) {
+            let header =
+                ZoneHeader::parse(zone.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+            for entity_index in 0..header.entity_count {
+                let item_index = header
+                    .entity_item_index(entity_index)
+                    .and_then(|index| usize::try_from(index).ok())
+                    .expect("owned ZDAT entity indices fit the parsed entry");
+                let item = zone
+                    .item(item_index)
+                    .expect("owned ZDAT entity index names an item");
+                let entity = ZoneEntity::parse(item.bytes(&nsf_bytes).unwrap()).unwrap();
+                if EntitySpawnDescriptor::from(&entity).selects_main_object() {
+                    main_programs.insert(
+                        *ldat
+                            .executable_map
+                            .get(usize::from(entity.executable))
+                            .expect("owned entity executable is present in LDAT"),
+                    );
+                }
+            }
+        }
+
+        let mut scanned_external = BTreeSet::new();
+        for global in nsf
+            .entries()
+            .filter(|entry| entry.entry_type == 11 && entry.items.len() >= 6)
+        {
+            let header =
+                GoolHeader::parse(global.item(0).unwrap().bytes(&nsf_bytes).unwrap()).unwrap();
+            all_max_initial_sp = all_max_initial_sp.max(header.initial_stack_pointer);
+            if !main_programs.contains(&global.eid) {
+                continue;
+            }
+            main_program_count += 1;
+            main_max_initial_sp = main_max_initial_sp.max(header.initial_stack_pointer);
+            scan_code(&words(global.item(1).unwrap().bytes(&nsf_bytes).unwrap()));
+
+            let states = global.item(4).unwrap().bytes(&nsf_bytes).unwrap();
+            assert_eq!(
+                states.len() % GoolState::BYTE_LEN,
+                0,
+                "owned GOOL state table has complete descriptors"
+            );
+            for state_index in 0..states.len() / GoolState::BYTE_LEN {
+                let program = match load_gool_state_program(
+                    &metadata,
+                    &nsf,
+                    &nsf_bytes,
+                    global.eid,
+                    u16::try_from(state_index).unwrap(),
+                ) {
+                    Ok(program) => program,
+                    Err(error)
+                        if error
+                            .message()
+                            .starts_with("could not resolve external GOOL entry ")
+                            && error.message().ends_with(" is absent from the NSD") =>
+                    {
+                        unresolved_external_state_count += 1;
+                        continue;
+                    }
+                    Err(error) => panic!(
+                        "unexpected owned GOOL state load failure for {:?} {} state {state_index}: {error:?}",
+                        known.id, global.eid
+                    ),
+                };
+                if scanned_external.insert(program.external_eid()) {
+                    scan_code(program.code());
+                }
+            }
+        }
+    }
+
+    assert_eq!(all_max_initial_sp, 103);
+    assert_eq!(main_max_initial_sp, 89);
+    assert_eq!(main_program_count, 47);
+    assert_eq!(pairs_without_executable_metadata, [LevelId::CAVE]);
+    assert_eq!(
+        unresolved_external_state_count, 223,
+        "only state descriptors whose external EID is absent from that pair remain unscannable"
+    );
+    assert_eq!(max_object_register, Some(88));
+    assert_eq!((min_frame_offset, max_frame_offset), (Some(-15), Some(17)));
+    assert!(saw_stack && saw_stack_double);
+    assert_eq!(
+        usize::try_from(main_max_initial_sp).unwrap() + MAX_STACK_WORDS,
+        345
+    );
+    assert!(
+        usize::try_from(main_max_initial_sp).unwrap() + MAX_STACK_WORDS < REGISTER_COUNT,
+        "the VM's complete checked stack reach stays below regs[0x1fc], so no owned program can observe the player-only tail"
+    );
 }
 
 #[test]

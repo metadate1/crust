@@ -174,8 +174,14 @@ reused. The separately allocated player/main address is non-null from machine in
 persists through Title teardown, and remains outside the ordinary free list. Once initialized, an
 object's six local-bound words now remain in the same physical allocation across kill and reuse;
 never-used `malloc` storage stays explicitly uninitialized instead of inventing bytes. The
-dedicated allocation's extra 0x100 stack-tail bytes remain open; legal-corpus audits have not yet
-observed that boundary in use.
+dedicated allocation now carries the source's exact extra 0x100-byte stack tail, preserves only
+tail words actually initialized by execution, and restores those words across Title teardown and
+reuse. Ordinary objects remain bounded by `regs[0x1fc]`, and linked physical-pool storage tags keep
+that source register bound. On the dedicated allocation only, native's existing nine-bit direct
+object GOPs can address the first four tail words (508 through 511); the encoding itself is not
+expanded. The 44-pair legal corpus does not consume the tail: its largest dedicated-main `init_sp`
+is 89 words and the VM's complete 256-word checked stack reach ends at word 345, below the ordinary
+508-word boundary.
 Writes that would corrupt the three allocator-owned link words of an ordinary free slot are
 deliberately rejected instead of reproducing the native C allocator's unsafe malformed-list state.
 The separate zero-initialized RNG-B word is shared in source order by lighting, PBAK choice and

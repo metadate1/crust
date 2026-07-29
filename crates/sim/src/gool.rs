@@ -42,6 +42,12 @@ use crate::retail_solid_motion::{
 pub const MAX_OBJECTS: usize = OBJECT_ARENA_CAPACITY;
 /// Exact `gool_object.regs[0x1FC]` word span from the retail 32-bit layout.
 pub const REGISTER_COUNT: usize = 0x1fc;
+/// Extra process words present only after the separately allocated retail
+/// player object. Native allocates `sizeof(gool_object) + 0x100`, so these
+/// words extend stack backing. The existing nine-bit direct-object GOP can
+/// also name the first four words, but it does not gain any new index bits.
+pub const PLAYER_STACK_TAIL_WORDS: usize = 0x40;
+const PLAYER_PROCESS_WORD_COUNT: usize = REGISTER_COUNT + PLAYER_STACK_TAIL_WORDS;
 pub const TABLE_WORD_COUNT: usize = 1024;
 pub const MAX_STACK_WORDS: usize = 256;
 pub const MAX_CALL_DEPTH: usize = 64;
@@ -3115,6 +3121,13 @@ pub struct VmObject {
     internal_pool_slots: Vec<Option<u8>>,
     external_pool_slots: Vec<Option<u8>>,
     registers: Vec<u32>,
+    /// Whether each process word has deterministic native contents.
+    ///
+    /// Retail stream objects begin in malloc/static-pool storage, so bytes
+    /// outside the fields and stack cells actually written by initialization
+    /// remain indeterminate. The dedicated player's extra 0x40 words must not
+    /// become fabricated zeroes when that allocation is killed and reused.
+    initialized_registers: Vec<bool>,
     /// Physical retail-pool provenance for pointer-shaped process words.
     ///
     /// Compact VM handles are an implementation detail and may be reused in
@@ -3182,6 +3195,10 @@ impl VmObject {
             internal_pool_slots: vec![None; TABLE_WORD_COUNT],
             external_pool_slots: vec![None; TABLE_WORD_COUNT],
             registers,
+            // Synthetic VM objects have always exposed a fully deterministic
+            // register image. Stream-backed constructors replace this mask
+            // with source-accurate selective initialization below.
+            initialized_registers: vec![true; REGISTER_COUNT],
             register_pool_slots: vec![None; REGISTER_COUNT],
             colors: [0; COLOR_COUNT],
             base_colors: [0; COLOR_COUNT],
@@ -3214,6 +3231,26 @@ impl VmObject {
 
     /// Binds the state-specific code and data resolved from retail NSF entries.
     pub fn from_gool_program(handle: ObjectHandle, program: &GoolProgram) -> Result<Self, VmError> {
+        Self::from_gool_program_with_process_capacity(handle, program, REGISTER_COUNT)
+    }
+
+    /// Binds one state program for retail's separately allocated player slot.
+    ///
+    /// Stack/frame addressing can consume the whole tail. Native's existing
+    /// nine-bit direct-object GOP can also reach indices 508..=511, while
+    /// linked physical-pool storage tags retain their original bound.
+    pub fn from_gool_program_for_dedicated_main(
+        handle: ObjectHandle,
+        program: &GoolProgram,
+    ) -> Result<Self, VmError> {
+        Self::from_gool_program_with_process_capacity(handle, program, PLAYER_PROCESS_WORD_COUNT)
+    }
+
+    fn from_gool_program_with_process_capacity(
+        handle: ObjectHandle,
+        program: &GoolProgram,
+        process_capacity: usize,
+    ) -> Result<Self, VmError> {
         if program.global_code().len() > MAX_CODE_WORDS {
             return Err(VmError::GlobalCodeTooLarge);
         }
@@ -3231,12 +3268,15 @@ impl VmObject {
         if usize::try_from(initial_stack_pointer).map_or(true, |value| {
             value
                 .checked_add(INITIAL_FRAME_WORDS)
-                .is_none_or(|end| end > REGISTER_COUNT)
+                .is_none_or(|end| end > process_capacity)
         }) {
             return Err(VmError::InvalidInitialStackPointer(initial_stack_pointer));
         }
 
         let mut object = Self::new(handle, program.code().to_vec())?;
+        object.configure_retail_process_capacity(process_capacity)?;
+        object.initialized_registers.fill(false);
+        object.initialized_registers[0] = true;
         object.program_identity = Some(GoolProgramIdentity {
             global_eid: program.global_eid(),
             object_type: program.header().object_type,
@@ -3268,6 +3308,41 @@ impl VmObject {
         }
         object.initialize_arguments(&[])?;
         Ok(object)
+    }
+
+    fn configure_retail_process_capacity(
+        &mut self,
+        process_capacity: usize,
+    ) -> Result<(), VmError> {
+        if !matches!(process_capacity, REGISTER_COUNT | PLAYER_PROCESS_WORD_COUNT) {
+            return Err(VmError::InvalidRegister(process_capacity));
+        }
+        let stack_end = usize::try_from(self.initial_stack_pointer)
+            .ok()
+            .and_then(|origin| origin.checked_add(self.stack.len()))
+            .ok_or(VmError::StackOverflow(self.handle))?;
+        if stack_end > process_capacity {
+            return Err(VmError::StackOverflow(self.handle));
+        }
+        self.registers.resize(process_capacity, 0);
+        self.register_pool_slots.resize(process_capacity, None);
+        self.initialized_registers.resize(process_capacity, false);
+        Ok(())
+    }
+
+    pub(crate) fn configure_retail_allocation(
+        &mut self,
+        dedicated_main: bool,
+    ) -> Result<(), VmError> {
+        self.configure_retail_process_capacity(if dedicated_main {
+            PLAYER_PROCESS_WORD_COUNT
+        } else {
+            REGISTER_COUNT
+        })
+    }
+
+    const fn process_word_capacity(&self) -> usize {
+        self.registers.len()
     }
 
     #[must_use]
@@ -3427,6 +3502,10 @@ impl VmObject {
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = value;
         *self
+            .initialized_registers
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = true;
+        *self
             .register_pool_slots
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = pool_slot;
@@ -3490,12 +3569,36 @@ impl VmObject {
     /// them. Program/state metadata lives outside this byte-level storage and
     /// deliberately keeps the values parsed for the replacement object.
     fn inherit_retail_process_storage(&mut self, storage: &RetiredRetailProcessStorage) {
-        for (index, initialized) in storage.initialized_registers.iter().copied().enumerate() {
-            if !initialized {
-                continue;
+        debug_assert_eq!(self.registers.len(), storage.registers.len());
+        debug_assert_eq!(
+            self.register_pool_slots.len(),
+            storage.register_pool_slots.len()
+        );
+        debug_assert_eq!(
+            self.initialized_registers.len(),
+            storage.initialized_registers.len()
+        );
+        for (
+            ((register, register_pool_slot), initialized_register),
+            ((stored_register, stored_pool_slot), stored_initialized),
+        ) in self
+            .registers
+            .iter_mut()
+            .zip(&mut self.register_pool_slots)
+            .zip(&mut self.initialized_registers)
+            .zip(
+                storage
+                    .registers
+                    .iter()
+                    .zip(storage.register_pool_slots.iter())
+                    .zip(storage.initialized_registers.iter()),
+            )
+        {
+            if *stored_initialized {
+                *register = *stored_register;
+                *register_pool_slot = *stored_pool_slot;
+                *initialized_register = true;
             }
-            self.registers[index] = storage.registers[index];
-            self.register_pool_slots[index] = storage.register_pool_slots[index];
         }
         for (index, link) in self.links.iter_mut().enumerate() {
             *link = self
@@ -4044,7 +4147,7 @@ impl VmObject {
         if required > MAX_STACK_WORDS
             || stack_origin
                 .checked_add(required)
-                .is_none_or(|end| end > REGISTER_COUNT)
+                .is_none_or(|end| end > self.process_word_capacity())
         {
             return Err(VmError::StackOverflow(self.handle));
         }
@@ -4109,9 +4212,34 @@ impl VmObject {
             .get_mut(index)
             .ok_or(VmError::StackOverflow(self.handle))? = value;
         *self
+            .initialized_registers
+            .get_mut(index)
+            .ok_or(VmError::StackOverflow(self.handle))? = true;
+        *self
             .register_pool_slots
             .get_mut(index)
             .ok_or(VmError::StackOverflow(self.handle))? = pool_slot;
+        self.stack.push(value);
+        Ok(())
+    }
+
+    /// Advances the modeled stack pointer over the existing process word.
+    ///
+    /// `GoolTranslateOutGop` returns `sp++` before its caller performs any
+    /// store. Keeping this separate from a push preserves indeterminate tail
+    /// bytes if translation is the only operation that occurs.
+    fn expose_next_stack_word(&mut self) -> Result<(), VmError> {
+        if self.stack.len() == MAX_STACK_WORDS {
+            return Err(VmError::StackOverflow(self.handle));
+        }
+        let index = (self.initial_stack_pointer as usize)
+            .checked_add(self.stack.len())
+            .ok_or(VmError::StackOverflow(self.handle))?;
+        let value = self
+            .registers
+            .get(index)
+            .copied()
+            .ok_or(VmError::StackOverflow(self.handle))?;
         self.stack.push(value);
         Ok(())
     }
@@ -4328,7 +4456,7 @@ impl VmObject {
         if required > MAX_STACK_WORDS
             || stack_origin
                 .checked_add(required)
-                .is_none_or(|end| end > REGISTER_COUNT)
+                .is_none_or(|end| end > self.process_word_capacity())
         {
             return Err(VmError::StackOverflow(self.handle));
         }
@@ -4365,6 +4493,10 @@ impl VmObject {
             .map(CollisionObjectReference::new)
             .map_or(0, CollisionObjectReference::to_word);
         *self
+            .initialized_registers
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = true;
+        *self
             .register_pool_slots
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? = None;
@@ -4395,6 +4527,10 @@ impl VmObject {
             .get_mut(index)
             .ok_or(VmError::InvalidRegister(index))? =
             CollisionObjectReference::new(target_token).to_word();
+        *self
+            .initialized_registers
+            .get_mut(index)
+            .ok_or(VmError::InvalidRegister(index))? = true;
         *self
             .register_pool_slots
             .get_mut(index)
@@ -4551,9 +4687,9 @@ impl RetiredRetailProcessStorage {
     }
 
     fn initial_dedicated_player() -> Self {
-        let registers = vec![0; REGISTER_COUNT].into_boxed_slice();
-        let register_pool_slots = vec![None; REGISTER_COUNT].into_boxed_slice();
-        let mut initialized_registers = vec![false; REGISTER_COUNT].into_boxed_slice();
+        let registers = vec![0; PLAYER_PROCESS_WORD_COUNT].into_boxed_slice();
+        let register_pool_slots = vec![None; PLAYER_PROCESS_WORD_COUNT].into_boxed_slice();
+        let mut initialized_registers = vec![false; PLAYER_PROCESS_WORD_COUNT].into_boxed_slice();
         // GoolInitAllocTable initializes exactly these three links after the
         // separate player malloc. Other malloc bytes are indeterminate and
         // therefore must not seed a later logical main object.
@@ -6509,6 +6645,8 @@ impl Machine {
     ) -> Result<(), VmError> {
         self.object(handle)?;
         self.preflight_retail_pool_slot_binding(handle, pool_slot)?;
+        self.object_mut(handle)?
+            .configure_retail_allocation(usize::from(pool_slot) == OBJECT_POOL_CAPACITY)?;
         let bound = self.retail_pool_slots_by_object[usize::from(handle.get())];
         if usize::from(pool_slot) < OBJECT_POOL_CAPACITY && bound != Some(pool_slot) {
             let position = self
@@ -6546,6 +6684,7 @@ impl Machine {
         if usize::from(pool_slot) >= MAX_OBJECTS {
             return Err(VmError::InvalidRetailPoolSlot(pool_slot));
         }
+        object.configure_retail_allocation(usize::from(pool_slot) == OBJECT_POOL_CAPACITY)?;
         if let Some(storage) = self.retired_retail_pool_registers[usize::from(pool_slot)].as_ref() {
             object.inherit_retail_process_storage(storage);
         }
@@ -7005,7 +7144,7 @@ impl Machine {
                 Some(RetiredRetailProcessStorage {
                     registers: removed.registers.clone().into_boxed_slice(),
                     register_pool_slots: removed.register_pool_slots.clone().into_boxed_slice(),
-                    initialized_registers: vec![true; REGISTER_COUNT].into_boxed_slice(),
+                    initialized_registers: removed.initialized_registers.clone().into_boxed_slice(),
                     local_bound: removed.initialized_retail_local_bound(),
                 });
         }
@@ -7202,7 +7341,7 @@ impl Machine {
             .checked_add(argument_base)
             .and_then(|base| base.checked_add(arguments.len()))
             .ok_or(VmError::StackOverflow(handle))?;
-        if frame_base + 3 > REGISTER_COUNT {
+        if frame_base + 3 > object.process_word_capacity() {
             return Err(VmError::StackOverflow(handle));
         }
         let return_address = object.code_address();
@@ -8126,7 +8265,7 @@ impl Machine {
         let stack_pointer = stack_origin
             .checked_add(stack_len)
             .ok_or(VmError::StackOverflow(handle))?;
-        if stack_pointer + ONCE_FRAME_WORDS > REGISTER_COUNT {
+        if stack_pointer + ONCE_FRAME_WORDS > object.process_word_capacity() {
             return Err(VmError::StackOverflow(handle));
         }
         let return_address = object.code_address();
@@ -8268,7 +8407,7 @@ impl Machine {
         let stack_pointer = stack_origin
             .checked_add(stack_len)
             .ok_or(VmError::StackOverflow(handle))?;
-        if stack_pointer + ONCE_FRAME_WORDS > REGISTER_COUNT {
+        if stack_pointer + ONCE_FRAME_WORDS > object.process_word_capacity() {
             return Err(VmError::StackOverflow(handle));
         }
         let return_address = object.code_address();
@@ -11915,11 +12054,10 @@ impl Machine {
                         .checked_add(object.stack.len())
                         .ok_or(VmError::StackOverflow(handle))?
                 };
-                let previous = self.read_aliased_process_register(handle, register_index)?;
                 // Translating an output stack GOP advances SP but does not
                 // itself write the pointed-to word. Retain the stale bounded
                 // register value until a caller stores through the reference.
-                self.push(handle, previous)?;
+                self.object_mut(handle)?.expose_next_stack_word()?;
                 StorageReference::checked(handle, StorageRegion::Register, register_index)?
             }
         };
@@ -12428,7 +12566,9 @@ impl Machine {
             .checked_mul(4)
             .and_then(|bytes| u16::try_from(bytes).ok())
             .ok_or(VmError::StackOverflow(handle))?;
-        if object.stack.len() + 3 > MAX_STACK_WORDS || stack_pointer + 3 > REGISTER_COUNT {
+        if object.stack.len() + 3 > MAX_STACK_WORDS
+            || stack_pointer + 3 > object.process_word_capacity()
+        {
             return Err(VmError::StackOverflow(handle));
         }
         let frame = CallFrame {
@@ -20923,6 +21063,160 @@ mod tests {
             Some(translation.map(u32::cast_signed)),
             "the runtime translation view must be created by the first pre-main write"
         );
+    }
+
+    #[test]
+    fn dedicated_main_has_exactly_the_native_extra_stack_tail() {
+        let ordinary_handle = handle(0);
+        let mut ordinary = VmObject::new(ordinary_handle, vec![0]).unwrap();
+        assert_eq!(ordinary.process_word_capacity(), REGISTER_COUNT);
+        ordinary.initial_stack_pointer = (REGISTER_COUNT - INITIAL_FRAME_WORDS) as u32;
+        ordinary.initialize_arguments(&[]).unwrap();
+        assert_eq!(
+            ordinary.push_stack_word(0x1111_1100),
+            Err(VmError::StackOverflow(ordinary_handle)),
+            "an ordinary gool_object must remain bounded by regs[0x1fc]"
+        );
+
+        let main_handle = handle(OBJECT_POOL_CAPACITY as u16);
+        let mut main = VmObject::new(main_handle, vec![0]).unwrap();
+        main.configure_retail_allocation(true).unwrap();
+        assert_eq!(
+            main.process_word_capacity(),
+            REGISTER_COUNT + PLAYER_STACK_TAIL_WORDS
+        );
+        main.initial_stack_pointer = (PLAYER_PROCESS_WORD_COUNT - INITIAL_FRAME_WORDS) as u32;
+        main.initialize_arguments(&[]).unwrap();
+        assert_eq!(
+            main.register(PLAYER_PROCESS_WORD_COUNT - 1),
+            Ok(0),
+            "the initial wait word may occupy the final byte-backed player cell"
+        );
+        assert_eq!(
+            main.push_stack_word(0x2222_2200),
+            Err(VmError::StackOverflow(main_handle))
+        );
+        assert_eq!(
+            main.set_register(PLAYER_PROCESS_WORD_COUNT, 0),
+            Err(VmError::InvalidRegister(PLAYER_PROCESS_WORD_COUNT)),
+            "the dedicated allocation is exactly 0x100 bytes larger"
+        );
+    }
+
+    #[test]
+    fn dedicated_main_direct_gops_reach_the_four_encodable_tail_words_only() {
+        let first_tail_gop = 0x0e00 | REGISTER_COUNT as u16;
+        let ordinary_handle = handle(0);
+        let mut ordinary_machine = Machine::new(0);
+        ordinary_machine
+            .insert_object(
+                VmObject::new(
+                    ordinary_handle,
+                    vec![Instruction::encode(0x11, 0, first_tail_gop)],
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            ordinary_machine.run(ordinary_handle, 1),
+            Err(VmError::InvalidRegister(REGISTER_COUNT)),
+            "the same nine-bit GOP remains out of bounds for an ordinary allocation"
+        );
+
+        let main_handle = handle(OBJECT_POOL_CAPACITY as u16);
+        let direct_tail_indices = REGISTER_COUNT..=0x01ff;
+        let code = direct_tail_indices
+            .clone()
+            .enumerate()
+            .flat_map(|(source, index)| {
+                let tail_gop = 0x0e00 | index as u16;
+                [
+                    Instruction::encode(0x11, source as u16, tail_gop),
+                    Instruction::encode(0x11, tail_gop, STACK),
+                ]
+            })
+            .collect();
+        let mut main = VmObject::new(main_handle, code).unwrap();
+        main.configure_retail_allocation(true).unwrap();
+        let expected = direct_tail_indices
+            .clone()
+            .map(|index| 0x5080_0000 | index as u32)
+            .collect::<Vec<_>>();
+        for (source, value) in expected.iter().copied().enumerate() {
+            main.set_internal(source, value).unwrap();
+        }
+        let mut main_machine = Machine::new(0);
+        main_machine.insert_object(main).unwrap();
+        assert_eq!(
+            main_machine.run(main_handle, expected.len() * 2).unwrap(),
+            Execution {
+                reason: HaltReason::BudgetExhausted,
+                steps: expected.len() * 2,
+            }
+        );
+        assert_eq!(main_machine.object(main_handle).unwrap().stack(), expected);
+
+        assert_eq!(
+            StorageReference::retail_pool_register(OBJECT_POOL_CAPACITY as u8, REGISTER_COUNT),
+            Err(VmError::InvalidStorageReference(
+                RETAIL_POOL_STORAGE_REFERENCE_TAG
+            )),
+            "the Rust physical-pool token does not gain encodability from the player tail"
+        );
+    }
+
+    #[test]
+    fn dedicated_main_tail_retains_only_words_native_execution_initialized() {
+        let main_slot = OBJECT_POOL_CAPACITY as u8;
+        let original = handle(0);
+        let replacement = handle(1);
+        let retained_index = REGISTER_COUNT + 17;
+        let untouched_index = retained_index + 1;
+        let retained_value = 0x1234_5600;
+        let replacement_sentinel = 0xcafe_ba00;
+
+        let mut original_object = VmObject::new(original, vec![0]).unwrap();
+        original_object.configure_retail_allocation(true).unwrap();
+        original_object.initial_stack_pointer = retained_index as u32;
+        original_object.push_stack_word(retained_value).unwrap();
+        assert!(!original_object.initialized_registers[untouched_index]);
+
+        let mut machine = Machine::new(0);
+        machine.insert_object(original_object).unwrap();
+        machine.bind_retail_pool_slot(original, main_slot).unwrap();
+        machine
+            .remove_object_from_retail_pool_slot(original, main_slot)
+            .unwrap();
+
+        let retained = machine.retired_retail_pool_registers[usize::from(main_slot)]
+            .as_ref()
+            .unwrap();
+        assert_eq!(retained.registers.len(), PLAYER_PROCESS_WORD_COUNT);
+        assert!(retained.initialized_registers[retained_index]);
+        assert!(!retained.initialized_registers[untouched_index]);
+
+        let mut replacement_object = VmObject::new(replacement, vec![0]).unwrap();
+        replacement_object
+            .configure_retail_allocation(true)
+            .unwrap();
+        replacement_object.registers[retained_index] = 0xdead_be00;
+        replacement_object.registers[untouched_index] = replacement_sentinel;
+        replacement_object.initialized_registers[retained_index] = false;
+        replacement_object.initialized_registers[untouched_index] = false;
+        machine
+            .seed_retail_pool_slot_storage(main_slot, &mut replacement_object)
+            .unwrap();
+
+        assert_eq!(
+            replacement_object.register(retained_index),
+            Ok(retained_value)
+        );
+        assert_eq!(
+            replacement_object.register(untouched_index),
+            Ok(replacement_sentinel),
+            "indeterminate malloc tail bytes must not become initialized zeroes"
+        );
+        assert!(!replacement_object.initialized_registers[untouched_index]);
     }
 
     #[test]

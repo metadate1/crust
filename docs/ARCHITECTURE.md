@@ -263,9 +263,13 @@ while the slot is free, follows only same-slot reuse, and preflights complete ve
 mutation. The dedicated player allocation has initialized slot-96 backing before its first logical
 main object and every live object's link five retains that address across Title teardown. The six
 initialized `gool_object.bound` words are retained beside that process storage and seed the next
-occupant before selective initialization; a never-used slot retains no invented bound value. Still
-outside this model are the dedicated allocation's extra 0x100 bytes beyond `gool_object`; legal
-traces have not demonstrated that boundary in use.
+occupant before selective initialization; a never-used slot retains no invented bound value. Slot
+96 alone also owns the exact 0x100 bytes allocated after `gool_object`. Those 64 words extend stack
+backing, and their initialized-word mask survives logical main-object reuse without turning
+untouched malloc bytes into zeroes. Native's existing nine-bit direct-object GOP can reach the first
+four tail words on this allocation; ordinary allocations remain strict and physical-pool tokens do
+not expand beyond `regs[0x1fc]`. Legal traces have not demonstrated a tail access: dedicated-main
+`init_sp` peaks at 89 words and the checked 256-word stack ends at word 345, below `regs[0x1fc]`.
 
 The GOOL VM distinguishes external and shared/global code segments with checked `CodeAddress`
 values. Logical code PCs, storage indices and entry slots are encoded with zero low bits and

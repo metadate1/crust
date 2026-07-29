@@ -303,8 +303,11 @@ gameplay path.
   96-slot ordinary free list is modeled; slot 96 represents the separately allocated player from
   initialization onward and link five stays non-null through Title teardown. Initialized
   local-bound bytes survive physical-slot reuse without assigning a value to never-written
-  `malloc` storage. The dedicated allocation's extra 0x100 stack-tail bytes remain unmodeled, but a
-  legal-corpus audit has not observed that boundary being consumed. Colors and animation are
+  `malloc` storage. The dedicated allocation's exact extra 0x100 stack-tail bytes are modeled with
+  selective initialized-word retention; ordinary objects and physical-pool storage tags retain the
+  `regs[0x1fc]` boundary. Native's existing nine-bit direct-object GOP can address indices 508
+  through 511 on the dedicated allocation only. The legal corpus still does not consume that tail
+  (main `init_sp` peaks at 89 and checked stack reach ends at word 345). Colors and animation are
   overwritten/reset on successful source initialization and are not retained-state gaps.
   Synthetic non-retail VM teardown deliberately retains its older checked inbound-link clearing
   contract.

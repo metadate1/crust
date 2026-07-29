@@ -51839,10 +51839,10 @@ fn synthetic_post_sunset_session_reaches_ending_and_returns_to_title() {
     let dr_neo_cortex = CampaignPair::parse(&root, LevelId::new_const(0x1f));
     let ending = CampaignPair::parse(&root, LevelId::ENDING);
 
-    // Start at the authored map contract after Sunset Vista. These clocks are
-    // exported by `sunset_vista_authentic_campaign_phase_reaches_authored_end_warp`
-    // after its real Level Complete graph requests Title. The focused chain
-    // proves every later mount without replaying the still-evolving prefix.
+    // Start at a pinned, legally-local full-campaign characterization of the
+    // authored Title/map boundary after Sunset Vista and Level Complete. This
+    // synthetic test does not derive that checkpoint: it deliberately isolates
+    // every later mount while the continuous pre-Sunset chain remains active.
     let post_sunset_title = synthetic_title_map_carry(16, 17, 0x9210_119b, 24_074, 0x4987_cf9b);
     let koala_carry = carry_map_to_next_level(
         &title,

@@ -17093,7 +17093,7 @@ impl GreatGateRouteController {
                         object.origin,
                         ObjectOrigin::Runtime {
                             executable: 33,
-                            subtype: 1
+                            subtype: 6
                         }
                     )
                     .then_some((object.state, object.translation[1]))

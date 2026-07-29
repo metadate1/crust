@@ -5124,12 +5124,12 @@ impl LostCityCompletionRouteController {
                         let Some(player) = player else {
                             return 0;
                         };
-                        const SECOND_WALL_RUNUP_X: i32 = 15_881_328;
-                        const TOLERANCE: u32 = 12_288;
-                        if player.translation[0] > SECOND_WALL_RUNUP_X + TOLERANCE.cast_signed() {
+                        let second_wall_runup_x = 15_881_328;
+                        let tolerance = 12_288_u32;
+                        if player.translation[0] > second_wall_runup_x + tolerance.cast_signed() {
                             return PAD_LEFT;
                         }
-                        if player.translation[0] < SECOND_WALL_RUNUP_X - TOLERANCE.cast_signed() {
+                        if player.translation[0] < second_wall_runup_x - tolerance.cast_signed() {
                             return PAD_RIGHT;
                         }
                         if player.velocity[0] > 70_000 {
@@ -32150,11 +32150,13 @@ impl HighRoadCompletionRouteController {
                     } else {
                         0
                     };
-                    return horizontal
-                        | lane
-                        | (tick >= spin_delay && (tick - spin_delay).is_multiple_of(2))
-                            .then_some(PAD_SQUARE)
-                            .unwrap_or(0);
+                    let attack =
+                        if tick >= spin_delay && (tick - spin_delay).is_multiple_of(2) {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        };
+                    return horizontal | lane | attack;
                 }
                 if self.sunset_b1_recovery_alignment
                     && self.sunset_stage == 16
@@ -32367,9 +32369,11 @@ impl HighRoadCompletionRouteController {
                         let tick = self.sunset_b2_wait_spin_tick;
                         self.sunset_b2_wait_spin_tick =
                             self.sunset_b2_wait_spin_tick.wrapping_add(1);
-                        (tick >= 7 && (tick - 7).is_multiple_of(6))
-                            .then_some(PAD_SQUARE)
-                            .unwrap_or(0)
+                        if tick >= 7 && (tick - 7).is_multiple_of(6) {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        }
                     };
                     if !projectile_volley_clear
                         || !(7_300_000..=7_340_000).contains(&player.translation[0])
@@ -32455,7 +32459,12 @@ impl HighRoadCompletionRouteController {
                         } else {
                             PAD_UP
                         };
-                        return lane | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                        let attack = if tick.is_multiple_of(2) {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        };
+                        return lane | attack;
                     }
                     self.sunset_stage = 8;
                     self.jump_hold = 8;
@@ -32487,7 +32496,11 @@ impl HighRoadCompletionRouteController {
                         let tick = self.sunset_b3_wait_spin_tick;
                         self.sunset_b3_wait_spin_tick =
                             self.sunset_b3_wait_spin_tick.wrapping_add(1);
-                        let attack = tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                        let attack = if tick.is_multiple_of(2) {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        };
                         if !self.sunset_b3_far_lane_backout_complete {
                             if player.translation[0] > 7_900_000 {
                                 return PAD_LEFT | attack;
@@ -32554,7 +32567,12 @@ impl HighRoadCompletionRouteController {
                         } else {
                             PAD_UP
                         };
-                        return lane | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                        let attack = if tick.is_multiple_of(2) {
+                            PAD_SQUARE
+                        } else {
+                            0
+                        };
+                        return lane | attack;
                     }
                     return 0;
                 }
@@ -32603,7 +32621,11 @@ impl HighRoadCompletionRouteController {
                 {
                     let tick = self.sunset_b3_wait_spin_tick;
                     self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
-                    tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0)
+                    if tick.is_multiple_of(2) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    }
                 } else {
                     PAD_SQUARE
                 };
@@ -32690,9 +32712,12 @@ impl HighRoadCompletionRouteController {
                 }
                 let tick = self.sunset_b3_wait_spin_tick;
                 self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
-                return horizontal
-                    | lane
-                    | tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                let attack = if tick.is_multiple_of(2) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+                return horizontal | lane | attack;
             }
             if self.sunset_b1_recovery_alignment
                 && self.sunset_stage == 17
@@ -32713,7 +32738,11 @@ impl HighRoadCompletionRouteController {
                 self.sunset_c2_projectile_volley_seen |= forward_projectiles_live;
                 let tick = self.sunset_b3_wait_spin_tick;
                 self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
-                let attack = tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0);
+                let attack = if tick.is_multiple_of(2) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
                 if !self.sunset_c2_projectile_volley_seen || forward_projectiles_live {
                     // The carried global phase puts a full ruin-stone volley
                     // across the next jump. Clear it from this authored safe
@@ -40098,7 +40127,11 @@ impl HighRoadCompletionRouteController {
                 {
                     let tick = self.sunset_b3_wait_spin_tick;
                     self.sunset_b3_wait_spin_tick = self.sunset_b3_wait_spin_tick.wrapping_add(1);
-                    tick.is_multiple_of(2).then_some(PAD_SQUARE).unwrap_or(0)
+                    if tick.is_multiple_of(2) {
+                        PAD_SQUARE
+                    } else {
+                        0
+                    }
                 } else if camera.path.zone == d1 {
                     0
                 } else {

@@ -161,6 +161,42 @@ opt-in survey export path. In addition to ordinary `bootLid`, `segments`, `expec
 - `transition.lid` and the fragment's root LID expectations agree with the phase exit; and
 - `unlockAll` agrees with the manifest.
 
+Publisher/title and authored island-map harnesses also emit exact observer metadata:
+
+- `entryCheckpoint` and `exitCheckpoint` contain the same complete checkpoint shape used by the
+  manifest, including `titleState`;
+- `entryProgression` and `exitProgression` contain `gameState`, `titleState`,
+  `savedTitleState`, `currentMapLevel`, `levelCount`, `levelsUnlocked`, and
+  `islandCameraState`;
+- `initialPad` and `finalPad` contain `tapped`, `held`, `tappedPrevious`, `heldPrevious`, and
+  `heldPrevious2`; and
+- every emitted segment explicitly has `"inputKind": "physical"`.
+
+The composer treats these fields as a paired, optional strengthening of schema 1 so older
+legally-local gameplay fragments remain usable. When present, checkpoints must equal the
+manifest exactly, progression must be continuous between adjacent captured fragments, and
+replaying the ordered physical runs from `initialPad` must reproduce `finalPad`. Across a
+cross-LID phase, the composer applies the real `CoreObjectsCreate` pad update before comparing the
+next fragment's initial history. The first captured phase must begin with the browser's zeroed
+physical boot pad. This catches a missing mount-held sample or a fabricated tap before a long
+browser run begins.
+
+Set `C1_BROWSER_REPLAY_EXPORT` to an ignored local directory while running a legally-local
+characterization test to opt in:
+
+```bash
+C1_STREAM_DIR=/path/to/local/streams \
+C1_BROWSER_REPLAY_EXPORT=target/local-campaign/fragments \
+cargo test -p crust-sim --test local_retail_idle_survey \
+  publisher_first_physical_pad_completes_n_sanity_and_jungle_rollers \
+  -- --ignored --exact
+```
+
+The Rust exporter refuses a repository-local destination unless it is under `target/`,
+`local-data/`, `artifacts/`, `captures/`, or `recordings/`. It observes harness frames and the
+authored transition only; it does not write globals, alter RNG state, request a transition, or
+mount a destination.
+
 Every composed segment receives:
 
 ```json

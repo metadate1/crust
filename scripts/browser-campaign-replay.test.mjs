@@ -61,6 +61,36 @@ function fragment(entry, exit, segments, extra = {}) {
   };
 }
 
+function progression(salt) {
+  return {
+    gameState: 0x300 + salt,
+    titleState: 15,
+    savedTitleState: 15,
+    currentMapLevel: 1 + salt,
+    levelCount: 1,
+    levelsUnlocked: 1 + salt,
+    islandCameraState: salt & 1,
+  };
+}
+
+function pad(
+  held,
+  {
+    tapped = 0,
+    tappedPrevious = 0,
+    heldPrevious = 0,
+    heldPrevious2 = 0,
+  } = {},
+) {
+  return {
+    tapped,
+    held,
+    tappedPrevious,
+    heldPrevious,
+    heldPrevious2,
+  };
+}
+
 function syntheticCampaign() {
   const beachEntry = checkpoint(0x09, 11, 1);
   const completionEntry = checkpoint(0x2d, 101, 2);
@@ -164,6 +194,153 @@ function syntheticCampaign() {
     },
   };
 }
+
+test("composer accepts ordered native title capture metadata and exact mount pad history", async () => {
+  const titleEntry = {
+    ...checkpoint(0x19, 0, 1),
+    titleState: 1,
+  };
+  const beachEntry = {
+    ...checkpoint(0x09, 3, 2),
+    titleState: 15,
+  };
+  const completionEntry = {
+    ...checkpoint(0x2d, 5, 3),
+    titleState: 15,
+  };
+  const titleProgression = progression(0);
+  const beachProgression = progression(1);
+  const completionProgression = progression(2);
+  const titleInitialPad = pad(0);
+  const titleFinalPad = pad(0x0040, { tapped: 0x0040 });
+  const beachInitialPad = pad(0x0040, {
+    tappedPrevious: 0x0040,
+    heldPrevious: 0x0040,
+  });
+  const beachFinalPad = pad(0x0040, {
+    tapped: 0x0040,
+    heldPrevious: 0,
+    heldPrevious2: 0x0040,
+  });
+  const manifest = {
+    schema: 1,
+    localDiagnosticOnly: true,
+    canonicalCampaign: false,
+    bootLid: 0x19,
+    unlockAll: false,
+    phases: [
+      phase("publisher-title", "./publisher.json", titleEntry, beachEntry),
+      phase("n-sanity", "./beach.json", beachEntry, completionEntry),
+    ],
+  };
+  const fragments = new Map([
+    [
+      "./publisher.json",
+      {
+        ...fragment(
+          titleEntry,
+          beachEntry,
+          [
+            { frames: 2, held: 0, inputKind: "physical" },
+            { frames: 1, held: 0x0040, inputKind: "physical" },
+          ],
+        ),
+        entryCheckpoint: titleEntry,
+        exitCheckpoint: beachEntry,
+        entryProgression: titleProgression,
+        exitProgression: beachProgression,
+        initialPad: titleInitialPad,
+        finalPad: titleFinalPad,
+      },
+    ],
+    [
+      "./beach.json",
+      {
+        ...fragment(
+          beachEntry,
+          completionEntry,
+          [
+            { frames: 1, held: 0, inputKind: "physical" },
+            { frames: 1, held: 0x0040, inputKind: "physical" },
+          ],
+        ),
+        entryCheckpoint: beachEntry,
+        exitCheckpoint: completionEntry,
+        entryProgression: beachProgression,
+        exitProgression: completionProgression,
+        initialPad: beachInitialPad,
+        finalPad: beachFinalPad,
+      },
+    ],
+  ]);
+
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+
+  assert.deepEqual(replay.composition.phaseIds, [
+    "publisher-title",
+    "n-sanity",
+  ]);
+  assert.deepEqual(
+    replay.segments.map(({ frames, held }) => ({ frames, held })),
+    [
+      { frames: 2, held: 0 },
+      { frames: 1, held: 0x0040 },
+      { frames: 1, held: 0 },
+      { frames: 1, held: 0x0040 },
+    ],
+    "native capture run order must survive composition",
+  );
+
+  const wrongCheckpoint = structuredClone(fragments);
+  wrongCheckpoint
+    .get("./publisher.json")
+    .exitCheckpoint.retailRandomSeedB += 1;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => wrongCheckpoint.get(reference),
+    ),
+    /exitCheckpoint does not match the exact manifest checkpoint.*retailRandomSeedB/s,
+  );
+
+  const wrongFinalPad = structuredClone(fragments);
+  wrongFinalPad.get("./publisher.json").finalPad.heldPrevious = 0x0040;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => wrongFinalPad.get(reference),
+    ),
+    /finalPad does not match its ordered physical segments.*heldPrevious/s,
+  );
+
+  const discontinuousPad = structuredClone(fragments);
+  discontinuousPad.get("./beach.json").initialPad.heldPrevious2 = 0x0040;
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => discontinuousPad.get(reference),
+    ),
+    /physical-pad history is discontinuous.*heldPrevious2/s,
+  );
+
+  const discontinuousProgression = structuredClone(fragments);
+  discontinuousProgression.get("./beach.json").entryProgression = {
+    ...discontinuousProgression.get("./beach.json").entryProgression,
+    levelsUnlocked:
+      discontinuousProgression.get("./beach.json").entryProgression
+        .levelsUnlocked + 1,
+  };
+  await assert.rejects(
+    composeCampaignReplay(
+      manifest,
+      async (reference) => discontinuousProgression.get(reference),
+    ),
+    /captured progression is discontinuous.*levelsUnlocked/s,
+  );
+});
 
 test("composer inserts authored title-map fragments with guards and exact exits", async () => {
   const { manifest, fragments, checkpoints } = syntheticCampaign();

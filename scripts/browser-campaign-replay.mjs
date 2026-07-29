@@ -37,10 +37,28 @@ const CHECKPOINT_FIELDS = [
   "retailDeathCameraFrames",
 ];
 const OPTIONAL_CHECKPOINT_FIELDS = ["titleState"];
+const PROGRESSION_FIELDS = [
+  "gameState",
+  "titleState",
+  "savedTitleState",
+  "currentMapLevel",
+  "levelCount",
+  "levelsUnlocked",
+  "islandCameraState",
+];
+const PAD_SNAPSHOT_FIELDS = [
+  "tapped",
+  "held",
+  "tappedPrevious",
+  "heldPrevious",
+  "heldPrevious2",
+];
 const ALL_CHECKPOINT_FIELDS = new Set([
   ...CHECKPOINT_FIELDS,
   ...OPTIONAL_CHECKPOINT_FIELDS,
 ]);
+const ALL_PROGRESSION_FIELDS = new Set(PROGRESSION_FIELDS);
+const ALL_PAD_SNAPSHOT_FIELDS = new Set(PAD_SNAPSHOT_FIELDS);
 const PHASE_KEYS = new Set([
   "entry",
   "exit",
@@ -123,6 +141,83 @@ function normalizeCheckpoint(raw, label) {
     );
   }
   return checkpoint;
+}
+
+function normalizeProgression(raw, label) {
+  if (!isObject(raw)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(raw, ALL_PROGRESSION_FIELDS, label);
+  const missing = PROGRESSION_FIELDS.filter((field) => raw[field] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `${label} is missing exact progression fields: ${missing.join(", ")}`,
+    );
+  }
+  return Object.fromEntries(
+    PROGRESSION_FIELDS.map((field) => [
+      field,
+      wholeNumber(raw[field], `${label}.${field}`, 0xffff_ffff),
+    ]),
+  );
+}
+
+function hasOpposingPhysicalDirections(held) {
+  return (
+    ((held & PAD_UP) !== 0 && (held & PAD_DOWN) !== 0)
+    || ((held & PAD_LEFT) !== 0 && (held & PAD_RIGHT) !== 0)
+  );
+}
+
+function normalizePadSnapshot(raw, label) {
+  if (!isObject(raw)) throw new Error(`${label} must be an object`);
+  assertOnlyKeys(raw, ALL_PAD_SNAPSHOT_FIELDS, label);
+  const missing = PAD_SNAPSHOT_FIELDS.filter((field) => raw[field] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `${label} is missing exact physical-pad fields: ${missing.join(", ")}`,
+    );
+  }
+  const snapshot = Object.fromEntries(
+    PAD_SNAPSHOT_FIELDS.map((field) => [
+      field,
+      wholeNumber(raw[field], `${label}.${field}`, 0xffff),
+    ]),
+  );
+  for (const field of ["held", "heldPrevious", "heldPrevious2"]) {
+    if (hasOpposingPhysicalDirections(snapshot[field])) {
+      throw new Error(`${label}.${field} contains opposing physical directions`);
+    }
+  }
+  if ((snapshot.tapped & ~snapshot.held) !== 0) {
+    throw new Error(`${label}.tapped must be a subset of held`);
+  }
+  if ((snapshot.tappedPrevious & ~snapshot.heldPrevious) !== 0) {
+    throw new Error(`${label}.tappedPrevious must be a subset of heldPrevious`);
+  }
+  return snapshot;
+}
+
+function advancePadSnapshot(previous, held) {
+  return {
+    tapped: ((~previous.held & held) & 0xf9ff) >>> 0,
+    held,
+    tappedPrevious: previous.tapped,
+    heldPrevious: previous.held,
+    heldPrevious2: previous.heldPrevious,
+  };
+}
+
+function replayPhysicalPad(initial, segments) {
+  let snapshot = initial;
+  for (const segment of segments) {
+    // A constant physical word reaches a stable five-word history after
+    // three updates, so very long local route fragments remain cheap to
+    // validate without weakening the exact final-state check.
+    const updates = Math.min(segment.frames, 3);
+    for (let index = 0; index < updates; index += 1) {
+      snapshot = advancePadSnapshot(snapshot, segment.held);
+    }
+  }
+  return snapshot;
 }
 
 function normalizeInputKind(raw, label) {
@@ -443,6 +538,100 @@ function validateFragmentMetadata(fragment, normalizedReplay, phase, manifest) {
       );
     }
   }
+
+  const pairedMetadata = [
+    ["entryCheckpoint", "exitCheckpoint"],
+    ["entryProgression", "exitProgression"],
+    ["initialPad", "finalPad"],
+  ];
+  for (const [entryField, exitField] of pairedMetadata) {
+    if (
+      (fragment[entryField] === undefined)
+      !== (fragment[exitField] === undefined)
+    ) {
+      throw new Error(
+        `${label}.${entryField} and ${label}.${exitField} must be provided together`,
+      );
+    }
+  }
+
+  const entryCheckpoint =
+    fragment.entryCheckpoint === undefined
+      ? undefined
+      : normalizeCheckpoint(
+          fragment.entryCheckpoint,
+          `${label}.entryCheckpoint`,
+        );
+  const exitCheckpoint =
+    fragment.exitCheckpoint === undefined
+      ? undefined
+      : normalizeCheckpoint(fragment.exitCheckpoint, `${label}.exitCheckpoint`);
+  for (const [name, captured, declared] of [
+    ["entryCheckpoint", entryCheckpoint, phase.entry],
+    ["exitCheckpoint", exitCheckpoint, phase.exit],
+  ]) {
+    if (captured === undefined) continue;
+    const differences = checkpointDifference(captured, declared);
+    if (differences.length > 0) {
+      throw new Error(
+        `${label}.${name} does not match the exact manifest checkpoint: ` +
+          differences.join(", "),
+      );
+    }
+  }
+
+  const entryProgression =
+    fragment.entryProgression === undefined
+      ? undefined
+      : normalizeProgression(
+          fragment.entryProgression,
+          `${label}.entryProgression`,
+        );
+  const exitProgression =
+    fragment.exitProgression === undefined
+      ? undefined
+      : normalizeProgression(
+          fragment.exitProgression,
+          `${label}.exitProgression`,
+        );
+  const initialPad =
+    fragment.initialPad === undefined
+      ? undefined
+      : normalizePadSnapshot(fragment.initialPad, `${label}.initialPad`);
+  const finalPad =
+    fragment.finalPad === undefined
+      ? undefined
+      : normalizePadSnapshot(fragment.finalPad, `${label}.finalPad`);
+  if (initialPad !== undefined) {
+    const nonPhysical = normalizedReplay.segments.findIndex(
+      (segment) => segment.inputKind !== "physical",
+    );
+    if (nonPhysical !== -1) {
+      throw new Error(
+        `${label} exact pad metadata requires physical input in segment ` +
+          `${nonPhysical + 1}`,
+      );
+    }
+    const replayedFinalPad = replayPhysicalPad(
+      initialPad,
+      normalizedReplay.segments,
+    );
+    const differences = checkpointDifference(replayedFinalPad, finalPad);
+    if (differences.length > 0) {
+      throw new Error(
+        `${label}.finalPad does not match its ordered physical segments: ` +
+          differences.join(", "),
+      );
+    }
+  }
+  return {
+    entryCheckpoint,
+    exitCheckpoint,
+    entryProgression,
+    exitProgression,
+    initialPad,
+    finalPad,
+  };
 }
 
 function guardedPhaseSegments(fragment, normalizedReplay, phase) {
@@ -508,6 +697,8 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
   const manifest = normalizeCampaignManifest(rawManifest);
   const outputSegments = [];
   let traceFromSegment;
+  let previousCaptureMetadata;
+  let previousPhase;
   for (const phase of manifest.phases) {
     if (phase.id === manifest.traceFromPhase) {
       traceFromSegment = outputSegments.length + 1;
@@ -528,10 +719,75 @@ export async function composeCampaignReplay(rawManifest, loadFragment) {
         : fragment.segments,
     };
     const normalizedReplay = normalizeReplay(fragmentWithInputKind);
-    validateFragmentMetadata(fragment, normalizedReplay, phase, manifest);
+    const captureMetadata = validateFragmentMetadata(
+      fragment,
+      normalizedReplay,
+      phase,
+      manifest,
+    );
+    if (captureMetadata.initialPad !== undefined && outputSegments.length === 0) {
+      const bootPad = {
+        tapped: 0,
+        held: 0,
+        tappedPrevious: 0,
+        heldPrevious: 0,
+        heldPrevious2: 0,
+      };
+      const differences = checkpointDifference(
+        captureMetadata.initialPad,
+        bootPad,
+      );
+      if (differences.length > 0) {
+        throw new Error(
+          `first fragment ${JSON.stringify(phase.id)} does not begin with the ` +
+            `browser's physical boot pad: ${differences.join(", ")}`,
+        );
+      }
+    }
+    if (
+      previousCaptureMetadata?.exitProgression !== undefined
+      && captureMetadata.entryProgression !== undefined
+    ) {
+      const differences = checkpointDifference(
+        previousCaptureMetadata.exitProgression,
+        captureMetadata.entryProgression,
+      );
+      if (differences.length > 0) {
+        throw new Error(
+          `captured progression is discontinuous between ` +
+            `${JSON.stringify(previousPhase.id)} and ${JSON.stringify(phase.id)}: ` +
+            differences.join(", "),
+        );
+      }
+    }
+    if (
+      previousCaptureMetadata?.finalPad !== undefined
+      && captureMetadata.initialPad !== undefined
+    ) {
+      const expectedInitialPad =
+        previousPhase.entry.currentLid === previousPhase.exit.currentLid
+          ? previousCaptureMetadata.finalPad
+          : advancePadSnapshot(
+              previousCaptureMetadata.finalPad,
+              previousCaptureMetadata.finalPad.held,
+            );
+      const differences = checkpointDifference(
+        expectedInitialPad,
+        captureMetadata.initialPad,
+      );
+      if (differences.length > 0) {
+        throw new Error(
+          `captured physical-pad history is discontinuous between ` +
+            `${JSON.stringify(previousPhase.id)} and ${JSON.stringify(phase.id)}: ` +
+            differences.join(", "),
+        );
+      }
+    }
     outputSegments.push(
       ...guardedPhaseSegments(fragment, normalizedReplay, phase),
     );
+    previousCaptureMetadata = captureMetadata;
+    previousPhase = phase;
   }
   const finalCheckpoint = manifest.phases.at(-1).exit;
   const replay = {

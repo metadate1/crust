@@ -27,7 +27,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     num::{NonZeroU16, NonZeroU32},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 use crust_formats::{
@@ -47780,6 +47780,470 @@ impl PersistentPadState {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserReplayHarnessKind {
+    PublisherTitle,
+    AuthoredTitleMap,
+}
+
+impl BrowserReplayHarnessKind {
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::PublisherTitle => "publisher-title",
+            Self::AuthoredTitleMap => "authored-title-map",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::PublisherTitle => "Publisher Title",
+            Self::AuthoredTitleMap => "Authored Title Map",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserReplayCheckpoint {
+    current_lid: u32,
+    mounted_lid: u32,
+    retail_draw_count: u32,
+    retail_process_draw_count: u32,
+    retail_random_seed: u32,
+    retail_random_seed_b: u32,
+    retail_hard_restarts: u32,
+    retail_load_states: u32,
+    retail_death_camera_frames: u32,
+    title_state: u32,
+}
+
+impl BrowserReplayCheckpoint {
+    fn from_runtime(runtime: &RetailRuntime, mounted_lid: u32) -> Self {
+        let carry = runtime.export_session_carry();
+        // The retail counters are stored in 8.8 units. A same-level
+        // LoadState produces one hard restart, so the clean publisher/map
+        // chains (and the characterized death/restart chain) preserve the
+        // browser harness's cumulative count at this boundary.
+        let hard_restarts = carry.respawn_count >> 8;
+        Self {
+            current_lid: mounted_lid,
+            mounted_lid,
+            retail_draw_count: runtime.draw_count(),
+            retail_process_draw_count: runtime.draw_count(),
+            retail_random_seed: runtime.machine().random_seed(),
+            retail_random_seed_b: runtime.random_seed_b(),
+            retail_hard_restarts: hard_restarts,
+            retail_load_states: hard_restarts,
+            // Neither Title harness owns a death camera. The clean campaign
+            // path entering these handoffs therefore retains the exact zero
+            // cumulative value used by the browser campaign manifest.
+            retail_death_camera_frames: 0,
+            title_state: runtime
+                .global_word(TITLE_STATE_GLOBAL)
+                .expect("Title replay checkpoint must expose the title-state global"),
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "currentLid": self.current_lid,
+            "mountedLid": self.mounted_lid,
+            "retailDrawCount": self.retail_draw_count,
+            "retailProcessDrawCount": self.retail_process_draw_count,
+            "retailRandomSeed": self.retail_random_seed,
+            "retailRandomSeedB": self.retail_random_seed_b,
+            "retailHardRestarts": self.retail_hard_restarts,
+            "retailLoadStates": self.retail_load_states,
+            "retailDeathCameraFrames": self.retail_death_camera_frames,
+            "titleState": self.title_state,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserReplayProgression {
+    game_state: u32,
+    title_state: u32,
+    saved_title_state: u32,
+    current_map_level: u32,
+    level_count: u32,
+    levels_unlocked: u32,
+    island_camera_state: u32,
+}
+
+impl BrowserReplayProgression {
+    fn from_runtime(runtime: &RetailRuntime) -> Self {
+        let [
+            game_state,
+            title_state,
+            saved_title_state,
+            current_map_level,
+            level_count,
+            levels_unlocked,
+            island_camera_state,
+        ] = campaign_progression_globals(runtime);
+        Self {
+            game_state,
+            title_state,
+            saved_title_state,
+            current_map_level,
+            level_count,
+            levels_unlocked,
+            island_camera_state,
+        }
+    }
+
+    fn to_json(self) -> serde_json::Value {
+        serde_json::json!({
+            "gameState": self.game_state,
+            "titleState": self.title_state,
+            "savedTitleState": self.saved_title_state,
+            "currentMapLevel": self.current_map_level,
+            "levelCount": self.level_count,
+            "levelsUnlocked": self.levels_unlocked,
+            "islandCameraState": self.island_camera_state,
+        })
+    }
+}
+
+fn replay_pad_to_json(snapshot: RetailPadSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "tapped": snapshot.tapped,
+        "held": snapshot.held,
+        "tappedPrevious": snapshot.tapped_previous,
+        "heldPrevious": snapshot.held_previous,
+        "heldPrevious2": snapshot.held_previous_2,
+    })
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BrowserReplayInputRun {
+    frames: u32,
+    held: u32,
+}
+
+#[derive(Debug)]
+struct BrowserReplayCapture {
+    export_dir: Option<PathBuf>,
+    kind: BrowserReplayHarnessKind,
+    entry_checkpoint: BrowserReplayCheckpoint,
+    entry_progression: BrowserReplayProgression,
+    initial_pad: RetailPadSnapshot,
+    frames: u32,
+    runs: Vec<BrowserReplayInputRun>,
+}
+
+impl BrowserReplayCapture {
+    fn configured(
+        kind: BrowserReplayHarnessKind,
+        runtime: &RetailRuntime,
+        initial_pad: RetailPadSnapshot,
+    ) -> Self {
+        Self::new(
+            std::env::var_os("C1_BROWSER_REPLAY_EXPORT").map(PathBuf::from),
+            kind,
+            BrowserReplayCheckpoint::from_runtime(runtime, LevelId::TITLE.get()),
+            BrowserReplayProgression::from_runtime(runtime),
+            initial_pad,
+        )
+    }
+
+    fn new(
+        export_dir: Option<PathBuf>,
+        kind: BrowserReplayHarnessKind,
+        entry_checkpoint: BrowserReplayCheckpoint,
+        entry_progression: BrowserReplayProgression,
+        initial_pad: RetailPadSnapshot,
+    ) -> Self {
+        Self {
+            export_dir,
+            kind,
+            entry_checkpoint,
+            entry_progression,
+            initial_pad,
+            frames: 0,
+            runs: Vec::new(),
+        }
+    }
+
+    fn record_frame(&mut self, frame: u32, held: u32) {
+        assert_eq!(
+            frame,
+            self.frames + 1,
+            "{} replay capture must receive every frame in source order",
+            self.kind.label()
+        );
+        assert!(
+            u16::try_from(held).is_ok(),
+            "{} frame {frame} is not a physical 16-bit pad word: {held:#010x}",
+            self.kind.label()
+        );
+        assert!(
+            !((held & PAD_UP != 0 && held & PAD_DOWN != 0)
+                || (held & PAD_LEFT != 0 && held & PAD_RIGHT != 0)),
+            "{} frame {frame} contains opposing physical directions: {held:#06x}",
+            self.kind.label()
+        );
+        self.frames = frame;
+        if let Some(last) = self.runs.last_mut()
+            && last.held == held
+        {
+            last.frames += 1;
+        } else {
+            self.runs.push(BrowserReplayInputRun { frames: 1, held });
+        }
+    }
+
+    fn final_pad_from_runs(&self) -> RetailPadSnapshot {
+        let mut pad = PersistentPadState {
+            snapshot: self.initial_pad,
+        };
+        for run in &self.runs {
+            for _ in 0..run.frames {
+                pad.update(run.held);
+            }
+        }
+        pad.snapshot
+    }
+
+    fn document(
+        &self,
+        runtime: &RetailRuntime,
+        final_pad: RetailPadSnapshot,
+        destination_lid: u32,
+    ) -> Result<serde_json::Value, String> {
+        if self.frames == 0 || self.runs.is_empty() {
+            return Err(format!(
+                "{} replay capture has no frames",
+                self.kind.label()
+            ));
+        }
+        let reconstructed_pad = self.final_pad_from_runs();
+        if reconstructed_pad != final_pad {
+            return Err(format!(
+                "{} replay pad history is discontinuous: reconstructed {reconstructed_pad:?}, \
+                 live {final_pad:?}",
+                self.kind.label()
+            ));
+        }
+        let exit_checkpoint = BrowserReplayCheckpoint::from_runtime(runtime, destination_lid);
+        let exit_progression = BrowserReplayProgression::from_runtime(runtime);
+        let segments = self
+            .runs
+            .iter()
+            .map(|run| {
+                serde_json::json!({
+                    "frames": run.frames,
+                    "held": run.held,
+                    "inputKind": "physical",
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::json!({
+            "schema": 1,
+            "bootLid": LevelId::TITLE.get(),
+            "unlockAll": false,
+            "settleFrames": 120,
+            "expect": {
+                "currentLid": destination_lid,
+                "mountedLid": destination_lid,
+                "minRetailExecutions": 1,
+            },
+            "level": LevelId::TITLE.get(),
+            "name": self.kind.label(),
+            "inputProfile": self.kind.slug(),
+            "context": "SessionGlobals",
+            "captureKind": self.kind.slug(),
+            "initialDrawCount": self.entry_checkpoint.retail_draw_count,
+            "frames": self.frames,
+            "surveyFrames": self.frames,
+            "localDiagnosticOnly": true,
+            "canonicalCampaign": false,
+            "transition": {
+                "frame": self.frames,
+                "lid": destination_lid,
+            },
+            "entryCheckpoint": self.entry_checkpoint.to_json(),
+            "exitCheckpoint": exit_checkpoint.to_json(),
+            "entryProgression": self.entry_progression.to_json(),
+            "exitProgression": exit_progression.to_json(),
+            "initialPad": replay_pad_to_json(self.initial_pad),
+            "finalPad": replay_pad_to_json(final_pad),
+            "segments": segments,
+        }))
+    }
+
+    fn export_transition(
+        &self,
+        runtime: &RetailRuntime,
+        final_pad: RetailPadSnapshot,
+        destination_lid: u32,
+    ) -> Result<(), String> {
+        let Some(export_dir) = &self.export_dir else {
+            return Ok(());
+        };
+        ensure_local_replay_export_dir(export_dir)?;
+        let document = self.document(runtime, final_pad, destination_lid)?;
+        std::fs::create_dir_all(export_dir)
+            .map_err(|error| format!("create replay export {}: {error}", export_dir.display()))?;
+        let filename = format!(
+            "lid-{:02x}-draw-{:08}-{}-to-{:02x}.json",
+            LevelId::TITLE.get(),
+            self.entry_checkpoint.retail_draw_count,
+            self.kind.slug(),
+            destination_lid,
+        );
+        let path = export_dir.join(filename);
+        let mut bytes = serde_json::to_vec_pretty(&document)
+            .map_err(|error| format!("serialize replay fragment {}: {error}", path.display()))?;
+        bytes.push(b'\n');
+        std::fs::write(&path, bytes)
+            .map_err(|error| format!("write replay fragment {}: {error}", path.display()))
+    }
+}
+
+fn ensure_local_replay_export_dir(export_dir: &Path) -> Result<(), String> {
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("sim crate must be nested under the repository root")
+        .canonicalize()
+        .map_err(|error| format!("resolve replay repository root: {error}"))?;
+    let unresolved = if export_dir.is_absolute() {
+        export_dir.to_path_buf()
+    } else {
+        repository_root.join(export_dir)
+    };
+    let mut absolute = PathBuf::new();
+    for component in unresolved.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                absolute.pop();
+            }
+            Component::Prefix(prefix) => absolute.push(prefix.as_os_str()),
+            Component::RootDir => absolute.push(Path::new("/")),
+            Component::Normal(component) => absolute.push(component),
+        }
+    }
+    let Ok(relative) = absolute.strip_prefix(&repository_root) else {
+        return Ok(());
+    };
+    let local_roots = [
+        "artifacts",
+        "captures",
+        "local-data",
+        "recordings",
+        "target",
+    ];
+    if relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .is_some_and(|component| local_roots.contains(&component))
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "replay export {} must be outside the repository or under an ignored local artifact \
+         directory ({})",
+        absolute.display(),
+        local_roots.join(", "),
+    ))
+}
+
+#[test]
+fn title_replay_capture_preserves_physical_order_and_previous_pad_history() {
+    let mut runtime = RetailRuntime::new_for_level(GLOBAL_WORDS, LevelId::TITLE);
+    for (index, value) in [
+        (GAME_STATE_GLOBAL, 0x300),
+        (TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (SAVED_TITLE_STATE_GLOBAL, TitleScreen::Map.raw()),
+        (CURRENT_MAP_LEVEL_GLOBAL, 1),
+        (LEVEL_COUNT_GLOBAL, 1),
+        (LEVELS_UNLOCKED_GLOBAL, 2),
+        (ISLAND_CAMERA_STATE_GLOBAL, 1),
+    ] {
+        runtime
+            .set_global_word(index, value)
+            .expect("synthetic replay progression global is writable");
+    }
+    let entry_checkpoint = BrowserReplayCheckpoint::from_runtime(&runtime, LevelId::TITLE.get());
+    let entry_progression = BrowserReplayProgression::from_runtime(&runtime);
+    let mut pad = PersistentPadState::default();
+    let mut capture = BrowserReplayCapture::new(
+        None,
+        BrowserReplayHarnessKind::AuthoredTitleMap,
+        entry_checkpoint,
+        entry_progression,
+        pad.snapshot,
+    );
+
+    for (frame, held) in [0, 0, PAD_CROSS, PAD_CROSS, 0].into_iter().enumerate() {
+        let frame = u32::try_from(frame + 1).expect("synthetic replay frame fits u32");
+        capture.record_frame(frame, held);
+        pad.update(held);
+    }
+    let document = capture
+        .document(&runtime, pad.snapshot, LevelId::N_SANITY_BEACH.get())
+        .expect("physical title replay document must serialize");
+
+    assert_eq!(document["frames"], 5);
+    assert_eq!(
+        document["segments"],
+        serde_json::json!([
+            { "frames": 2, "held": 0, "inputKind": "physical" },
+            { "frames": 2, "held": PAD_CROSS, "inputKind": "physical" },
+            { "frames": 1, "held": 0, "inputKind": "physical" },
+        ])
+    );
+    assert_eq!(document["transition"]["frame"], 5);
+    assert_eq!(document["transition"]["lid"], LevelId::N_SANITY_BEACH.get());
+    assert_eq!(
+        document["entryCheckpoint"],
+        entry_checkpoint.to_json(),
+        "the exact entry clock/RNG checkpoint must survive serialization"
+    );
+    assert_eq!(
+        document["entryProgression"],
+        entry_progression.to_json(),
+        "the complete Title/map progression tuple must survive serialization"
+    );
+    assert_eq!(
+        document["initialPad"],
+        replay_pad_to_json(RetailPadSnapshot::default())
+    );
+    assert_eq!(document["finalPad"], replay_pad_to_json(pad.snapshot));
+    assert_eq!(
+        pad.snapshot,
+        RetailPadSnapshot {
+            tapped: 0,
+            held: 0,
+            tapped_previous: 0,
+            held_previous: PAD_CROSS,
+            held_previous_2: PAD_CROSS,
+        },
+        "released input must retain the two physical previous-held samples"
+    );
+
+    let mut discontinuous = pad.snapshot;
+    discontinuous.held_previous = 0;
+    assert!(
+        capture
+            .document(&runtime, discontinuous, LevelId::N_SANITY_BEACH.get(),)
+            .unwrap_err()
+            .contains("pad history is discontinuous")
+    );
+}
+
+#[test]
+fn title_replay_export_rejects_repository_local_unignored_output() {
+    assert!(ensure_local_replay_export_dir(Path::new("target/local-replays")).is_ok());
+    assert!(ensure_local_replay_export_dir(Path::new("local-data/replays")).is_ok());
+    assert!(ensure_local_replay_export_dir(Path::new("replays")).is_err());
+    assert!(ensure_local_replay_export_dir(Path::new("target/../replays")).is_err());
+    assert!(ensure_local_replay_export_dir(Path::new("/tmp/crust-local-replays")).is_ok());
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct PersistentSurveyPlan {
     mount_held: u32,
@@ -48729,6 +49193,7 @@ struct PublisherTitleHarness<'assets> {
     runtime: RetailRuntime,
     card: VirtualCard,
     pad: PersistentPadState,
+    replay: Option<BrowserReplayCapture>,
     frame: u32,
     transitions: Vec<(u32, i32)>,
 }
@@ -48782,10 +49247,16 @@ impl<'assets> PublisherTitleHarness<'assets> {
             runtime,
             card: VirtualCard::new(),
             pad,
+            replay: None,
             frame: 0,
             transitions: Vec::new(),
         };
         harness.mount_screen(TitleScreen::PublisherFirst);
+        harness.replay = Some(BrowserReplayCapture::configured(
+            BrowserReplayHarnessKind::PublisherTitle,
+            &harness.runtime,
+            harness.pad.snapshot,
+        ));
         harness
     }
 
@@ -48844,10 +49315,16 @@ impl<'assets> PublisherTitleHarness<'assets> {
             runtime,
             card: VirtualCard::new(),
             pad,
+            replay: None,
             frame: 0,
             transitions: Vec::new(),
         };
         harness.mount_screen(screen);
+        harness.replay = Some(BrowserReplayCapture::configured(
+            BrowserReplayHarnessKind::PublisherTitle,
+            &harness.runtime,
+            harness.pad.snapshot,
+        ));
         harness
     }
 
@@ -48946,6 +49423,10 @@ impl<'assets> PublisherTitleHarness<'assets> {
 
     fn step(&mut self, held: u32) {
         self.frame += 1;
+        self.replay
+            .as_mut()
+            .expect("publisher replay capture must initialize after mounting")
+            .record_frame(self.frame, held);
         self.runtime.set_frame_timing(34, 34);
         self.card.update();
         self.runtime
@@ -49016,6 +49497,7 @@ impl<'assets> PublisherTitleHarness<'assets> {
                 .filter(|execution| execution.result.is_err())
                 .collect::<Vec<_>>()
         );
+        let transition_count_before = self.transitions.len();
         self.transitions
             .extend(report.effects.iter().filter_map(|effect| match effect {
                 VmEffect::Transition(level) => Some((self.frame, *level)),
@@ -49041,6 +49523,31 @@ impl<'assets> PublisherTitleHarness<'assets> {
             "publisher Title frame {} retained a faulted object",
             self.frame
         );
+        if self.transitions.len() != transition_count_before {
+            assert_eq!(
+                self.transitions.len(),
+                transition_count_before + 1,
+                "publisher Title frame {} emitted more than one transition",
+                self.frame
+            );
+            let destination_lid = u32::try_from(
+                self.transitions
+                    .last()
+                    .expect("new publisher transition must remain present")
+                    .1,
+            )
+            .expect("publisher transition LID must be non-negative");
+            self.replay
+                .as_ref()
+                .expect("publisher replay capture must initialize after mounting")
+                .export_transition(&self.runtime, self.pad.snapshot, destination_lid)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "publisher Title frame {} replay export: {error}",
+                        self.frame
+                    )
+                });
+        }
     }
 
     fn update_camera(&mut self, pad: RetailPadSnapshot) {
@@ -49175,10 +49682,9 @@ struct AuthoredTitleMapHarness<'assets> {
     camera: RetailCameraRuntime,
     runtime: RetailRuntime,
     card: VirtualCard,
+    pad: PersistentPadState,
+    replay: Option<BrowserReplayCapture>,
     frame: u32,
-    held_previous: u32,
-    held_previous_2: u32,
-    tapped_previous: u32,
     transitions: Vec<(u32, i32)>,
 }
 
@@ -49203,22 +49709,46 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
         nsf_bytes: &'assets [u8],
         carry: RetailSessionCarry,
     ) -> Self {
+        Self::from_session_with_pad(nsd, nsf, nsf_bytes, carry, PersistentPadState::default())
+    }
+
+    fn from_session_with_pad(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
+        carry: RetailSessionCarry,
+        pad: PersistentPadState,
+    ) -> Self {
         let runtime = RetailRuntime::new_from_session(GLOBAL_WORDS, LevelId::TITLE, carry)
             .expect("Title Map must import the preceding authored session carry");
-        Self::from_runtime(nsd, nsf, nsf_bytes, runtime)
+        Self::from_runtime_with_pad(nsd, nsf, nsf_bytes, runtime, pad)
     }
 
     fn from_runtime(
         nsd: &'assets Nsd,
         nsf: &'assets Nsf,
         nsf_bytes: &'assets [u8],
+        runtime: RetailRuntime,
+    ) -> Self {
+        Self::from_runtime_with_pad(nsd, nsf, nsf_bytes, runtime, PersistentPadState::default())
+    }
+
+    fn from_runtime_with_pad(
+        nsd: &'assets Nsd,
+        nsf: &'assets Nsf,
+        nsf_bytes: &'assets [u8],
         mut runtime: RetailRuntime,
+        mut pad: PersistentPadState,
     ) -> Self {
         let graph =
             graph_for_pair(LevelId::TITLE, nsd, nsf, nsf_bytes).expect("Title graph must parse");
         let (zones, lifecycle) = zone_catalog(nsd, nsf, nsf_bytes, &graph, LevelId::TITLE)
             .expect("Title zone catalog must parse");
         let camera = RetailCameraRuntime::new(&graph).expect("Title camera must initialize");
+        let mount_held = pad.snapshot.held;
+        runtime
+            .set_pad_snapshot(0, pad.update(mount_held))
+            .expect("Title Map mount pad boundary must publish");
         runtime
             .configure_retail_title(TitleScreen::Map, false)
             .expect("Title Map state must configure");
@@ -49232,13 +49762,17 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
             camera,
             runtime,
             card: VirtualCard::new(),
+            pad,
+            replay: None,
             frame: 0,
-            held_previous: 0,
-            held_previous_2: 0,
-            tapped_previous: 0,
             transitions: Vec::new(),
         };
         harness.mount();
+        harness.replay = Some(BrowserReplayCapture::configured(
+            BrowserReplayHarnessKind::AuthoredTitleMap,
+            &harness.runtime,
+            harness.pad.snapshot,
+        ));
         harness
     }
 
@@ -49301,6 +49835,10 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
 
     fn step(&mut self, held: u32) {
         self.frame += 1;
+        self.replay
+            .as_mut()
+            .expect("authored map replay capture must initialize after mounting")
+            .record_frame(self.frame, held);
         self.runtime.set_frame_timing(34, 34);
         self.card.update();
         self.runtime
@@ -49342,14 +49880,7 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
         );
 
         self.update_camera();
-        let tapped = held & !self.held_previous;
-        let snapshot = RetailPadSnapshot {
-            tapped,
-            held,
-            tapped_previous: self.tapped_previous,
-            held_previous: self.held_previous,
-            held_previous_2: self.held_previous_2,
-        };
+        let snapshot = self.pad.update(held);
         let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
         let report = self
             .runtime
@@ -49363,9 +49894,6 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
                 },
             )
             .unwrap_or_else(|error| panic!("Title Map frame {} runtime: {error:?}", self.frame));
-        self.held_previous_2 = self.held_previous;
-        self.held_previous = held;
-        self.tapped_previous = tapped;
         assert!(
             report
                 .executions
@@ -49379,6 +49907,7 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
                 .filter(|execution| execution.result.is_err())
                 .collect::<Vec<_>>()
         );
+        let transition_count_before = self.transitions.len();
         self.transitions
             .extend(report.effects.iter().filter_map(|effect| match effect {
                 VmEffect::Transition(level) => Some((self.frame, *level)),
@@ -49404,6 +49933,28 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
             "Title Map frame {} retained a faulted object",
             self.frame
         );
+        if self.transitions.len() != transition_count_before {
+            assert_eq!(
+                self.transitions.len(),
+                transition_count_before + 1,
+                "Title Map frame {} emitted more than one transition",
+                self.frame
+            );
+            let destination_lid = u32::try_from(
+                self.transitions
+                    .last()
+                    .expect("new Title Map transition must remain present")
+                    .1,
+            )
+            .expect("Title Map transition LID must be non-negative");
+            self.replay
+                .as_ref()
+                .expect("authored map replay capture must initialize after mounting")
+                .export_transition(&self.runtime, self.pad.snapshot, destination_lid)
+                .unwrap_or_else(|error| {
+                    panic!("Title Map frame {} replay export: {error}", self.frame)
+                });
+        }
     }
 
     fn update_camera(&mut self) {
@@ -49430,7 +49981,7 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
             .update_with_island(
                 &self.graph,
                 RetailCameraInput {
-                    tapped: self.tapped_previous,
+                    tapped: self.pad.snapshot.tapped,
                 },
                 Some(RetailIslandCameraInput {
                     island_cam_state,
@@ -49626,6 +50177,25 @@ impl<'assets> AuthoredTitleMapHarness<'assets> {
             [(transition_frame, expected_lid)],
             "the next unlocked authored map node must launch {expected}"
         );
+    }
+
+    fn finish_transition(mut self, expected: LevelId) -> (RetailSessionCarry, PersistentPadState) {
+        let expected_lid = i32::try_from(expected.get()).expect("destination LID fits i32");
+        assert_eq!(
+            self.transitions.last(),
+            Some(&(self.frame, expected_lid)),
+            "authored Title Map must request {expected}"
+        );
+        let mut host = NsfProgramHost::new(self.nsd, self.nsf, self.nsf_bytes);
+        let report = self
+            .runtime
+            .finish_level_transition(&mut host, expected_lid)
+            .expect("authored Title Map LEVEL_END must export its carry");
+        assert!(report.event_failures.is_empty());
+        assert!(report.effects.is_empty());
+        assert_eq!(report.resolved.level, expected);
+        assert!(!report.resolved.bonus_return);
+        (report.carry, self.pad)
     }
 }
 
@@ -52873,7 +53443,7 @@ fn carry_map_to_next_level(
     map.select_next_unlocked(expected);
     assert_eq!(campaign_progression_globals(&map.runtime), expected_globals);
     assert_eq!(map.runtime.faulted_object_count(), 0);
-    let carry = title.finish_checked(map.runtime, expected);
+    let (carry, _pad) = map.finish_transition(expected);
     assert_unassisted_campaign_carry(&carry, title.name);
     carry
 }

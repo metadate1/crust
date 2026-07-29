@@ -2994,6 +2994,19 @@ impl FumblingInTheDarkCompletionRouteController {
         ) {
             held |= PAD_CROSS;
         }
+        // Defeat the two authored rolling pillars, then spin through the next
+        // live pillar instead of relying on the former unconfigured-child bug.
+        if (1_270..=1_300).contains(&frame) || (1_408..=1_425).contains(&frame) {
+            held |= PAD_SQUARE;
+        }
+        if (1_342..=1_345).contains(&frame) {
+            held |= PAD_CROSS;
+        }
+        // The earlier pillar spin advances Crash slightly; hesitate on this
+        // safe ledge so the remaining authored jump cadence stays aligned.
+        if (1_528..=1_531).contains(&frame) {
+            held = 0;
+        }
         held
     }
 }

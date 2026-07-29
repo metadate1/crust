@@ -58553,8 +58553,11 @@ fn hog_wild_direct_boot_reaches_level_complete() {
         ]
     );
     assert_eq!(survey.effect_counts.get("save-state"), Some(&2));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&56));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&38));
+    // Native preserves an initialized local bound when a physical object-pool
+    // slot is reused. The checked runtime now does the same, restoring the
+    // collision callbacks that the former zeroed-slot model suppressed.
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&59));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&43));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
 
@@ -58749,8 +58752,10 @@ fn whole_hog_direct_boot_reaches_level_complete() {
             (1_626, 0xa00),
         ]
     );
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&79));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&45));
+    // As above, retained native pool bounds expose the complete authored
+    // collision/event sequence without changing the clean completion route.
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&81));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&49));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
 
@@ -61394,7 +61399,10 @@ fn up_the_creek_direct_route_reaches_static_zero_f_island() {
     assert_eq!(player_vm.register(process_register::NODE), Ok(0xffff));
     assert_eq!(survey.final_live_objects, 23);
     assert_eq!(survey.max_live_objects, 35);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&174));
+    // Native preserves initialized bounds in reclaimed physical object slots.
+    // The checked runtime now observes the corresponding extra collision
+    // callback throughout this route's deterministic progression slices.
+    assert_eq!(survey.effect_counts.get("solid"), Some(&175));
     assert!(survey.spawn_flag_samples.contains(&(492, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -61478,7 +61486,7 @@ fn up_the_creek_direct_route_activates_zero_g_platform() {
     assert_eq!(spawned_entity_state(&runtime, 44), Ok(Some(11)));
     assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 35);
-    assert_eq!(survey.effect_counts.get("solid"), Some(&174));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&175));
     assert!(survey.spawn_flag_samples.contains(&(533, 44, 5)));
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -61588,8 +61596,8 @@ fn up_the_creek_direct_route_activates_first_checkpoint() {
         );
     }
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&60));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&410));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&62));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&413));
     assert!(!survey.effect_counts.contains_key("load-state"));
 
     assert_eq!(runtime.global_word(BOX_COUNT_GLOBAL), Ok(0x500));
@@ -61734,8 +61742,8 @@ fn up_the_creek_direct_route_rides_post_checkpoint_platform_into_zero_l() {
     assert_eq!(survey.final_live_objects, 33);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&62));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&466));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&64));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&469));
     for boundary in [(1_317, 86, 5), (1_317, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
@@ -61874,8 +61882,8 @@ fn up_the_creek_direct_route_transfers_to_next_zero_l_platform() {
     assert_eq!(survey.final_live_objects, 26);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&66));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&708));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&68));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&711));
     for boundary in [(1_447, 71, 5), (1_516, 86, 5), (1_516, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
@@ -62015,8 +62023,8 @@ fn up_the_creek_direct_route_lands_on_zero_m_vertical_platform() {
     assert_eq!(survey.final_live_objects, 26);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&70));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&760));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&72));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&763));
     for boundary in [(1_447, 71, 5), (1_516, 86, 5), (1_516, 88, 5)] {
         assert!(
             survey.spawn_flag_samples.contains(&boundary),
@@ -62149,8 +62157,8 @@ fn up_the_creek_direct_route_reaches_zero_u_right_bank() {
     assert_eq!(survey.final_live_objects, 30);
     assert_eq!(survey.max_live_objects, 36);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&109));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_154));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&111));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_157));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62249,8 +62257,8 @@ fn up_the_creek_direct_route_lands_on_zero_y_falling_platform() {
     assert_eq!(survey.final_live_objects, 33);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&129));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_223));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&131));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_226));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62351,8 +62359,8 @@ fn up_the_creek_direct_route_crosses_post_zero_y_bank_to_platform_140() {
     assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&133));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_239));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&135));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_242));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62462,8 +62470,8 @@ fn up_the_creek_direct_route_transfers_from_platform_140_to_139() {
     assert_eq!(survey.final_live_objects, 37);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&135));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_248));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&137));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_251));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62572,8 +62580,8 @@ fn up_the_creek_direct_route_crosses_entity_138_to_zero_a_bank() {
     assert_eq!(survey.final_live_objects, 42);
     assert_eq!(survey.max_live_objects, 44);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&137));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_267));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&139));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_270));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62717,8 +62725,8 @@ fn up_the_creek_direct_route_rides_shared_platform_38_into_zero_b() {
     assert_eq!(survey.final_live_objects, 40);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&140));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_316));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&142));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_319));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -62857,8 +62865,8 @@ fn up_the_creek_direct_route_transfers_to_shared_platform_39() {
     assert_eq!(survey.final_live_objects, 40);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&142));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_385));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&144));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_388));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63001,8 +63009,8 @@ fn up_the_creek_direct_route_lands_on_zero_c_platform_156() {
     assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&145));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_454));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&147));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_457));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63138,8 +63146,8 @@ fn up_the_creek_direct_route_leaves_platform_156_for_zero_c_bank() {
     assert_eq!(survey.final_live_objects, 27);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&145));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_448));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&147));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_451));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63277,8 +63285,8 @@ fn up_the_creek_direct_route_lands_on_zero_d_platform_161() {
     assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&148));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_476));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&150));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_479));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63416,8 +63424,8 @@ fn up_the_creek_direct_route_transfers_from_platform_161_to_160() {
     assert_eq!(survey.final_live_objects, 36);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&151));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_540));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&153));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_543));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63582,8 +63590,8 @@ fn up_the_creek_direct_route_bounces_from_crate_162_to_zero_e_platform_8() {
     assert_eq!(survey.final_live_objects, 29);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&154));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_573));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&156));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_576));
     assert_eq!(
         survey.box_count_samples,
         [
@@ -63729,8 +63737,8 @@ fn up_the_creek_direct_route_reaches_zero_f_bank_after_platform_8() {
     assert_eq!(survey.final_live_objects, 33);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&157));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_582));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&159));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_585));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
@@ -63933,8 +63941,8 @@ fn up_the_creek_direct_route_clears_zero_e_hazard_and_lands_on_zero_f_platform_1
     assert_eq!(survey.final_live_objects, 29);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&159));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_587));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_590));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
@@ -64128,8 +64136,8 @@ fn up_the_creek_direct_route_transfers_from_zero_f_platform_12_to_platform_11() 
     assert_eq!(survey.final_live_objects, 28);
     assert_eq!(survey.max_live_objects, 47);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&161));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_597));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&163));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_600));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(
         survey.box_count_samples,
@@ -64342,8 +64350,8 @@ fn up_the_creek_direct_route_enters_zero_g_warp_and_reaches_level_complete() {
     assert_eq!(survey.save_handshakes, 0);
     assert_eq!(survey.death_camera_frames, 0);
     assert_eq!(survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&165));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_677));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&167));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_680));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&46));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
@@ -64540,8 +64548,8 @@ fn up_the_creek_and_ripper_roo_completions_unlock_lost_city_through_authored_map
     assert!(up_survey.restart_frames.is_empty());
     assert_eq!(up_survey.save_handshakes, 0);
     assert_eq!(up_survey.effect_counts.get("save-state"), Some(&1));
-    assert_eq!(up_survey.effect_counts.get("send-event"), Some(&180));
-    assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_688));
+    assert_eq!(up_survey.effect_counts.get("send-event"), Some(&182));
+    assert_eq!(up_survey.effect_counts.get("solid"), Some(&1_690));
     assert_eq!(up_survey.effect_counts.get("reparent"), Some(&49));
     assert_eq!(up_survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(up_survey.effect_counts.get("transition"), Some(&1));
@@ -65625,10 +65633,12 @@ fn pinstripe_ordinary_pad_route_reaches_authored_title_transition() {
     assert_eq!(survey.successful_spawns, 4);
     assert_eq!(survey.spawn_attempts, 6_616);
     assert_eq!(survey.expected_spawn_rejections, 6_612);
-    assert_eq!(survey.executions, 47_634);
+    // Retained physical-slot bounds restore the boss-room collision services
+    // that native executes for reused objects.
+    assert_eq!(survey.executions, 47_765);
     assert_eq!(survey.zone_transitions, 0);
-    assert_eq!(survey.final_live_objects, 35);
-    assert_eq!(survey.max_live_objects, 54);
+    assert_eq!(survey.final_live_objects, 34);
+    assert_eq!(survey.max_live_objects, 53);
     assert_eq!(survey.save_handshakes, 1);
     assert_eq!(survey.restarts, 0);
     assert!(survey.restart_frames.is_empty());
@@ -65636,13 +65646,15 @@ fn pinstripe_ordinary_pad_route_reaches_authored_title_transition() {
     assert!(survey.first_below_zero.is_none());
     assert!(survey.first_terminal_fall.is_none());
     assert_eq!(survey.last_player_movement, 1_575);
+    // The native-retained boss-room bound changes Crash's final grounded
+    // height but not the authored defeat or title transition.
     assert_eq!(
         survey.final_player_translation,
-        Some([68_096, 406_051, 387_840])
+        Some([68_096, 393_253, 387_840])
     );
     assert!(!survey.effect_counts.contains_key("load-state"));
-    assert_eq!(survey.effect_counts.get("send-event"), Some(&75));
-    assert_eq!(survey.effect_counts.get("solid"), Some(&1_069));
+    assert_eq!(survey.effect_counts.get("send-event"), Some(&96));
+    assert_eq!(survey.effect_counts.get("solid"), Some(&1_066));
     assert_eq!(survey.effect_counts.get("reparent"), Some(&98));
     assert_eq!(survey.effect_counts.get("master-fade-reset"), Some(&1));
     assert_eq!(survey.effect_counts.get("transition"), Some(&1));
@@ -69223,7 +69235,9 @@ fn n_sanity_beach_fresh_route_reaches_authored_level_complete() {
             (643, 0x400),
             (650, 0x500),
             (682, 0x600),
-            (684, 0x700),
+            // Retaining the reclaimed native slot's initialized bound keeps
+            // this adjacent-crate collision active for one additional frame.
+            (685, 0x700),
             (761, 0x800),
             (786, 0x900),
             (860, 0xa00),
@@ -69397,7 +69411,9 @@ fn n_sanity_goal_directed_input_characterizes_progression() {
                 (643, 0x400),
                 (650, 0x500),
                 (682, 0x600),
-                (684, 0x700),
+                // Retained native slot bounds delay this neighboring crate's
+                // counted collision by one cooperative frame.
+                (685, 0x700),
                 (761, 0x800),
                 (786, 0x900),
                 (860, 0xa00),
@@ -69536,7 +69552,9 @@ fn n_sanity_checkpoint_survives_an_authored_death_restart() {
             (643, 0x400),
             (650, 0x500),
             (682, 0x600),
-            (684, 0x700),
+            // The retained physical-slot bound keeps this adjacent-crate
+            // collision live for the same extra frame as the clean route.
+            (685, 0x700),
             (761, 0x800),
             (786, 0x900),
             (860, 0xa00),

@@ -30121,7 +30121,7 @@ impl StormyAscentCompletionRouteController {
             if player.status_a & 1 != 0 && player_collider_entity == Some(150) {
                 self.a4_wall_stage = 123;
                 self.i3_runup = 0;
-                self.jump_frames = 0;
+                self.jump_frames = 32;
                 self.release_frames = 0;
                 return PAD_RIGHT;
             }
@@ -30139,7 +30139,23 @@ impl StormyAscentCompletionRouteController {
                 };
         }
         if matches!(name, "i3_yZ" | "i4_yZ") && self.a4_wall_stage == 123 {
-            return PAD_RIGHT;
+            if player.status_a & 1 != 0 && player.translation[0] >= 31_490_000 {
+                self.a4_wall_stage = 124;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            let mut held = PAD_RIGHT;
+            if self.i3_runup == 0 {
+                self.i3_runup = 1;
+                held |= PAD_SQUARE;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
         }
         let opening_vertical = matches!(
             name,

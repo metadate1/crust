@@ -15,6 +15,11 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 import { ChromeCdp } from "./chrome-cdp.mjs";
+import {
+  SYNTHETIC_COOKED_ISO_BYTES,
+  createSyntheticRetailCookedIso,
+  expectedSyntheticCookedIsoBlobRanges,
+} from "./synthetic-retail-iso.mjs";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_URL = "http://127.0.0.1:4175/";
@@ -156,9 +161,12 @@ export function retailExecutionObserved(previouslyObserved, snapshot) {
 export function usage() {
   return `Usage:
   node scripts/browser-harness-smoke.mjs --asset PATH [--asset PATH ...] [options]
+  node scripts/browser-harness-smoke.mjs --synthetic-cooked-iso-import [options]
 
 Options:
   --asset PATH       Legally owned BIN/ISO/NSD/NSF file (repeatable)
+  --synthetic-cooked-iso-import
+                     Verify cooked-ISO discovery with generated one-byte zero payloads
   --replay PATH      Run-length replay JSON; overrides --lid and --frames
   --lid NUMBER       Direct-boot stream id (default: 0x19)
   --frames NUMBER    Number of zero-input frames (default: 120)
@@ -189,8 +197,10 @@ export function parseArguments(argv, environment = process.env) {
       repositoryRoot,
       "target/browser-test-artifacts/smoke.png",
     ),
+    syntheticCookedIsoImport: false,
     help: false,
   };
+  let launchArgumentUsed = false;
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     const value = () => {
@@ -204,18 +214,25 @@ export function parseArguments(argv, environment = process.env) {
       case "--asset":
         options.assets.push(value());
         break;
+      case "--synthetic-cooked-iso-import":
+        options.syntheticCookedIsoImport = true;
+        break;
       case "--replay":
         options.replay = value();
+        launchArgumentUsed = true;
         break;
       case "--lid":
         options.bootLid = parseWholeNumber(value(), "--lid", 0xff);
+        launchArgumentUsed = true;
         break;
       case "--frames":
         options.frames = parseWholeNumber(value(), "--frames", 1_000_000);
         if (options.frames === 0) throw new Error("--frames must be at least 1");
+        launchArgumentUsed = true;
         break;
       case "--unlock-all":
         options.unlockAll = true;
+        launchArgumentUsed = true;
         break;
       case "--url":
         options.url = value();
@@ -236,6 +253,14 @@ export function parseArguments(argv, environment = process.env) {
       default:
         throw new Error(`unknown argument: ${argument}`);
     }
+  }
+  if (
+    options.syntheticCookedIsoImport
+    && (options.assets.length > 0 || launchArgumentUsed)
+  ) {
+    throw new Error(
+      "--synthetic-cooked-iso-import cannot be combined with assets or launch/replay options",
+    );
   }
   options.assets = options.assets.map((path) => resolve(path));
   if (options.replay) options.replay = resolve(options.replay);
@@ -544,6 +569,76 @@ export function snapshotFailures(snapshot) {
     .filter((line) => line.startsWith("! "));
   if (faultLines.length > 0) {
     failures.push(`runtime fault log: ${faultLines.join(" | ")}`);
+  }
+  return failures;
+}
+
+export function syntheticCookedIsoImportFailures(snapshot, evidence) {
+  const failures = [...snapshotFailures(snapshot)];
+  if (snapshot.runtimeState !== "idle") {
+    failures.push(
+      `runtime state: expected "idle", received ${JSON.stringify(snapshot.runtimeState)}`,
+    );
+  }
+  if (snapshot.fileCount !== 88) {
+    failures.push(
+      `file count: expected 88, received ${JSON.stringify(snapshot.fileCount)}`,
+    );
+  }
+  if (snapshot.pairCount !== 44) {
+    failures.push(
+      `pair count: expected 44, received ${JSON.stringify(snapshot.pairCount)}`,
+    );
+  }
+  if (snapshot.launchDisabled !== false) {
+    failures.push("launch control did not become available after exact catalog import");
+  }
+  if (snapshot.progressHidden !== true) {
+    failures.push("import progress remained visible after cooked-ISO discovery");
+  }
+  if (
+    snapshot.assetMessage
+    !== "Full set mounted: 43 playable pairs plus the Cave archive."
+  ) {
+    failures.push(
+      `asset summary: received ${JSON.stringify(snapshot.assetMessage)}`,
+    );
+  }
+  const mountMessage =
+    "Mounted 88 streams from ISO 2048 without uploading it.";
+  if (!snapshot.runtimeLog?.includes(mountMessage)) {
+    failures.push(`runtime log is missing ${JSON.stringify(mountMessage)}`);
+  }
+
+  const expectedRanges = expectedSyntheticCookedIsoBlobRanges();
+  if (
+    JSON.stringify(evidence?.blobRanges)
+    !== JSON.stringify(expectedRanges)
+  ) {
+    failures.push(
+      "Blob.slice ranges did not match raw-first detection plus six bounded cooked-sector reads: "
+      + JSON.stringify(evidence?.blobRanges),
+    );
+  }
+  const expectedArrayBufferSizes = expectedRanges.map(
+    ({ start, end }) => end - start,
+  );
+  if (
+    JSON.stringify(evidence?.arrayBufferSizes)
+    !== JSON.stringify(expectedArrayBufferSizes)
+  ) {
+    failures.push(
+      "Blob.arrayBuffer reads did not match the bounded slices: "
+      + JSON.stringify(evidence?.arrayBufferSizes),
+    );
+  }
+  if (!Array.isArray(evidence?.networkRequests)) {
+    failures.push("post-selection network-request evidence is unavailable");
+  } else if (evidence.networkRequests.length > 0) {
+    failures.push(
+      "disc selection caused network activity: "
+      + JSON.stringify(evidence.networkRequests),
+    );
   }
   return failures;
 }
@@ -952,6 +1047,29 @@ async function evaluate(cdp, sessionId, expression) {
   return response.result?.value;
 }
 
+const blobRangeInstrumentation = `(() => {
+  const originalSlice = Blob.prototype.slice;
+  const originalArrayBuffer = Blob.prototype.arrayBuffer;
+  window.__crustBrowserSmokeBlobEvidence = {
+    blobRanges: [],
+    arrayBufferSizes: []
+  };
+  Blob.prototype.slice = function(start, end, contentType) {
+    const actualStart = start ?? 0;
+    const actualEnd = end ?? this.size;
+    window.__crustBrowserSmokeBlobEvidence.blobRanges.push({
+      sourceSize: this.size,
+      start: actualStart,
+      end: actualEnd
+    });
+    return Reflect.apply(originalSlice, this, [start, end, contentType]);
+  };
+  Blob.prototype.arrayBuffer = function() {
+    window.__crustBrowserSmokeBlobEvidence.arrayBufferSizes.push(this.size);
+    return Reflect.apply(originalArrayBuffer, this, []);
+  };
+})();`;
+
 const snapshotExpression = `(() => {
   const debug = window.__crustDebug || {};
   const harness = window.__crustTest || {};
@@ -1063,6 +1181,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     cdp = await ChromeCdp.connect(chrome.webSocketUrl);
     const sessionId = await attachPage(cdp);
     const failures = [];
+    const networkRequests = [];
     const pageOrigin = new URL(options.url).origin;
     const recordFailure = (message) => failures.push(message);
     cdp.on("Runtime.exceptionThrown", (params, eventSession) => {
@@ -1103,6 +1222,7 @@ async function runBrowser(options, replay, chromeExecutable) {
     cdp.on("Network.requestWillBeSent", (params, eventSession) => {
       if (eventSession !== sessionId) return;
       const { method, url } = params.request;
+      networkRequests.push({ method, url });
       if (method !== "GET") recordFailure(`unexpected network method ${method}: ${url}`);
       const parsed = new URL(url);
       if (!["data:", "blob:"].includes(parsed.protocol) && parsed.origin !== pageOrigin) {
@@ -1131,7 +1251,8 @@ async function runBrowser(options, replay, chromeExecutable) {
         } catch (error) {
           throw new Error("browser smoke could not clear storage: " + error);
         }
-        window.__crustBrowserSmokeFresh = true;`,
+        window.__crustBrowserSmokeFresh = true;`
+          + (options.syntheticCookedIsoImport ? blobRangeInstrumentation : ""),
       },
       sessionId,
     );
@@ -1163,6 +1284,19 @@ async function runBrowser(options, replay, chromeExecutable) {
     if (freshKeys.length > 0) {
       throw new Error(`fresh browser profile retained storage keys: ${freshKeys.join(", ")}`);
     }
+    if (options.syntheticCookedIsoImport) {
+      await evaluate(
+        cdp,
+        sessionId,
+        `(() => {
+          const evidence = window.__crustBrowserSmokeBlobEvidence;
+          if (!evidence) throw new Error("Blob range instrumentation is unavailable");
+          evidence.blobRanges.length = 0;
+          evidence.arrayBufferSizes.length = 0;
+        })()`,
+      );
+    }
+    const importNetworkRequestStart = networkRequests.length;
 
     const { root } = await cdp.command("DOM.getDocument", { depth: -1 }, sessionId);
     const { nodeId } = await cdp.command(
@@ -1188,6 +1322,48 @@ async function runBrowser(options, replay, chromeExecutable) {
       failures,
       120_000,
     );
+
+    if (options.syntheticCookedIsoImport) {
+      // Leave a brief quiet window after the UI reaches idle so deferred upload
+      // or fetch behavior cannot escape the post-selection network assertion.
+      await delay(100);
+      const finalImportSnapshot = await browserSnapshot(cdp, sessionId);
+      const blobEvidence = await evaluate(
+        cdp,
+        sessionId,
+        `(() => {
+          const evidence = window.__crustBrowserSmokeBlobEvidence;
+          return {
+            blobRanges: evidence?.blobRanges.map((range) => ({ ...range })) ?? null,
+            arrayBufferSizes: [...(evidence?.arrayBufferSizes ?? [])]
+          };
+        })()`,
+      );
+      const evidence = {
+        ...blobEvidence,
+        networkRequests: networkRequests.slice(importNetworkRequestStart),
+      };
+      const problems = syntheticCookedIsoImportFailures(
+        finalImportSnapshot,
+        evidence,
+      );
+      if (problems.length > 0) {
+        throw new Error(
+          `synthetic cooked-ISO import failed:\n${problems.join("\n")}`,
+        );
+      }
+      return {
+        assets: options.assets.length,
+        files: finalImportSnapshot.fileCount,
+        pairs: finalImportSnapshot.pairCount,
+        layout: "ISO 2048",
+        imageBytes: SYNTHETIC_COOKED_ISO_BYTES,
+        blobRanges: evidence.blobRanges,
+        arrayBufferSizes: evidence.arrayBufferSizes,
+        postSelectionNetworkRequests: evidence.networkRequests.length,
+        launched: false,
+      };
+    }
 
     const targetAvailable = await evaluate(
       cdp,
@@ -1530,24 +1706,55 @@ async function runBrowser(options, replay, chromeExecutable) {
 }
 
 export async function run(options) {
-  await validateAssets(options.assets);
-  const replay = await loadReplay(options.replay, options);
-  const chromeExecutable =
-    options.chrome ?? (await firstExisting(CHROME_CANDIDATES));
-  if (!chromeExecutable) {
-    throw new Error(
-      "Chrome/Chromium was not found; pass --chrome or set CRUST_CHROME_BIN",
-    );
-  }
-  await access(chromeExecutable).catch((error) => {
-    throw new Error(`cannot execute Chrome at ${chromeExecutable}: ${error.message}`);
-  });
-  let server;
+  let syntheticDirectory;
   try {
-    if (options.startServer) server = await startHarnessServer(options.url);
-    return await runBrowser(options, replay, chromeExecutable);
+    let runOptions = options;
+    if (options.syntheticCookedIsoImport) {
+      if (options.assets.length > 0 || options.replay !== undefined) {
+        throw new Error(
+          "synthetic cooked-ISO import verification does not accept external assets or replay data",
+        );
+      }
+      syntheticDirectory = await mkdtemp(
+        resolve(tmpdir(), "crust-synthetic-cooked-iso-"),
+      );
+      const syntheticPath = resolve(
+        syntheticDirectory,
+        "synthetic-retail-catalog.iso",
+      );
+      await writeFile(syntheticPath, createSyntheticRetailCookedIso(), {
+        flag: "wx",
+      });
+      runOptions = { ...options, assets: [syntheticPath] };
+    }
+
+    await validateAssets(runOptions.assets);
+    const replay = runOptions.syntheticCookedIsoImport
+      ? undefined
+      : await loadReplay(runOptions.replay, runOptions);
+    const chromeExecutable =
+      runOptions.chrome ?? (await firstExisting(CHROME_CANDIDATES));
+    if (!chromeExecutable) {
+      throw new Error(
+        "Chrome/Chromium was not found; pass --chrome or set CRUST_CHROME_BIN",
+      );
+    }
+    await access(chromeExecutable).catch((error) => {
+      throw new Error(`cannot execute Chrome at ${chromeExecutable}: ${error.message}`);
+    });
+    let server;
+    try {
+      if (runOptions.startServer) {
+        server = await startHarnessServer(runOptions.url);
+      }
+      return await runBrowser(runOptions, replay, chromeExecutable);
+    } finally {
+      await terminate(server);
+    }
   } finally {
-    await terminate(server);
+    if (syntheticDirectory) {
+      await rm(syntheticDirectory, { recursive: true, force: true });
+    }
   }
 }
 

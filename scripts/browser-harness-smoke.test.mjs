@@ -13,7 +13,9 @@ import {
   replayStepMethod,
   retailExecutionObserved,
   snapshotFailures,
+  syntheticCookedIsoImportFailures,
 } from "./browser-harness-smoke.mjs";
+import { expectedSyntheticCookedIsoBlobRanges } from "./synthetic-retail-iso.mjs";
 
 test("destination mount acknowledgement waits for the requested stream pair", () => {
   assert.equal(
@@ -186,6 +188,74 @@ test("browser smoke arguments keep the harness local and assets explicit", () =>
     () => parseArguments(["--asset", "./x.nsd", "--url", "https://example.com/"], {}),
     /loopback HTTP URL/,
   );
+
+  const synthetic = parseArguments(["--synthetic-cooked-iso-import"], {});
+  assert.equal(synthetic.syntheticCookedIsoImport, true);
+  assert.deepEqual(synthetic.assets, []);
+  for (const incompatible of [
+    ["--synthetic-cooked-iso-import", "--asset", "./disc.iso"],
+    ["--synthetic-cooked-iso-import", "--frames", "1"],
+    ["--synthetic-cooked-iso-import", "--unlock-all"],
+    ["--synthetic-cooked-iso-import", "--replay", "./route.json"],
+  ]) {
+    assert.throws(
+      () => parseArguments(incompatible, {}),
+      /cannot be combined/,
+    );
+  }
+});
+
+test("synthetic cooked-ISO import evidence is exact and fail-closed", () => {
+  const cleanSnapshot = {
+    bootstrap: "running",
+    runtimeState: "idle",
+    runtimeStatus: "Local media ready",
+    assetMessage: "Full set mounted: 43 playable pairs plus the Cave archive.",
+    fileCount: 88,
+    pairCount: 44,
+    launchDisabled: false,
+    progressHidden: true,
+    runtimeLog:
+      "> Mounted 88 streams from ISO 2048 without uploading it.\n"
+      + "> Local game data is ready.",
+    consoleErrors: [],
+    harness: { lastError: null },
+    debug: {
+      glError: 0,
+      retailFaultedObjects: 0,
+      retailExecutionErrors: 0,
+      retailZoneEventFailures: 0,
+      retailRuntimeError: null,
+      retailRuntimeWarning: null,
+    },
+  };
+  const ranges = expectedSyntheticCookedIsoBlobRanges();
+  const cleanEvidence = {
+    blobRanges: ranges,
+    arrayBufferSizes: ranges.map(({ start, end }) => end - start),
+    networkRequests: [],
+  };
+  assert.deepEqual(
+    syntheticCookedIsoImportFailures(cleanSnapshot, cleanEvidence),
+    [],
+  );
+
+  const failures = syntheticCookedIsoImportFailures(
+    {
+      ...cleanSnapshot,
+      pairCount: 43,
+      runtimeLog: "> wrong layout",
+    },
+    {
+      ...cleanEvidence,
+      blobRanges: cleanEvidence.blobRanges.slice(1),
+      networkRequests: [{ method: "POST", url: "http://127.0.0.1/upload" }],
+    },
+  ).join("\n");
+  assert.match(failures, /pair count/);
+  assert.match(failures, /ISO 2048/);
+  assert.match(failures, /Blob\.slice/);
+  assert.match(failures, /network activity/);
 });
 
 test("run-length replay validates 16-bit input and deterministic frame count", () => {

@@ -75,6 +75,19 @@ the browser executable. Add `--unlock-all` to assert in the feature-only read-on
 that both retail life globals equal `999 << 8`, the map access gate equals 99, and both key-path
 bits are present.
 
+Cooked 2,048-byte ISO discovery has a separate non-proprietary import check:
+
+```bash
+npm run verify:browser-harness:cooked-iso
+```
+
+The command generates an ignored temporary 40-sector ISO9660 image whose 88 canonical records use
+one-byte zero payloads, selects its `.iso` through the production file input, and stops before
+launch. It requires the `ISO 2048` mount, all 44 pairs, the exact bounded `Blob.slice()` sequence,
+and no network request after file selection. This proves browser classification and catalog
+discovery without bundling game data; because its payloads are deliberately invalid NSD/NSF
+streams, it is not gameplay or cooked-retail-image evidence.
+
 Longer local traces use a run-length JSON file passed with `--replay`:
 
 ```json

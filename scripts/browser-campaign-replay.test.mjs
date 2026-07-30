@@ -284,6 +284,105 @@ test("longest-path discovery preserves exact native handoffs and hybrid input cl
   );
 });
 
+test("publisher discovery keeps a bonus return on the one continuous campaign path", async () => {
+  const publisherEntry = {
+    ...checkpoint(0x19, 0, 0),
+    titleState: 10,
+  };
+  const greatGateEntry = checkpoint(0x12, 10, 1);
+  const bonusEntry = checkpoint(0x33, 20, 2);
+  const greatGateReturn = checkpoint(0x12, 30, 3);
+  const completionEntry = checkpoint(0x2d, 40, 4);
+  const finalTitle = checkpoint(0x19, 50, 5);
+  const captures = [
+    [
+      "./publisher-to-great-gate.json",
+      publisherEntry,
+      greatGateEntry,
+      "publisher-title",
+    ],
+    [
+      "./great-gate-to-bonus.json",
+      greatGateEntry,
+      bonusEntry,
+      "great-gate-tawna-bonus",
+    ],
+    [
+      "./bonus-to-great-gate.json",
+      bonusEntry,
+      greatGateReturn,
+      "tawna-bonus-two-completion-route",
+    ],
+    [
+      "./returned-great-gate-to-complete.json",
+      greatGateReturn,
+      completionEntry,
+      "great-gate-phase-robust",
+    ],
+    [
+      "./complete-to-title.json",
+      completionEntry,
+      finalTitle,
+      "direction-and-button-sweep-to-transition",
+    ],
+  ];
+  const fragments = new Map(
+    captures.map(([reference, entry, exit, inputProfile]) => [
+      reference,
+      {
+        ...fragment(entry, exit, [{ frames: 1, held: 0 }]),
+        ...(inputProfile === "publisher-title"
+          ? { captureKind: "publisher-title" }
+          : {}),
+        inputProfile,
+      },
+    ]),
+  );
+  const entries = [...fragments].map(([reference, document]) => ({
+    fragment: reference,
+    document,
+  }));
+  const manifest = discoverLongestCampaignManifest(entries, {
+    requireComplete: true,
+    rejectAmbiguous: true,
+  });
+  assert.deepEqual(
+    manifest.phases.map(({ entry }) => entry.currentLid),
+    [0x19, 0x12, 0x33, 0x12, 0x2d],
+  );
+
+  const replay = await composeCampaignReplay(
+    manifest,
+    async (reference) => fragments.get(reference),
+  );
+  assert.equal(replay.bootLid, 0x19);
+  assert.equal(replay.expect.currentLid, 0x19);
+  assert.equal(replay.composition.phaseIds.length, captures.length);
+
+  const staleFork = {
+    ...fragment(
+      greatGateEntry,
+      completionEntry,
+      [{ frames: 1, held: 0 }],
+    ),
+    inputProfile: "great-gate-pre-bonus-fork",
+  };
+  assert.throws(
+    () =>
+      discoverLongestCampaignManifest(
+        [
+          ...entries,
+          {
+            fragment: "./great-gate-pre-bonus-fork.json",
+            document: staleFork,
+          },
+        ],
+        { requireComplete: true, rejectAmbiguous: true },
+      ),
+    /fragment graph is disconnected.*unused.*great-gate-pre-bonus-fork/s,
+  );
+});
+
 test("longest-path discovery refuses to bridge a physical-pad seam", () => {
   const { fragments } = syntheticCampaign();
   const disconnected = structuredClone(fragments.get("./jungle.json"));

@@ -285,7 +285,7 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        6_200,
+        6_400,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -30156,6 +30156,73 @@ impl StormyAscentCompletionRouteController {
                 held |= PAD_CROSS;
             }
             return held;
+        }
+        if matches!(name, "i4_yZ" | "i5_yZ") && self.a4_wall_stage == 124 {
+            // Use the front floor for a deterministic run-up into the rotating
+            // RWaOC wheel instead of committing from its left edge.
+            if player.status_a & 1 != 0 && player.translation[0] >= 31_700_000 {
+                self.a4_wall_stage = 125;
+                self.i3_runup = 1;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i4_yZ" | "i5_yZ") && self.a4_wall_stage == 125 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 32_200_000 {
+                self.a4_wall_stage = 126;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let mut held = PAD_RIGHT;
+            // Renew horizontal spin speed while holding the long jump; the
+            // rising lower-left runtime child is not represented by entity
+            // 154 in the collider trace, so the grounded x gate is the
+            // observable landing contract.
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "i5_yZ"
+            && self.a4_wall_stage == 126
+            && player.status_a & 1 != 0
+            && player.translation[0] >= 32_700_000
+        {
+            self.a4_wall_stage = 127;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "i5_yZ" && self.a4_wall_stage == 127 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 32_900_000 {
+                self.a4_wall_stage = 128;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i5_yZ" | "j1_yZ") && self.a4_wall_stage == 128 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 33_200_000 {
+                self.a4_wall_stage = 129;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
         }
         let opening_vertical = matches!(
             name,

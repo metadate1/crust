@@ -77678,10 +77678,10 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
             assert_eq!(rolling_stones_survey.final_live_objects, 22);
             assert_eq!(rolling_stones_survey.max_live_objects, 33);
             assert_eq!(rolling_stones_survey.successful_spawns, 123);
-            assert_eq!(rolling_stones_survey.spawn_attempts, 31_368);
-            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 31_245);
+            assert_eq!(rolling_stones_survey.spawn_attempts, 31_367);
+            assert_eq!(rolling_stones_survey.expected_spawn_rejections, 31_244);
             assert_eq!(rolling_stones_survey.unexpected_spawn_errors, 0);
-            assert_eq!(rolling_stones_survey.executions, 58_743);
+            assert_eq!(rolling_stones_survey.executions, 58_742);
             assert_eq!(rolling_stones_survey.zone_transitions, 34);
             assert_eq!(rolling_stones_survey.camera_ranges.len(), 45);
             assert_eq!(rolling_stones_survey.camera_path_changes, 48);
@@ -77757,7 +77757,7 @@ fn run_authored_main_campaign_with_session_carry(continue_after_sunset_mount: bo
                 rolling_stones_survey.effect_counts.get("send-event"),
                 Some(&101)
             );
-            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&212));
+            assert_eq!(rolling_stones_survey.effect_counts.get("solid"), Some(&213));
             assert_eq!(
                 rolling_stones_survey.effect_counts.get("master-fade-reset"),
                 Some(&1)

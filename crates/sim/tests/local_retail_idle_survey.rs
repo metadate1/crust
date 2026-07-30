@@ -14024,6 +14024,8 @@ struct RollingStonesRouteController {
     exact_zero_b_wall_jump_done: bool,
     exact_zero_b_wall_jump_hold: u8,
     exact_zero_b_wall_exit_jump_done: bool,
+    exact_zero_c_plant_jump_done: bool,
+    exact_zero_c_plant_jump_hold: u8,
     exact_zero_e_wall_jump_done: bool,
     exact_zero_e_wall_jump_hold: u8,
     exact_post_wall_last_x: Option<i32>,
@@ -14147,6 +14149,8 @@ impl RollingStonesRouteController {
         self.exact_zero_b_wall_jump_done = false;
         self.exact_zero_b_wall_jump_hold = 0;
         self.exact_zero_b_wall_exit_jump_done = false;
+        self.exact_zero_c_plant_jump_done = false;
+        self.exact_zero_c_plant_jump_hold = 0;
         self.exact_zero_e_wall_jump_done = false;
         self.exact_zero_e_wall_jump_hold = 0;
         self.exact_post_wall_last_x = None;
@@ -14213,6 +14217,107 @@ impl RollingStonesRouteController {
                 Eid::from_name("0C_lZ").expect("fixed Rolling Stones ledge-zone EID is valid");
             let zero_upper_e =
                 Eid::from_name("0E_lZ").expect("fixed Rolling Stones wall-zone EID is valid");
+            if self.exact_campaign_phase
+                && self.checkpoint_phase_wait == 2
+                && self.exact_zero_u_right_platform_phase
+                && self.exact_zero_x_late_platform_phase
+                && camera.path.zone == zero_upper_c
+                && let Some(player) = player
+                && let Some(plant_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 86
+                                && descriptor.executable == 25
+                                && descriptor.subtype == 0
+                                && matches!(object.state, 2 | 3)
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                let forward_gap = player.translation[2].saturating_sub(plant_bound.max.z);
+                if (0..=700_000).contains(&forward_gap)
+                    && player.translation[0] <= plant_bound.max.x + 256_000
+                {
+                    if self.exact_zero_c_plant_jump_hold > 0 {
+                        self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                        self.exact_zero_c_plant_jump_hold -= 1;
+                        return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                    }
+                    if !self.exact_zero_c_plant_jump_done {
+                        self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                        if player.status_a & 1 == 0 {
+                            return PAD_UP;
+                        }
+                        self.exact_zero_c_plant_jump_done = true;
+                        self.exact_zero_c_plant_jump_hold = 7;
+                        return PAD_UP | PAD_CROSS | PAD_SQUARE;
+                    }
+                }
+            }
+            if self.exact_campaign_phase
+                && self.checkpoint_phase_wait == 2
+                && self.exact_zero_u_right_platform_phase
+                && self.exact_zero_x_late_platform_phase
+                && self.exact_zero_c_plant_jump_done
+                && camera.path.zone == zero_upper_c
+                && camera.path.index == 0
+                && let Some(player) = player
+                && let Some(left_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 89
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && let Some(right_wall) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 88
+                                && descriptor.executable == 22
+                                && descriptor.subtype == 6
+                                && object.state == 5
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+            {
+                let reversed_gap = right_wall.max.x.saturating_add(80_000) < left_wall.min.x;
+                if reversed_gap {
+                    // The plant is defeated during an already-open normal
+                    // gap. Resume once the pair first reverses: ordinary
+                    // travel then reaches platform 84 during the following
+                    // crossing, before that platform begins its down stroke.
+                    self.exact_zero_c_plant_jump_done = false;
+                }
+                if self.exact_zero_c_plant_jump_done {
+                    let target_x = 3_276_800;
+                    let predicted_x = player.translation[0]
+                        .saturating_add(player.velocity[0].saturating_mul(4) / 34);
+                    let lateral = if predicted_x < target_x - 24_000 {
+                        PAD_RIGHT
+                    } else if predicted_x > target_x + 24_000 {
+                        PAD_LEFT
+                    } else {
+                        0
+                    };
+                    let longitudinal = if player.velocity[2] < -100_000 {
+                        PAD_DOWN
+                    } else if player.velocity[2] > 100_000 {
+                        PAD_UP
+                    } else {
+                        0
+                    };
+                    return longitudinal | lateral;
+                }
+            }
             if self.exact_campaign_phase
                 && !self.checkpoint_phase_recovered
                 && tick > 295
@@ -14332,6 +14437,38 @@ impl RollingStonesRouteController {
                 self.exact_zero_y_boundary_jump_hold -= 1;
                 self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
                 return PAD_UP | PAD_CROSS;
+            }
+            if self.exact_campaign_phase
+                && self.checkpoint_phase_wait == 2
+                && self.exact_zero_u_right_platform_phase
+                && self.exact_zero_x_late_platform_phase
+                && !self.exact_zero_y_boundary_jump_done
+                && self.checkpoint_phase_recovered
+                && camera.path.zone == zero_y
+                && camera.path.index == 0
+                && let Some(player) = player
+                && player.status_a & 1 != 0
+                && matches!(player.state, 1 | 2 | 10 | 13)
+                && let Some(platform_bound) = objects.iter().find_map(|object| {
+                    matches!(
+                        object.origin,
+                        ObjectOrigin::Entity(descriptor)
+                            if descriptor.id == 82
+                                && descriptor.executable == 11
+                                && descriptor.subtype == 2
+                                && object.state == 8
+                    )
+                    .then_some(object.bound)
+                    .flatten()
+                })
+                && (0..=800_000)
+                    .contains(&player.translation[2].saturating_sub(platform_bound.max.z))
+                && player.translation[0] < platform_bound.min.x
+            {
+                self.exact_zero_y_boundary_jump_done = true;
+                self.exact_zero_y_boundary_jump_hold = 5;
+                self.checkpoint_tick = self.checkpoint_tick.saturating_add(1);
+                return PAD_UP | PAD_RIGHT | PAD_CROSS;
             }
             if self.exact_campaign_phase
                 && self.exact_zero_x_late_platform_phase
@@ -14758,7 +14895,12 @@ impl RollingStonesRouteController {
                     // same ordinary run-up used by the characterized route.
                     // Starting from rest when the gap first opens cannot
                     // reach platform 53.
-                    return if tick >= 445 {
+                    let run_up_tick = if self.checkpoint_phase_wait == 2 {
+                        450
+                    } else {
+                        445
+                    };
+                    return if tick >= run_up_tick {
                         PAD_UP | lateral
                     } else {
                         lateral
@@ -15328,11 +15470,14 @@ impl RollingStonesRouteController {
                     };
                     return PAD_UP | landing_lateral;
                 }
-                let carried_platform_takeoff = self.exact_zero_x_late_platform_phase
-                    && walls_takeoff
-                    || self.exact_zero_u_right_platform_phase
-                        && self.exact_zero_x_late_platform_phase
-                        && wall_center_separation <= 300_000;
+                let carried_platform_takeoff = if self.checkpoint_phase_wait == 2
+                    && self.exact_zero_u_right_platform_phase
+                    && self.exact_zero_x_late_platform_phase
+                {
+                    walls_crossing
+                } else {
+                    self.exact_zero_x_late_platform_phase && walls_takeoff
+                };
                 if near_platform
                     && (walls_crossing || reversed_gap.is_some() || carried_platform_takeoff)
                     && player.status_a & 1 != 0
@@ -16683,6 +16828,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
         exact_zero_b_wall_jump_done: true,
         exact_zero_b_wall_jump_hold: 3,
         exact_zero_b_wall_exit_jump_done: true,
+        exact_zero_c_plant_jump_done: true,
+        exact_zero_c_plant_jump_hold: 3,
         exact_zero_e_wall_jump_done: true,
         exact_zero_e_wall_jump_hold: 4,
         exact_post_wall_last_x: Some(1_234),
@@ -16708,6 +16855,8 @@ fn rolling_stones_checkpoint_controller_rearms_after_restart() {
     assert_eq!(controller.exact_zero_y_boundary_jump_hold, 0);
     assert!(!controller.exact_zero_x_late_platform_phase);
     assert!(!controller.exact_zero_b_wall_exit_jump_done);
+    assert!(!controller.exact_zero_c_plant_jump_done);
+    assert_eq!(controller.exact_zero_c_plant_jump_hold, 0);
     assert!(!controller.exact_zero_e_wall_jump_done);
     assert_eq!(controller.exact_zero_e_wall_jump_hold, 0);
     assert_eq!(controller.exact_post_wall_last_x, None);
@@ -51060,6 +51209,8 @@ impl SurveyInputController {
                 exact_zero_b_wall_jump_done: false,
                 exact_zero_b_wall_jump_hold: 0,
                 exact_zero_b_wall_exit_jump_done: false,
+                exact_zero_c_plant_jump_done: false,
+                exact_zero_c_plant_jump_hold: 0,
                 exact_zero_e_wall_jump_done: false,
                 exact_zero_e_wall_jump_hold: 0,
                 exact_post_wall_last_x: None,
@@ -51088,6 +51239,8 @@ impl SurveyInputController {
                     exact_zero_b_wall_jump_done: false,
                     exact_zero_b_wall_jump_hold: 0,
                     exact_zero_b_wall_exit_jump_done: false,
+                    exact_zero_c_plant_jump_done: false,
+                    exact_zero_c_plant_jump_hold: 0,
                     exact_zero_e_wall_jump_done: false,
                     exact_zero_e_wall_jump_hold: 0,
                     exact_post_wall_last_x: None,
@@ -56069,6 +56222,7 @@ fn survey_pair_with_runtime_impl(
                     Eid::from_name("WarpC").expect("fixed retail WarpC EID is valid"),
                     Eid::from_name("JunOC").expect("fixed Rolling Stones hazard EID is valid"),
                     Eid::from_name("PoPlC").expect("fixed Rolling Stones platform EID is valid"),
+                    Eid::from_name("PlanC").expect("fixed Rolling Stones plant EID is valid"),
                 ],
             )?,
             SurveyInputProfile::RollingStonesBrioBonus => program_object_traces(

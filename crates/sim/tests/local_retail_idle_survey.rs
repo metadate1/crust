@@ -285,7 +285,7 @@ fn stormy_ascent_direct_boot_reaches_authored_end_warp() {
         RetailRuntime::new_for_level(GLOBAL_WORDS, level),
         LevelContextSource::FreshBoot,
         SurveyInputProfile::StormyAscentCompletionRoute,
-        6_000,
+        6_200,
     )
     .expect("Stormy Ascent's ordinary-pad completion route must execute");
 
@@ -26130,6 +26130,8 @@ struct StormyAscentCompletionRouteController {
     d3_platform_hops: u8,
     d3_platform_runup: u8,
     f1_platform_wait: u8,
+    i1_third_last_x: Option<i32>,
+    i3_runup: u8,
 }
 
 impl Default for StormyAscentCompletionRouteController {
@@ -26160,6 +26162,8 @@ impl Default for StormyAscentCompletionRouteController {
             d3_platform_hops: 0,
             d3_platform_runup: 0,
             f1_platform_wait: 0,
+            i1_third_last_x: None,
+            i3_runup: 0,
         }
     }
 }
@@ -29905,6 +29909,236 @@ impl StormyAscentCompletionRouteController {
             if self.release_frames > 0 {
                 self.release_frames -= 1;
             }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ") && self.a4_wall_stage == 112 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(118) {
+                self.a4_wall_stage = 113;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ") && self.a4_wall_stage == 113 {
+            // The first two PoPlC platforms move in phase. Ride entity 118
+            // toward its right extreme so entity 119 travels back into the
+            // ordinary long-jump arc instead of receding from it.
+            let second_platform_x = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 119
+                )
+                .then_some(object.translation[0])
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(118)
+                && second_platform_x.is_some_and(|x| x >= 27_900_000)
+            {
+                self.a4_wall_stage = 114;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return 0;
+        }
+        if matches!(name, "h3_yZ" | "i1_yZ") && self.a4_wall_stage == 114 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(119) {
+                self.a4_wall_stage = 115;
+                self.i1_third_last_x = None;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "i1_yZ" && self.a4_wall_stage == 115 {
+            // Entity 134 has the opposite phase from entity 119. Wait until
+            // their live positions converge before leaving the second
+            // platform; at the other half-cycle the same jump cannot reach.
+            let second_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 119
+                )
+                .then_some(object.bound?)
+            });
+            let third_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 134
+                )
+                .then_some((object.translation[0], object.bound?))
+            });
+            let live_gap = second_platform
+                .zip(third_platform)
+                .map(|(second, (_, third))| third.min.x.saturating_sub(second.max.x));
+            let third_platform_x = third_platform.map(|(x, _)| x);
+            let third_moving_left = self
+                .i1_third_last_x
+                .zip(third_platform_x)
+                .is_some_and(|(last, current)| current < last);
+            self.i1_third_last_x = third_platform_x;
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(119)
+                && third_moving_left
+                && live_gap.is_some_and(|gap| gap <= 860_000)
+            {
+                self.a4_wall_stage = 116;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(119)
+                && third_moving_left
+                && live_gap.is_some_and(|gap| gap <= 1_300_000)
+            {
+                return PAD_RIGHT;
+            }
+            return 0;
+        }
+        if name == "i1_yZ" && self.a4_wall_stage == 116 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(134) {
+                self.a4_wall_stage = 117;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i1_yZ" | "i2_yZ") && self.a4_wall_stage == 117 {
+            let third_platform = route_objects.iter().find_map(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 134
+                )
+                .then_some((object.translation[0], object.bound?))
+            });
+            if player.status_a & 1 != 0
+                && player_collider_entity == Some(134)
+                && third_platform.is_some_and(|(x, _)| x >= 28_780_000)
+            {
+                self.a4_wall_stage = 118;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            let Some((platform_x, platform_bound)) = third_platform else {
+                return PAD_RIGHT;
+            };
+            if platform_x >= 28_620_000 {
+                return PAD_RIGHT;
+            }
+            let target_x = platform_bound.min.x.saturating_add(platform_bound.max.x) / 2;
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            return if predicted_x < target_x.saturating_sub(15_000) {
+                PAD_RIGHT
+            } else if predicted_x > target_x.saturating_add(15_000) {
+                PAD_LEFT
+            } else {
+                0
+            };
+        }
+        if matches!(name, "i1_yZ" | "i2_yZ") && self.a4_wall_stage == 118 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 29_250_000 {
+                self.a4_wall_stage = 119;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i2_yZ" | "i3_yZ") && self.a4_wall_stage == 119 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(148) {
+                self.a4_wall_stage = 121;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 29_500_000 {
+                self.a4_wall_stage = 120;
+                self.jump_frames = 17;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS | PAD_SQUARE;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i2_yZ" | "i3_yZ") && self.a4_wall_stage == 120 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(148) {
+                self.a4_wall_stage = 121;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if name == "i3_yZ" && self.a4_wall_stage == 121 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(149) {
+                self.a4_wall_stage = 122;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "i3_yZ" | "i4_yZ") && self.a4_wall_stage == 122 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(150) {
+                self.a4_wall_stage = 123;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            // The collapsing platform supplies the vertical bounce. A single
+            // spin edge two frames later supplies the first horizontal boost.
+            // Pulse it again early enough for the spin to finish at touchdown:
+            // the extra runout centers Crash on entity 150 while preserving
+            // that platform's automatic bounce.
+            return PAD_RIGHT
+                | if matches!(self.i3_runup, 3 | 18) {
+                    PAD_SQUARE
+                } else {
+                    0
+                };
+        }
+        if matches!(name, "i3_yZ" | "i4_yZ") && self.a4_wall_stage == 123 {
             return PAD_RIGHT;
         }
         let opening_vertical = matches!(

@@ -26380,7 +26380,7 @@ impl StormyAscentCompletionRouteController {
                 self.jump_frames = 0;
                 self.release_frames = 3;
                 self.horizontal = PAD_LEFT;
-                return PAD_LEFT | PAD_DOWN;
+                return PAD_LEFT | PAD_UP;
             }
             let held = PAD_UP | if self.a4_door_wait >= 8 { PAD_LEFT } else { 0 };
             if self.jump_frames != 0 {
@@ -30214,15 +30214,169 @@ impl StormyAscentCompletionRouteController {
         if matches!(name, "i5_yZ" | "j1_yZ") && self.a4_wall_stage == 128 {
             if player.status_a & 1 != 0 && player.translation[0] >= 33_200_000 {
                 self.a4_wall_stage = 129;
-                self.jump_frames = 0;
+                self.a4_wall_wait = 0;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
                 self.release_frames = 0;
-                return PAD_RIGHT;
+                return PAD_RIGHT | PAD_DOWN;
             }
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if player.translation[0] >= 33_100_000 && predicted_z < 190_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            let horizontal = if depth == 0 { PAD_RIGHT } else { 0 };
             if self.jump_frames > 0 {
                 self.jump_frames -= 1;
+                return horizontal | PAD_CROSS | depth;
+            }
+            return horizontal | depth;
+        }
+        if matches!(name, "i5_yZ" | "j1_yZ") && self.a4_wall_stage == 129 {
+            if player.status_a & 1 != 0 && player.translation[0] >= 33_700_000 {
+                self.a4_wall_stage = 130;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT | PAD_DOWN;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if predicted_z < 200_000 {
+                PAD_DOWN
+            } else if predicted_z > 220_000 {
+                PAD_UP
+            } else {
+                0
+            };
+            let mut held = PAD_RIGHT | depth;
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 130 {
+            // The assistant occupies the rear half of the authored floor.
+            // Brake and sidestep into the front/platform lane before jumping.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 33_930_000 {
+                PAD_LEFT
+            } else if predicted_x < 33_880_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0
+                && player.translation[2] <= 45_000
+                && player.velocity[0].unsigned_abs() <= 100_000
+            {
+                self.a4_wall_stage = 131;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
+                return PAD_CROSS | PAD_SQUARE;
+            }
+            return horizontal | PAD_UP;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 131 {
+            let assistant_defeated = !route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 135
+                ) && object.state < 10
+            });
+            if assistant_defeated {
+                self.a4_wall_stage = 132;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            self.i3_runup = self.i3_runup.saturating_add(1);
+            let predicted_z = player.translation[2] + player.velocity[2] / 4;
+            let depth = if predicted_z > 40_000 {
+                PAD_UP
+            } else if predicted_z < -20_000 {
+                PAD_DOWN
+            } else {
+                0
+            };
+            let mut held = depth;
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            if self.i3_runup.is_multiple_of(8) {
+                held |= PAD_SQUARE;
+            }
+            return held;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 132 {
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let horizontal = if predicted_x > 33_930_000 {
+                PAD_LEFT
+            } else if predicted_x < 33_880_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 133;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_LEFT;
+            }
+            return horizontal;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 133 {
+            if self.i3_runup == 0 {
+                if player.translation[0] <= 33_820_000 {
+                    self.i3_runup = 1;
+                    return PAD_RIGHT | PAD_SQUARE;
+                }
+                return PAD_LEFT;
+            }
+            if player.translation[0] >= 34_400_000 {
+                self.a4_wall_stage = 134;
+                self.i3_runup = 0;
+                self.jump_frames = 32;
+                self.release_frames = 0;
                 return PAD_RIGHT | PAD_CROSS;
             }
             return PAD_RIGHT;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 134 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(137) {
+                self.a4_wall_stage = 135;
+                self.i3_runup = 0;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return 0;
+            }
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let mut held = if predicted_x > 34_650_000 {
+                PAD_LEFT
+            } else if predicted_x < 34_570_000 {
+                PAD_RIGHT
+            } else {
+                0
+            };
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                held |= PAD_CROSS;
+            }
+            return held;
+        }
+        if name == "j1_yZ" && self.a4_wall_stage == 135 {
+            // Hold the lower elevator after the clean landing. The next route
+            // slice can choose its departure from the observed raised phase.
+            return 0;
         }
         let opening_vertical = matches!(
             name,
@@ -51237,6 +51391,16 @@ fn survey_pair_with_runtime_impl(
                 )
             {
                 eprintln!("SLIPPERY_EFFECT frame={frame} effect={effect:?}");
+            }
+            if input_profile == SurveyInputProfile::StormyAscentCompletionRoute
+                && std::env::var_os("C1_SURVEY_STORMY_TRACE").is_some()
+                && frame >= 6_200
+                && matches!(
+                    effect,
+                    VmEffect::SendEvent(_) | VmEffect::Solid { .. } | VmEffect::StateChanged { .. }
+                )
+            {
+                eprintln!("STORMY_EFFECT frame={frame} effect={effect:?}");
             }
             if input_profile == SurveyInputProfile::CortexPowerCompletionRoute
                 && std::env::var_os("C1_SURVEY_CORTEX_TRACE").is_some()

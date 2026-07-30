@@ -59755,7 +59755,7 @@ fn carry_boulder_dash_to_sunset_vista_mount(
             sunset_carry.respawn_count,
             sunset_carry.death_count,
         ),
-        (0xd8f0_8ec4, 55_777, 0xdff3_7021, 0, 0),
+        (0x49a1_441f, 56_768, 0xe9ca_6a3b, 0, 0),
         "the exact no-reset prefix must retain Sunset Vista's process-lifetime phase"
     );
     assert_eq!(

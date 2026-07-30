@@ -29780,6 +29780,133 @@ impl StormyAscentCompletionRouteController {
             }
             return horizontal;
         }
+        if name == "h2_yZ"
+            && camera.path.index == 1
+            && self.a4_wall_stage == 106
+            && player.status_a & 1 != 0
+            && (25_180_000..=25_360_000).contains(&player.translation[0])
+            && player.translation[1] <= -11_200_000
+        {
+            self.a4_wall_stage = 107;
+            self.jump_frames = 0;
+            self.release_frames = 0;
+            return PAD_RIGHT;
+        }
+        if name == "h2_yZ" && self.a4_wall_stage == 107 {
+            // Stay grounded beneath the lethal staircase. Jumping here clips
+            // entity 131 while its CasOC children are extended.
+            let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = if predicted_x < 25_450_000 {
+                PAD_RIGHT
+            } else {
+                self.a4_wall_stage = 108;
+                PAD_RIGHT
+            };
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+        if name == "h2_yZ" && self.a4_wall_stage == 108 {
+            // Entity 142 alternates between a shallow/retracted bound and an
+            // extended solid bridge. Stage at the edge until the live bound
+            // and state agree that it will remain under the landing arc.
+            let platform_extended = route_objects.iter().any(|object| {
+                matches!(
+                    object.origin,
+                    ObjectOrigin::Entity(descriptor) if descriptor.id == 142
+                ) && object.state == 11
+                    && object.bound.is_some_and(|bound| bound.max.z >= 100_000)
+            });
+            if !platform_extended {
+                let predicted_x = player.translation[0].saturating_add(player.velocity[0] / 8);
+                return if predicted_x > 25_520_000 {
+                    PAD_LEFT
+                } else if predicted_x < 25_490_000 {
+                    PAD_RIGHT
+                } else {
+                    0
+                };
+            }
+            if player.status_a & 1 != 0 && player.translation[0] >= 25_590_000 {
+                self.a4_wall_stage = 109;
+                self.jump_frames = 32;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = PAD_RIGHT;
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            return held;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 109 {
+            let predicted_z = player.translation[2] + player.velocity[2] / 16;
+            let target_z = 130_000_i32;
+            let mut held = PAD_RIGHT;
+            if predicted_z > target_z.saturating_add(20_000) {
+                held |= PAD_UP;
+            } else if predicted_z < target_z.saturating_sub(20_000) {
+                held |= PAD_DOWN;
+            }
+            if name == "h3_yZ" && player.status_a & 1 != 0 && player_collider_entity == Some(142) {
+                self.a4_wall_stage = 110;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return held;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return held | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+                return held;
+            }
+            if player.status_a & 1 != 0 {
+                self.a4_wall_stage = 106;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return held | PAD_CROSS;
+            }
+            return held;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 110 {
+            if player.status_a & 1 != 0 && player_collider_entity == Some(142) {
+                self.a4_wall_stage = 111;
+                self.jump_frames = 8;
+                self.release_frames = 3;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            return PAD_RIGHT;
+        }
+        if matches!(name, "h2_yZ" | "h3_yZ") && self.a4_wall_stage == 111 {
+            if player.status_a & 1 != 0
+                && player_collider_entity != Some(142)
+                && player.translation[0] >= 26_280_000
+            {
+                self.a4_wall_stage = 112;
+                self.jump_frames = 0;
+                self.release_frames = 0;
+                return PAD_RIGHT;
+            }
+            if self.jump_frames > 0 {
+                self.jump_frames -= 1;
+                return PAD_RIGHT | PAD_CROSS;
+            }
+            if self.release_frames > 0 {
+                self.release_frames -= 1;
+            }
+            return PAD_RIGHT;
+        }
         let opening_vertical = matches!(
             name,
             "a1_yZ" | "a2_yZ" | "a3_yZ" | "a4_yZ" | "b1_yZ" | "b2_yZ" | "b3_yZ" | "b4_yZ" | "c1_yZ"
@@ -29813,7 +29940,14 @@ impl StormyAscentCompletionRouteController {
 
         if opening_vertical || middle_vertical || late_vertical {
             let (left_turn_x, right_turn_x) = if middle_vertical {
-                (26_000_000, 25_000_000)
+                (
+                    26_000_000,
+                    if self.a4_wall_stage == 106 {
+                        25_050_000
+                    } else {
+                        25_000_000
+                    },
+                )
             } else if late_vertical {
                 (35_100_000, 34_100_000)
             } else {
@@ -29890,12 +30024,19 @@ impl StormyAscentCompletionRouteController {
             } else if predicted_z < target_z - 20_000 {
                 held |= PAD_DOWN;
             }
+        } else if self.a4_wall_stage == 106 {
+            if predicted_z > 170_000 {
+                held |= PAD_UP;
+            } else if predicted_z < 130_000 {
+                held |= PAD_DOWN;
+            }
         } else if predicted_z > 150_000 {
             held |= PAD_UP;
         } else if predicted_z < 40_000 {
             held |= PAD_DOWN;
         }
         if self.tick.is_multiple_of(20)
+            && !(self.a4_wall_stage == 106 && player.translation[1] <= -10_800_000)
             && !(name == "a4_yZ" && matches!(self.a4_wall_stage, 3 | 6 | 7 | 77 | 78 | 79 | 80))
         {
             held |= PAD_SQUARE;
@@ -29912,8 +30053,23 @@ impl StormyAscentCompletionRouteController {
             return held;
         }
         if player.status_a & 1 != 0 {
-            let long_stormy_jump = self.a4_wall_stage >= 55 && player.translation[0] >= 9_400_000;
-            self.jump_frames = if long_stormy_jump { 32 } else { 17 };
+            let short_h2_step = self.a4_wall_stage == 106;
+            let h2_right_riser = short_h2_step
+                && self.horizontal == PAD_RIGHT
+                && player.translation[0] <= 25_100_000
+                && (player.translation[1] <= -11_200_000
+                    || matches!(player_collider_entity, Some(139 | 140)));
+            let long_stormy_jump =
+                !short_h2_step && self.a4_wall_stage >= 55 && player.translation[0] >= 9_400_000;
+            self.jump_frames = if h2_right_riser {
+                17
+            } else if short_h2_step {
+                8
+            } else if long_stormy_jump {
+                32
+            } else {
+                17
+            };
             self.release_frames = 3;
             return held
                 | PAD_CROSS
